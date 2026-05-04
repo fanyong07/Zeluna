@@ -732,7 +732,7 @@ class ServiceSettingsPage extends ConsumerWidget {
         title: '观看记录 / 片单 / 评分',
         lines: [
           '免登录只能读取公开数据；写入云端历史一定需要账号授权。',
-          '当前保留 Bangumi 公开收藏读取和本机播放记录框架，不需要 token。',
+          '当前保留 Bangumi 公开收藏读取和本机播放记录框架，不需要授权配置。',
         ],
       ),
       const SizedBox(height: 12),
@@ -810,7 +810,7 @@ class ServiceSettingsPage extends ConsumerWidget {
         title: '弹幕源：Bilibili / 自建弹幕库',
         lines: [
           '通过 B 站公开番剧搜索匹配当前集 cid，再读取公开弹幕 XML。',
-          '不需要 AppId 或 AppSecret；没有 B 站条目时可后续接自建接口。',
+          '不需要平台密钥；没有 B 站条目时可后续接自建接口。',
         ],
       ),
       const SizedBox(height: 12),

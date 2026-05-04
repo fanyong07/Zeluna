@@ -1,6 +1,8 @@
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/data/external_service_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -108,4 +110,119 @@ void main() {
     expect(json, isNot(contains('openSubtitlesEnabled')));
     expect(json, isNot(contains('dandanplayEnabled')));
   });
+
+  test(
+    'rule playback source framework keeps anime series and movies separate',
+    () async {
+      const repository = RulePluginRepository();
+      final state = repository.defaultState();
+      final source = RulePlaybackSourceRepository(
+        repository: repository,
+        ruleState: state,
+      );
+      const episode = AnimeEpisode(
+        id: 101,
+        subjectId: 1,
+        number: 1,
+        title: '',
+        airdate: '2026-01-01',
+        duration: '24:00',
+        description: '第一集',
+      );
+
+      final animeLines = await source.linesForEpisode(_animeSubject, episode);
+      final seriesLines = await source.linesForEpisode(_seriesSubject, episode);
+      final movieLines = await source.linesForEpisode(_movieSubject, episode);
+
+      expect(repository.rulesFor(RuleContentType.anime), isNotEmpty);
+      expect(repository.rulesFor(RuleContentType.series), isNotEmpty);
+      expect(repository.rulesFor(RuleContentType.movie), isNotEmpty);
+      expect(
+        animeLines.map((line) => line.providerId),
+        contains('kazumi:omofun03'),
+      );
+      expect(
+        animeLines.map((line) => line.providerName),
+        isNot(contains('韩剧看看')),
+      );
+      expect(
+        animeLines.map((line) => line.providerName),
+        isNot(contains('电影先生')),
+      );
+      expect(seriesLines.map((line) => line.providerName), contains('韩剧看看'));
+      expect(
+        seriesLines.map((line) => line.providerId),
+        isNot(contains('kazumi:omofun03')),
+      );
+      expect(
+        seriesLines.map((line) => line.providerName),
+        isNot(contains('电影先生')),
+      );
+      expect(movieLines.map((line) => line.providerName), contains('电影先生'));
+      expect(
+        movieLines.map((line) => line.providerName),
+        isNot(contains('韩剧看看')),
+      );
+      expect(
+        movieLines.map((line) => line.providerId),
+        isNot(contains('kazumi:omofun03')),
+      );
+      expect(animeLines.every((line) => line.available == false), isTrue);
+      expect(seriesLines.every((line) => line.available == false), isTrue);
+      expect(movieLines.every((line) => line.available == false), isTrue);
+    },
+  );
 }
+
+const _animeSubject = AnimeSubject(
+  id: 1,
+  title: '测试番剧',
+  originalTitle: 'Test Anime',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-01-01',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '全12集',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [AnimeTag(name: '番剧')],
+  totalEpisodes: 12,
+);
+
+const _seriesSubject = AnimeSubject(
+  id: 169,
+  title: 'Breaking Bad',
+  originalTitle: 'Breaking Bad',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2008-01-20',
+  platform: 'Scripted',
+  language: 'English',
+  region: 'United States',
+  status: 'Ended',
+  categories: [AnimeCategory(name: 'Drama')],
+  tags: [AnimeTag(name: 'TVMaze')],
+  totalEpisodes: 62,
+  source: 'tvmaze',
+);
+
+const _movieSubject = AnimeSubject(
+  id: 2875,
+  title: 'Inception',
+  originalTitle: 'Inception',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2010-07-08',
+  platform: 'Movie',
+  language: 'English',
+  region: 'United States',
+  status: '电影',
+  categories: [AnimeCategory(name: '电影')],
+  tags: [AnimeTag(name: 'Wikidata')],
+  totalEpisodes: 1,
+  source: 'wikidata',
+);

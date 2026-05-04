@@ -750,32 +750,18 @@ class ExternalServiceSettings {
 
   factory ExternalServiceSettings.fromJson(Map<String, dynamic> json) {
     return ExternalServiceSettings(
-      mediaMetadataEnabled:
-          json['mediaMetadataEnabled'] as bool? ??
-          json['tmdbEnabled'] as bool? ??
-          true,
+      mediaMetadataEnabled: json['mediaMetadataEnabled'] as bool? ?? true,
       mediaMetadataProvider:
           json['mediaMetadataProvider']?.toString() ?? 'TVMaze',
       anilistEnabled: json['anilistEnabled'] as bool? ?? true,
       bangumiEnabled: json['bangumiEnabled'] as bool? ?? true,
       preferBangumiChinese: json['preferBangumiChinese'] as bool? ?? true,
       publicCollectionSyncEnabled:
-          json['publicCollectionSyncEnabled'] as bool? ??
-          json['localLibrarySync'] as bool? ??
-          json['traktAutoSync'] as bool? ??
-          true,
-      bilibiliSubtitleEnabled:
-          json['bilibiliSubtitleEnabled'] as bool? ??
-          json['localSubtitleEnabled'] as bool? ??
-          json['openSubtitlesEnabled'] as bool? ??
-          true,
+          json['publicCollectionSyncEnabled'] as bool? ?? true,
+      bilibiliSubtitleEnabled: json['bilibiliSubtitleEnabled'] as bool? ?? true,
       subtitleLanguage: json['subtitleLanguage']?.toString() ?? 'zh-CN',
       autoMatchSubtitle: json['autoMatchSubtitle'] as bool? ?? true,
-      bilibiliDanmakuEnabled:
-          json['bilibiliDanmakuEnabled'] as bool? ??
-          json['localDanmakuEnabled'] as bool? ??
-          json['dandanplayEnabled'] as bool? ??
-          true,
+      bilibiliDanmakuEnabled: json['bilibiliDanmakuEnabled'] as bool? ?? true,
       customDanmakuEnabled: json['customDanmakuEnabled'] as bool? ?? false,
       customDanmakuEndpoint: json['customDanmakuEndpoint']?.toString() ?? '',
       danmakuTimelineSync: json['danmakuTimelineSync'] as bool? ?? true,

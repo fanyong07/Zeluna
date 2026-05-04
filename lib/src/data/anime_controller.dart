@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../domain/anime_models.dart';
+import '../rules/rule_models.dart';
+import '../rules/rule_plugin_repository.dart';
 import 'bangumi_metadata_repository.dart';
 import 'external_service_repository.dart';
 import 'playback_source_repository.dart';
@@ -38,6 +40,7 @@ class AnimeState {
     this.danmaku = const DanmakuSettings(),
     this.misc = const MiscSettings(),
     this.services = const ExternalServiceSettings(),
+    this.rulePlugins = const RulePluginState(),
   });
 
   final AnimeHomeFeed homeFeed;
@@ -55,6 +58,7 @@ class AnimeState {
   final DanmakuSettings danmaku;
   final MiscSettings misc;
   final ExternalServiceSettings services;
+  final RulePluginState rulePlugins;
 
   AnimeState copyWith({
     AnimeHomeFeed? homeFeed,
@@ -72,6 +76,7 @@ class AnimeState {
     DanmakuSettings? danmaku,
     MiscSettings? misc,
     ExternalServiceSettings? services,
+    RulePluginState? rulePlugins,
   }) {
     return AnimeState(
       homeFeed: homeFeed ?? this.homeFeed,
@@ -89,6 +94,7 @@ class AnimeState {
       danmaku: danmaku ?? this.danmaku,
       misc: misc ?? this.misc,
       services: services ?? this.services,
+      rulePlugins: rulePlugins ?? this.rulePlugins,
     );
   }
 }
@@ -113,7 +119,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final danmakuJson = _settings.get('danmaku');
     final miscJson = _settings.get('misc');
     final servicesJson = _settings.get('services');
+    final rulePluginsJson = _settings.get('rulePlugins');
     final feed = await ref.read(bangumiMetadataRepositoryProvider).homeFeed();
+    final defaultRulePlugins = const RulePluginRepository().defaultState();
     return AnimeState(
       homeFeed: feed,
       settings: settings,
@@ -143,6 +151,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
               servicesJson.cast<String, dynamic>(),
             )
           : const ExternalServiceSettings(),
+      rulePlugins: rulePluginsJson is Map
+          ? RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>())
+          : defaultRulePlugins,
     );
   }
 
@@ -256,9 +267,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeSubject subject,
     AnimeEpisode episode,
   ) {
-    return ref
-        .read(playbackSourceRepositoryProvider)
-        .linesForEpisode(subject, episode);
+    final ruleState =
+        state.value?.rulePlugins ?? const RulePluginRepository().defaultState();
+    return RulePlaybackSourceRepository(
+      repository: const RulePluginRepository(),
+      ruleState: ruleState,
+    ).linesForEpisode(subject, episode);
   }
 
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
@@ -329,6 +343,60 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       state = AsyncData(current.copyWith(services: settings));
     }
     await _settings.put('services', settings.toJson());
+  }
+
+  Future<void> installRulePlugin(String id) async {
+    final current = state.value;
+    if (current == null) return;
+    final installed = {...current.rulePlugins.installedIds, id};
+    final enabled = {...current.rulePlugins.enabledIds, id};
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(
+        installedIds: installed,
+        enabledIds: enabled,
+      ),
+    );
+  }
+
+  Future<void> uninstallRulePlugin(String id) async {
+    final current = state.value;
+    if (current == null) return;
+    final installed = {...current.rulePlugins.installedIds}..remove(id);
+    final enabled = {...current.rulePlugins.enabledIds}..remove(id);
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(
+        installedIds: installed,
+        enabledIds: enabled,
+      ),
+    );
+  }
+
+  Future<void> toggleRulePlugin(String id, bool enabled) async {
+    final current = state.value;
+    if (current == null || !current.rulePlugins.installedIds.contains(id)) {
+      return;
+    }
+    final enabledIds = {...current.rulePlugins.enabledIds};
+    if (enabled) {
+      enabledIds.add(id);
+    } else {
+      enabledIds.remove(id);
+    }
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(enabledIds: enabledIds),
+    );
+  }
+
+  Future<void> resetRulePlugins() async {
+    await _updateRulePlugins(const RulePluginRepository().defaultState());
+  }
+
+  Future<void> _updateRulePlugins(RulePluginState rulePlugins) async {
+    final current = state.value;
+    if (current != null) {
+      state = AsyncData(current.copyWith(rulePlugins: rulePlugins));
+    }
+    await _settings.put('rulePlugins', rulePlugins.toJson());
   }
 
   Future<bool> toggleFavorite(AnimeSubject subject) async {

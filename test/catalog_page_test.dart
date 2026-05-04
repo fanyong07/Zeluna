@@ -1,6 +1,7 @@
 import 'package:anime/src/app/anime_app.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -162,6 +163,55 @@ void main() {
     expect(find.text('还没有观看记录'), findsOneWidget);
   });
 
+  testWidgets(
+    'rule plugin pages separate anime series and movie repositories',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(_FakeAnimeController.new),
+          ],
+          child: const AnimeApp(),
+        ),
+      );
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('我的'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('规则管理').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('规则管理'), findsWidgets);
+      expect(find.text('播放规则插件'), findsOneWidget);
+      expect(find.text('番剧规则'), findsOneWidget);
+
+      await tester.tap(find.text('打开规则仓库'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('规则仓库'), findsWidgets);
+      expect(find.text('omofun03'), findsOneWidget);
+      expect(find.text('韩剧看看'), findsNothing);
+      expect(find.text('电影先生'), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('ruleRepositoryRail:series')));
+      await tester.pumpAndSettle();
+      expect(find.text('韩剧看看'), findsOneWidget);
+      expect(find.text('电影先生'), findsNothing);
+      expect(find.text('omofun03'), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('ruleRepositoryRail:movie')));
+      await tester.pumpAndSettle();
+      expect(find.text('电影先生'), findsOneWidget);
+      expect(find.text('电影港'), findsOneWidget);
+      expect(find.text('韩剧看看'), findsNothing);
+    },
+  );
+
   testWidgets('playback settings rows are actionable', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
@@ -214,6 +264,7 @@ class _FakeAnimeController extends AnimeController {
       homeFeed: _feed,
       settings: lastSettings,
       services: lastServices,
+      rulePlugins: const RulePluginRepository().defaultState(),
     );
   }
 

@@ -7,6 +7,7 @@ import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/player_page.dart';
 import '../profile/profile_page.dart';
+import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import 'app_theme.dart';
 
@@ -102,6 +103,14 @@ final routerProvider = Provider<GoRouter>((ref) {
         final subject = state.extra;
         return FeedbackPage(subject: subject is AnimeSubject ? subject : null);
       },
+    ),
+    GoRoute(
+      path: '/profile/rules',
+      builder: (context, state) => const RuleManagementPage(),
+    ),
+    GoRoute(
+      path: '/profile/rules/repository',
+      builder: (context, state) => const RuleRepositoryPage(),
     ),
     GoRoute(
       path: '/settings/playback',
