@@ -235,6 +235,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
             kind: widget.kind,
             onCategory: _openCategory,
             onTag: _openTag,
+            onFilter: _selectTypeFilter,
           ),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
@@ -267,6 +268,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         language: _language,
                         year: _year,
                         typeValues: _typeValues,
+                        languageValues: _languageValues,
                         onTypeChanged: (value) => setState(() => _type = value),
                         onLanguageChanged: (value) =>
                             setState(() => _language = value),
@@ -280,7 +282,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         child: _EmptyState(
                           icon: _icon,
                           title: '$_title 暂无结果',
-                          message: '当前 Bangumi 元数据里没有匹配条目，换个筛选条件或稍后刷新试试。',
+                          message: _emptyMessage,
                         ),
                       )
                     else
@@ -338,23 +340,49 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
       ],
       MetadataHubKind.series => const [
         '全部',
-        'TV',
-        'WEB',
-        'OVA',
-        'ONA',
-        '正篇',
-        '动画',
-        '奇幻',
+        '美剧',
+        '韩剧',
+        '日剧',
+        '英剧',
+        '剧情',
+        '犯罪',
+        '动作',
+        '科幻',
       ],
-      MetadataHubKind.movie => const ['全部', '剧场版', '电影', '动画', '奇幻', '冒险'],
+      MetadataHubKind.movie => const [
+        '全部',
+        '电影',
+        '剧情',
+        '动作',
+        '科幻',
+        '奇幻',
+        '冒险',
+        '喜剧',
+      ],
+    };
+  }
+
+  List<String> get _languageValues {
+    return switch (widget.kind) {
+      MetadataHubKind.discover => const ['全部', '日语', '国语', '英语', '韩语', '其他'],
+      MetadataHubKind.series => const ['全部', '英语', '韩语', '日语', '国语', '其他'],
+      MetadataHubKind.movie => const ['全部', '英语', '国语', '日语', '韩语', '其他'],
     };
   }
 
   String _subtitle(int count) {
     return switch (widget.kind) {
       MetadataHubKind.discover => '来自最近更新、推荐和索引的综合元数据，共 $count 部',
-      MetadataHubKind.series => '按 TV / WEB / OVA / ONA 等剧集元数据筛选，共 $count 部',
-      MetadataHubKind.movie => '按剧场版 / Movie / 电影标签筛选，共 $count 部',
+      MetadataHubKind.series => '接入 TVMaze 影视剧元数据，共 $count 部',
+      MetadataHubKind.movie => '接入 Wikidata 电影元数据，共 $count 部',
+    };
+  }
+
+  String get _emptyMessage {
+    return switch (widget.kind) {
+      MetadataHubKind.discover => '当前 Bangumi 元数据里没有匹配条目，换个筛选条件或稍后刷新试试。',
+      MetadataHubKind.series => '当前 TVMaze 剧集数据里没有匹配条目，换个分类或年份试试。',
+      MetadataHubKind.movie => '当前 Wikidata 电影数据里没有匹配条目，换个分类或年份试试。',
     };
   }
 
@@ -370,11 +398,69 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   List<AnimeSubject> _filterSubjects(List<AnimeSubject> subjects) {
     return subjects.where((subject) {
       final text = _metadataText(subject);
-      final typeOk = _type == '全部' || text.contains(_type.toLowerCase());
-      final languageOk = _language == '全部' || subject.language == _language;
+      final typeOk = _type == '全部' || _matchesType(subject, _type, text);
+      final languageOk =
+          _language == '全部' || _matchesLanguage(subject, _language);
       final yearOk = _year == '全部' || subject.year == _year.replaceAll('年', '');
       return typeOk && languageOk && yearOk;
     }).toList();
+  }
+
+  bool _matchesType(AnimeSubject subject, String type, String text) {
+    final normalized = type.toLowerCase();
+    if (normalized == '电影') return subject.platform.toLowerCase() == 'movie';
+    if (normalized == '美剧') {
+      return text.contains('united states') || text.contains('english');
+    }
+    if (normalized == '英剧') {
+      return text.contains('united kingdom') || text.contains('british');
+    }
+    if (normalized == '韩剧') {
+      return text.contains('korea') || text.contains('korean');
+    }
+    if (normalized == '日剧') {
+      return text.contains('japan') || text.contains('japanese');
+    }
+    const aliases = {
+      '剧情': ['drama', '剧情'],
+      '犯罪': ['crime', '犯罪'],
+      '动作': ['action', '动作'],
+      '科幻': ['science fiction', 'sci-fi', '科幻'],
+      '奇幻': ['fantasy', '奇幻'],
+      '冒险': ['adventure', '冒险'],
+      '喜剧': ['comedy', '喜剧'],
+    };
+    final values = aliases[type] ?? [normalized];
+    return values.any(text.contains);
+  }
+
+  bool _matchesLanguage(AnimeSubject subject, String language) {
+    final text = '${subject.language} ${subject.region}'.toLowerCase();
+    return switch (language) {
+      '日语' =>
+        text.contains('日语') ||
+            text.contains('japanese') ||
+            text.contains('japan'),
+      '国语' =>
+        text.contains('国语') ||
+            text.contains('chinese') ||
+            text.contains('china'),
+      '英语' =>
+        text.contains('英语') ||
+            text.contains('english') ||
+            text.contains('united states') ||
+            text.contains('united kingdom'),
+      '韩语' =>
+        text.contains('韩语') ||
+            text.contains('korean') ||
+            text.contains('korea'),
+      '其他' =>
+        !(_matchesLanguage(subject, '日语') ||
+            _matchesLanguage(subject, '国语') ||
+            _matchesLanguage(subject, '英语') ||
+            _matchesLanguage(subject, '韩语')),
+      _ => true,
+    };
   }
 
   double _watchProgress(List<LibraryEntry> history) {
@@ -390,10 +476,21 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
       subject.title,
       subject.originalTitle,
       subject.platform,
+      subject.language,
+      subject.region,
       subject.status,
       ...subject.categories.map((item) => item.name),
       ...subject.tags.map((item) => item.name),
     ].join(' ').toLowerCase();
+  }
+
+  void _selectTypeFilter(String value) {
+    if (!_typeValues.contains(value)) return;
+    setState(() {
+      _type = value;
+      _language = '全部';
+      _year = '全部';
+    });
   }
 
   void _openDetail(AnimeSubject subject) {
@@ -571,6 +668,7 @@ class _InlineFilterPanel extends StatelessWidget {
     required this.language,
     required this.year,
     required this.typeValues,
+    required this.languageValues,
     required this.onTypeChanged,
     required this.onLanguageChanged,
     required this.onYearChanged,
@@ -580,6 +678,7 @@ class _InlineFilterPanel extends StatelessWidget {
   final String language;
   final String year;
   final List<String> typeValues;
+  final List<String> languageValues;
   final ValueChanged<String> onTypeChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String> onYearChanged;
@@ -602,7 +701,7 @@ class _InlineFilterPanel extends StatelessWidget {
           ),
           _FilterRow(
             label: '语言',
-            values: const ['全部', '日语', '国语', '英语', '韩语', '其他'],
+            values: languageValues,
             selected: language,
             onChanged: onLanguageChanged,
           ),
@@ -624,16 +723,21 @@ class _MetadataRightRail extends StatelessWidget {
     required this.kind,
     required this.onCategory,
     required this.onTag,
+    required this.onFilter,
   });
 
   final AnimeState state;
   final MetadataHubKind kind;
   final ValueChanged<AnimeCategory> onCategory;
   final ValueChanged<AnimeTag> onTag;
+  final ValueChanged<String> onFilter;
 
   @override
   Widget build(BuildContext context) {
     final feed = state.homeFeed;
+    final categories = _categories(feed);
+    final tags = _tags(feed);
+    final subjects = _railSubjects(feed);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
       children: [
@@ -643,11 +747,19 @@ class _MetadataRightRail extends StatelessWidget {
             children: [
               SectionTitle(title: _title, subtitle: _subtitle),
               const SizedBox(height: 12),
-              for (final subject in _railSubjects(feed).take(5))
-                CompactSubjectRow(
-                  subject: subject,
-                  onTap: () => _openSubject(context, subject),
-                ),
+              if (subjects.isEmpty)
+                Text(
+                  _sourceMessage,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+                )
+              else
+                for (final subject in subjects.take(5))
+                  CompactSubjectRow(
+                    subject: subject,
+                    onTap: () => _openSubject(context, subject),
+                  ),
             ],
           ),
         ),
@@ -656,16 +768,20 @@ class _MetadataRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '分类'),
+              SectionTitle(
+                title: kind == MetadataHubKind.discover ? '分类' : '频道',
+              ),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final category in feed.categories.take(12))
+                  for (final category in categories)
                     _FilterChipButton(
-                      label: '${category.name}(${category.count})',
-                      onTap: () => onCategory(category),
+                      label: category.count > 0
+                          ? '${category.name}(${category.count})'
+                          : category.name,
+                      onTap: () => _handleCategory(category),
                     ),
                 ],
               ),
@@ -677,16 +793,22 @@ class _MetadataRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '标签'),
+              SectionTitle(
+                title: kind == MetadataHubKind.discover ? '标签' : '来源',
+              ),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final tag in feed.tags.take(16))
+                  for (final tag in tags)
                     _FilterChipButton(
-                      label: '${tag.name}(${tag.count})',
-                      onTap: () => onTag(tag),
+                      label: tag.count > 0
+                          ? '${tag.name}(${tag.count})'
+                          : tag.name,
+                      onTap: kind == MetadataHubKind.discover
+                          ? () => _handleTag(tag)
+                          : null,
                     ),
                 ],
               ),
@@ -697,10 +819,61 @@ class _MetadataRightRail extends StatelessWidget {
     );
   }
 
+  String get _sourceMessage {
+    return switch (kind) {
+      MetadataHubKind.discover => 'Bangumi / AniList 番剧元数据',
+      MetadataHubKind.series => '从 TVMaze 公开接口加载电视剧、连续剧和网剧资料。',
+      MetadataHubKind.movie => '从 Wikidata 公开电影条目加载影片资料。',
+    };
+  }
+
+  List<AnimeCategory> _categories(AnimeHomeFeed feed) {
+    return switch (kind) {
+      MetadataHubKind.discover => feed.categories.take(12).toList(),
+      MetadataHubKind.series => const [
+        AnimeCategory(name: '美剧'),
+        AnimeCategory(name: '韩剧'),
+        AnimeCategory(name: '日剧'),
+        AnimeCategory(name: '英剧'),
+        AnimeCategory(name: '剧情'),
+        AnimeCategory(name: '犯罪'),
+        AnimeCategory(name: '动作'),
+        AnimeCategory(name: '科幻'),
+      ],
+      MetadataHubKind.movie => const [
+        AnimeCategory(name: '电影'),
+        AnimeCategory(name: '剧情'),
+        AnimeCategory(name: '动作'),
+        AnimeCategory(name: '科幻'),
+        AnimeCategory(name: '奇幻'),
+        AnimeCategory(name: '冒险'),
+        AnimeCategory(name: '喜剧'),
+      ],
+    };
+  }
+
+  List<AnimeTag> _tags(AnimeHomeFeed feed) {
+    return switch (kind) {
+      MetadataHubKind.discover => feed.tags.take(16).toList(),
+      MetadataHubKind.series => const [
+        AnimeTag(name: 'TVMaze'),
+        AnimeTag(name: '公开剧集库'),
+        AnimeTag(name: '最近播出'),
+        AnimeTag(name: '免 Key'),
+      ],
+      MetadataHubKind.movie => const [
+        AnimeTag(name: 'Wikidata'),
+        AnimeTag(name: '电影实体'),
+        AnimeTag(name: 'IMDb 标识'),
+        AnimeTag(name: '免 Key'),
+      ],
+    };
+  }
+
   String get _title {
     return switch (kind) {
       MetadataHubKind.discover => '发现推荐',
-      MetadataHubKind.series => '剧集更新',
+      MetadataHubKind.series => '影视剧',
       MetadataHubKind.movie => '电影索引',
     };
   }
@@ -708,16 +881,16 @@ class _MetadataRightRail extends StatelessWidget {
   String get _subtitle {
     return switch (kind) {
       MetadataHubKind.discover => '综合热度与评分',
-      MetadataHubKind.series => '按集数连续观看',
-      MetadataHubKind.movie => '剧场版与单片',
+      MetadataHubKind.series => '电视剧 / 连续剧 / 网剧',
+      MetadataHubKind.movie => '院线电影 / 网络电影',
     };
   }
 
   List<AnimeSubject> _railSubjects(AnimeHomeFeed feed) {
     return switch (kind) {
       MetadataHubKind.discover => feed.recommended,
-      MetadataHubKind.series => feed.recent,
-      MetadataHubKind.movie => feed.index,
+      MetadataHubKind.series => const [],
+      MetadataHubKind.movie => const [],
     };
   }
 
@@ -726,20 +899,38 @@ class _MetadataRightRail extends StatelessWidget {
       MaterialPageRoute(builder: (context) => DetailPage(subject: subject)),
     );
   }
+
+  void _handleCategory(AnimeCategory category) {
+    if (kind == MetadataHubKind.discover) {
+      onCategory(category);
+      return;
+    }
+    onFilter(category.name);
+  }
+
+  void _handleTag(AnimeTag tag) {
+    if (kind == MetadataHubKind.discover) {
+      onTag(tag);
+    }
+  }
 }
 
 class _FilterChipButton extends StatelessWidget {
-  const _FilterChipButton({required this.label, required this.onTap});
+  const _FilterChipButton({required this.label, this.onTap});
 
   final String label;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onTap != null;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
-      child: SmallBadge(label: label),
+      child: Opacity(
+        opacity: enabled ? 1 : 0.72,
+        child: SmallBadge(label: label),
+      ),
     );
   }
 }

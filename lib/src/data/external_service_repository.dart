@@ -154,12 +154,56 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         .toList();
   }
 
+  Future<List<AnimeSubject>> tvMazeSchedule({
+    required String country,
+    required DateTime date,
+  }) async {
+    final response = await _client
+        .get(
+          Uri.parse('https://api.tvmaze.com/schedule').replace(
+            queryParameters: {'country': country, 'date': _dateString(date)},
+          ),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 14));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final results = decoded is List ? decoded : null;
+    if (results == null) return const [];
+    return results
+        .whereType<Map>()
+        .map((item) {
+          final show = item['show'] is Map ? item['show'] as Map : item;
+          return _subjectFromTvMaze(show.cast<String, dynamic>());
+        })
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList();
+  }
+
   Future<List<AnimeSubject>> seriesMetadataFeed() async {
+    final now = DateTime.now();
+    final scheduleRequests = <Future<List<AnimeSubject>>>[];
+    for (final country in const ['US', 'GB', 'KR', 'JP', 'CN']) {
+      for (var days = 0; days < 4; days++) {
+        scheduleRequests.add(
+          tvMazeSchedule(
+            country: country,
+            date: now.subtract(Duration(days: days)),
+          ).onError((_, _) => const <AnimeSubject>[]),
+        );
+      }
+    }
     final groups =
         await Future.wait([
-          tvMazeShows(page: 0).onError((_, _) => const <AnimeSubject>[]),
-          tvMazeShows(page: 1).onError((_, _) => const <AnimeSubject>[]),
-          tvMazeSearch('2026').onError((_, _) => const <AnimeSubject>[]),
+          ...scheduleRequests,
+          tvMazeSearch('drama').onError((_, _) => const <AnimeSubject>[]),
+          tvMazeSearch(
+            'korean drama',
+          ).onError((_, _) => const <AnimeSubject>[]),
+          tvMazeSearch(
+            'chinese drama',
+          ).onError((_, _) => const <AnimeSubject>[]),
+          tvMazeSearch('crime').onError((_, _) => const <AnimeSubject>[]),
         ]).timeout(
           const Duration(seconds: 24),
           onTimeout: () => const <List<AnimeSubject>>[],
@@ -556,25 +600,28 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
     required String keyword,
     required int limit,
   }) async {
+    final escapedKeyword = _sparqlString(keyword.trim());
     final query = keyword.trim().isEmpty
         ? '''
-SELECT ?item ?itemLabel ?description ?date ?imdb ?image ?genreLabel WHERE {
+SELECT ?item ?itemLabel ?description ?date ?imdb ?image ?genreLabel ?languageLabel ?countryLabel WHERE {
   ?item wdt:P31/wdt:P279* wd:Q11424.
   OPTIONAL { ?item wdt:P577 ?date. }
   OPTIONAL { ?item wdt:P345 ?imdb. }
   OPTIONAL { ?item wdt:P18 ?image. }
   OPTIONAL { ?item wdt:P136 ?genre. }
+  OPTIONAL { ?item wdt:P364 ?language. }
+  OPTIONAL { ?item wdt:P495 ?country. }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "zh,en". }
 }
 ORDER BY DESC(?date)
 LIMIT $limit
 '''
         : '''
-SELECT ?item ?itemLabel ?description ?date ?imdb ?image ?genreLabel WHERE {
+SELECT ?item ?itemLabel ?description ?date ?imdb ?image ?genreLabel ?languageLabel ?countryLabel WHERE {
   SERVICE wikibase:mwapi {
     bd:serviceParam wikibase:endpoint "www.wikidata.org";
                     wikibase:api "EntitySearch";
-                    mwapi:search "$keyword";
+                    mwapi:search "$escapedKeyword";
                     mwapi:language "zh";
                     mwapi:limit "$limit".
     ?item wikibase:apiOutputItem mwapi:item.
@@ -584,6 +631,8 @@ SELECT ?item ?itemLabel ?description ?date ?imdb ?image ?genreLabel WHERE {
   OPTIONAL { ?item wdt:P345 ?imdb. }
   OPTIONAL { ?item wdt:P18 ?image. }
   OPTIONAL { ?item wdt:P136 ?genre. }
+  OPTIONAL { ?item wdt:P364 ?language. }
+  OPTIONAL { ?item wdt:P495 ?country. }
   SERVICE wikibase:label { bd:serviceParam wikibase:language "zh,en". }
 }
 LIMIT $limit
@@ -624,6 +673,8 @@ LIMIT $limit
     final date = _bindingValue(json['date']);
     final image = _bindingValue(json['image']);
     final imdb = _bindingValue(json['imdb']);
+    final language = _bindingValue(json['languageLabel']);
+    final country = _bindingValue(json['countryLabel']);
     final categories = [
       const AnimeCategory(name: '电影'),
       if (genre.isNotEmpty) AnimeCategory(name: genre),
@@ -642,8 +693,8 @@ LIMIT $limit
       bannerUrl: image.isEmpty ? null : image,
       date: date.length >= 10 ? date.substring(0, 10) : null,
       platform: 'Movie',
-      language: '',
-      region: 'Wikidata',
+      language: language,
+      region: country.isEmpty ? 'Wikidata' : country,
       status: '电影',
       categories: categories,
       tags: tags,
@@ -792,6 +843,16 @@ LIMIT $limit
   String _formatMinutes(int minutes) {
     if (minutes <= 0) return '待补';
     return '$minutes 分钟';
+  }
+
+  String _dateString(DateTime date) {
+    final month = '${date.month}'.padLeft(2, '0');
+    final day = '${date.day}'.padLeft(2, '0');
+    return '${date.year}-$month-$day';
+  }
+
+  String _sparqlString(String value) {
+    return value.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
   }
 
   String? _tvMazeImage(Object? value) {

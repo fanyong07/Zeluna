@@ -553,6 +553,29 @@ const _fallbackExternalSeries = [
     totalEpisodes: 62,
     source: 'tvmaze',
   ),
+  AnimeSubject(
+    id: 527,
+    title: 'The Walking Dead',
+    originalTitle: 'The Walking Dead',
+    summary: '幸存者在末日世界中寻找栖身之处，也面对人与人之间更复杂的冲突。',
+    coverUrl:
+        'https://static.tvmaze.com/uploads/images/original_untouched/67/168817.jpg',
+    bannerUrl:
+        'https://static.tvmaze.com/uploads/images/original_untouched/67/168817.jpg',
+    date: '2010-10-31',
+    platform: 'Scripted',
+    language: 'English',
+    region: 'United States',
+    status: 'Ended',
+    categories: [
+      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: 'Action'),
+      AnimeCategory(name: 'Horror'),
+    ],
+    tags: [AnimeTag(name: 'TVMaze')],
+    totalEpisodes: 177,
+    source: 'tvmaze',
+  ),
 ];
 
 const _fallbackExternalMovies = [
@@ -594,6 +617,30 @@ const _fallbackExternalMovies = [
     categories: [
       AnimeCategory(name: '电影'),
       AnimeCategory(name: 'Science fiction'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'IMDb'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 103474,
+    title: 'Interstellar',
+    originalTitle: 'Interstellar',
+    summary: '人类为寻找新的栖息星球，穿越虫洞展开星际航行。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2014-10-26',
+    platform: 'Movie',
+    language: 'English',
+    region: 'United States',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Science fiction'),
+      AnimeCategory(name: 'Adventure'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),

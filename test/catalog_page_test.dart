@@ -118,13 +118,24 @@ void main() {
 
     await tester.tap(find.text('剧集').first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('按 TV / WEB / OVA / ONA'), findsOneWidget);
-    expect(find.text('孤独摇滚！'), findsWidgets);
+    expect(find.textContaining('接入 TVMaze 影视剧元数据'), findsOneWidget);
+    expect(find.text('Breaking Bad'), findsWidgets);
+
+    await tester.tap(find.text('韩剧').last);
+    await tester.pumpAndSettle();
+    expect(find.text('The Glory'), findsWidgets);
+    expect(find.text('Breaking Bad'), findsNothing);
 
     await tester.tap(find.text('电影').first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('按剧场版 / Movie / 电影标签筛选'), findsOneWidget);
-    expect(find.text('剧场版测试片'), findsWidgets);
+    expect(find.textContaining('接入 Wikidata 电影元数据'), findsOneWidget);
+    expect(find.text('Inception'), findsWidgets);
+    expect(find.text('剧场版测试片'), findsNothing);
+
+    await tester.tap(find.text('科幻').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Inception'), findsWidgets);
+    expect(find.text('The Godfather'), findsNothing);
   });
 
   testWidgets('profile menu pages are reachable', (tester) async {
@@ -238,17 +249,17 @@ class _FakeAnimeController extends AnimeController {
 
   @override
   Future<List<AnimeSubject>> discoverSubjects() async {
-    return const [_subject, _movieSubject];
+    return const [_subject, _seriesSubject, _movieSubject];
   }
 
   @override
   Future<List<AnimeSubject>> seriesSubjects() async {
-    return const [_subject];
+    return const [_seriesSubject, _koreanSeriesSubject];
   }
 
   @override
   Future<List<AnimeSubject>> movieSubjects() async {
-    return const [_movieSubject];
+    return const [_movieSubject, _movieDramaSubject];
   }
 
   @override
@@ -286,23 +297,95 @@ const _subject = AnimeSubject(
 );
 
 const _movieSubject = AnimeSubject(
-  id: 2,
-  title: '剧场版测试片',
-  originalTitle: 'Test Movie',
-  summary: '用于测试电影元数据入口。',
+  id: 2875,
+  title: 'Inception',
+  originalTitle: 'Inception',
+  summary: '一名盗梦者接受在他人潜意识中植入想法的任务。',
   coverUrl: null,
   bannerUrl: null,
-  date: '2024-03-01',
+  date: '2010-07-08',
   platform: 'Movie',
-  language: '日语',
-  region: '日本',
-  status: '剧场版',
+  language: 'English',
+  region: 'United States',
+  status: '电影',
   categories: [
-    AnimeCategory(name: '动画'),
-    AnimeCategory(name: '剧场版'),
+    AnimeCategory(name: '电影'),
+    AnimeCategory(name: 'Science fiction'),
+    AnimeCategory(name: 'Action'),
   ],
-  tags: [AnimeTag(name: '剧场版', count: 80)],
+  tags: [
+    AnimeTag(name: 'Wikidata'),
+    AnimeTag(name: 'IMDb'),
+  ],
   totalEpisodes: 1,
+  source: 'wikidata',
+);
+
+const _seriesSubject = AnimeSubject(
+  id: 169,
+  title: 'Breaking Bad',
+  originalTitle: 'Breaking Bad',
+  summary: '一位化学教师在绝境中走向犯罪世界。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2008-01-20',
+  platform: 'Scripted',
+  language: 'English',
+  region: 'United States',
+  status: 'Ended',
+  categories: [
+    AnimeCategory(name: 'Drama'),
+    AnimeCategory(name: 'Crime'),
+  ],
+  tags: [AnimeTag(name: 'TVMaze')],
+  totalEpisodes: 62,
+  source: 'tvmaze',
+);
+
+const _koreanSeriesSubject = AnimeSubject(
+  id: 57841,
+  title: 'The Glory',
+  originalTitle: '더 글로리',
+  summary: '一名女性围绕校园暴力展开漫长复仇。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2022-12-30',
+  platform: 'Scripted',
+  language: 'Korean',
+  region: 'South Korea',
+  status: 'Ended',
+  categories: [
+    AnimeCategory(name: 'Drama'),
+    AnimeCategory(name: 'Thriller'),
+  ],
+  tags: [AnimeTag(name: 'TVMaze')],
+  totalEpisodes: 16,
+  source: 'tvmaze',
+);
+
+const _movieDramaSubject = AnimeSubject(
+  id: 47703,
+  title: 'The Godfather',
+  originalTitle: 'The Godfather',
+  summary: '科里昂家族权力交接中的犯罪史诗。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '1972-03-14',
+  platform: 'Movie',
+  language: 'English',
+  region: 'United States',
+  status: '电影',
+  categories: [
+    AnimeCategory(name: '电影'),
+    AnimeCategory(name: 'Crime'),
+    AnimeCategory(name: 'Drama'),
+  ],
+  tags: [
+    AnimeTag(name: 'Wikidata'),
+    AnimeTag(name: 'IMDb'),
+  ],
+  totalEpisodes: 1,
+  source: 'wikidata',
 );
 
 const _feed = AnimeHomeFeed(
