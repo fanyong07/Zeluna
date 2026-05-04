@@ -1,0 +1,267 @@
+"""
+SQLAlchemy 异步引擎 + ORM 模型
+"""
+
+import datetime
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func
+
+from .config import DATABASE_URL
+
+engine = create_async_engine(DATABASE_URL, echo=False)
+async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 用户
+# ---------------------------------------------------------------------------
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="user")
+    sex: Mapped[str] = mapped_column(String(10), default="保密")
+    avatar: Mapped[str] = mapped_column(String(500), default="")
+    exp: Mapped[int] = mapped_column(Integer, default=0)
+    coin: Mapped[int] = mapped_column(Integer, default=0)
+    color: Mapped[str] = mapped_column(String(20), default="#FF6B6B")
+    address: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    tokens: Mapped[list["UserToken"]] = relationship("UserToken", back_populates="user", cascade="all, delete-orphan")
+    danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserToken(Base):
+    __tablename__ = "user_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    token: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    user: Mapped["User"] = relationship("User", back_populates="tokens")
+
+
+class VerifyCode(Base):
+    __tablename__ = "verify_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255))
+    code: Mapped[str] = mapped_column(String(6))
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    expires_at: Mapped[float] = mapped_column(Float)
+
+
+# ---------------------------------------------------------------------------
+# 番剧
+# ---------------------------------------------------------------------------
+class Bangumi(Base):
+    __tablename__ = "bangumi"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(500))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    cover_url: Mapped[str] = mapped_column(String(1000), default="")
+    banner_url: Mapped[str] = mapped_column(String(1000), default="")
+    type: Mapped[str] = mapped_column(String(20), default="tv")  # tv, movie, ova
+    lang: Mapped[str] = mapped_column(String(20), default="ja")   # ja, zh
+    year: Mapped[int] = mapped_column(Integer, default=2024)
+    status: Mapped[int] = mapped_column(Integer, default=0)       # 0=连载, 1=完结
+    tags: Mapped[str] = mapped_column(Text, default="")           # JSON array string
+    genres: Mapped[str] = mapped_column(Text, default="")         # JSON array string
+    rating: Mapped[float] = mapped_column(Float, default=0.0)
+    rating_count: Mapped[int] = mapped_column(Integer, default=0)
+    bangumi_id: Mapped[str] = mapped_column(String(100), default="")  # 外部 ID
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    episodes: Mapped[list["BangumiEpisode"]] = relationship("BangumiEpisode", back_populates="bangumi", cascade="all, delete-orphan")
+    collections: Mapped[list["BangumiCollection"]] = relationship("BangumiCollection", back_populates="bangumi", cascade="all, delete-orphan")
+    danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="bangumi", cascade="all, delete-orphan")
+
+
+class BangumiEpisode(Base):
+    __tablename__ = "bangumi_episodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    number: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    vod_url: Mapped[str] = mapped_column(Text, default="")     # JSON: [{"url":"...","type":"hls","caption":"1080p"}]
+    duration: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    bangumi: Mapped["Bangumi"] = relationship("Bangumi", back_populates="episodes")
+    danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="episode", cascade="all, delete-orphan")
+
+
+class BangumiCollection(Base):
+    __tablename__ = "bangumi_collections"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    type: Mapped[str] = mapped_column(String(20), default="wish")  # wish, watch, watched
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    bangumi: Mapped["Bangumi"] = relationship("Bangumi", back_populates="collections")
+
+
+# ---------------------------------------------------------------------------
+# 角色 & 人物
+# ---------------------------------------------------------------------------
+class Character(Base):
+    __tablename__ = "characters"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(100), default="")    # 主角/配角
+    avatar_url: Mapped[str] = mapped_column(String(1000), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    seiyuu: Mapped[str] = mapped_column(String(200), default="")  # 声优
+
+
+class Person(Base):
+    __tablename__ = "persons"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(100), default="")    # 监督/脚本/音乐
+    avatar_url: Mapped[str] = mapped_column(String(1000), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+
+
+# ---------------------------------------------------------------------------
+# 弹幕
+# ---------------------------------------------------------------------------
+class Danmaku(Base):
+    __tablename__ = "danmaku"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    episode_id: Mapped[int] = mapped_column(ForeignKey("bangumi_episodes.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
+    type: Mapped[int] = mapped_column(Integer, default=0)  # 0=scroll, 1=top, 2=bottom
+    time: Mapped[float] = mapped_column(Float, default=0.0)  # 弹幕出现时间(秒)
+    text: Mapped[str] = mapped_column(Text)
+    color: Mapped[str] = mapped_column(String(20), default="#FFFFFF")
+    date: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    danmaku_id: Mapped[str] = mapped_column(String(100), default="")  # 外部 ID
+
+    bangumi: Mapped["Bangumi"] = relationship("Bangumi", back_populates="danmaku")
+    episode: Mapped["BangumiEpisode"] = relationship("BangumiEpisode", back_populates="danmaku")
+    user: Mapped["User"] = relationship("User", back_populates="danmaku")
+
+
+# ---------------------------------------------------------------------------
+# 帖子 / 图片社区
+# ---------------------------------------------------------------------------
+class Thread(Base):
+    __tablename__ = "threads"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(500))
+    body: Mapped[str] = mapped_column(Text, default="")
+    tags: Mapped[str] = mapped_column(Text, default="")      # JSON array
+    nsfw: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai: Mapped[bool] = mapped_column(Boolean, default=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
+    like_count: Mapped[int] = mapped_column(Integer, default=0)
+    collect_count: Mapped[int] = mapped_column(Integer, default=0)
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+    images: Mapped[list["ThreadImage"]] = relationship("ThreadImage", back_populates="thread", cascade="all, delete-orphan")
+
+
+class ThreadImage(Base):
+    __tablename__ = "thread_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+    color: Mapped[str] = mapped_column(String(20), default="")
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
+    original: Mapped[str] = mapped_column(String(1000), default="")
+    master: Mapped[str] = mapped_column(String(1000), default="")
+    original_size: Mapped[int] = mapped_column(Integer, default=0)
+    master_size: Mapped[int] = mapped_column(Integer, default=0)
+
+    thread: Mapped["Thread"] = relationship("Thread", back_populates="images")
+
+
+class ThreadCollection(Base):
+    __tablename__ = "thread_collections"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+class ThreadLike(Base):
+    __tablename__ = "thread_likes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+# ---------------------------------------------------------------------------
+# 评论
+# ---------------------------------------------------------------------------
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    type: Mapped[str] = mapped_column(String(50))                 # "thread" | "bangumi_episode"
+    target_id: Mapped[str] = mapped_column(String(100))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
+    parent_id: Mapped[str] = mapped_column(String(100), default="")  # 父评论 ID
+    reply_to: Mapped[str] = mapped_column(String(200), default="")   # 回复给谁
+    contents: Mapped[str] = mapped_column(Text, default="[]")        # JSON array
+    like_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+class CommentLike(Base):
+    __tablename__ = "comment_likes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    comment_id: Mapped[int] = mapped_column(ForeignKey("comments.id"))
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+# ---------------------------------------------------------------------------
+# 播放历史
+# ---------------------------------------------------------------------------
+class PlayHistory(Base):
+    __tablename__ = "play_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    bangumi_id: Mapped[int] = mapped_column(ForeignKey("bangumi.id"))
+    episode_id: Mapped[int] = mapped_column(ForeignKey("bangumi_episodes.id"))
+    position: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+async def init_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
