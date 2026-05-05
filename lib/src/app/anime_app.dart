@@ -9,16 +9,19 @@ import '../player/player_page.dart';
 import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
+import '../shared_ui/app_chrome.dart';
+import '../sources/source_management_page.dart';
 import 'app_theme.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final routes = <RouteBase>[
     GoRoute(path: '/', builder: (context, state) => const CatalogPage()),
     GoRoute(
-      path: '/discover',
+      path: '/anime',
       builder: (context, state) =>
-          const MetadataHubPage(kind: MetadataHubKind.discover),
+          const MetadataHubPage(kind: MetadataHubKind.anime),
     ),
+    GoRoute(path: '/discover', redirect: (context, state) => '/anime'),
     GoRoute(
       path: '/series',
       builder: (context, state) =>
@@ -34,16 +37,8 @@ final routerProvider = Provider<GoRouter>((ref) {
       builder: (context, state) => const SchedulePage(),
     ),
     GoRoute(path: '/profile', builder: (context, state) => const ProfilePage()),
-    GoRoute(
-      path: '/profile/history',
-      builder: (context, state) => LibraryPage(
-        title: '观看记录',
-        emptyTitle: '还没有观看记录',
-        emptyMessage: '从详情页播放任意一集后，这里会记录番剧和集数。',
-        entriesOf: (state) => state.history,
-        clearKey: 'history',
-      ),
-    ),
+    GoRoute(path: '/history', builder: (context, state) => const HistoryPage()),
+    GoRoute(path: '/profile/history', redirect: (context, state) => '/history'),
     GoRoute(
       path: '/profile/offline',
       builder: (context, state) => LibraryPage(
@@ -59,8 +54,9 @@ final routerProvider = Provider<GoRouter>((ref) {
       builder: (context, state) => LibraryPage(
         title: '追番列表',
         emptyTitle: '还没有追番',
-        emptyMessage: '后续详情页可加入追番，这里会按本地列表展示。',
+        emptyMessage: '在详情页点“追番”后会加入这里，也可以从“我的”页进入。',
         entriesOf: (state) => state.following,
+        active: ChromeDestination.favorite,
       ),
     ),
     GoRoute(
@@ -109,8 +105,16 @@ final routerProvider = Provider<GoRouter>((ref) {
       builder: (context, state) => const RuleManagementPage(),
     ),
     GoRoute(
+      path: '/profile/sources',
+      builder: (context, state) => const SourceManagementPage(),
+    ),
+    GoRoute(
       path: '/profile/rules/repository',
       builder: (context, state) => const RuleRepositoryPage(),
+    ),
+    GoRoute(
+      path: '/settings',
+      builder: (context, state) => const SettingsHubPage(),
     ),
     GoRoute(
       path: '/settings/playback',

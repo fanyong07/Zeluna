@@ -6,6 +6,10 @@ import 'package:http/http.dart' as http;
 
 import '../domain/anime_models.dart';
 
+extension _DateSeed on DateTime {
+  int get dayOfYear => difference(DateTime(year)).inDays + 1;
+}
+
 class BangumiMetadataRepository {
   BangumiMetadataRepository({http.Client? client})
     : _client = client ?? http.Client();
@@ -21,35 +25,40 @@ class BangumiMetadataRepository {
   Future<AnimeHomeFeed> homeFeed() async {
     try {
       final batches = await Future.wait([
-        searchSubjects(
+        _searchSubjectPages(
           keyword: '',
           sort: 'heat',
           filters: const {
             'type': [2],
             'air_date': ['>=2025-01-01'],
           },
-          limit: 28,
+          pageSize: 28,
+          pages: 3,
         ),
-        searchSubjects(
+        _searchSubjectPages(
           keyword: '',
           sort: 'score',
           filters: const {
             'type': [2],
           },
-          limit: 30,
+          pageSize: 30,
+          pages: 3,
         ),
-        searchSubjects(
+        _searchSubjectPages(
           keyword: '',
           sort: 'rank',
           filters: const {
             'type': [2],
           },
-          limit: 42,
+          pageSize: 42,
+          pages: 3,
         ),
       ]).timeout(const Duration(seconds: 20));
 
       final recent = batches[0].isEmpty ? _fallbackSubjects : batches[0];
-      final recommended = batches[1].isEmpty ? _fallbackSubjects : batches[1];
+      final recommended = _dailyRotate(
+        batches[1].isEmpty ? _fallbackSubjects : batches[1],
+      );
       final index = batches[2].isEmpty ? _fallbackSubjects : batches[2];
       return AnimeHomeFeed(
         hero: recommended.firstOrNull ?? _fallbackSubjects.first,
@@ -110,16 +119,50 @@ class BangumiMetadataRepository {
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
-    final subjects = await searchSubjects(
+    final subjects = await _searchSubjectPages(
       keyword: '',
       sort: 'heat',
       filters: const {
         'type': [2],
         'air_date': ['>=2025-01-01'],
       },
-      limit: 84,
+      pageSize: 42,
+      pages: 3,
     ).timeout(const Duration(seconds: 20), onTimeout: () => const []);
     return _groupByWeekday(subjects.isEmpty ? _fallbackSubjects : subjects);
+  }
+
+  Future<List<AnimeSubject>> discoverySubjects() async {
+    final batches = await Future.wait([
+      _searchSubjectPages(
+        keyword: '',
+        sort: 'heat',
+        filters: const {
+          'type': [2],
+        },
+        pageSize: 36,
+        pages: 3,
+      ).onError((_, _) => const <AnimeSubject>[]),
+      _searchSubjectPages(
+        keyword: '',
+        sort: 'rank',
+        filters: const {
+          'type': [2],
+        },
+        pageSize: 36,
+        pages: 3,
+      ).onError((_, _) => const <AnimeSubject>[]),
+      _searchSubjectPages(
+        keyword: '',
+        sort: 'score',
+        filters: const {
+          'type': [2],
+        },
+        pageSize: 36,
+        pages: 3,
+      ).onError((_, _) => const <AnimeSubject>[]),
+    ]).timeout(const Duration(seconds: 20), onTimeout: () => const []);
+    return _uniqueSubjects(batches.expand((items) => items));
   }
 
   Future<List<AnimeSubject>> searchSubjects({
@@ -148,6 +191,30 @@ class BangumiMetadataRepository {
         .map((item) => _subjectFromJson(item.cast<String, dynamic>()))
         .where((item) => item.title.trim().isNotEmpty)
         .toList();
+  }
+
+  Future<List<AnimeSubject>> _searchSubjectPages({
+    required String keyword,
+    required String sort,
+    required Map<String, Object?> filters,
+    required int pageSize,
+    required int pages,
+  }) async {
+    final batches = await Future.wait([
+      for (var page = 0; page < pages; page++)
+        searchSubjects(
+          keyword: keyword,
+          sort: sort,
+          filters: filters,
+          limit: pageSize,
+          offset: page * pageSize,
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(batches.expand((items) => items));
+  }
+
+  List<AnimeSubject> _dailyRotate(List<AnimeSubject> subjects) {
+    return _rotateSubjectsForToday(_uniqueSubjects(subjects));
   }
 
   Future<AnimeDetailBundle> detail(int subjectId) async {
@@ -659,46 +726,49 @@ final _fallbackSubjects = [
   ),
 ];
 
-AnimeHomeFeed get _fallbackFeed => AnimeHomeFeed(
-  hero: _fallbackSubjects[1],
-  recent: _fallbackSubjects,
-  recommended: _fallbackSubjects,
-  index: _fallbackSubjects,
-  categories: const [
-    AnimeCategory(
-      name: '动画',
-      count: 35681,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
-    ),
-    AnimeCategory(
-      name: '喜剧',
-      count: 11599,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
-    ),
-    AnimeCategory(
-      name: '奇幻',
-      count: 8676,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
-    ),
-  ],
-  tags: const [
-    AnimeTag(
-      name: 'TV',
-      count: 12883,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
-    ),
-    AnimeTag(
-      name: '日本',
-      count: 10822,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
-    ),
-    AnimeTag(
-      name: '漫画改',
-      count: 5899,
-      imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
-    ),
-  ],
-);
+AnimeHomeFeed get _fallbackFeed {
+  final recommended = _rotateSubjectsForToday(_fallbackSubjects);
+  return AnimeHomeFeed(
+    hero: recommended.firstOrNull ?? _fallbackSubjects.first,
+    recent: _fallbackSubjects,
+    recommended: recommended,
+    index: _fallbackSubjects,
+    categories: const [
+      AnimeCategory(
+        name: '动画',
+        count: 35681,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
+      ),
+      AnimeCategory(
+        name: '喜剧',
+        count: 11599,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+      ),
+      AnimeCategory(
+        name: '奇幻',
+        count: 8676,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
+      ),
+    ],
+    tags: const [
+      AnimeTag(
+        name: 'TV',
+        count: 12883,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
+      ),
+      AnimeTag(
+        name: '日本',
+        count: 10822,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
+      ),
+      AnimeTag(
+        name: '漫画改',
+        count: 5899,
+        imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+      ),
+    ],
+  );
+}
 
 List<AnimeEpisode> _fallbackEpisodes(AnimeSubject subject) {
   final count = subject.totalEpisodes <= 0
@@ -758,6 +828,37 @@ List<AnimeRecommendation> _fallbackRecommendations(AnimeSubject subject) {
     for (final item in _fallbackSubjects.where((item) => item.id != subject.id))
       AnimeRecommendation(subject: item, relation: '推荐'),
   ];
+}
+
+List<AnimeSubject> _rotateSubjectsForToday(List<AnimeSubject> subjects) {
+  if (subjects.length <= 1) return subjects;
+  final now = DateTime.now();
+  final seed = now.year * 1000 + now.dayOfYear;
+  final decorated = [
+    for (final subject in subjects)
+      MapEntry(_stableDailyScore(subject, seed), subject),
+  ]..sort((a, b) => a.key.compareTo(b.key));
+  return decorated.map((entry) => entry.value).toList(growable: false);
+}
+
+int _stableDailyScore(AnimeSubject subject, int seed) {
+  var value = subject.id ^ seed ^ _stableTextHash(subject.title);
+  value = 0x1fffffff & (value + 0x7ed55d16 + (value << 12));
+  value = 0x1fffffff & (value ^ 0xc761c23c ^ (value >> 19));
+  value = 0x1fffffff & (value + 0x165667b1 + (value << 5));
+  value = 0x1fffffff & (value + 0xd3a2646c ^ (value << 9));
+  value = 0x1fffffff & (value + 0xfd7046c5 + (value << 3));
+  value = 0x1fffffff & (value ^ 0xb55a4f09 ^ (value >> 16));
+  return value;
+}
+
+int _stableTextHash(String text) {
+  var hash = 0x811c9dc5;
+  for (final unit in text.codeUnits) {
+    hash ^= unit;
+    hash = 0x1fffffff & (hash * 0x01000193);
+  }
+  return hash;
 }
 
 extension _FirstOrNull<T> on List<T> {

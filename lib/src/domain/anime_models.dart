@@ -675,6 +675,9 @@ class ExternalServiceSettings {
     this.bilibiliSubtitleEnabled = true,
     this.subtitleLanguage = 'zh-CN',
     this.autoMatchSubtitle = true,
+    this.dandanplayDanmakuEnabled = true,
+    this.dandanplayAppId = '',
+    this.dandanplayAppSecret = '',
     this.bilibiliDanmakuEnabled = true,
     this.customDanmakuEnabled = false,
     this.customDanmakuEndpoint = '',
@@ -690,6 +693,9 @@ class ExternalServiceSettings {
   final bool bilibiliSubtitleEnabled;
   final String subtitleLanguage;
   final bool autoMatchSubtitle;
+  final bool dandanplayDanmakuEnabled;
+  final String dandanplayAppId;
+  final String dandanplayAppSecret;
   final bool bilibiliDanmakuEnabled;
   final bool customDanmakuEnabled;
   final String customDanmakuEndpoint;
@@ -705,6 +711,9 @@ class ExternalServiceSettings {
     bool? bilibiliSubtitleEnabled,
     String? subtitleLanguage,
     bool? autoMatchSubtitle,
+    bool? dandanplayDanmakuEnabled,
+    String? dandanplayAppId,
+    String? dandanplayAppSecret,
     bool? bilibiliDanmakuEnabled,
     bool? customDanmakuEnabled,
     String? customDanmakuEndpoint,
@@ -723,6 +732,10 @@ class ExternalServiceSettings {
           bilibiliSubtitleEnabled ?? this.bilibiliSubtitleEnabled,
       subtitleLanguage: subtitleLanguage ?? this.subtitleLanguage,
       autoMatchSubtitle: autoMatchSubtitle ?? this.autoMatchSubtitle,
+      dandanplayDanmakuEnabled:
+          dandanplayDanmakuEnabled ?? this.dandanplayDanmakuEnabled,
+      dandanplayAppId: dandanplayAppId ?? this.dandanplayAppId,
+      dandanplayAppSecret: dandanplayAppSecret ?? this.dandanplayAppSecret,
       bilibiliDanmakuEnabled:
           bilibiliDanmakuEnabled ?? this.bilibiliDanmakuEnabled,
       customDanmakuEnabled: customDanmakuEnabled ?? this.customDanmakuEnabled,
@@ -742,6 +755,9 @@ class ExternalServiceSettings {
     'bilibiliSubtitleEnabled': bilibiliSubtitleEnabled,
     'subtitleLanguage': subtitleLanguage,
     'autoMatchSubtitle': autoMatchSubtitle,
+    'dandanplayDanmakuEnabled': dandanplayDanmakuEnabled,
+    'dandanplayAppId': dandanplayAppId,
+    'dandanplayAppSecret': dandanplayAppSecret,
     'bilibiliDanmakuEnabled': bilibiliDanmakuEnabled,
     'customDanmakuEnabled': customDanmakuEnabled,
     'customDanmakuEndpoint': customDanmakuEndpoint,
@@ -761,6 +777,10 @@ class ExternalServiceSettings {
       bilibiliSubtitleEnabled: json['bilibiliSubtitleEnabled'] as bool? ?? true,
       subtitleLanguage: json['subtitleLanguage']?.toString() ?? 'zh-CN',
       autoMatchSubtitle: json['autoMatchSubtitle'] as bool? ?? true,
+      dandanplayDanmakuEnabled:
+          json['dandanplayDanmakuEnabled'] as bool? ?? true,
+      dandanplayAppId: json['dandanplayAppId']?.toString() ?? '',
+      dandanplayAppSecret: json['dandanplayAppSecret']?.toString() ?? '',
       bilibiliDanmakuEnabled: json['bilibiliDanmakuEnabled'] as bool? ?? true,
       customDanmakuEnabled: json['customDanmakuEnabled'] as bool? ?? false,
       customDanmakuEndpoint: json['customDanmakuEndpoint']?.toString() ?? '',
@@ -824,6 +844,13 @@ class PlaybackSettings {
     this.autoSwitchLine = true,
     this.autoFullscreen = false,
     this.rememberLine = true,
+    this.keyboardShortcutsEnabled = true,
+    this.shortcutPlayPause = true,
+    this.shortcutSeek = true,
+    this.shortcutVolume = true,
+    this.shortcutFullscreen = true,
+    this.shortcutMute = true,
+    this.shortcutReload = true,
   });
 
   final double volumeBoost;
@@ -840,6 +867,13 @@ class PlaybackSettings {
   final bool autoSwitchLine;
   final bool autoFullscreen;
   final bool rememberLine;
+  final bool keyboardShortcutsEnabled;
+  final bool shortcutPlayPause;
+  final bool shortcutSeek;
+  final bool shortcutVolume;
+  final bool shortcutFullscreen;
+  final bool shortcutMute;
+  final bool shortcutReload;
 
   PlaybackSettings copyWith({
     double? volumeBoost,
@@ -856,6 +890,13 @@ class PlaybackSettings {
     bool? autoSwitchLine,
     bool? autoFullscreen,
     bool? rememberLine,
+    bool? keyboardShortcutsEnabled,
+    bool? shortcutPlayPause,
+    bool? shortcutSeek,
+    bool? shortcutVolume,
+    bool? shortcutFullscreen,
+    bool? shortcutMute,
+    bool? shortcutReload,
   }) {
     return PlaybackSettings(
       volumeBoost: volumeBoost ?? this.volumeBoost,
@@ -872,6 +913,14 @@ class PlaybackSettings {
       autoSwitchLine: autoSwitchLine ?? this.autoSwitchLine,
       autoFullscreen: autoFullscreen ?? this.autoFullscreen,
       rememberLine: rememberLine ?? this.rememberLine,
+      keyboardShortcutsEnabled:
+          keyboardShortcutsEnabled ?? this.keyboardShortcutsEnabled,
+      shortcutPlayPause: shortcutPlayPause ?? this.shortcutPlayPause,
+      shortcutSeek: shortcutSeek ?? this.shortcutSeek,
+      shortcutVolume: shortcutVolume ?? this.shortcutVolume,
+      shortcutFullscreen: shortcutFullscreen ?? this.shortcutFullscreen,
+      shortcutMute: shortcutMute ?? this.shortcutMute,
+      shortcutReload: shortcutReload ?? this.shortcutReload,
     );
   }
 
@@ -890,6 +939,13 @@ class PlaybackSettings {
     'autoSwitchLine': autoSwitchLine,
     'autoFullscreen': autoFullscreen,
     'rememberLine': rememberLine,
+    'keyboardShortcutsEnabled': keyboardShortcutsEnabled,
+    'shortcutPlayPause': shortcutPlayPause,
+    'shortcutSeek': shortcutSeek,
+    'shortcutVolume': shortcutVolume,
+    'shortcutFullscreen': shortcutFullscreen,
+    'shortcutMute': shortcutMute,
+    'shortcutReload': shortcutReload,
   };
 
   factory PlaybackSettings.fromJson(Map<String, dynamic> json) {
@@ -908,6 +964,14 @@ class PlaybackSettings {
       autoSwitchLine: json['autoSwitchLine'] as bool? ?? true,
       autoFullscreen: json['autoFullscreen'] as bool? ?? false,
       rememberLine: json['rememberLine'] as bool? ?? true,
+      keyboardShortcutsEnabled:
+          json['keyboardShortcutsEnabled'] as bool? ?? true,
+      shortcutPlayPause: json['shortcutPlayPause'] as bool? ?? true,
+      shortcutSeek: json['shortcutSeek'] as bool? ?? true,
+      shortcutVolume: json['shortcutVolume'] as bool? ?? true,
+      shortcutFullscreen: json['shortcutFullscreen'] as bool? ?? true,
+      shortcutMute: json['shortcutMute'] as bool? ?? true,
+      shortcutReload: json['shortcutReload'] as bool? ?? true,
     );
   }
 }

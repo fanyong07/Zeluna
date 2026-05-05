@@ -1,18 +1,20 @@
 import 'rule_models.dart';
 
 class RulePluginRepository {
-  const RulePluginRepository();
+  const RulePluginRepository({this.extraRules = const []});
 
-  List<RulePlugin> get allRules => _curatedRules;
+  final List<RulePlugin> extraRules;
+
+  List<RulePlugin> get allRules => _mergeRules(_curatedRules, extraRules);
 
   List<RulePlugin> rulesFor(RuleContentType type) {
-    return _curatedRules
+    return allRules
         .where((rule) => rule.contentType == type)
         .toList(growable: false);
   }
 
   List<RulePlugin> installedRules(RulePluginState state) {
-    return _curatedRules
+    return allRules
         .where((rule) => state.installedIds.contains(rule.id))
         .toList(growable: false);
   }
@@ -21,30 +23,48 @@ class RulePluginRepository {
     RulePluginState state,
     RuleContentType type,
   ) {
-    return _curatedRules
+    return allRules
         .where(
           (rule) =>
               rule.contentType == type &&
               state.installedIds.contains(rule.id) &&
-              state.enabledIds.contains(rule.id),
+              state.enabledIds.contains(rule.id) &&
+              rule.canResolveNatively,
         )
         .toList(growable: false);
   }
 
   RulePluginState defaultState() {
     final installed = {
-      for (final rule in _curatedRules)
+      for (final rule in allRules)
         if (rule.installedByDefault) rule.id,
     };
-    return RulePluginState(installedIds: installed, enabledIds: installed);
+    final enabled = {
+      for (final rule in allRules)
+        if (installed.contains(rule.id) && rule.canResolveNatively) rule.id,
+    };
+    return RulePluginState(
+      installedIds: installed,
+      enabledIds: enabled,
+      customRules: extraRules,
+    );
   }
 
   RulePlugin? byId(String id) {
-    for (final rule in _curatedRules) {
+    for (final rule in allRules) {
       if (rule.id == id) return rule;
     }
     return null;
   }
+}
+
+List<RulePlugin> _mergeRules(List<RulePlugin> curated, List<RulePlugin> extra) {
+  if (extra.isEmpty) return curated;
+  final byId = <String, RulePlugin>{for (final rule in curated) rule.id: rule};
+  for (final rule in extra) {
+    byId[rule.id] = rule;
+  }
+  return byId.values.toList(growable: false);
 }
 
 DateTime _date(
@@ -81,6 +101,13 @@ final _curatedRules = <RulePlugin>[
     filterable: true,
     requiresWebView: true,
     installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: '//div[1]/div[2]/div/div/div[2]/div//div',
+      searchName: '//div[2]/div[1]/a/strong',
+      searchResult: '//div[3]/a[2]',
+      chapterRoads: '//div/div[2]/div/div[2]//div',
+      chapterResult: '//div/div/a',
+    ),
     note: 'KazumiRules 中更新时间最新，字段完整，支持多线路和原生播放。',
   ),
   RulePlugin(
@@ -98,7 +125,14 @@ final _curatedRules = <RulePlugin>[
     searchable: true,
     quickSearch: true,
     filterable: true,
-    installedByDefault: false,
+    installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: '//div[1]/div[2]/div/div/div[2]/div/div',
+      searchName: '//div[2]/div[1]/a',
+      searchResult: '//div[2]/div[1]/a',
+      chapterRoads: '//div/div[2]/div/div[2]/div/div/div',
+      chapterResult: '//a',
+    ),
     note: '规则较新且不依赖验证码，适合作为番剧备用源。',
   ),
   RulePlugin(
@@ -116,7 +150,14 @@ final _curatedRules = <RulePlugin>[
     searchable: true,
     quickSearch: true,
     filterable: true,
-    installedByDefault: false,
+    installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: "//div[@class='public-list-box search-box flex rel']",
+      searchName: '//div[3]/div[1]/div[1]',
+      searchResult: '//div[3]/div[2]/a[1]',
+      chapterRoads: "//ul[@class='anthology-list-play size']",
+      chapterResult: '//li/a',
+    ),
     note: '字段完整，更新时间靠前，作为无验证码备用规则保留。',
   ),
   RulePlugin(
@@ -137,6 +178,14 @@ final _curatedRules = <RulePlugin>[
     requiresWebView: true,
     requiresCaptcha: true,
     installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: '//div[1]/div/div/section/div//div',
+      searchName: '//div/div[2]/h6/a',
+      searchResult: '//div/div[2]/h6/a',
+      chapterRoads: '//div[1]/div[2]/div/div[1]/section[2]/div//div',
+      chapterResult: '//div[2]/div/a',
+    ),
+    unsupportedReason: '该规则启用了验证码验证，需要 WebView 手动处理，解析器不会绕过验证码。',
     note: '规则完整但带验证码，安装后作为手动备用源使用。',
   ),
   RulePlugin(
@@ -158,6 +207,14 @@ final _curatedRules = <RulePlugin>[
     requiresWebView: true,
     requiresCaptcha: true,
     installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: "//div[@class='vod-detail style-detail cor4 search-list']",
+      searchName: '//div/div[2]/a',
+      searchResult: '//div/div[2]/a',
+      chapterRoads: "//ul[@class='anthology-list-play size']",
+      chapterResult: '//li/a',
+    ),
+    unsupportedReason: '该规则启用了反爬验证，需要 WebView 手动处理，解析器不会绕过验证。',
     note: '字段完整但启用反爬验证，保留为可安装番剧规则。',
   ),
   RulePlugin(
@@ -178,6 +235,14 @@ final _curatedRules = <RulePlugin>[
     requiresWebView: true,
     requiresCaptcha: true,
     installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: "//div[@class='vod-detail style-detail cor4 search-list']",
+      searchName: '//div/div[2]/a/h3',
+      searchResult: '//div/div[2]/a',
+      chapterRoads: "//ul[@class='anthology-list-play size']",
+      chapterResult: '//li/a',
+    ),
+    unsupportedReason: '该规则启用了反爬验证，需要 WebView 手动处理，解析器不会绕过验证。',
     note: 'KazumiRules 已列入索引，作为番剧规则的兜底线路。',
   ),
   RulePlugin(
@@ -195,7 +260,14 @@ final _curatedRules = <RulePlugin>[
     searchable: true,
     quickSearch: true,
     filterable: true,
-    installedByDefault: false,
+    installedByDefault: true,
+    kazumi: const KazumiParserConfig(
+      searchList: '//div[3]/ul/li',
+      searchName: '//h3/a',
+      searchResult: '//h3/a',
+      chapterRoads: '//div[4]/div/div/ul',
+      chapterResult: '//li/a',
+    ),
     note: '版本号较高，不带验证码，作为可安装备用规则。',
   ),
   RulePlugin(
@@ -214,6 +286,18 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: true,
+    xbpq: const XbpqParserConfig(
+      searchArray: 'module-card-item-class&&</a>',
+      searchTitle: 'title="&&"',
+      searchLink: 'href="&&"',
+      playArray: 'module-play-list-content&&</div>',
+      playList: '<a&&/a>',
+      playTitle: '>&&</',
+      playLink: 'href="&&"',
+      lineArray: 'module-tab-item&&</div>',
+      lineTitle: '>&&</',
+      jumpPlayLink: 'var player_*"url":"&&"',
+    ),
     note: '分类明确区分韩国剧集、韩国电影、韩国综艺，优先归入电视剧规则。',
   ),
   RulePlugin(
@@ -232,6 +316,7 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: true,
+    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
     note: 'TVBox 配置中的美剧专用源，未携带私密授权信息。',
   ),
   RulePlugin(
@@ -250,6 +335,7 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
+    unsupportedReason: '该规则属于 drpy-js，需要接入 JS 规则执行器后才能解析。',
     note: '综合影视源，优先在电视剧频道使用，电影频道另配专用电影源。',
   ),
   RulePlugin(
@@ -268,6 +354,18 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: true,
+    xbpq: const XbpqParserConfig(
+      searchArray: '<div class="module-item-pic">&&</div>',
+      searchTitle: 'title="&&"',
+      searchLink: 'href="&&"',
+      playArray: '<div class="scroll-content">&&</div>',
+      playList: '<a&&/a>',
+      playTitle: '<span>&&</span>',
+      playLink: 'href="&&"',
+      lineArray: 'data-dropdown-value=&&</div>',
+      lineTitle: '<span>&&</small>',
+      jumpPlayLink: 'var player_*"url":"&&"',
+    ),
     note: '分类内含电影/电视剧/动漫/综艺，这里仅把电影规则归入电影频道。',
   ),
   RulePlugin(
@@ -286,6 +384,7 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: true,
+    unsupportedReason: '该规则主要返回磁力/下载链接，不作为在线播放线路解析。',
     note: '电影分类完整，包含最新电影、经典高清、国配电影、4K 等频道。',
   ),
   RulePlugin(
@@ -304,6 +403,7 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
+    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
     note: 'TVBox 中较常见的电影源，不需要本地授权信息。',
   ),
   RulePlugin(
@@ -322,6 +422,7 @@ final _curatedRules = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
+    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
     note: '电影向资源站，保留为可安装备用源。',
   ),
 ];

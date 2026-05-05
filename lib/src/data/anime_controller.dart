@@ -2,8 +2,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../domain/anime_models.dart';
+import '../rules/rule_importer.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_plugin_repository.dart';
+import '../sources/source_catalog_models.dart';
+import '../sources/source_catalog_repository.dart';
 import 'bangumi_metadata_repository.dart';
 import 'external_service_repository.dart';
 import 'playback_source_repository.dart';
@@ -18,6 +21,10 @@ final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
 
 final externalServiceRepositoryProvider = Provider<ExternalServiceRepository>(
   (ref) => ExternalServiceRepository(),
+);
+
+final sourceCatalogRepositoryProvider = Provider<SourceCatalogRepository>(
+  (ref) => const SourceCatalogRepository(),
 );
 
 final animeControllerProvider =
@@ -41,6 +48,7 @@ class AnimeState {
     this.misc = const MiscSettings(),
     this.services = const ExternalServiceSettings(),
     this.rulePlugins = const RulePluginState(),
+    this.sourceCatalog = const SourceCatalogState(),
   });
 
   final AnimeHomeFeed homeFeed;
@@ -59,6 +67,7 @@ class AnimeState {
   final MiscSettings misc;
   final ExternalServiceSettings services;
   final RulePluginState rulePlugins;
+  final SourceCatalogState sourceCatalog;
 
   AnimeState copyWith({
     AnimeHomeFeed? homeFeed,
@@ -77,6 +86,7 @@ class AnimeState {
     MiscSettings? misc,
     ExternalServiceSettings? services,
     RulePluginState? rulePlugins,
+    SourceCatalogState? sourceCatalog,
   }) {
     return AnimeState(
       homeFeed: homeFeed ?? this.homeFeed,
@@ -95,6 +105,7 @@ class AnimeState {
       misc: misc ?? this.misc,
       services: services ?? this.services,
       rulePlugins: rulePlugins ?? this.rulePlugins,
+      sourceCatalog: sourceCatalog ?? this.sourceCatalog,
     );
   }
 }
@@ -120,8 +131,23 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final miscJson = _settings.get('misc');
     final servicesJson = _settings.get('services');
     final rulePluginsJson = _settings.get('rulePlugins');
+    final sourceEnabledJson = _settings.get('sourceEnabled');
     final feed = await ref.read(bangumiMetadataRepositoryProvider).homeFeed();
     final defaultRulePlugins = const RulePluginRepository().defaultState();
+    final rulePlugins = rulePluginsJson is Map
+        ? _mergeDefaultNativeRules(
+            _normalizeRulePlugins(
+              RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>()),
+            ),
+            defaultRulePlugins,
+          )
+        : defaultRulePlugins;
+    if (rulePluginsJson is Map) {
+      await _settings.put('rulePlugins', rulePlugins.toJson());
+    }
+    final sourceCatalog = await _loadSourceCatalog(
+      _enabledOverridesFromJson(sourceEnabledJson),
+    );
     return AnimeState(
       homeFeed: feed,
       settings: settings,
@@ -151,9 +177,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
               servicesJson.cast<String, dynamic>(),
             )
           : const ExternalServiceSettings(),
-      rulePlugins: rulePluginsJson is Map
-          ? RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>())
-          : defaultRulePlugins,
+      rulePlugins: rulePlugins,
+      sourceCatalog: sourceCatalog,
     );
   }
 
@@ -186,23 +211,41 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<List<AnimeSubject>> discoverSubjects() async {
-    return _homeSubjects;
+    final subjects = _homeSubjects;
+    final extra = await ref
+        .read(bangumiMetadataRepositoryProvider)
+        .discoverySubjects()
+        .timeout(const Duration(seconds: 18), onTimeout: () => const [])
+        .onError((_, _) => const <AnimeSubject>[]);
+    return _uniqueSubjects([...subjects, ...extra]);
   }
 
   Future<List<AnimeSubject>> seriesSubjects() async {
     final subjects = await ref
         .read(externalServiceRepositoryProvider)
         .seriesMetadataFeed()
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => const <AnimeSubject>[],
+        )
         .onError((_, _) => const <AnimeSubject>[]);
-    return subjects.isEmpty ? _fallbackExternalSeries : subjects;
+    return subjects.isEmpty
+        ? _fallbackExternalSeries
+        : _uniqueSubjects([...subjects, ..._fallbackExternalSeries]);
   }
 
   Future<List<AnimeSubject>> movieSubjects() async {
     final subjects = await ref
         .read(externalServiceRepositoryProvider)
         .movieMetadataFeed()
+        .timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => const <AnimeSubject>[],
+        )
         .onError((_, _) => const <AnimeSubject>[]);
-    return subjects.isEmpty ? _fallbackExternalMovies : subjects;
+    return subjects.isEmpty
+        ? _fallbackExternalMovies
+        : _uniqueSubjects([...subjects, ..._fallbackExternalMovies]);
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() {
@@ -270,7 +313,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final ruleState =
         state.value?.rulePlugins ?? const RulePluginRepository().defaultState();
     return RulePlaybackSourceRepository(
-      repository: const RulePluginRepository(),
+      repository: RulePluginRepository(extraRules: ruleState.customRules),
       ruleState: ruleState,
     ).linesForEpisode(subject, episode);
   }
@@ -348,8 +391,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> installRulePlugin(String id) async {
     final current = state.value;
     if (current == null) return;
+    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
     final installed = {...current.rulePlugins.installedIds, id};
-    final enabled = {...current.rulePlugins.enabledIds, id};
+    final enabled = {...current.rulePlugins.enabledIds};
+    if (rule?.canResolveNatively ?? false) enabled.add(id);
     await _updateRulePlugins(
       current.rulePlugins.copyWith(
         installedIds: installed,
@@ -376,6 +421,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (current == null || !current.rulePlugins.installedIds.contains(id)) {
       return;
     }
+    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
+    if (enabled && (rule?.canResolveNatively != true)) return;
     final enabledIds = {...current.rulePlugins.enabledIds};
     if (enabled) {
       enabledIds.add(id);
@@ -388,15 +435,136 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> resetRulePlugins() async {
-    await _updateRulePlugins(const RulePluginRepository().defaultState());
+    final current = state.value;
+    final customRules =
+        current?.rulePlugins.customRules ?? const <RulePlugin>[];
+    final repositories =
+        current?.rulePlugins.repositories ?? const <RuleRepositoryRecord>[];
+    final defaults = RulePluginRepository(
+      extraRules: customRules,
+    ).defaultState();
+    await _updateRulePlugins(
+      defaults.copyWith(customRules: customRules, repositories: repositories),
+    );
+  }
+
+  Future<RuleImportResult> importRuleRepositoryUrl(String url) async {
+    final bundle = await const RuleImporter().importFromUrl(url);
+    return _importRuleBundle(bundle);
+  }
+
+  Future<RuleImportResult> importRuleRepositoryText(String text) async {
+    final bundle = const RuleImporter().importFromText(text);
+    return _importRuleBundle(bundle);
+  }
+
+  Future<void> toggleVideoSource(String id, bool enabled) async {
+    final current = state.value;
+    if (current == null || current.sourceCatalog.sourceById(id) == null) {
+      return;
+    }
+    final sourceCatalog = current.sourceCatalog.toggleSource(id, enabled);
+    state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
+    await _settings.put('sourceEnabled', sourceCatalog.enabledById);
   }
 
   Future<void> _updateRulePlugins(RulePluginState rulePlugins) async {
+    final normalized = _normalizeRulePlugins(rulePlugins);
     final current = state.value;
     if (current != null) {
-      state = AsyncData(current.copyWith(rulePlugins: rulePlugins));
+      state = AsyncData(current.copyWith(rulePlugins: normalized));
     }
-    await _settings.put('rulePlugins', rulePlugins.toJson());
+    await _settings.put('rulePlugins', normalized.toJson());
+  }
+
+  RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
+    final repository = _ruleRepositoryFor(rulePlugins);
+    return rulePlugins.copyWith(
+      enabledIds: {
+        for (final id in rulePlugins.enabledIds)
+          if (repository.byId(id)?.canResolveNatively ?? false) id,
+      },
+    );
+  }
+
+  RulePluginState _mergeDefaultNativeRules(
+    RulePluginState stored,
+    RulePluginState defaults,
+  ) {
+    final installedIds = {...stored.installedIds, ...defaults.installedIds};
+    final enabledIds = {...stored.enabledIds, ...defaults.enabledIds};
+    return _normalizeRulePlugins(
+      stored.copyWith(installedIds: installedIds, enabledIds: enabledIds),
+    );
+  }
+
+  Future<RuleImportResult> _importRuleBundle(RuleImportBundle bundle) async {
+    final current = state.value;
+    if (current == null) {
+      return RuleImportResult(
+        repositoryName: bundle.name,
+        ruleCount: bundle.rules.length,
+        installedCount: 0,
+      );
+    }
+    final existing = {
+      for (final rule in current.rulePlugins.customRules) rule.id: rule,
+    };
+    for (final rule in bundle.rules) {
+      existing[rule.id] = rule;
+    }
+    final installed = {
+      ...current.rulePlugins.installedIds,
+      ...bundle.rules.map((rule) => rule.id),
+    };
+    final enabled = {...current.rulePlugins.enabledIds};
+    for (final rule in bundle.rules) {
+      if (rule.canResolveNatively) enabled.add(rule.id);
+    }
+    final repositoryRecord = RuleRepositoryRecord(
+      id: bundle.sourceUrl.trim().isEmpty
+          ? 'clipboard:${DateTime.now().microsecondsSinceEpoch}'
+          : 'url:${bundle.sourceUrl.hashCode}',
+      name: bundle.name,
+      url: bundle.sourceUrl,
+      importedAt: DateTime.now(),
+      ruleCount: bundle.rules.length,
+    );
+    final repositories = [
+      repositoryRecord,
+      ...current.rulePlugins.repositories.where(
+        (record) => record.id != repositoryRecord.id,
+      ),
+    ];
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(
+        installedIds: installed,
+        enabledIds: enabled,
+        customRules: existing.values.toList(growable: false),
+        repositories: repositories,
+      ),
+    );
+    return RuleImportResult(
+      repositoryName: bundle.name,
+      ruleCount: bundle.rules.length,
+      installedCount: bundle.rules.length,
+    );
+  }
+
+  RulePluginRepository _ruleRepositoryFor(RulePluginState state) {
+    return RulePluginRepository(extraRules: state.customRules);
+  }
+
+  Future<SourceCatalogState> _loadSourceCatalog(
+    Map<String, bool> enabledOverrides,
+  ) async {
+    try {
+      return await ref
+          .read(sourceCatalogRepositoryProvider)
+          .loadCatalog(enabledOverrides: enabledOverrides);
+    } catch (error) {
+      return SourceCatalogState.failed(error);
+    }
   }
 
   Future<bool> toggleFavorite(AnimeSubject subject) async {
@@ -572,6 +740,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .where((item) => item.title.trim().isNotEmpty)
         .toList();
   }
+
+  Map<String, bool> _enabledOverridesFromJson(Object? value) {
+    if (value is! Map) return const {};
+    return {
+      for (final entry in value.entries)
+        entry.key.toString(): entry.value is bool
+            ? entry.value as bool
+            : entry.value.toString().toLowerCase() == 'true',
+    };
+  }
 }
 
 const _fallbackExternalSeries = [
@@ -644,6 +822,85 @@ const _fallbackExternalSeries = [
     totalEpisodes: 177,
     source: 'tvmaze',
   ),
+  AnimeSubject(
+    id: 57841,
+    title: 'The Glory',
+    originalTitle: '더 글로리',
+    summary: '一名女性围绕校园暴力展开漫长复仇。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2022-12-30',
+    platform: 'Scripted',
+    language: 'Korean',
+    region: 'South Korea',
+    status: 'Ended',
+    categories: [
+      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: 'Thriller'),
+    ],
+    tags: [AnimeTag(name: 'TVMaze')],
+    totalEpisodes: 16,
+    source: 'tvmaze',
+  ),
+  AnimeSubject(
+    id: 41007,
+    title: 'The Queen\'s Gambit',
+    originalTitle: 'The Queen\'s Gambit',
+    summary: '天才棋手在成长、胜负和自我控制之间寻找平衡。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2020-10-23',
+    platform: 'Scripted',
+    language: 'English',
+    region: 'United States',
+    status: 'Ended',
+    categories: [AnimeCategory(name: 'Drama')],
+    tags: [AnimeTag(name: 'TVMaze')],
+    totalEpisodes: 7,
+    source: 'tvmaze',
+  ),
+  AnimeSubject(
+    id: 2993,
+    title: 'Stranger Things',
+    originalTitle: 'Stranger Things',
+    summary: '小镇少年与超自然事件、秘密实验和异世界威胁相遇。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2016-07-15',
+    platform: 'Scripted',
+    language: 'English',
+    region: 'United States',
+    status: 'Running',
+    categories: [
+      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: 'Science fiction'),
+      AnimeCategory(name: 'Horror'),
+    ],
+    tags: [AnimeTag(name: 'TVMaze')],
+    totalEpisodes: 34,
+    source: 'tvmaze',
+  ),
+  AnimeSubject(
+    id: 335,
+    title: 'Sherlock',
+    originalTitle: 'Sherlock',
+    summary: '福尔摩斯与华生在现代伦敦破解高智商案件。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2010-07-25',
+    platform: 'Scripted',
+    language: 'English',
+    region: 'United Kingdom',
+    status: 'Ended',
+    categories: [
+      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: 'Crime'),
+      AnimeCategory(name: 'Mystery'),
+    ],
+    tags: [AnimeTag(name: 'TVMaze')],
+    totalEpisodes: 13,
+    source: 'tvmaze',
+  ),
 ];
 
 const _fallbackExternalMovies = [
@@ -701,6 +958,150 @@ const _fallbackExternalMovies = [
     coverUrl: null,
     bannerUrl: null,
     date: '2014-10-26',
+    platform: 'Movie',
+    language: 'English',
+    region: 'United States',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Science fiction'),
+      AnimeCategory(name: 'Adventure'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'IMDb'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 83495,
+    title: 'The Matrix',
+    originalTitle: 'The Matrix',
+    summary: '程序员发现现实背后的真相，并卷入人类与机器的战争。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '1999-03-31',
+    platform: 'Movie',
+    language: 'English',
+    region: 'United States',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Science fiction'),
+      AnimeCategory(name: 'Action'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'IMDb'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 163872,
+    title: 'The Dark Knight',
+    originalTitle: 'The Dark Knight',
+    summary: '蝙蝠侠面对小丑制造的混乱和道德困境。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2008-07-14',
+    platform: 'Movie',
+    language: 'English',
+    region: 'United States',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Action'),
+      AnimeCategory(name: 'Crime'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'IMDb'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 47703,
+    title: 'The Godfather',
+    originalTitle: 'The Godfather',
+    summary: '科里昂家族权力交接中的犯罪史诗。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '1972-03-14',
+    platform: 'Movie',
+    language: 'English',
+    region: 'United States',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Crime'),
+      AnimeCategory(name: 'Drama'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'IMDb'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 181795,
+    title: 'Spirited Away',
+    originalTitle: '千と千尋の神隠し',
+    summary: '少女误入神灵世界，为救父母开始独自面对陌生规则。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2001-07-20',
+    platform: 'Movie',
+    language: 'Japanese',
+    region: 'Japan',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Fantasy'),
+      AnimeCategory(name: 'Adventure'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'Animation'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 287158,
+    title: 'Your Name',
+    originalTitle: '君の名は。',
+    summary: '两个少年少女在梦中交换身体，并追寻彼此的命运交点。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2016-08-26',
+    platform: 'Movie',
+    language: 'Japanese',
+    region: 'Japan',
+    status: '电影',
+    categories: [
+      AnimeCategory(name: '电影'),
+      AnimeCategory(name: 'Fantasy'),
+      AnimeCategory(name: 'Drama'),
+    ],
+    tags: [
+      AnimeTag(name: 'Wikidata'),
+      AnimeTag(name: 'Animation'),
+    ],
+    totalEpisodes: 1,
+    source: 'wikidata',
+  ),
+  AnimeSubject(
+    id: 1055672,
+    title: 'Dune',
+    originalTitle: 'Dune',
+    summary: '少年继承沙漠星球的命运，在权力、生态和预言中成长。',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2021-09-03',
     platform: 'Movie',
     language: 'English',
     region: 'United States',

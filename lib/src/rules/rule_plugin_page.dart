@@ -1,10 +1,15 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../shared_ui/app_chrome.dart';
+import '../shared_ui/app_navigation.dart';
 import 'rule_models.dart';
 import 'rule_plugin_repository.dart';
 
@@ -13,18 +18,20 @@ class RuleManagementPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final repository = const RulePluginRepository();
     return AsyncAnimeGate(
       builder: (context, state) {
+        final repository = RulePluginRepository(
+          extraRules: state.rulePlugins.customRules,
+        );
         final installed = repository.installedRules(state.rulePlugins);
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
           title: '规则管理',
-          onBack: () => Navigator.of(context).pop(),
+          onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
           trailing: _RuleTopActions(
             onRefresh: () => _showSnack(context, '已刷新本地规则索引'),
-            onAdd: () => _showImportSheet(context),
+            onAdd: () => _showImportSheet(context, ref),
           ),
           rightRail: _RuleStatsRail(
             rules: repository.allRules,
@@ -36,6 +43,7 @@ class RuleManagementPage extends ConsumerWidget {
               _RuleHero(
                 installedCount: installed.length,
                 enabledCount: state.rulePlugins.enabledIds.length,
+                repositoryCount: state.rulePlugins.repositories.length + 1,
                 onOpenRepository: () =>
                     context.push('/profile/rules/repository'),
                 onReset: () => ref
@@ -85,18 +93,22 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final repository = const RulePluginRepository();
     return AsyncAnimeGate(
       builder: (context, state) {
+        final repository = RulePluginRepository(
+          extraRules: state.rulePlugins.customRules,
+        );
         final rules = repository.rulesFor(_type);
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
           title: '规则仓库',
-          onBack: () => Navigator.of(context).pop(),
+          onBack: () =>
+              safeNavigateBack(context, fallbackRoute: '/profile/rules'),
           trailing: _RuleTopActions(
             onHistory: () => _showSnack(context, '仓库更新时间已同步到本地索引'),
             onRefresh: () => _showSnack(context, '已重新扫描内置仓库'),
+            onAdd: () => _showImportSheet(context, ref),
           ),
           rightRail: _RepositoryRail(
             rules: repository.allRules,
@@ -108,7 +120,9 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
             children: [
               _RepositoryHeader(
                 selected: _type,
+                repositories: state.rulePlugins.repositories,
                 onSelected: (value) => setState(() => _type = value),
+                onImport: () => _showImportSheet(context, ref),
               ),
               const SizedBox(height: 16),
               for (final rule in rules) ...[
@@ -171,12 +185,14 @@ class _RuleHero extends StatelessWidget {
   const _RuleHero({
     required this.installedCount,
     required this.enabledCount,
+    required this.repositoryCount,
     required this.onOpenRepository,
     required this.onReset,
   });
 
   final int installedCount;
   final int enabledCount;
+  final int repositoryCount;
   final VoidCallback onOpenRepository;
   final VoidCallback onReset;
 
@@ -203,7 +219,7 @@ class _RuleHero extends StatelessWidget {
               const SizedBox(width: 10),
               _RuleMetric(label: '已启用', value: '$enabledCount'),
               const SizedBox(width: 10),
-              const _RuleMetric(label: '来源', value: '2'),
+              _RuleMetric(label: '来源', value: '$repositoryCount'),
             ],
           ),
           const SizedBox(height: 18),
@@ -329,6 +345,8 @@ class _InstalledRuleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final canSwitch = rule.canResolveNatively || enabled;
+    final unavailableMessage = _ruleUnavailableMessage(rule);
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: DecoratedBox(
@@ -347,10 +365,22 @@ class _InstalledRuleRow extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Expanded(child: _RuleCardText(rule: rule)),
-              Switch(value: enabled, onChanged: onToggle),
+              Tooltip(
+                message: canSwitch ? '切换规则启用状态' : unavailableMessage,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: canSwitch
+                      ? null
+                      : () => _showRuleUnavailableDialog(context, rule),
+                  child: Switch(
+                    value: enabled,
+                    onChanged: canSwitch ? onToggle : null,
+                  ),
+                ),
+              ),
               IconButton(
-                tooltip: '卸载',
-                onPressed: onRemove,
+                tooltip: '更多操作',
+                onPressed: () => _showRuleActionSheet(context, rule, onRemove),
                 icon: const Icon(Icons.more_vert_rounded),
               ),
             ],
@@ -361,11 +391,155 @@ class _InstalledRuleRow extends StatelessWidget {
   }
 }
 
+void _showRuleActionSheet(
+  BuildContext context,
+  RulePlugin rule,
+  VoidCallback onRemove,
+) {
+  showModalBottomSheet<void>(
+    context: context,
+    backgroundColor: AppColors.panelHigh,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (sheetContext) {
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                rule.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  color: AppColors.text,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              if (!rule.canResolveNatively) ...[
+                _RuleAction(
+                  icon: Icons.info_outline_rounded,
+                  title: '为什么不能启用',
+                  subtitle: _ruleUnavailableMessage(rule),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _showRuleUnavailableDialog(context, rule);
+                  },
+                ),
+              ],
+              if (rule.baseUrl.trim().isNotEmpty) ...[
+                _RuleAction(
+                  icon: Icons.open_in_browser_rounded,
+                  title: '打开原站',
+                  subtitle: '跳到规则对应的网站，手动完成验证或查找资源',
+                  onTap: () async {
+                    Navigator.of(sheetContext).pop();
+                    await _openRuleSite(context, rule);
+                  },
+                ),
+              ],
+              _RuleAction(
+                icon: Icons.refresh_rounded,
+                title: '更新规则',
+                subtitle: '从当前规则仓库检查这个规则的最新版本',
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _showSnack(context, '${rule.name} 已是当前仓库版本');
+                },
+              ),
+              _RuleAction(
+                icon: Icons.delete_outline,
+                title: '删除规则',
+                subtitle: '从已安装列表移除，之后可在规则仓库重新安装',
+                destructive: true,
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  onRemove();
+                  _showSnack(context, '已删除 ${rule.name}');
+                },
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _RuleAction extends StatelessWidget {
+  const _RuleAction({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.destructive = false,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+  final bool destructive;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = destructive ? const Color(0xFFFF7A90) : AppColors.text;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: SizedBox(
+        height: 72,
+        child: Row(
+          children: [
+            Icon(icon, color: color),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _RepositoryHeader extends StatelessWidget {
-  const _RepositoryHeader({required this.selected, required this.onSelected});
+  const _RepositoryHeader({
+    required this.selected,
+    required this.repositories,
+    required this.onSelected,
+    required this.onImport,
+  });
 
   final RuleContentType selected;
+  final List<RuleRepositoryRecord> repositories;
   final ValueChanged<RuleContentType> onSelected;
+  final VoidCallback onImport;
 
   @override
   Widget build(BuildContext context) {
@@ -373,9 +547,20 @@ class _RepositoryHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SectionTitle(
-            title: '规则仓库',
-            subtitle: '已筛掉直播、教育、网盘授权源、本地代理和不适合内置的混合源',
+          Row(
+            children: [
+              const Expanded(
+                child: SectionTitle(
+                  title: '规则仓库',
+                  subtitle: '内置推荐源 + 你导入的规则仓库',
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: onImport,
+                icon: const Icon(Icons.add_link_rounded),
+                label: const Text('导入仓库'),
+              ),
+            ],
           ),
           const SizedBox(height: 14),
           SegmentedButton<RuleContentType>(
@@ -390,6 +575,20 @@ class _RepositoryHeader extends StatelessWidget {
             selected: {selected},
             onSelectionChanged: (value) => onSelected(value.first),
           ),
+          if (repositories.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final repository in repositories.take(4))
+                  SmallBadge(
+                    label: '${repository.name} · ${repository.ruleCount}',
+                    active: true,
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -417,7 +616,13 @@ class _RepositoryRuleCard extends StatelessWidget {
           const SizedBox(width: 12),
           TextButton(
             onPressed: installed ? null : onInstall,
-            child: Text(installed ? '已安装' : '安装'),
+            child: Text(
+              installed
+                  ? '已安装'
+                  : rule.canResolveNatively
+                  ? '安装'
+                  : '安装备用',
+            ),
           ),
         ],
       ),
@@ -461,6 +666,10 @@ class _RuleCardText extends StatelessWidget {
             SmallBadge(label: rule.engine),
             SmallBadge(label: rule.sourceLabel),
             if (rule.requiresCaptcha) const SmallBadge(label: 'captcha'),
+            SmallBadge(
+              label: _ruleStatusLabel(rule),
+              active: rule.canResolveNatively,
+            ),
           ],
         ),
         const SizedBox(height: 8),
@@ -474,7 +683,7 @@ class _RuleCardText extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         Text(
-          rule.note,
+          _ruleDisplayNote(rule),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
@@ -483,6 +692,77 @@ class _RuleCardText extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+String _ruleStatusLabel(RulePlugin rule) {
+  if (rule.canResolveNatively) return '可自动播放';
+  if (rule.requiresCaptcha) return '需手动验证';
+  if (rule.requiresPrivateAuth) return '需私有授权';
+  if (rule.requiresWebView) return '需 WebView';
+  return '暂不能自动播放';
+}
+
+String _ruleDisplayNote(RulePlugin rule) {
+  final reason = rule.unsupportedReason?.trim();
+  if (reason != null && reason.isNotEmpty) return reason;
+  return rule.note;
+}
+
+String _ruleUnavailableMessage(RulePlugin rule) {
+  final reason = rule.unsupportedReason?.trim();
+  if (reason != null && reason.isNotEmpty) return reason;
+  if (rule.requiresCaptcha) {
+    return '这个规则需要先在网页里完成验证码验证，当前自动解析器不能直接启用。';
+  }
+  if (rule.requiresPrivateAuth) {
+    return '这个规则需要私有授权信息，当前不能作为自动播放线路启用。';
+  }
+  if (rule.requiresWebView) {
+    return '这个规则需要 WebView 手动处理页面，当前不能作为自动播放线路启用。';
+  }
+  return '这个规则当前没有可用的本地解析器，暂时只能作为备用规则保存。';
+}
+
+void _showRuleUnavailableDialog(BuildContext context, RulePlugin rule) {
+  showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return AlertDialog(
+        backgroundColor: AppColors.panelHigh,
+        title: Text('${rule.name} 暂不能启用'),
+        content: Text(
+          '${_ruleUnavailableMessage(rule)}\n\n'
+          '所以应用不会把它加入自动播放线路，避免出现“开关打开了但还是不能播放”的情况。',
+        ),
+        actions: [
+          if (rule.baseUrl.trim().isNotEmpty)
+            TextButton(
+              onPressed: () async {
+                Navigator.of(dialogContext).pop();
+                await _openRuleSite(context, rule);
+              },
+              child: const Text('打开原站'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+Future<void> _openRuleSite(BuildContext context, RulePlugin rule) async {
+  final uri = Uri.tryParse(rule.baseUrl.trim());
+  if (uri == null || !uri.hasScheme) {
+    _showSnack(context, '这个规则没有可打开的网站地址');
+    return;
+  }
+  final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+  if (!launched && context.mounted) {
+    _showSnack(context, '没有找到可以打开网站的应用');
   }
 }
 
@@ -760,34 +1040,83 @@ IconData _iconForType(RuleContentType type) {
   };
 }
 
-void _showImportSheet(BuildContext context) {
+void _showImportSheet(BuildContext context, WidgetRef ref) {
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: const Color(0xFF202820),
+    backgroundColor: AppColors.panel,
+    isScrollControlled: true,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
     ),
-    builder: (context) {
+    builder: (sheetContext) {
       return SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(24, 24, 24, 28),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _ImportAction(
-                title: '新建规则',
-                onTap: () => Navigator.of(context).pop(),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.add_circle_outline,
+                    color: AppColors.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '添加规则',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: AppColors.text,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ],
               ),
+              const SizedBox(height: 16),
               _ImportAction(
-                title: '从规则仓库导入',
+                icon: Icons.edit_note_rounded,
+                title: '新建规则',
+                subtitle: '填写名称、搜索地址和解析字段，保存到本地规则库',
                 onTap: () {
-                  Navigator.of(context).pop();
-                  context.push('/profile/rules/repository');
+                  Navigator.of(sheetContext).pop();
+                  _showManualRuleDialog(context, ref);
                 },
               ),
+              const SizedBox(height: 10),
               _ImportAction(
+                icon: Icons.inventory_2_outlined,
+                title: '从规则仓库导入',
+                subtitle: '打开仓库页，可安装内置规则，也可粘贴自己的仓库地址',
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (context.mounted) {
+                      context.push('/profile/rules/repository');
+                    }
+                  });
+                },
+              ),
+              const SizedBox(height: 10),
+              _ImportAction(
+                icon: Icons.content_paste_go_rounded,
                 title: '从剪贴板导入',
-                onTap: () => Navigator.of(context).pop(),
+                subtitle: '读取剪贴板里的规则 JSON 或 TVBox 配置并导入',
+                onTap: () async {
+                  Navigator.of(sheetContext).pop();
+                  await _importFromClipboard(context, ref);
+                },
+              ),
+              const SizedBox(height: 10),
+              _ImportAction(
+                icon: Icons.add_link_rounded,
+                title: '导入仓库 URL',
+                subtitle: '粘贴 raw JSON 地址，自动下载并保存仓库规则',
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _showRepositoryUrlDialog(context, ref);
+                },
               ),
             ],
           ),
@@ -798,9 +1127,16 @@ void _showImportSheet(BuildContext context) {
 }
 
 class _ImportAction extends StatelessWidget {
-  const _ImportAction({required this.title, required this.onTap});
+  const _ImportAction({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
 
+  final IconData icon;
   final String title;
+  final String subtitle;
   final VoidCallback onTap;
 
   @override
@@ -808,23 +1144,273 @@ class _ImportAction extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        height: 68,
-        width: double.infinity,
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            title,
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.text,
-              fontWeight: FontWeight.w800,
-            ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: AppColors.panelHigh,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 13, 12, 13),
+          child: Row(
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: Icon(icon, color: AppColors.primary),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: AppColors.text,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded, color: AppColors.muted),
+            ],
           ),
         ),
       ),
     );
   }
 }
+
+Future<void> _importFromClipboard(BuildContext context, WidgetRef ref) async {
+  final data = await Clipboard.getData(Clipboard.kTextPlain);
+  final text = data?.text?.trim() ?? '';
+  if (!context.mounted) return;
+  if (text.isEmpty) {
+    _showSnack(context, '剪贴板里没有可导入内容');
+    return;
+  }
+  try {
+    final result = await ref
+        .read(animeControllerProvider.notifier)
+        .importRuleRepositoryText(text);
+    if (context.mounted) {
+      _showSnack(
+        context,
+        '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
+      );
+    }
+  } catch (error) {
+    if (context.mounted) _showSnack(context, _friendlyImportError(error));
+  }
+}
+
+void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
+  final controller = TextEditingController();
+  var importing = false;
+  showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: AppColors.panel,
+            title: const Text('导入规则仓库'),
+            content: SizedBox(
+              width: 520,
+              child: TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: '仓库 JSON 地址',
+                  hintText: 'https://example.com/rules.json',
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: importing
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: importing
+                    ? null
+                    : () async {
+                        final url = controller.text.trim();
+                        setDialogState(() => importing = true);
+                        try {
+                          final result = await ref
+                              .read(animeControllerProvider.notifier)
+                              .importRuleRepositoryUrl(url);
+                          if (dialogContext.mounted) {
+                            Navigator.of(dialogContext).pop();
+                          }
+                          if (context.mounted) {
+                            _showSnack(
+                              context,
+                              '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
+                            );
+                          }
+                        } catch (error) {
+                          setDialogState(() => importing = false);
+                          if (context.mounted) {
+                            _showSnack(context, _friendlyImportError(error));
+                          }
+                        }
+                      },
+                icon: importing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.cloud_download_outlined),
+                label: Text(importing ? '导入中' : '导入'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+void _showManualRuleDialog(BuildContext context, WidgetRef ref) {
+  final nameController = TextEditingController();
+  final baseController = TextEditingController();
+  final searchController = TextEditingController();
+  var type = RuleContentType.anime;
+  showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: AppColors.panel,
+            title: const Text('新建规则'),
+            content: SizedBox(
+              width: 540,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(labelText: '规则名称'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<RuleContentType>(
+                    initialValue: type,
+                    decoration: const InputDecoration(labelText: '内容类型'),
+                    items: [
+                      for (final value in RuleContentType.values)
+                        DropdownMenuItem(
+                          value: value,
+                          child: Text(value.label),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setDialogState(() => type = value);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: baseController,
+                    decoration: const InputDecoration(
+                      labelText: '站点主页',
+                      hintText: 'https://example.com',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: searchController,
+                    decoration: const InputDecoration(
+                      labelText: '搜索地址',
+                      hintText: 'https://example.com/search?wd=@keyword',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  final name = nameController.text.trim();
+                  final baseUrl = baseController.text.trim();
+                  final searchUrl = searchController.text.trim();
+                  if (name.isEmpty || baseUrl.isEmpty || searchUrl.isEmpty) {
+                    _showSnack(context, '请填写名称、主页和搜索地址');
+                    return;
+                  }
+                  final id = 'manual:${DateTime.now().microsecondsSinceEpoch}';
+                  final json =
+                      '''
+{
+  "name": "手动规则",
+  "rules": [
+    {
+      "id": "$id",
+      "name": ${_jsonString(name)},
+      "source": "custom",
+      "contentType": "${type.name}",
+      "engine": "native",
+      "baseUrl": ${_jsonString(baseUrl)},
+      "searchUrl": ${_jsonString(searchUrl)},
+      "searchable": true,
+      "quickSearch": true,
+      "filterable": false,
+      "unsupportedReason": "手动新建规则还缺少播放页 XPath 字段，请继续补全后再启用播放。",
+      "note": "用户手动新建规则。"
+    }
+  ]
+}
+''';
+                  await ref
+                      .read(animeControllerProvider.notifier)
+                      .importRuleRepositoryText(json);
+                  if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+                  if (context.mounted) _showSnack(context, '已新建规则：$name');
+                },
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+String _friendlyImportError(Object error) {
+  final text = error.toString().replaceFirst('FormatException: ', '');
+  if (text.contains('SocketException')) return '仓库地址无法访问，请检查网络或地址';
+  if (text.contains('TimeoutException')) return '仓库请求超时';
+  return text;
+}
+
+String _jsonString(String value) => jsonEncode(value);
 
 void _showSnack(BuildContext context, String message) {
   ScaffoldMessenger.of(context)

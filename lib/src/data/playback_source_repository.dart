@@ -1,5 +1,6 @@
 import '../domain/anime_models.dart';
 import '../rules/rule_models.dart';
+import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
 
 abstract class PlaybackSourceRepository {
@@ -37,11 +38,14 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
   const RulePlaybackSourceRepository({
     required RulePluginRepository repository,
     required RulePluginState ruleState,
+    RulePlaybackResolver resolver = const RulePlaybackResolver(),
   }) : _repository = repository,
-       _ruleState = ruleState;
+       _ruleState = ruleState,
+       _resolver = resolver;
 
   final RulePluginRepository _repository;
   final RulePluginState _ruleState;
+  final RulePlaybackResolver _resolver;
 
   @override
   Future<List<PlaybackLine>> linesForEpisode(
@@ -56,22 +60,16 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
         episode,
       );
     }
-    return [
-      for (final rule in rules)
-        PlaybackLine(
-          id: 'rule:${rule.id}:${episode.id}',
-          episodeId: episode.id,
-          providerId: rule.id,
-          providerName: rule.name,
-          title: _lineTitle(rule, subject, episode),
-          quality: rule.tags.contains('4K') ? '4K/HD' : 'HD',
-          format: rule.engine,
-          available: false,
-          message: rule.requiresCaptcha
-              ? '规则已安装，但该源需要验证码或 WebView 处理后才能解析播放。'
-              : '规则已安装，后续在这里接入 ${rule.engine} 解析器返回真实播放地址。',
+    final groups = await Future.wait(
+      rules.map(
+        (rule) => _resolver.resolveRule(
+          rule: rule,
+          subject: subject,
+          episode: episode,
         ),
-    ];
+      ),
+    );
+    return groups.expand((items) => items).toList(growable: false);
   }
 
   RuleContentType _contentTypeFor(AnimeSubject subject) {
@@ -111,17 +109,6 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
       return RuleContentType.series;
     }
     return RuleContentType.anime;
-  }
-
-  String _lineTitle(
-    RulePlugin rule,
-    AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
-    if (rule.contentType == RuleContentType.movie) {
-      return '${subject.title} · 正片';
-    }
-    return '${subject.title} · 第${episode.number}集';
   }
 }
 

@@ -1,9 +1,15 @@
-import 'package:anime/src/data/playback_source_repository.dart';
+import 'dart:convert';
+
 import 'package:anime/src/data/external_service_repository.dart';
+import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/rule_importer.dart';
+import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
   test(
@@ -85,7 +91,7 @@ void main() {
       final danmaku = await repo.matchDanmaku(
         subject,
         episode,
-        const ExternalServiceSettings(),
+        const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
       );
 
       expect(subtitles.single.provider, 'Bilibili');
@@ -103,12 +109,108 @@ void main() {
     expect(settings.mediaMetadataProvider, 'TVMaze');
     expect(settings.publicCollectionSyncEnabled, isTrue);
     expect(settings.bilibiliSubtitleEnabled, isTrue);
+    expect(settings.dandanplayDanmakuEnabled, isTrue);
     expect(settings.bilibiliDanmakuEnabled, isTrue);
+    expect(json, contains('dandanplayDanmakuEnabled'));
+    expect(json, contains('dandanplayAppId'));
+    expect(json, contains('dandanplayAppSecret'));
     expect(json, isNot(contains('tmdbEnabled')));
     expect(json, isNot(contains('tmdbLanguage')));
     expect(json, isNot(contains('traktEnabled')));
     expect(json, isNot(contains('openSubtitlesEnabled')));
     expect(json, isNot(contains('dandanplayEnabled')));
+  });
+
+  test('playback settings persist shortcut configuration', () {
+    const settings = PlaybackSettings(
+      keyboardShortcutsEnabled: false,
+      shortcutPlayPause: false,
+      shortcutSeek: false,
+      shortcutVolume: false,
+      shortcutFullscreen: false,
+      shortcutMute: false,
+      shortcutReload: false,
+    );
+
+    final json = settings.toJson();
+    final restored = PlaybackSettings.fromJson(json);
+
+    expect(restored.keyboardShortcutsEnabled, isFalse);
+    expect(restored.shortcutPlayPause, isFalse);
+    expect(restored.shortcutSeek, isFalse);
+    expect(restored.shortcutVolume, isFalse);
+    expect(restored.shortcutFullscreen, isFalse);
+    expect(restored.shortcutMute, isFalse);
+    expect(restored.shortcutReload, isFalse);
+  });
+
+  test('dandanplay danmaku source parses matched episode results', () async {
+    const subject = AnimeSubject(
+      id: 1,
+      title: '葬送的芙莉莲',
+      originalTitle: 'Frieren',
+      summary: 'summary',
+      coverUrl: null,
+      bannerUrl: null,
+      date: '2023-09-29',
+      platform: 'TV',
+      language: '日语',
+      region: '日本',
+      status: '全28集',
+      categories: [AnimeCategory(name: '动画')],
+      tags: [AnimeTag(name: 'TV')],
+      totalEpisodes: 28,
+    );
+    const episode = AnimeEpisode(
+      id: 101,
+      subjectId: 1,
+      number: 1,
+      title: '',
+      airdate: '2023-09-29',
+      duration: '24:00',
+      description: '第一集',
+    );
+    final repo = ExternalServiceRepository(
+      client: MockClient((request) async {
+        if (request.url.path == '/api/v2/search/episodes') {
+          expect(_headerValue(request, 'X-AppId'), 'app');
+          expect(_headerValue(request, 'X-Timestamp'), isNotEmpty);
+          expect(_headerValue(request, 'X-Signature'), isNotEmpty);
+          expect(request.headers.keys, isNot(contains('X-AppSecret')));
+          return http.Response(
+            jsonEncode({
+              'animes': [
+                {
+                  'animeTitle': '葬送的芙莉莲',
+                  'episodes': [
+                    {'episodeId': 12345, 'episodeTitle': '第1话 冒险结束'},
+                  ],
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (request.url.path == '/api/v2/comment/12345') {
+          return http.Response(jsonEncode({'count': 321, 'comments': []}), 200);
+        }
+        return http.Response(jsonEncode({'count': 321, 'comments': []}), 200);
+      }),
+    );
+
+    final danmaku = await repo.matchDanmaku(
+      subject,
+      episode,
+      const ExternalServiceSettings(
+        dandanplayAppId: 'app',
+        dandanplayAppSecret: 'secret',
+        bilibiliDanmakuEnabled: false,
+      ),
+    );
+
+    expect(danmaku.single.provider, '弹弹play');
+    expect(danmaku.single.message, isNot(contains('凭证')));
+    expect(danmaku.single.message, isNot(contains('需要')));
   });
 
   test(
@@ -119,6 +221,9 @@ void main() {
       final source = RulePlaybackSourceRepository(
         repository: repository,
         ruleState: state,
+        resolver: RulePlaybackResolver(
+          client: MockClient((_) async => http.Response('not found', 404)),
+        ),
       );
       const episode = AnimeEpisode(
         id: 101,
@@ -137,6 +242,12 @@ void main() {
       expect(repository.rulesFor(RuleContentType.anime), isNotEmpty);
       expect(repository.rulesFor(RuleContentType.series), isNotEmpty);
       expect(repository.rulesFor(RuleContentType.movie), isNotEmpty);
+      expect(
+        state.enabledIds.every(
+          (id) => repository.byId(id)?.canResolveNatively ?? false,
+        ),
+        isTrue,
+      );
       expect(
         animeLines.map((line) => line.providerId),
         contains('kazumi:omofun03'),
@@ -167,11 +278,46 @@ void main() {
         movieLines.map((line) => line.providerId),
         isNot(contains('kazumi:omofun03')),
       );
-      expect(animeLines.every((line) => line.available == false), isTrue);
-      expect(seriesLines.every((line) => line.available == false), isTrue);
-      expect(movieLines.every((line) => line.available == false), isTrue);
+      expect(animeLines.every((line) => line.episodeId == episode.id), isTrue);
+      expect(seriesLines.every((line) => line.episodeId == episode.id), isTrue);
+      expect(movieLines.every((line) => line.episodeId == episode.id), isTrue);
     },
   );
+
+  test('rule importer persists user repository rules as real plugins', () {
+    final bundle = const RuleImporter().importFromText('''
+{
+  "name": "测试仓库",
+  "rules": [
+    {
+      "id": "demo",
+      "name": "Demo Rule",
+      "source": "custom",
+      "contentType": "anime",
+      "engine": "native",
+      "baseUrl": "https://example.com",
+      "searchUrl": "https://example.com/search?wd=@keyword",
+      "kazumi": {
+        "searchList": "//div",
+        "searchName": "//a",
+        "searchResult": "//a",
+        "chapterRoads": "//ul",
+        "chapterResult": "//li/a"
+      }
+    }
+  ]
+}
+''');
+    final repository = RulePluginRepository(extraRules: bundle.rules);
+
+    expect(bundle.name, '测试仓库');
+    expect(bundle.rules.single.id, 'custom:demo');
+    expect(repository.byId('custom:demo'), isNotNull);
+    expect(
+      repository.rulesFor(RuleContentType.anime).map((rule) => rule.name),
+      contains('Demo Rule'),
+    );
+  });
 }
 
 const _animeSubject = AnimeSubject(
@@ -226,3 +372,11 @@ const _movieSubject = AnimeSubject(
   totalEpisodes: 1,
   source: 'wikidata',
 );
+
+String? _headerValue(http.BaseRequest request, String name) {
+  final normalized = name.toLowerCase();
+  for (final entry in request.headers.entries) {
+    if (entry.key.toLowerCase() == normalized) return entry.value;
+  }
+  return null;
+}

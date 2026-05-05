@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-
 import '../domain/anime_models.dart';
 import 'poster_card.dart';
 
@@ -29,6 +28,8 @@ class AppChrome extends StatelessWidget {
   final String? title;
   final bool showSearch;
   final VoidCallback? onBack;
+
+  static final profileHistorySectionKey = GlobalKey();
 
   @override
   Widget build(BuildContext context) {
@@ -88,14 +89,14 @@ class AppChrome extends StatelessWidget {
 
 enum ChromeDestination {
   home(Icons.home_rounded, '首页', '/'),
-  discover(Icons.explore_outlined, '发现', '/discover'),
-  schedule(Icons.calendar_month_outlined, '追番', '/schedule'),
+  anime(Icons.explore_outlined, '番剧', '/anime'),
+  schedule(Icons.calendar_month_outlined, '周期表', '/schedule'),
   series(Icons.live_tv_outlined, '剧集', '/series'),
   movie(Icons.movie_outlined, '电影', '/movies'),
   favorite(Icons.star_border_rounded, '我的', '/profile'),
   download(Icons.download_for_offline_outlined, '下载', '/profile/offline'),
-  history(Icons.history_rounded, '历史', '/profile/history'),
-  settings(Icons.settings_outlined, '设置', '/settings/playback');
+  history(Icons.history_rounded, '历史', '/history'),
+  settings(Icons.settings_outlined, '设置', '/settings');
 
   const ChromeDestination(this.icon, this.label, this.route);
 
@@ -400,7 +401,7 @@ class _SideNavigation extends StatelessWidget {
           const SizedBox(height: 18),
           const _LogoMark(),
           const SizedBox(height: 18),
-          for (final item in ChromeDestination.values)
+          for (final item in _primaryDestinations)
             _NavItem(item: item, active: item == active),
           const Spacer(),
           if (bottomPlayer != null)
@@ -424,7 +425,7 @@ class _BottomNavigation extends StatelessWidget {
   Widget build(BuildContext context) {
     final items = [
       ChromeDestination.home,
-      ChromeDestination.schedule,
+      ChromeDestination.anime,
       ChromeDestination.favorite,
       ChromeDestination.settings,
     ];
@@ -509,6 +510,18 @@ class _NavItem extends StatelessWidget {
     );
   }
 }
+
+const _primaryDestinations = [
+  ChromeDestination.home,
+  ChromeDestination.anime,
+  ChromeDestination.schedule,
+  ChromeDestination.series,
+  ChromeDestination.movie,
+  ChromeDestination.favorite,
+  ChromeDestination.download,
+  ChromeDestination.history,
+  ChromeDestination.settings,
+];
 
 class _TopBar extends StatelessWidget {
   const _TopBar({
@@ -678,40 +691,25 @@ class _LogoMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 50,
-      height: 50,
-      child: Stack(
-        alignment: Alignment.center,
-        children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.primary.withValues(alpha: 0.12),
-              boxShadow: const [
-                BoxShadow(color: Color(0x554A56FF), blurRadius: 24),
-              ],
+      width: 64,
+      height: 64,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          boxShadow: [
+            BoxShadow(
+              color: Color(0x552D77FF),
+              blurRadius: 22,
+              offset: Offset(0, 8),
             ),
-            child: const SizedBox(width: 46, height: 46),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image.asset(
+            'assets/brand/anime_logo_app_icon.png',
+            fit: BoxFit.cover,
           ),
-          Transform.rotate(
-            angle: 0.58,
-            child: Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [AppColors.primary, AppColors.cyan],
-                ),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Icon(
-                Icons.play_arrow_rounded,
-                color: Colors.white,
-                size: 24,
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

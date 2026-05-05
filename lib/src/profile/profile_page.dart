@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../app/anime_app.dart';
+import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
+import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 
 class ProfilePage extends ConsumerWidget {
@@ -19,7 +21,7 @@ class ProfilePage extends ConsumerWidget {
           active: ChromeDestination.favorite,
           showSearch: false,
           title: '个人中心',
-          onBack: () => Navigator.of(context).pop(),
+          onBack: () => safeNavigateBack(context),
           rightRail: _ProfileRightRail(state: state),
           child: ListView(
             padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
@@ -211,7 +213,7 @@ class _ProfilePlaylistSection extends StatelessWidget {
             title: '我的片单',
             action: TextButton(
               onPressed: () => context.push('/profile/following'),
-              child: const Text('全部 24 ›'),
+              child: Text('全部 ${state.following.length} ›'),
             ),
           ),
           const SizedBox(height: 14),
@@ -231,6 +233,7 @@ class _ProfilePlaylistSection extends StatelessWidget {
                   title: labels[(index - 1) % labels.length],
                   count: 12 + index * 3,
                   subject: subject,
+                  onTap: () => _openDetail(context, subject),
                 );
               },
               separatorBuilder: (context, index) => const SizedBox(width: 12),
@@ -272,7 +275,7 @@ class _CreatePlaylistCard extends StatelessWidget {
               ),
               const SizedBox(height: 4),
               Text(
-                '创建专属片单',
+                '打开片单管理',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -290,63 +293,69 @@ class _PlaylistCard extends StatelessWidget {
     required this.title,
     required this.count,
     required this.subject,
+    required this.onTap,
   });
 
   final String title;
   final int count;
   final AnimeSubject subject;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       width: 170,
-      child: AppPanel(
-        padding: EdgeInsets.zero,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              PosterArt(
-                coverUrl: subject.bannerUrl ?? subject.coverUrl,
-                title: title,
-              ),
-              const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.transparent, Color(0xEE060912)],
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: AppPanel(
+          padding: EdgeInsets.zero,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PosterArt(
+                  coverUrl: subject.bannerUrl ?? subject.coverUrl,
+                  title: title,
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.transparent, Color(0xEE060912)],
+                    ),
                   ),
                 ),
-              ),
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: 12,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w900,
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 12,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: AppColors.text,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '$count 部',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                    ),
-                  ],
+                      const SizedBox(height: 3),
+                      Text(
+                        '$count 部 · 打开',
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -364,7 +373,7 @@ class _ProfileShortcutSection extends StatelessWidget {
     return AppPanel(
       child: Column(
         children: [
-          const SectionTitle(title: '收藏'),
+          const SectionTitle(title: '我的内容'),
           const SizedBox(height: 14),
           GridView.count(
             crossAxisCount: 6,
@@ -375,16 +384,22 @@ class _ProfileShortcutSection extends StatelessWidget {
             childAspectRatio: 2.15,
             children: [
               _ShortcutTile(
+                icon: Icons.bookmark_border,
+                title: '追番列表',
+                value: '${state.following.length}',
+                onTap: () => context.push('/profile/following'),
+              ),
+              _ShortcutTile(
                 icon: Icons.favorite,
                 title: '全部收藏',
-                value: '${state.favorites.length + 156}',
-                onTap: () => context.push('/profile/following'),
+                value: '${state.favorites.length}',
+                onTap: () => context.push('/profile/images'),
               ),
               _ShortcutTile(
                 icon: Icons.history,
                 title: '观看记录',
                 value: '${state.history.length}',
-                onTap: () => context.push('/profile/history'),
+                onTap: () => _scrollToHistory(context),
               ),
               _ShortcutTile(
                 icon: Icons.download_done,
@@ -397,6 +412,13 @@ class _ProfileShortcutSection extends StatelessWidget {
                 title: '规则管理',
                 value: '资源',
                 onTap: () => context.push('/profile/rules'),
+              ),
+              _ShortcutTile(
+                icon: Icons.hub_outlined,
+                title: '视频源',
+                value:
+                    '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
+                onTap: () => context.push('/profile/sources'),
               ),
               _ShortcutTile(
                 icon: Icons.subtitles,
@@ -483,35 +505,70 @@ class _ShortcutTile extends StatelessWidget {
   }
 }
 
-class _HistoryStrip extends StatelessWidget {
+class _HistoryStrip extends StatefulWidget {
   const _HistoryStrip({required this.entries});
 
   final List<LibraryEntry> entries;
 
   @override
+  State<_HistoryStrip> createState() => _HistoryStripState();
+}
+
+class _HistoryStripState extends State<_HistoryStrip> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final visibleEntries = _expanded ? entries : entries.take(6).toList();
     return AppPanel(
+      key: AppChrome.profileHistorySectionKey,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SectionTitle(
             title: '历史记录',
-            action: TextButton(
-              onPressed: () => context.push('/profile/history'),
-              child: const Text('全部历史 ›'),
-            ),
+            action: entries.length <= 6
+                ? null
+                : TextButton(
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                    child: Text(_expanded ? '收起历史' : '全部历史 ›'),
+                  ),
           ),
           const SizedBox(height: 14),
           if (entries.isEmpty)
             _InlineEmpty('暂无观看历史')
+          else if (_expanded)
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = (constraints.maxWidth / 214).floor().clamp(
+                  2,
+                  6,
+                );
+                return GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: visibleEntries.length,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 1.92,
+                  ),
+                  itemBuilder: (context, index) =>
+                      _HistoryCard(entry: visibleEntries[index]),
+                );
+              },
+            )
           else
             SizedBox(
               height: 98,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
-                itemCount: entries.take(6).length,
+                itemCount: visibleEntries.length,
                 separatorBuilder: (context, index) => const SizedBox(width: 12),
                 itemBuilder: (context, index) =>
-                    _HistoryCard(entry: entries[index]),
+                    _HistoryCard(entry: visibleEntries[index]),
               ),
             ),
         ],
@@ -529,54 +586,69 @@ class _HistoryCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox(
       width: 190,
-      child: AppPanel(
-        padding: EdgeInsets.zero,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              PosterArt(
-                coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
-                title: entry.title,
-              ),
-              const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.transparent, Color(0xEE060912)],
+      child: InkWell(
+        onTap: () => _playEntry(context, entry),
+        borderRadius: BorderRadius.circular(8),
+        child: AppPanel(
+          padding: EdgeInsets.zero,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PosterArt(
+                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  title: entry.title,
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.transparent, Color(0xEE060912)],
+                    ),
                   ),
                 ),
-              ),
-              Positioned(
-                left: 10,
-                right: 10,
-                bottom: 10,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      entry.subject.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w900,
+                Positioned(
+                  left: 10,
+                  right: 10,
+                  bottom: 10,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.subject.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: AppColors.text,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 5),
-                    LinearProgressIndicator(
-                      value: 0.32 + (entry.subject.id % 5) * 0.1,
-                      minHeight: 3,
-                      borderRadius: BorderRadius.circular(3),
-                      backgroundColor: AppColors.border,
-                      color: AppColors.primary,
-                    ),
-                  ],
+                      const SizedBox(height: 3),
+                      Text(
+                        entry.episode?.displayTitle ??
+                            (entry.note.isEmpty ? '详情页' : entry.note),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.muted,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      LinearProgressIndicator(
+                        value: _entryProgress(entry),
+                        minHeight: 3,
+                        borderRadius: BorderRadius.circular(3),
+                        backgroundColor: AppColors.border,
+                        color: AppColors.primary,
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -659,7 +731,17 @@ class _DownloadRow extends StatelessWidget {
               ],
             ),
           ),
-          IconButton(onPressed: () {}, icon: const Icon(Icons.pause)),
+          IconButton(
+            tooltip: '继续播放',
+            onPressed: entry.episode == null
+                ? () => _openDetail(context, entry.subject)
+                : () => _playEntry(context, entry),
+            icon: Icon(
+              entry.episode == null
+                  ? Icons.chevron_right_rounded
+                  : Icons.play_arrow_rounded,
+            ),
+          ),
         ],
       ),
     );
@@ -739,20 +821,20 @@ class _ProfileRightRail extends StatelessWidget {
               _RailAction(
                 icon: Icons.schedule,
                 title: '稍后观看',
-                value: '${state.history.length + 24}',
-                onTap: () => context.push('/profile/history'),
+                value: '${state.history.length}',
+                onTap: () => _scrollToHistory(context),
               ),
               _RailAction(
                 icon: Icons.bookmark_border,
                 title: '想看列表',
-                value: '${state.favorites.length + 56}',
+                value: '${state.following.length}',
                 onTap: () => context.push('/profile/following'),
               ),
               _RailAction(
                 icon: Icons.check_circle_outline,
                 title: '已看完',
-                value: '88',
-                onTap: () => context.push('/profile/history'),
+                value: '${state.history.where(_isFinishedEntry).length}',
+                onTap: () => _scrollToHistory(context),
               ),
               _RailAction(
                 icon: Icons.star_border,
@@ -923,14 +1005,18 @@ class LibraryPage extends ConsumerWidget {
     required this.emptyTitle,
     required this.emptyMessage,
     required this.entriesOf,
+    this.active = ChromeDestination.favorite,
     this.clearKey,
+    this.playEntries = false,
   });
 
   final String title;
   final String emptyTitle;
   final String emptyMessage;
   final List<LibraryEntry> Function(AnimeState state) entriesOf;
+  final ChromeDestination active;
   final String? clearKey;
+  final bool playEntries;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -939,6 +1025,7 @@ class LibraryPage extends ConsumerWidget {
         final entries = entriesOf(state);
         return _ProfileScaffold(
           title: title,
+          active: active,
           action: clearKey == null || entries.isEmpty
               ? null
               : IconButton(
@@ -955,11 +1042,225 @@ class LibraryPage extends ConsumerWidget {
                   itemCount: entries.length,
                   separatorBuilder: (context, index) =>
                       const SizedBox(height: 10),
-                  itemBuilder: (context, index) =>
-                      _LibraryTile(entry: entries[index]),
+                  itemBuilder: (context, index) => _LibraryTile(
+                    entry: entries[index],
+                    onTap: playEntries
+                        ? () => _playEntry(context, entries[index])
+                        : () => _openDetail(context, entries[index].subject),
+                    trailingIcon: playEntries
+                        ? Icons.play_arrow_rounded
+                        : Icons.chevron_right_rounded,
+                  ),
                 ),
         );
       },
+    );
+  }
+}
+
+class HistoryPage extends ConsumerWidget {
+  const HistoryPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final entries = state.history;
+        return AppChrome(
+          active: ChromeDestination.history,
+          showSearch: false,
+          title: '历史记录',
+          onBack: () => safeNavigateBack(context),
+          trailing: entries.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: '清空历史',
+                  onPressed: () => ref
+                      .read(animeControllerProvider.notifier)
+                      .clearLibrary('history'),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+          rightRail: _HistoryRightRail(entries: entries),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
+            child: entries.isEmpty
+                ? const _ProfileEmptyState(
+                    title: '还没有观看记录',
+                    message: '从详情页播放任意一集后，这里会记录番剧和集数。',
+                  )
+                : _HistoryList(entries: entries),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HistoryList extends StatelessWidget {
+  const _HistoryList({required this.entries});
+
+  final List<LibraryEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      itemCount: entries.length + 1,
+      separatorBuilder: (context, index) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return AppPanel(
+            child: SectionTitle(
+              title: '全部历史',
+              subtitle: '${entries.length} 条观看记录，点击任意记录继续播放',
+              icon: Icons.history_rounded,
+            ),
+          );
+        }
+        final entry = entries[index - 1];
+        return _HistoryListTile(entry: entry);
+      },
+    );
+  }
+}
+
+class _HistoryListTile extends StatelessWidget {
+  const _HistoryListTile({required this.entry});
+
+  final LibraryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => _playEntry(context, entry),
+      borderRadius: BorderRadius.circular(8),
+      child: AppPanel(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: SizedBox(
+                width: 116,
+                height: 68,
+                child: PosterArt(
+                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  title: entry.title,
+                ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    entry.subject.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: AppColors.text,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    [
+                      entry.episode?.displayTitle ?? '详情页',
+                      if (entry.note.isNotEmpty) entry.note,
+                      _formatDateTime(entry.updatedAt),
+                    ].join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.muted,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  LinearProgressIndicator(
+                    value: _entryProgress(entry),
+                    minHeight: 4,
+                    borderRadius: BorderRadius.circular(4),
+                    backgroundColor: AppColors.border,
+                    color: AppColors.primary,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Icon(Icons.play_arrow_rounded, color: AppColors.primary),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryRightRail extends StatelessWidget {
+  const _HistoryRightRail({required this.entries});
+
+  final List<LibraryEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final finished = entries.where(_isFinishedEntry).length;
+    final latest = entries.isEmpty ? null : entries.first;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
+      children: [
+        AppPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle(title: '历史概览'),
+              const SizedBox(height: 14),
+              _HistoryStatRow(label: '总记录', value: '${entries.length}'),
+              _HistoryStatRow(label: '已看完', value: '$finished'),
+              _HistoryStatRow(
+                label: '最近观看',
+                value: latest == null ? '暂无' : latest.subject.title,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HistoryStatRow extends StatelessWidget {
+  const _HistoryStatRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: AppColors.text,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1414,60 +1715,118 @@ class _ProfileScaffold extends StatelessWidget {
   const _ProfileScaffold({
     required this.title,
     required this.child,
+    this.active = ChromeDestination.favorite,
     this.action,
   });
 
   final String title;
   final Widget child;
+  final ChromeDestination active;
   final Widget? action;
 
   @override
   Widget build(BuildContext context) {
+    final desktop = MediaQuery.sizeOf(context).width >= 980;
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Stack(
+        child: Row(
           children: [
-            Column(
-              children: [
-                SizedBox(
-                  height: 48,
-                  child: Row(
+            if (desktop) _ProfileMiniRail(active: active),
+            Expanded(
+              child: Stack(
+                children: [
+                  Column(
                     children: [
-                      IconButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        icon: const Icon(Icons.arrow_back),
-                      ),
-                      Expanded(
-                        child: Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
+                      SizedBox(
+                        height: 48,
+                        child: Row(
+                          children: [
+                            IconButton(
+                              onPressed: () => safeNavigateBack(
+                                context,
+                                fallbackRoute: '/profile',
                               ),
+                              icon: const Icon(Icons.arrow_back),
+                            ),
+                            Expanded(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleLarge
+                                    ?.copyWith(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ),
+                            ?action,
+                            const SizedBox(width: 8),
+                          ],
                         ),
                       ),
-                      ?action,
-                      const SizedBox(width: 8),
+                      Expanded(child: child),
                     ],
                   ),
-                ),
-                Expanded(child: child),
-              ],
-            ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 28,
-              child: Center(
-                child: _BackPill(onBack: () => Navigator.of(context).pop()),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 28,
+                    child: Center(
+                      child: _BackPill(
+                        onBack: () => safeNavigateBack(
+                          context,
+                          fallbackRoute: '/profile',
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ProfileMiniRail extends StatelessWidget {
+  const _ProfileMiniRail({required this.active});
+
+  final ChromeDestination active;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = const [
+      ChromeDestination.home,
+      ChromeDestination.anime,
+      ChromeDestination.favorite,
+      ChromeDestination.settings,
+    ];
+    return Container(
+      width: 72,
+      decoration: const BoxDecoration(
+        color: Color(0xFF080808),
+        border: Border(right: BorderSide(color: Color(0xFF202020))),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 12),
+          for (final item in items)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: IconButton(
+                tooltip: item.label,
+                onPressed: () => context.go(item.route),
+                icon: Icon(
+                  item.icon,
+                  color: item == active ? AppColors.primary : Colors.white54,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1749,43 +2108,54 @@ class _RadioRow<T> extends StatelessWidget {
 }
 
 class _LibraryTile extends StatelessWidget {
-  const _LibraryTile({required this.entry});
+  const _LibraryTile({
+    required this.entry,
+    required this.onTap,
+    required this.trailingIcon,
+  });
 
   final LibraryEntry entry;
+  final VoidCallback onTap;
+  final IconData trailingIcon;
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF202020),
-        borderRadius: BorderRadius.circular(7),
-      ),
-      child: ListTile(
-        minVerticalPadding: 12,
-        leading: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: SizedBox(
-            width: 54,
-            height: 54,
-            child: _PosterThumb(subject: entry.subject),
-          ),
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(7),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xFF202020),
+          borderRadius: BorderRadius.circular(7),
         ),
-        title: Text(
-          entry.title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w800,
+        child: ListTile(
+          minVerticalPadding: 12,
+          leading: ClipRRect(
+            borderRadius: BorderRadius.circular(6),
+            child: SizedBox(
+              width: 54,
+              height: 54,
+              child: _PosterThumb(subject: entry.subject),
+            ),
           ),
-        ),
-        subtitle: Text(
-          entry.note.isEmpty
-              ? '${entry.subject.year} · ${_formatDateTime(entry.updatedAt)}'
-              : '${entry.note} · ${_formatDateTime(entry.updatedAt)}',
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.white60),
+          title: Text(
+            entry.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          subtitle: Text(
+            entry.note.isEmpty
+                ? '${entry.subject.year} · ${_formatDateTime(entry.updatedAt)}'
+                : '${entry.note} · ${_formatDateTime(entry.updatedAt)}',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Colors.white60),
+          ),
+          trailing: Icon(trailingIcon, color: AppColors.primary),
         ),
       ),
     );
@@ -1989,6 +2359,69 @@ String _formatDateTime(DateTime date) {
   if (date.millisecondsSinceEpoch <= 0) return '未知时间';
   String two(int value) => value.toString().padLeft(2, '0');
   return '${date.year}-${two(date.month)}-${two(date.day)} ${two(date.hour)}:${two(date.minute)}';
+}
+
+Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
+  final ref = ProviderScope.containerOf(context, listen: false);
+  final controller = ref.read(animeControllerProvider.notifier);
+  var episode = entry.episode;
+  var episodes = <AnimeEpisode>[];
+  try {
+    final detail = await controller.detail(entry.subject);
+    episodes = detail.episodes;
+    episode ??= episodes.firstOrNull;
+  } catch (_) {
+    episode ??= entry.episode;
+  }
+  if (!context.mounted) return;
+  if (episode == null) {
+    _showToast(context, '这条记录没有可继续播放的集数');
+    _openDetail(context, entry.subject);
+    return;
+  }
+  await controller.addHistory(entry.subject, episode);
+  if (!context.mounted) return;
+  context.push(
+    '/player',
+    extra: PlaySessionRequest(
+      subject: entry.subject,
+      episodes: episodes.isEmpty ? [episode] : episodes,
+      episode: episode,
+    ),
+  );
+}
+
+void _openDetail(BuildContext context, AnimeSubject subject) {
+  Navigator.of(
+    context,
+  ).push(MaterialPageRoute(builder: (context) => DetailPage(subject: subject)));
+}
+
+void _scrollToHistory(BuildContext context) {
+  final target = AppChrome.profileHistorySectionKey.currentContext;
+  if (target == null) {
+    context.go('/profile');
+    return;
+  }
+  Scrollable.ensureVisible(
+    target,
+    duration: const Duration(milliseconds: 280),
+    curve: Curves.easeOutCubic,
+    alignment: 0.08,
+  );
+}
+
+double _entryProgress(LibraryEntry entry) {
+  final total = entry.subject.totalEpisodes;
+  final number = entry.episode?.number ?? 1;
+  if (total <= 0) return 0.35;
+  return (number / total).clamp(0.05, 1.0);
+}
+
+bool _isFinishedEntry(LibraryEntry entry) {
+  final total = entry.subject.totalEpisodes;
+  final number = entry.episode?.number ?? 0;
+  return total > 0 && number >= total;
 }
 
 void _showToast(BuildContext context, String message) {
