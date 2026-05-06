@@ -64,6 +64,8 @@ class RulePlugin {
     this.kazumi,
     this.xbpq,
     this.animeko,
+    this.groupId = '',
+    this.priority = 100,
     this.unsupportedReason,
     this.note = '',
   });
@@ -89,6 +91,8 @@ class RulePlugin {
   final KazumiParserConfig? kazumi;
   final XbpqParserConfig? xbpq;
   final AnimekoWebSelectorConfig? animeko;
+  final String groupId;
+  final int priority;
   final String? unsupportedReason;
   final String note;
 
@@ -137,6 +141,8 @@ class RulePlugin {
     KazumiParserConfig? kazumi,
     XbpqParserConfig? xbpq,
     AnimekoWebSelectorConfig? animeko,
+    String? groupId,
+    int? priority,
     String? unsupportedReason,
     String? note,
   }) {
@@ -162,6 +168,8 @@ class RulePlugin {
       kazumi: kazumi ?? this.kazumi,
       xbpq: xbpq ?? this.xbpq,
       animeko: animeko ?? this.animeko,
+      groupId: groupId ?? this.groupId,
+      priority: priority ?? this.priority,
       unsupportedReason: unsupportedReason ?? this.unsupportedReason,
       note: note ?? this.note,
     );
@@ -189,6 +197,8 @@ class RulePlugin {
     'kazumi': kazumi?.toJson(),
     'xbpq': xbpq?.toJson(),
     'animeko': animeko?.toJson(),
+    'groupId': groupId,
+    'priority': priority,
     'unsupportedReason': unsupportedReason,
     'note': note,
   };
@@ -248,6 +258,8 @@ class RulePlugin {
               animekoJson.cast<String, dynamic>(),
             )
           : null,
+      groupId: json['groupId']?.toString() ?? '',
+      priority: _intFromJson(json['priority'], fallback: 100),
       unsupportedReason: _blankToNull(json['unsupportedReason']?.toString()),
       note: json['note']?.toString() ?? json['description']?.toString() ?? '',
     );

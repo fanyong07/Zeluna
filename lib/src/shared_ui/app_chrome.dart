@@ -36,6 +36,8 @@ class AppChrome extends StatelessWidget {
     final width = MediaQuery.sizeOf(context).width;
     final desktop = width >= 980;
     final railWidth = width >= 1320 ? 310.0 : 270.0;
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final mobileBottomSpace = desktop ? 0.0 : 76.0 + bottomInset;
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: SafeArea(
@@ -60,7 +62,14 @@ class AppChrome extends StatelessWidget {
                       Expanded(
                         child: Row(
                           children: [
-                            Expanded(child: child),
+                            Expanded(
+                              child: Padding(
+                                padding: EdgeInsets.only(
+                                  bottom: mobileBottomSpace,
+                                ),
+                                child: child,
+                              ),
+                            ),
                             if (rightRail != null && width >= 1180) ...[
                               const SizedBox(width: 18),
                               SizedBox(width: railWidth, child: rightRail!),
@@ -75,9 +84,9 @@ class AppChrome extends StatelessWidget {
             ),
             if (!desktop)
               Positioned(
-                left: 16,
-                right: 16,
-                bottom: 16,
+                left: 12,
+                right: 12,
+                bottom: 10 + bottomInset,
                 child: _BottomNavigation(active: active),
               ),
           ],
@@ -423,28 +432,94 @@ class _BottomNavigation extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final items = [
-      ChromeDestination.home,
-      ChromeDestination.anime,
-      ChromeDestination.favorite,
-      ChromeDestination.settings,
-    ];
+    final items = _mobileDestinations(active);
     return AppPanel(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-      radius: 14,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          for (final item in items)
-            IconButton(
-              tooltip: item.label,
-              onPressed: () => _go(context, item),
-              icon: Icon(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+      radius: 12,
+      child: SizedBox(
+        height: 56,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final fits = constraints.maxWidth >= items.length * 44;
+            if (fits) {
+              return Row(
+                children: [
+                  for (final item in items)
+                    Expanded(
+                      child: _BottomNavItem(
+                        item: item,
+                        active: item == active,
+                        onTap: () => _go(context, item),
+                      ),
+                    ),
+                ],
+              );
+            }
+            return ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: items.length,
+              separatorBuilder: (context, index) => const SizedBox(width: 2),
+              itemBuilder: (context, index) {
+                final item = items[index];
+                return _BottomNavItem(
+                  item: item,
+                  active: item == active,
+                  width: 48,
+                  onTap: () => _go(context, item),
+                );
+              },
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomNavItem extends StatelessWidget {
+  const _BottomNavItem({
+    required this.item,
+    required this.active,
+    required this.onTap,
+    this.width,
+  });
+
+  final ChromeDestination item;
+  final bool active;
+  final VoidCallback onTap;
+  final double? width;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: item.label,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: width,
+          height: 56,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
                 item.icon,
-                color: item == active ? AppColors.primary : AppColors.muted,
+                size: 22,
+                color: active ? AppColors.primary : AppColors.muted,
               ),
-            ),
-        ],
+              const SizedBox(height: 2),
+              Text(
+                item.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: active ? AppColors.text : AppColors.muted,
+                  fontWeight: active ? FontWeight.w900 : FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -522,6 +597,23 @@ const _primaryDestinations = [
   ChromeDestination.history,
   ChromeDestination.settings,
 ];
+
+List<ChromeDestination> _mobileDestinations(ChromeDestination active) {
+  final items = <ChromeDestination>[
+    ChromeDestination.home,
+    ChromeDestination.anime,
+    ChromeDestination.series,
+    ChromeDestination.movie,
+    ChromeDestination.history,
+    ChromeDestination.favorite,
+    ChromeDestination.settings,
+  ];
+  if (active == ChromeDestination.schedule ||
+      active == ChromeDestination.download) {
+    items.insert(2, active);
+  }
+  return items;
+}
 
 class _TopBar extends StatelessWidget {
   const _TopBar({

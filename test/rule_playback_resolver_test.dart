@@ -10,6 +10,8 @@ void main() {
   test('Kazumi resolver extracts current episode playable url', () async {
     final client = MockClient((request) async {
       switch (request.url.path) {
+        case '/test/01.m3u8':
+          return http.Response('#EXTM3U', 200);
         case '/vod/search.html':
           return _html('''
             <div class="item">
@@ -49,6 +51,8 @@ void main() {
   test('XBPQ resolver extracts current episode playable url', () async {
     final client = MockClient((request) async {
       switch (request.url.path) {
+        case '/movie.mp4':
+          return http.Response('video', 200);
         case '/search.html':
           return _html('''
             <div class="module-item-pic">
@@ -111,6 +115,7 @@ void main() {
               "version": 2,
               "arguments": {
                 "name": "AnimeGarden",
+                "tier": 9,
                 "description": "BT 资源聚合站",
                 "searchConfig": {
                   "searchUrl": "https://garden.example/feed.xml?q={keyword}"
@@ -122,6 +127,7 @@ void main() {
               "version": 2,
               "arguments": {
                 "name": "在线源",
+                "tier": 2,
                 "searchConfig": {
                   "searchUrl": "https://example.com/search?wd={keyword}",
                   "subjectFormatId": "a",
@@ -157,14 +163,20 @@ void main() {
       );
       expect(rss.canResolveNatively, isFalse);
       expect(rss.unsupportedReason, contains('BT/RSS'));
+      expect(rss.priority, 9);
+      expect(rss.groupId, isNotEmpty);
       expect(web.canResolveNatively, isTrue);
       expect(web.animeko?.matchVideoUrl, contains('url='));
+      expect(web.priority, 2);
+      expect(web.groupId, isNotEmpty);
     },
   );
 
   test('Animeko web selector resolver extracts current episode url', () async {
     final client = MockClient((request) async {
       switch (request.url.path) {
+        case '/anime/02.m3u8':
+          return http.Response('#EXTM3U', 200);
         case '/search':
           expect(request.url.query, contains('wd='));
           return _html('''

@@ -80,6 +80,7 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
   }
 
   Widget _body(AnimeHomeFeed feed) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     final content = switch (_tab) {
       AnimeHomeTab.recent => _RecentTab(
         subjects: feed.recent,
@@ -135,7 +136,7 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
       ),
     };
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 2, 0, 24),
+      padding: EdgeInsets.fromLTRB(compact ? 14 : 24, 2, compact ? 14 : 0, 24),
       child: content,
     );
   }
@@ -184,8 +185,14 @@ class SubjectListPage extends ConsumerWidget {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
+          final compact = MediaQuery.sizeOf(context).width < 760;
           return Padding(
-            padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 0,
+              24,
+            ),
             child: _SubjectResultView(subjects: subjects, title: title),
           );
         },
@@ -250,8 +257,14 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
               if (snapshot.connectionState == ConnectionState.waiting) {
                 return _MetadataLoading(kind: widget.kind);
               }
+              final compact = MediaQuery.sizeOf(context).width < 760;
               return Padding(
-                padding: const EdgeInsets.fromLTRB(24, 2, 0, 24),
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 14 : 24,
+                  compact ? 0 : 2,
+                  compact ? 14 : 0,
+                  24,
+                ),
                 child: CustomScrollView(
                   slivers: [
                     SliverToBoxAdapter(
@@ -265,7 +278,9 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         onOpen: _openDetail,
                       ),
                     ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 14)),
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: compact ? 10 : 14),
+                    ),
                     SliverToBoxAdapter(
                       child: _InlineFilterPanel(
                         type: _type,
@@ -279,7 +294,9 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         onYearChanged: (value) => setState(() => _year = value),
                       ),
                     ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 14)),
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: compact ? 10 : 14),
+                    ),
                     if (subjects.isEmpty)
                       SliverFillRemaining(
                         hasScrollBody: false,
@@ -648,6 +665,7 @@ class _MetadataHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     final lead = subjects.firstOrNull;
     final following = state.following.isNotEmpty
         ? state.following
@@ -658,7 +676,9 @@ class _MetadataHeader extends StatelessWidget {
         state.services.dandanplayDanmakuEnabled ||
         state.services.bilibiliDanmakuEnabled ||
         state.services.customDanmakuEnabled;
-    final height = kind == MetadataHubKind.anime ? 236.0 : 176.0;
+    final height = compact
+        ? (kind == MetadataHubKind.anime ? 178.0 : 138.0)
+        : (kind == MetadataHubKind.anime ? 236.0 : 176.0);
     return SizedBox(
       height: height,
       child: AppPanel(
@@ -690,29 +710,38 @@ class _MetadataHeader extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(22, 18, 22, 18),
+                padding: EdgeInsets.fromLTRB(
+                  compact ? 16 : 22,
+                  compact ? 14 : 18,
+                  compact ? 16 : 22,
+                  compact ? 14 : 18,
+                ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    CircleAvatar(
-                      radius: 21,
-                      backgroundColor: AppColors.primary.withValues(
-                        alpha: 0.22,
+                    if (!compact)
+                      CircleAvatar(
+                        radius: 21,
+                        backgroundColor: AppColors.primary.withValues(
+                          alpha: 0.22,
+                        ),
+                        child: Icon(icon, color: AppColors.text, size: 22),
                       ),
-                      child: Icon(icon, color: AppColors.text, size: 22),
-                    ),
                     const Spacer(),
                     Text(
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(
-                            color: AppColors.text,
-                            fontWeight: FontWeight.w900,
-                          ),
+                      style:
+                          (compact
+                                  ? Theme.of(context).textTheme.titleLarge
+                                  : Theme.of(context).textTheme.headlineSmall)
+                              ?.copyWith(
+                                color: AppColors.text,
+                                fontWeight: FontWeight.w900,
+                              ),
                     ),
-                    const SizedBox(height: 6),
+                    SizedBox(height: compact ? 4 : 6),
                     Text(
                       subtitle,
                       maxLines: 1,
@@ -723,11 +752,11 @@ class _MetadataHeader extends StatelessWidget {
                       ),
                     ),
                     if (kind == MetadataHubKind.anime) ...[
-                      const SizedBox(height: 14),
+                      SizedBox(height: compact ? 10 : 14),
                       LayoutBuilder(
                         builder: (context, constraints) {
                           final compact = constraints.maxWidth < 700;
-                          final chips = [
+                          final chips = <Widget>[
                             _AnimekoStatusChip(
                               icon: Icons.play_circle_outline,
                               label: continueEntry == null
@@ -743,17 +772,21 @@ class _MetadataHeader extends StatelessWidget {
                               label: '今日更新 ${_todayCount(subjects)} 部',
                               active: _todayCount(subjects) > 0,
                             ),
-                            _AnimekoStatusChip(
-                              icon: Icons.hub_outlined,
-                              label: '源 $activeSources 个',
-                              active: activeSources > 0,
-                            ),
-                            _AnimekoStatusChip(
-                              icon: Icons.subtitles_outlined,
-                              label: danmakuReady ? '弹幕已接入' : '弹幕未开启',
-                              active: danmakuReady,
-                            ),
                           ];
+                          if (!compact) {
+                            chips.addAll([
+                              _AnimekoStatusChip(
+                                icon: Icons.hub_outlined,
+                                label: '源 $activeSources 个',
+                                active: activeSources > 0,
+                              ),
+                              _AnimekoStatusChip(
+                                icon: Icons.subtitles_outlined,
+                                label: danmakuReady ? '弹幕已接入' : '弹幕未开启',
+                                active: danmakuReady,
+                              ),
+                            ]);
+                          }
                           return compact
                               ? Wrap(spacing: 8, runSpacing: 8, children: chips)
                               : Row(
@@ -872,8 +905,14 @@ class _InlineFilterPanel extends StatelessWidget {
       '全部',
       for (var y = DateTime.now().year; y >= 2013; y--) '$y年',
     ];
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return AppPanel(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      padding: EdgeInsets.fromLTRB(
+        compact ? 10 : 14,
+        compact ? 6 : 10,
+        compact ? 10 : 14,
+        compact ? 6 : 10,
+      ),
       child: Column(
         children: [
           _FilterRow(
@@ -1809,6 +1848,7 @@ class _RecommendTabState extends State<_RecommendTab> {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     final heroSubjects = _heroSubjects(widget.feed);
     final heroIndex = heroSubjects.isEmpty
         ? 0
@@ -1832,6 +1872,13 @@ class _RecommendTabState extends State<_RecommendTab> {
             ),
           ),
         ),
+        if (compact)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
+              child: const _MobileQuickActions(),
+            ),
+          ),
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(0, 0, 0, 10),
@@ -1958,6 +2005,93 @@ class _CategoryShortcut extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileQuickActions extends StatelessWidget {
+  const _MobileQuickActions();
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      _MobileQuickAction(
+        icon: Icons.explore_outlined,
+        label: '番剧',
+        onTap: () => context.push('/anime'),
+      ),
+      _MobileQuickAction(
+        icon: Icons.calendar_month_outlined,
+        label: '追番',
+        onTap: () => context.push('/schedule'),
+      ),
+      _MobileQuickAction(
+        icon: Icons.history_rounded,
+        label: '历史',
+        onTap: () => context.push('/history'),
+      ),
+      _MobileQuickAction(
+        icon: Icons.rule_folder_outlined,
+        label: '规则',
+        onTap: () => context.push('/profile/rules'),
+      ),
+      _MobileQuickAction(
+        icon: Icons.source_outlined,
+        label: '视频源',
+        onTap: () => context.push('/profile/sources'),
+      ),
+    ];
+    return SizedBox(
+      height: 76,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: items.length,
+        separatorBuilder: (context, index) => const SizedBox(width: 10),
+        itemBuilder: (context, index) => items[index],
+      ),
+    );
+  }
+}
+
+class _MobileQuickAction extends StatelessWidget {
+  const _MobileQuickAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: AppPanel(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        color: AppColors.panelHigh,
+        child: SizedBox(
+          width: 68,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: AppColors.primary, size: 24),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: AppColors.text,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -2098,15 +2232,16 @@ class _SubjectGridSliver extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(0, 0, 8, 0),
+      padding: EdgeInsets.fromLTRB(0, 0, compact ? 0 : 8, 0),
       sliver: SliverGrid(
-        gridDelegate: _gridDelegate(context, landscape: landscape),
+        gridDelegate: _gridDelegate(context, landscape: !compact && landscape),
         delegate: SliverChildBuilderDelegate((context, index) {
           final subject = subjects[index];
           return PosterCard(
             subject: subject,
-            landscape: landscape,
+            landscape: !compact && landscape,
             onTap: () => onOpen(subject),
           );
         }, childCount: subjects.length),
@@ -2203,8 +2338,9 @@ class _HeroCarousel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final safeSubjects = subjects.isEmpty ? [_fallbackHeroSubject] : subjects;
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return SizedBox(
-      height: 264,
+      height: compact ? 214 : 264,
       child: AppPanel(
         padding: EdgeInsets.zero,
         borderColor: AppColors.borderBright,
@@ -2256,8 +2392,8 @@ class _HeroCarousel extends StatelessWidget {
               ),
               if (safeSubjects.length > 1)
                 Positioned(
-                  right: 18,
-                  bottom: 16,
+                  right: compact ? 12 : 18,
+                  bottom: compact ? 82 : 16,
                   child: Row(
                     children: [
                       _HeroArrowButton(
@@ -2331,6 +2467,7 @@ class _HeroBannerSlide extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final compact = constraints.maxWidth < 520;
         final contentWidth = (constraints.maxWidth - 48)
             .clamp(220.0, 520.0)
             .toDouble();
@@ -2366,10 +2503,10 @@ class _HeroBannerSlide extends StatelessWidget {
                 ),
               ),
               Positioned(
-                left: 24,
-                top: 24,
-                bottom: 24,
-                width: contentWidth,
+                left: compact ? 18 : 24,
+                top: compact ? 18 : 24,
+                bottom: compact ? 18 : 24,
+                width: compact ? constraints.maxWidth - 36 : contentWidth,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -2384,12 +2521,16 @@ class _HeroBannerSlide extends StatelessWidget {
                     const Spacer(),
                     Text(
                       subject.title,
-                      maxLines: 1,
+                      maxLines: compact ? 2 : 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
+                      style:
+                          (compact
+                                  ? Theme.of(context).textTheme.headlineMedium
+                                  : Theme.of(context).textTheme.displaySmall)
+                              ?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                              ),
                     ),
                     const SizedBox(height: 8),
                     Text(
@@ -2404,14 +2545,14 @@ class _HeroBannerSlide extends StatelessWidget {
                     const SizedBox(height: 10),
                     Text(
                       subject.summary,
-                      maxLines: 2,
+                      maxLines: compact ? 1 : 2,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: AppColors.text,
                         height: 1.45,
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    SizedBox(height: compact ? 12 : 20),
                     AccentButton(
                       icon: Icons.play_arrow_rounded,
                       label: '查看详情',
@@ -2510,13 +2651,14 @@ class _FilterRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return SizedBox(
-      height: 48,
+      height: compact ? 40 : 48,
       child: Row(
         children: [
           Container(
-            width: 52,
-            height: 36,
+            width: compact ? 44 : 52,
+            height: compact ? 30 : 36,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: AppColors.panelHigh,
@@ -2525,13 +2667,14 @@ class _FilterRow extends StatelessWidget {
             ),
             child: Text(
               label,
-              style: const TextStyle(
+              style: TextStyle(
+                fontSize: compact ? 13 : null,
                 fontWeight: FontWeight.w800,
                 color: AppColors.text,
               ),
             ),
           ),
-          const SizedBox(width: 12),
+          SizedBox(width: compact ? 8 : 12),
           Expanded(
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
@@ -2542,21 +2685,30 @@ class _FilterRow extends StatelessWidget {
                   onTap: () => onChanged(value),
                   borderRadius: BorderRadius.circular(8),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 10,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: compact ? 6 : 8,
+                      vertical: compact ? 8 : 10,
                     ),
                     child: Text(
                       value,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: active ? AppColors.primary : AppColors.text,
-                        fontWeight: active ? FontWeight.w800 : FontWeight.w500,
-                      ),
+                      style:
+                          (compact
+                                  ? Theme.of(context).textTheme.bodyMedium
+                                  : Theme.of(context).textTheme.titleMedium)
+                              ?.copyWith(
+                                color: active
+                                    ? AppColors.primary
+                                    : AppColors.text,
+                                fontWeight: active
+                                    ? FontWeight.w800
+                                    : FontWeight.w500,
+                              ),
                     ),
                   ),
                 );
               },
-              separatorBuilder: (context, index) => const SizedBox(width: 12),
+              separatorBuilder: (context, index) =>
+                  SizedBox(width: compact ? 8 : 12),
               itemCount: values.length,
             ),
           ),
@@ -3604,14 +3756,17 @@ SliverGridDelegateWithFixedCrossAxisCount _gridDelegate(
   bool landscape = false,
 }) {
   final width = MediaQuery.sizeOf(context).width;
-  final columns = landscape
+  final compact = width < 760;
+  final columns = compact
+      ? 2
+      : landscape
       ? (width / 292).floor().clamp(2, 4)
       : (width / 180).floor().clamp(2, 6);
   return SliverGridDelegateWithFixedCrossAxisCount(
     crossAxisCount: columns,
-    mainAxisSpacing: 12,
-    crossAxisSpacing: 12,
-    childAspectRatio: landscape ? 1.48 : 0.56,
+    mainAxisSpacing: compact ? 10 : 12,
+    crossAxisSpacing: compact ? 10 : 12,
+    childAspectRatio: compact ? 0.58 : (landscape ? 1.48 : 0.56),
   );
 }
 

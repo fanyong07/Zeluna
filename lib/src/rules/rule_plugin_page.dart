@@ -13,6 +13,8 @@ import '../shared_ui/app_navigation.dart';
 import 'rule_models.dart';
 import 'rule_plugin_repository.dart';
 
+const _creamycakeCssRepositoryUrl = 'https://sub.creamycake.org/v1/css1.json';
+
 class RuleManagementPage extends ConsumerWidget {
   const RuleManagementPage({super.key});
 
@@ -123,6 +125,11 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
                 repositories: state.rulePlugins.repositories,
                 onSelected: (value) => setState(() => _type = value),
                 onImport: () => _showImportSheet(context, ref),
+                onImportCreamycakeCss: () => _importRepositoryUrl(
+                  context,
+                  ref,
+                  _creamycakeCssRepositoryUrl,
+                ),
               ),
               const SizedBox(height: 16),
               for (final rule in rules) ...[
@@ -534,12 +541,14 @@ class _RepositoryHeader extends StatelessWidget {
     required this.repositories,
     required this.onSelected,
     required this.onImport,
+    required this.onImportCreamycakeCss,
   });
 
   final RuleContentType selected;
   final List<RuleRepositoryRecord> repositories;
   final ValueChanged<RuleContentType> onSelected;
   final VoidCallback onImport;
+  final VoidCallback onImportCreamycakeCss;
 
   @override
   Widget build(BuildContext context) {
@@ -561,6 +570,15 @@ class _RepositoryHeader extends StatelessWidget {
                 label: const Text('导入仓库'),
               ),
             ],
+          ),
+          const SizedBox(height: 14),
+          _RecommendedRepositoryCard(
+            title: 'CreamyCake CSS 播放规则',
+            subtitle: 'Animeko web-selector 规则包，导入后默认只启用前 6 条优先线路',
+            imported: repositories.any(
+              (repository) => repository.url == _creamycakeCssRepositoryUrl,
+            ),
+            onImport: onImportCreamycakeCss,
           ),
           const SizedBox(height: 14),
           SegmentedButton<RuleContentType>(
@@ -590,6 +608,75 @@ class _RepositoryHeader extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _RecommendedRepositoryCard extends StatelessWidget {
+  const _RecommendedRepositoryCard({
+    required this.title,
+    required this.subtitle,
+    required this.imported,
+    required this.onImport,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool imported;
+  final VoidCallback onImport;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.panelHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+        child: Row(
+          children: [
+            const Icon(Icons.hub_outlined, color: AppColors.primary),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: AppColors.text,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            FilledButton.icon(
+              onPressed: onImport,
+              icon: Icon(
+                imported
+                    ? Icons.refresh_rounded
+                    : Icons.cloud_download_outlined,
+              ),
+              label: Text(imported ? '重新导入' : '导入'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1221,6 +1308,28 @@ Future<void> _importFromClipboard(BuildContext context, WidgetRef ref) async {
   }
 }
 
+Future<bool> _importRepositoryUrl(
+  BuildContext context,
+  WidgetRef ref,
+  String url,
+) async {
+  try {
+    final result = await ref
+        .read(animeControllerProvider.notifier)
+        .importRuleRepositoryUrl(url);
+    if (context.mounted) {
+      _showSnack(
+        context,
+        '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
+      );
+    }
+    return true;
+  } catch (error) {
+    if (context.mounted) _showSnack(context, _friendlyImportError(error));
+    return false;
+  }
+}
+
 void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
   final controller = TextEditingController();
   var importing = false;
@@ -1257,24 +1366,15 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                     : () async {
                         final url = controller.text.trim();
                         setDialogState(() => importing = true);
-                        try {
-                          final result = await ref
-                              .read(animeControllerProvider.notifier)
-                              .importRuleRepositoryUrl(url);
-                          if (dialogContext.mounted) {
-                            Navigator.of(dialogContext).pop();
-                          }
-                          if (context.mounted) {
-                            _showSnack(
-                              context,
-                              '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
-                            );
-                          }
-                        } catch (error) {
+                        final imported = await _importRepositoryUrl(
+                          context,
+                          ref,
+                          url,
+                        );
+                        if (imported && dialogContext.mounted) {
+                          Navigator.of(dialogContext).pop();
+                        } else if (dialogContext.mounted) {
                           setDialogState(() => importing = false);
-                          if (context.mounted) {
-                            _showSnack(context, _friendlyImportError(error));
-                          }
                         }
                       },
                 icon: importing

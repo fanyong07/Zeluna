@@ -72,6 +72,7 @@ flutter:
 
   assets:
     - assets/brand/
+    - assets/shaders/anime4k/
     - output/sources_catalog.json
 
   # To add assets to your application, add an assets section, like this:

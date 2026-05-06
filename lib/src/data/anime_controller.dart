@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
@@ -29,6 +31,8 @@ final sourceCatalogRepositoryProvider = Provider<SourceCatalogRepository>(
 
 final animeControllerProvider =
     AsyncNotifierProvider<AnimeController, AnimeState>(AnimeController.new);
+
+const _autoEnableRulesPerImportedGroup = 6;
 
 class AnimeState {
   const AnimeState({
@@ -113,8 +117,12 @@ class AnimeState {
 class AnimeController extends AsyncNotifier<AnimeState> {
   static const _settingsBox = 'anime.settings.v2';
   static const _libraryBox = 'anime.library.v2';
+  static const _animeMetadataCacheKey = 'metadata.cache.anime';
+  static const _seriesMetadataCacheKey = 'metadata.cache.series';
+  static const _movieMetadataCacheKey = 'metadata.cache.movie';
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
+  final _metadataRefreshes = <String>{};
 
   @override
   Future<AnimeState> build() async {
@@ -212,40 +220,54 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<List<AnimeSubject>> discoverSubjects() async {
     final subjects = _homeSubjects;
-    final extra = await ref
-        .read(bangumiMetadataRepositoryProvider)
-        .discoverySubjects()
-        .timeout(const Duration(seconds: 18), onTimeout: () => const [])
-        .onError((_, _) => const <AnimeSubject>[]);
-    return _uniqueSubjects([...subjects, ...extra]);
+    final cached = _readSubjectCache(_animeMetadataCacheKey);
+    unawaited(
+      _refreshSubjectCache(_animeMetadataCacheKey, () async {
+        final extra = await ref
+            .read(bangumiMetadataRepositoryProvider)
+            .discoverySubjects()
+            .timeout(const Duration(seconds: 12), onTimeout: () => const [])
+            .onError((_, _) => const <AnimeSubject>[]);
+        return _uniqueSubjects([...subjects, ...extra]);
+      }),
+    );
+    return _uniqueSubjects([...subjects, ...cached]);
   }
 
   Future<List<AnimeSubject>> seriesSubjects() async {
-    final subjects = await ref
-        .read(externalServiceRepositoryProvider)
-        .seriesMetadataFeed()
-        .timeout(
-          const Duration(seconds: 12),
-          onTimeout: () => const <AnimeSubject>[],
-        )
-        .onError((_, _) => const <AnimeSubject>[]);
-    return subjects.isEmpty
-        ? _fallbackExternalSeries
-        : _uniqueSubjects([...subjects, ..._fallbackExternalSeries]);
+    final cached = _readSubjectCache(_seriesMetadataCacheKey);
+    unawaited(
+      _refreshSubjectCache(_seriesMetadataCacheKey, () async {
+        final subjects = await ref
+            .read(externalServiceRepositoryProvider)
+            .seriesMetadataFeed()
+            .timeout(
+              const Duration(seconds: 12),
+              onTimeout: () => const <AnimeSubject>[],
+            )
+            .onError((_, _) => const <AnimeSubject>[]);
+        return _uniqueSubjects([...subjects, ..._fallbackExternalSeries]);
+      }),
+    );
+    return _uniqueSubjects([...cached, ..._fallbackExternalSeries]);
   }
 
   Future<List<AnimeSubject>> movieSubjects() async {
-    final subjects = await ref
-        .read(externalServiceRepositoryProvider)
-        .movieMetadataFeed()
-        .timeout(
-          const Duration(seconds: 8),
-          onTimeout: () => const <AnimeSubject>[],
-        )
-        .onError((_, _) => const <AnimeSubject>[]);
-    return subjects.isEmpty
-        ? _fallbackExternalMovies
-        : _uniqueSubjects([...subjects, ..._fallbackExternalMovies]);
+    final cached = _readSubjectCache(_movieMetadataCacheKey);
+    unawaited(
+      _refreshSubjectCache(_movieMetadataCacheKey, () async {
+        final subjects = await ref
+            .read(externalServiceRepositoryProvider)
+            .movieMetadataFeed()
+            .timeout(
+              const Duration(seconds: 8),
+              onTimeout: () => const <AnimeSubject>[],
+            )
+            .onError((_, _) => const <AnimeSubject>[]);
+        return _uniqueSubjects([...subjects, ..._fallbackExternalMovies]);
+      }),
+    );
+    return _uniqueSubjects([...cached, ..._fallbackExternalMovies]);
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() {
@@ -310,12 +332,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeSubject subject,
     AnimeEpisode episode,
   ) {
+    return linesForEpisodeMode(subject, episode);
+  }
+
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+  }) {
     final ruleState =
         state.value?.rulePlugins ?? const RulePluginRepository().defaultState();
     return RulePlaybackSourceRepository(
       repository: RulePluginRepository(extraRules: ruleState.customRules),
       ruleState: ruleState,
-    ).linesForEpisode(subject, episode);
+    ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
   }
 
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
@@ -518,8 +548,33 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ...bundle.rules.map((rule) => rule.id),
     };
     final enabled = {...current.rulePlugins.enabledIds};
-    for (final rule in bundle.rules) {
-      if (rule.canResolveNatively) enabled.add(rule.id);
+    final autoEnabledByGroup = <String, int>{};
+    for (final id in enabled) {
+      final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
+      final groupId = rule?.groupId ?? '';
+      if (groupId.isEmpty) continue;
+      autoEnabledByGroup[groupId] = (autoEnabledByGroup[groupId] ?? 0) + 1;
+    }
+    final sortedRules = [...bundle.rules]
+      ..sort((a, b) {
+        final priority = a.priority.compareTo(b.priority);
+        return priority == 0 ? a.name.compareTo(b.name) : priority;
+      });
+    for (final rule in sortedRules) {
+      if (!rule.canResolveNatively) {
+        enabled.remove(rule.id);
+        continue;
+      }
+      enabled.add(rule.id);
+      final groupId = rule.groupId;
+      if (groupId.isNotEmpty) {
+        final count = autoEnabledByGroup[groupId] ?? 0;
+        if (count >= _autoEnableRulesPerImportedGroup) {
+          enabled.remove(rule.id);
+        } else if (enabled.contains(rule.id)) {
+          autoEnabledByGroup[groupId] = count + 1;
+        }
+      }
     }
     final repositoryRecord = RuleRepositoryRecord(
       id: bundle.sourceUrl.trim().isEmpty
@@ -699,6 +754,33 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .map((item) => LibraryEntry.fromJson(item.cast<String, dynamic>()))
         .where((item) => item.subject.title.trim().isNotEmpty)
         .toList();
+  }
+
+  List<AnimeSubject> _readSubjectCache(String key) {
+    final value = _library.get(key);
+    if (value is! List) return const [];
+    return value
+        .whereType<Map>()
+        .map((item) => AnimeSubject.fromJson(item.cast<String, dynamic>()))
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList();
+  }
+
+  Future<void> _refreshSubjectCache(
+    String key,
+    Future<List<AnimeSubject>> Function() load,
+  ) async {
+    if (!_metadataRefreshes.add(key)) return;
+    try {
+      final subjects = await load();
+      if (subjects.isEmpty) return;
+      await _library.put(
+        key,
+        subjects.take(160).map((item) => item.toJson()).toList(),
+      );
+    } finally {
+      _metadataRefreshes.remove(key);
+    }
   }
 
   List<AnimeSubject> _uniqueSubjects(Iterable<AnimeSubject> subjects) {

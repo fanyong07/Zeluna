@@ -316,6 +316,8 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
+      _FakeAnimeController.lastRulePlugins = const RulePluginRepository()
+          .defaultState();
 
       await tester.pumpWidget(
         ProviderScope(
@@ -345,6 +347,16 @@ void main() {
 
       expect(find.text('规则仓库'), findsWidgets);
       expect(find.text('omofun03'), findsOneWidget);
+      expect(find.text('CreamyCake CSS 播放规则'), findsOneWidget);
+      expect(find.text('导入'), findsOneWidget);
+
+      await tester.tap(find.text('导入'));
+      await tester.pumpAndSettle();
+
+      expect(
+        _FakeAnimeController.lastRulePlugins.repositories.first.url,
+        'https://sub.creamycake.org/v1/css1.json',
+      );
 
       await tester.tap(find.byTooltip('返回'));
       await tester.pumpAndSettle();
@@ -556,6 +568,56 @@ class _FakeAnimeController extends AnimeController {
       repositoryName: '剪贴板仓库',
       ruleCount: 1,
       installedCount: 1,
+    );
+  }
+
+  @override
+  Future<RuleImportResult> importRuleRepositoryUrl(String url) async {
+    final importedRule = RulePlugin(
+      id: 'custom:creamycake',
+      name: 'CreamyCake 测试规则',
+      version: '1.0',
+      source: RuleSourceKind.custom,
+      contentType: RuleContentType.anime,
+      engine: 'animeko-web-selector',
+      updatedAt: _testRuleDate,
+      qualityScore: 80,
+      tags: ['Animeko', 'CSS'],
+      baseUrl: 'https://example.com',
+      searchUrl: 'https://example.com/search?wd={keyword}',
+      searchable: true,
+      quickSearch: true,
+      filterable: false,
+      groupId: 'repo:test',
+      priority: 0,
+      animeko: const AnimekoWebSelectorConfig(
+        searchUrl: 'https://example.com/search?wd={keyword}',
+        subjectFormatId: 'a',
+        channelFormatId: 'index-grouped',
+        matchVideoUrl: r'(?<v>https?:\/\/.+\.(m3u8|mp4))',
+      ),
+      note: '测试 URL 导入',
+    );
+    final current = state.value ?? const AnimeState(homeFeed: _feed);
+    lastRulePlugins = current.rulePlugins.copyWith(
+      installedIds: {...current.rulePlugins.installedIds, importedRule.id},
+      enabledIds: {...current.rulePlugins.enabledIds, importedRule.id},
+      customRules: [...current.rulePlugins.customRules, importedRule],
+      repositories: [
+        RuleRepositoryRecord(
+          id: 'url:test',
+          name: 'CreamyCake CSS',
+          url: url,
+          importedAt: _testRuleDate,
+          ruleCount: 37,
+        ),
+      ],
+    );
+    state = AsyncData(current.copyWith(rulePlugins: lastRulePlugins));
+    return const RuleImportResult(
+      repositoryName: 'CreamyCake CSS',
+      ruleCount: 37,
+      installedCount: 37,
     );
   }
 

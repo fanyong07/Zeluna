@@ -129,6 +129,8 @@ class RuleImporter {
     final idSeed = '$sourceUrl:$factoryId:$name:$searchUrl:$index';
     final version = source['version']?.toString() ?? '1.0';
     final description = args['description']?.toString() ?? '';
+    final tier = _intFromAny(args['tier'], fallback: index);
+    final groupId = _importGroupId(sourceUrl, factoryId);
 
     if (factoryId == 'web-selector') {
       return RulePlugin(
@@ -148,6 +150,8 @@ class RuleImporter {
         filterable: false,
         installedByDefault: false,
         animeko: _animekoConfigFromSearchConfig(searchConfig),
+        groupId: groupId,
+        priority: tier,
         note: description.trim().isEmpty
             ? '从 Animeko web-selector 源导入，可直接尝试解析在线播放地址。'
             : description,
@@ -171,6 +175,8 @@ class RuleImporter {
         quickSearch: true,
         filterable: false,
         installedByDefault: false,
+        groupId: groupId,
+        priority: tier,
         unsupportedReason:
             '这是 BT/RSS 资源订阅，不是 mp4/m3u8 在线播放源；当前播放器没有下载或 BT 边下边播能力，所以不能直接启用播放。',
         note: description.trim().isEmpty
@@ -195,6 +201,8 @@ class RuleImporter {
       quickSearch: false,
       filterable: false,
       installedByDefault: false,
+      groupId: groupId,
+      priority: tier,
       unsupportedReason: '当前还没有接入 Animeko 的 $factoryId 源执行器。',
       note: description.trim().isEmpty ? '从 Animeko 源导入。' : description,
     );
@@ -445,8 +453,20 @@ bool _boolFromAny(Object? value, {bool fallback = false}) {
   return fallback;
 }
 
+int _intFromAny(Object? value, {int fallback = 0}) {
+  if (value is int) return value;
+  if (value is num) return value.round();
+  return int.tryParse(value?.toString() ?? '') ?? fallback;
+}
+
 String _hash(String value) {
   return sha1.convert(utf8.encode(value)).toString().substring(0, 12);
+}
+
+String _importGroupId(String sourceUrl, String factoryId) {
+  final source = sourceUrl.trim();
+  if (source.isNotEmpty) return 'repo:${_hash('$source:$factoryId')}';
+  return 'clipboard:$factoryId';
 }
 
 String _animekoBaseUrl(String searchUrl, String rawBaseUrl) {

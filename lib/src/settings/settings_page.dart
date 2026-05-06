@@ -16,80 +16,104 @@ class SettingsHubPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return AsyncAnimeGate(
       builder: (context, state) {
+        final compact = MediaQuery.sizeOf(context).width < 760;
+        final tiles = [
+          _SettingsHubTile(
+            icon: Icons.download_done,
+            title: '下载管理',
+            value: '${state.offlineTasks.length}',
+            onTap: () => context.push('/profile/offline'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.extension_outlined,
+            title: '规则管理',
+            value:
+                '${state.rulePlugins.enabledIds.length}/${state.rulePlugins.installedIds.length}',
+            onTap: () => context.push('/profile/rules'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.hub_outlined,
+            title: '视频源',
+            value:
+                '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
+            onTap: () => context.push('/profile/sources'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.subtitles,
+            title: '弹幕设置',
+            value: state.danmaku.enabled ? '开启' : '关闭',
+            onTap: () => context.push('/profile/danmaku'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.play_circle_outline,
+            title: '播放设置',
+            value: '偏好',
+            onTap: () => context.push('/settings/playback'),
+          ),
+        ];
         return AppChrome(
           active: ChromeDestination.settings,
           showSearch: false,
           title: '设置',
           rightRail: _SettingsHubRail(state: state),
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 0,
+              120,
+            ),
             children: [
-              AppPanel(
-                borderColor: AppColors.borderBright,
-                child: const Row(
-                  children: [
-                    Icon(Icons.settings_outlined, color: AppColors.primary),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: SectionTitle(
-                        title: '设置',
-                        subtitle: '播放、资源、缓存和弹幕统一管理',
+              if (!compact) ...[
+                AppPanel(
+                  borderColor: AppColors.borderBright,
+                  child: const Row(
+                    children: [
+                      Icon(Icons.settings_outlined, color: AppColors.primary),
+                      SizedBox(width: 10),
+                      Expanded(
+                        child: SectionTitle(
+                          title: '设置',
+                          subtitle: '播放、资源、缓存和弹幕统一管理',
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
+              ],
               LayoutBuilder(
                 builder: (context, constraints) {
+                  if (compact) {
+                    return AppPanel(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      child: Column(
+                        children: [
+                          for (var i = 0; i < tiles.length; i++) ...[
+                            tiles[i],
+                            if (i != tiles.length - 1)
+                              const SizedBox(height: 8),
+                          ],
+                        ],
+                      ),
+                    );
+                  }
                   final columns = constraints.maxWidth >= 1080
                       ? 4
                       : constraints.maxWidth >= 760
                       ? 3
-                      : constraints.maxWidth >= 520
-                      ? 2
-                      : 1;
+                      : 2;
                   return GridView.count(
                     crossAxisCount: columns,
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
                     mainAxisSpacing: 12,
                     crossAxisSpacing: 12,
-                    childAspectRatio: columns == 1 ? 4.2 : 2.5,
-                    children: [
-                      _SettingsHubTile(
-                        icon: Icons.download_done,
-                        title: '下载管理',
-                        value: '${state.offlineTasks.length}',
-                        onTap: () => context.push('/profile/offline'),
-                      ),
-                      _SettingsHubTile(
-                        icon: Icons.extension_outlined,
-                        title: '规则管理',
-                        value:
-                            '${state.rulePlugins.enabledIds.length}/${state.rulePlugins.installedIds.length}',
-                        onTap: () => context.push('/profile/rules'),
-                      ),
-                      _SettingsHubTile(
-                        icon: Icons.hub_outlined,
-                        title: '视频源',
-                        value:
-                            '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
-                        onTap: () => context.push('/profile/sources'),
-                      ),
-                      _SettingsHubTile(
-                        icon: Icons.subtitles,
-                        title: '弹幕设置',
-                        value: state.danmaku.enabled ? '开启' : '关闭',
-                        onTap: () => context.push('/profile/danmaku'),
-                      ),
-                      _SettingsHubTile(
-                        icon: Icons.play_circle_outline,
-                        title: '播放设置',
-                        value: '偏好',
-                        onTap: () => context.push('/settings/playback'),
-                      ),
-                    ],
+                    childAspectRatio: 2.5,
+                    children: tiles,
                   );
                 },
               ),
@@ -116,15 +140,20 @@ class _SettingsHubTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: AppPanel(
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 12 : 16,
+          vertical: compact ? 12 : 16,
+        ),
         color: AppColors.panelHigh,
         child: Row(
           children: [
-            Icon(icon, color: AppColors.primary, size: 30),
-            const SizedBox(width: 14),
+            Icon(icon, color: AppColors.primary, size: compact ? 24 : 30),
+            SizedBox(width: compact ? 12 : 14),
             Expanded(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -134,10 +163,14 @@ class _SettingsHubTile extends StatelessWidget {
                     title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.text,
-                      fontWeight: FontWeight.w900,
-                    ),
+                    style:
+                        (compact
+                                ? Theme.of(context).textTheme.titleSmall
+                                : Theme.of(context).textTheme.titleMedium)
+                            ?.copyWith(
+                              color: AppColors.text,
+                              fontWeight: FontWeight.w900,
+                            ),
                   ),
                   const SizedBox(height: 3),
                   Text(
@@ -151,6 +184,14 @@ class _SettingsHubTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (compact) ...[
+              const SizedBox(width: 8),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: AppColors.faint,
+                size: 22,
+              ),
+            ],
           ],
         ),
       ),
@@ -321,14 +362,31 @@ class PlaybackSettingsView extends StatelessWidget {
               children: [
                 _SettingsTitle(onBack: onBack, compact: compact),
                 if (compact) ...[
-                  _PlaybackInfoCard(
-                    subject: subject,
-                    episode: episode,
-                    line: line,
-                    playbackMessage: playbackMessage,
+                  _SettingsDisclosure(
+                    icon: Icons.info_outline_rounded,
+                    title: '播放信息',
+                    subtitle:
+                        '${_textOrFallback(line?.providerName)} · ${_playbackStatusText(line, playbackMessage)}',
+                    child: _PlaybackInfoContent(
+                      subject: subject,
+                      episode: episode,
+                      line: line,
+                      playbackMessage: playbackMessage,
+                      showTitle: false,
+                    ),
                   ),
                   const SizedBox(height: 12),
-                  _ShortcutHelpCard(settings: settings),
+                  _SettingsDisclosure(
+                    icon: Icons.keyboard_alt_outlined,
+                    title: '按键说明',
+                    subtitle: settings.keyboardShortcutsEnabled
+                        ? '已启用 · Space / K / F / M'
+                        : '已关闭',
+                    child: _ShortcutHelpContent(
+                      settings: settings,
+                      showTitle: false,
+                    ),
+                  ),
                 ],
                 const SizedBox(height: 12),
                 _VolumeCard(settings: settings, onChanged: onChanged),
@@ -411,7 +469,7 @@ class PlaybackSettingsView extends StatelessWidget {
                   children: [
                     _SwitchRow(
                       title: '超分辨率',
-                      subtitle: '对硬件性能有要求，遇到卡顿请关闭',
+                      subtitle: 'Anime4K 实时超分，对硬件性能有要求',
                       value: settings.superResolution,
                       onChanged: (value) =>
                           onChanged(settings.copyWith(superResolution: value)),
@@ -608,18 +666,27 @@ class _SettingsTitle extends StatelessWidget {
   }
 }
 
-class _PlaybackInfoCard extends StatelessWidget {
-  const _PlaybackInfoCard({
+class _PlaybackInfoContent extends StatelessWidget {
+  const _PlaybackInfoContent({
     required this.subject,
     required this.episode,
     required this.line,
     required this.playbackMessage,
+    this.showTitle = true,
   });
 
   final AnimeSubject? subject;
   final AnimeEpisode? episode;
   final PlaybackLine? line;
   final String? playbackMessage;
+  final bool showTitle;
+
+  String get _contentTitle {
+    final title = subject?.title.trim();
+    final episodeText = episode == null ? '' : ' · 第${episode!.number}集';
+    if (title == null || title.isEmpty) return '未选择内容$episodeText';
+    return '$title$episodeText';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -629,21 +696,17 @@ class _PlaybackInfoCard extends StatelessWidget {
       _InfoPair('线路', _textOrFallback(line?.title)),
       _InfoPair('清晰度', _textOrFallback(line?.quality)),
       _InfoPair('格式', _textOrFallback(line?.format)),
-      _InfoPair('状态', _statusText),
+      _InfoPair('状态', _playbackStatusText(line, playbackMessage)),
       _InfoPair('延迟', _latencyText(line?.latency)),
       _InfoPair('大小', _textOrFallback(line?.sizeLabel)),
       _InfoPair('地址', _hostText(line?.url)),
     ];
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF202020),
-        borderRadius: BorderRadius.circular(7),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    return Padding(
+      padding: EdgeInsets.fromLTRB(18, showTitle ? 16 : 14, 18, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (showTitle) ...[
             Text(
               '播放信息',
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
@@ -652,65 +715,46 @@ class _PlaybackInfoCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            for (final row in rows)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: 64,
-                      child: Text(
-                        row.label,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.white38),
-                      ),
-                    ),
-                    Expanded(
-                      child: Text(
-                        row.value,
-                        maxLines: row.label == '地址' ? 2 : 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
           ],
-        ),
+          for (final row in rows)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 64,
+                    child: Text(
+                      row.label,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Colors.white38),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      row.value,
+                      maxLines: row.label == '地址' ? 2 : 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
-
-  String get _contentTitle {
-    final title = subject?.title.trim();
-    final episodeText = episode == null ? '' : ' · 第${episode!.number}集';
-    if (title == null || title.isEmpty) return '未选择内容$episodeText';
-    return '$title$episodeText';
-  }
-
-  String get _statusText {
-    final message = playbackMessage?.trim();
-    if (line == null) return message?.isNotEmpty == true ? message! : '等待选线';
-    final lineMessage = line!.message?.trim();
-    if (!line!.available) {
-      return lineMessage?.isNotEmpty == true ? lineMessage! : '不可用';
-    }
-    if ((line!.url ?? '').trim().isEmpty) {
-      return lineMessage?.isNotEmpty == true ? lineMessage! : '未返回播放地址';
-    }
-    return message?.isNotEmpty == true ? message! : '可播放';
-  }
 }
 
-class _ShortcutHelpCard extends StatelessWidget {
-  const _ShortcutHelpCard({required this.settings});
+class _ShortcutHelpContent extends StatelessWidget {
+  const _ShortcutHelpContent({required this.settings, this.showTitle = true});
 
   final PlaybackSettings settings;
+  final bool showTitle;
 
   @override
   Widget build(BuildContext context) {
@@ -729,16 +773,12 @@ class _ShortcutHelpCard extends StatelessWidget {
       if (settings.shortcutReload) const _ShortcutPair('R', '重载当前线路'),
       const _ShortcutPair('Esc', '关闭侧栏或退出全屏'),
     ];
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF202020),
-        borderRadius: BorderRadius.circular(7),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+    return Padding(
+      padding: EdgeInsets.fromLTRB(18, showTitle ? 16 : 14, 18, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (showTitle) ...[
             Row(
               children: [
                 Expanded(
@@ -759,42 +799,42 @@ class _ShortcutHelpCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            if (!enabled)
-              Text(
-                '开启 Windows 快捷键后生效。',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
-              )
-            else
-              for (final item in items)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 9),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 92,
-                        child: Text(
-                          item.keys,
-                          style: Theme.of(context).textTheme.labelLarge
-                              ?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                              ),
-                        ),
-                      ),
-                      Expanded(
-                        child: Text(
-                          item.description,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(color: Colors.white60),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
           ],
-        ),
+          if (!enabled)
+            Text(
+              '开启 Windows 快捷键后生效。',
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
+            )
+          else
+            for (final item in items)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 9),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 92,
+                      child: Text(
+                        item.keys,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        item.description,
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodyMedium?.copyWith(color: Colors.white60),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+        ],
       ),
     );
   }
@@ -818,6 +858,19 @@ String _textOrFallback(String? value) {
   final text = value?.trim();
   if (text == null || text.isEmpty) return '未知';
   return text;
+}
+
+String _playbackStatusText(PlaybackLine? line, String? playbackMessage) {
+  final message = playbackMessage?.trim();
+  if (line == null) return message?.isNotEmpty == true ? message! : '等待选线';
+  final lineMessage = line.message?.trim();
+  if (!line.available) {
+    return lineMessage?.isNotEmpty == true ? lineMessage! : '不可用';
+  }
+  if ((line.url ?? '').trim().isEmpty) {
+    return lineMessage?.isNotEmpty == true ? lineMessage! : '未返回播放地址';
+  }
+  return message?.isNotEmpty == true ? message! : '可播放';
 }
 
 String _latencyText(Duration? value) {
@@ -913,6 +966,105 @@ class _SettingsCard extends StatelessWidget {
               if (i != children.length - 1)
                 const Divider(height: 1, color: Color(0xFF303030)),
             ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsDisclosure extends StatefulWidget {
+  const _SettingsDisclosure({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  @override
+  State<_SettingsDisclosure> createState() => _SettingsDisclosureState();
+}
+
+class _SettingsDisclosureState extends State<_SettingsDisclosure> {
+  var _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF202020),
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: Column(
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(7),
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 13, 14, 13),
+                child: Row(
+                  children: [
+                    Icon(widget.icon, color: Colors.white70, size: 22),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.title,
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            widget.subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: Colors.white54),
+                          ),
+                        ],
+                      ),
+                    ),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      child: const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: Colors.white54,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            AnimatedCrossFade(
+              firstChild: const SizedBox.shrink(),
+              secondChild: Column(
+                children: [
+                  const Divider(height: 1, color: Color(0xFF303030)),
+                  widget.child,
+                ],
+              ),
+              crossFadeState: _expanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 180),
+              firstCurve: Curves.easeOutCubic,
+              secondCurve: Curves.easeOutCubic,
+              sizeCurve: Curves.easeOutCubic,
+            ),
           ],
         ),
       ),

@@ -9,6 +9,8 @@ import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 import '../domain/anime_models.dart';
 import 'rule_models.dart';
 
+const _playableProbeTimeout = Duration(seconds: 6);
+
 class RulePlaybackResolver {
   const RulePlaybackResolver({
     http.Client? client,
@@ -133,20 +135,33 @@ class RulePlaybackResolver {
       if (playableUrl == null || !_looksPlayable(playableUrl)) continue;
 
       final referer = _animekoVideoReferer(config, link.url);
+      final headers = _animekoVideoHeaders(rule, config, referer);
+      final probe = await _probePlayableUrl(client, playableUrl, headers);
       lines.add(
-        _availableLine(
-          rule,
-          episode,
-          url: playableUrl,
-          title:
-              '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}',
-          latency: started.elapsed,
-          referer: referer,
-          quality: config.defaultResolution.trim().isEmpty
-              ? null
-              : config.defaultResolution.trim(),
-          headers: _animekoVideoHeaders(rule, config, referer),
-        ),
+        probe.available
+            ? _availableLine(
+                rule,
+                episode,
+                url: playableUrl,
+                title:
+                    '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}',
+                latency: started.elapsed,
+                referer: referer,
+                quality: config.defaultResolution.trim().isEmpty
+                    ? null
+                    : config.defaultResolution.trim(),
+                headers: headers,
+              )
+            : _deadLine(
+                rule,
+                episode,
+                url: playableUrl,
+                title:
+                    '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}',
+                latency: started.elapsed,
+                message: probe.message,
+                headers: headers,
+              ),
       );
     }
 
@@ -227,16 +242,29 @@ class RulePlaybackResolver {
       );
       final playableUrl = _extractPlayableUrl(playHtml, playPageUrl);
       if (playableUrl == null) continue;
+      final headers = _headers(rule: rule, referer: playPageUrl);
+      final probe = await _probePlayableUrl(client, playableUrl, headers);
 
       lines.add(
-        _availableLine(
-          rule,
-          episode,
-          url: playableUrl,
-          title: '${episode.displayTitle} · 线路${roadIndex + 1}',
-          latency: started.elapsed,
-          referer: playPageUrl,
-        ),
+        probe.available
+            ? _availableLine(
+                rule,
+                episode,
+                url: playableUrl,
+                title: '${episode.displayTitle} · 线路${roadIndex + 1}',
+                latency: started.elapsed,
+                referer: playPageUrl,
+                headers: headers,
+              )
+            : _deadLine(
+                rule,
+                episode,
+                url: playableUrl,
+                title: '${episode.displayTitle} · 线路${roadIndex + 1}',
+                latency: started.elapsed,
+                message: probe.message,
+                headers: headers,
+              ),
       );
     }
 
@@ -332,16 +360,38 @@ class RulePlaybackResolver {
       if (playableUrl == null || !_looksPlayable(playableUrl)) continue;
 
       final title = _cleanText(_cutByRule(episodeSegment, config.playTitle));
+      final normalizedPlayableUrl = _normalizePlayableUrl(
+        playableUrl,
+        playPageUrl,
+      );
+      final headers = _headers(rule: rule, referer: playPageUrl);
+      final probe = await _probePlayableUrl(
+        client,
+        normalizedPlayableUrl,
+        headers,
+      );
       lines.add(
-        _availableLine(
-          rule,
-          episode,
-          url: _normalizePlayableUrl(playableUrl, playPageUrl),
-          title:
-              '${title.isEmpty ? episode.displayTitle : title} · 线路${groupIndex + 1}',
-          latency: started.elapsed,
-          referer: playPageUrl,
-        ),
+        probe.available
+            ? _availableLine(
+                rule,
+                episode,
+                url: normalizedPlayableUrl,
+                title:
+                    '${title.isEmpty ? episode.displayTitle : title} · 线路${groupIndex + 1}',
+                latency: started.elapsed,
+                referer: playPageUrl,
+                headers: headers,
+              )
+            : _deadLine(
+                rule,
+                episode,
+                url: normalizedPlayableUrl,
+                title:
+                    '${title.isEmpty ? episode.displayTitle : title} · 线路${groupIndex + 1}',
+                latency: started.elapsed,
+                message: probe.message,
+                headers: headers,
+              ),
       );
     }
 
@@ -443,6 +493,33 @@ class RulePlaybackResolver {
     );
   }
 
+  PlaybackLine _deadLine(
+    RulePlugin rule,
+    AnimeEpisode episode, {
+    required String url,
+    required String title,
+    required Duration latency,
+    required String message,
+    required Map<String, String> headers,
+  }) {
+    final normalizedUrl = _normalizePlayableUrl(url, headers['Referer'] ?? '');
+    return PlaybackLine(
+      id: 'rule:${rule.id}:${episode.id}:dead:${normalizedUrl.hashCode}',
+      episodeId: episode.id,
+      providerId: rule.id,
+      providerName: rule.name,
+      title: title,
+      quality: rule.tags.contains('4K') ? '4K/HD' : 'HD',
+      format: _formatForUrl(normalizedUrl, rule.engine),
+      url: normalizedUrl,
+      headers: headers,
+      latency: latency,
+      sizeLabel: _sizeLabelForUrl(normalizedUrl),
+      available: false,
+      message: message,
+    );
+  }
+
   PlaybackLine _unavailableLine(
     RulePlugin rule,
     AnimeSubject subject,
@@ -498,6 +575,46 @@ class RulePlaybackResolver {
     if (cookie.isNotEmpty) headers['Cookie'] = cookie;
     return headers;
   }
+
+  Future<_PlayableProbeResult> _probePlayableUrl(
+    http.Client client,
+    String url,
+    Map<String, String> headers,
+  ) async {
+    final target = Uri.tryParse(url);
+    if (target == null || !target.hasScheme) {
+      return const _PlayableProbeResult(false, '视频地址格式不正确。');
+    }
+    try {
+      final response = await client
+          .get(target, headers: _videoProbeHeaders(headers))
+          .timeout(_playableProbeTimeout);
+      if (response.statusCode >= 200 && response.statusCode < 400) {
+        return const _PlayableProbeResult(true, '');
+      }
+      if (response.statusCode == 403) {
+        return const _PlayableProbeResult(false, '视频 CDN 拒绝访问，可能有防盗链或地区限制。');
+      }
+      if (response.statusCode == 404) {
+        return const _PlayableProbeResult(false, '视频 CDN 返回 404，这条播放地址已经失效。');
+      }
+      return _PlayableProbeResult(
+        false,
+        '视频 CDN 返回 HTTP ${response.statusCode}。',
+      );
+    } on TimeoutException {
+      return const _PlayableProbeResult(false, '视频 CDN 连接超时。');
+    } catch (error) {
+      return _PlayableProbeResult(false, '视频 CDN 无法访问：${_shortError(error)}');
+    }
+  }
+}
+
+class _PlayableProbeResult {
+  const _PlayableProbeResult(this.available, this.message);
+
+  final bool available;
+  final String message;
 }
 
 class HttpException implements Exception {
@@ -1269,6 +1386,18 @@ String _friendlyError(Object error) {
   if (text.contains('HTTP')) return '规则源请求失败：$text';
   if (text.contains('SocketException')) return '网络不可用或规则源无法访问。';
   return '解析失败：$text';
+}
+
+Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
+  return {...headers, 'Accept': '*/*', 'Range': 'bytes=0-2048'};
+}
+
+String _shortError(Object error) {
+  final text = error.toString();
+  if (text.contains('SocketException')) return '网络不可用或源站无法访问';
+  if (text.contains('HandshakeException')) return '证书或 TLS 握手失败';
+  if (text.contains('ClientException')) return '连接被中断';
+  return text.length > 60 ? '${text.substring(0, 60)}...' : text;
 }
 
 String _formatForUrl(String url, String fallback) {

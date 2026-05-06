@@ -123,6 +123,7 @@ void main() {
 
   test('playback settings persist shortcut configuration', () {
     const settings = PlaybackSettings(
+      superResolution: true,
       keyboardShortcutsEnabled: false,
       shortcutPlayPause: false,
       shortcutSeek: false,
@@ -135,6 +136,7 @@ void main() {
     final json = settings.toJson();
     final restored = PlaybackSettings.fromJson(json);
 
+    expect(restored.superResolution, isTrue);
     expect(restored.keyboardShortcutsEnabled, isFalse);
     expect(restored.shortcutPlayPause, isFalse);
     expect(restored.shortcutSeek, isFalse);
@@ -318,6 +320,62 @@ void main() {
       contains('Demo Rule'),
     );
   });
+
+  test('rule playback source uses quick and expanded lookup modes', () async {
+    final requestedHosts = <String>[];
+    final rules = List.generate(
+      10,
+      (index) => _animekoLookupRule(
+        id: 'custom:animeko:bulk$index',
+        name: 'Bulk $index',
+        host: 'rule$index.example',
+        groupId: 'repo:creamycake-css1',
+        priority: index,
+      ),
+    );
+    final repository = RulePluginRepository(extraRules: rules);
+    final source = RulePlaybackSourceRepository(
+      repository: repository,
+      ruleState: RulePluginState(
+        installedIds: rules.map((rule) => rule.id).toSet(),
+        enabledIds: rules.map((rule) => rule.id).toSet(),
+        customRules: rules,
+      ),
+      resolver: RulePlaybackResolver(
+        client: MockClient((request) async {
+          requestedHosts.add(request.url.host);
+          return http.Response('not found', 404);
+        }),
+      ),
+    );
+
+    final quickLines = await source.linesForEpisode(_animeSubject, _episode);
+
+    expect(requestedHosts, hasLength(6));
+    expect(requestedHosts, [
+      'rule0.example',
+      'rule1.example',
+      'rule2.example',
+      'rule3.example',
+      'rule4.example',
+      'rule5.example',
+    ]);
+    expect(
+      quickLines.map((line) => line.providerName),
+      isNot(contains('Bulk 6')),
+    );
+
+    requestedHosts.clear();
+    final expandedLines = await source.linesForEpisodeMode(
+      _animeSubject,
+      _episode,
+      expandAll: true,
+    );
+
+    expect(requestedHosts, hasLength(10));
+    expect(requestedHosts.last, 'rule9.example');
+    expect(expandedLines.map((line) => line.providerName), contains('Bulk 9'));
+  });
 }
 
 const _animeSubject = AnimeSubject(
@@ -372,6 +430,55 @@ const _movieSubject = AnimeSubject(
   totalEpisodes: 1,
   source: 'wikidata',
 );
+
+const _episode = AnimeEpisode(
+  id: 101,
+  subjectId: 1,
+  number: 1,
+  title: '',
+  airdate: '2026-01-01',
+  duration: '24:00',
+  description: '第一集',
+);
+
+RulePlugin _animekoLookupRule({
+  required String id,
+  required String name,
+  required String host,
+  required String groupId,
+  required int priority,
+}) {
+  return RulePlugin(
+    id: id,
+    name: name,
+    version: '2',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.anime,
+    engine: 'animeko-web-selector',
+    updatedAt: DateTime(2026, 5, 6),
+    qualityScore: 80,
+    tags: const ['Animeko', 'CSS'],
+    baseUrl: 'https://$host/',
+    searchUrl: 'https://$host/search?wd={keyword}',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    groupId: groupId,
+    priority: priority,
+    animeko: AnimekoWebSelectorConfig(
+      searchUrl: 'https://$host/search?wd={keyword}',
+      subjectFormatId: 'a',
+      channelFormatId: 'index-grouped',
+      subjectA: const AnimekoSubjectAConfig(selectLists: '.result a'),
+      channelFlattened: const AnimekoChannelFlattenedConfig(
+        selectEpisodeLists: '.playlist',
+        selectEpisodesFromList: 'a',
+        matchEpisodeSortFromName: r'(?<ep>\d+)',
+      ),
+      matchVideoUrl: r'(?<v>https?:\/\/.+\.(m3u8|mp4))',
+    ),
+  );
+}
 
 String? _headerValue(http.BaseRequest request, String name) {
   final normalized = name.toLowerCase();

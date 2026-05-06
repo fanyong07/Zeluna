@@ -17,6 +17,7 @@ class ProfilePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return AsyncAnimeGate(
       builder: (context, state) {
+        final compact = MediaQuery.sizeOf(context).width < 760;
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
@@ -24,16 +25,21 @@ class ProfilePage extends ConsumerWidget {
           onBack: () => safeNavigateBack(context),
           rightRail: _ProfileRightRail(state: state),
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 0,
+              120,
+            ),
             children: [
               _ProfileBanner(state: state),
-              const SizedBox(height: 16),
+              SizedBox(height: compact ? 12 : 16),
               _ProfilePlaylistSection(state: state),
-              const SizedBox(height: 16),
+              SizedBox(height: compact ? 12 : 16),
               _ProfileShortcutSection(state: state),
-              const SizedBox(height: 16),
+              SizedBox(height: compact ? 12 : 16),
               _HistoryStrip(entries: state.history),
-              const SizedBox(height: 16),
+              SizedBox(height: compact ? 12 : 16),
               _DownloadStrip(entries: state.offlineTasks),
             ],
           ),
@@ -50,9 +56,10 @@ class _ProfileBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     final hero = state.homeFeed.hero;
     return SizedBox(
-      height: 176,
+      height: compact ? 128 : 176,
       child: AppPanel(
         padding: EdgeInsets.zero,
         borderColor: AppColors.borderBright,
@@ -75,22 +82,25 @@ class _ProfileBanner extends StatelessWidget {
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.all(24),
+                padding: EdgeInsets.all(compact ? 16 : 24),
                 child: Row(
                   children: [
                     CircleAvatar(
-                      radius: 48,
+                      radius: compact ? 34 : 48,
                       backgroundColor: AppColors.primary,
                       child: Text(
                         state.profile.avatarText,
-                        style: Theme.of(context).textTheme.displaySmall
-                            ?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w900,
-                            ),
+                        style:
+                            (compact
+                                    ? Theme.of(context).textTheme.headlineMedium
+                                    : Theme.of(context).textTheme.displaySmall)
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                ),
                       ),
                     ),
-                    const SizedBox(width: 24),
+                    SizedBox(width: compact ? 14 : 24),
                     Expanded(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -103,20 +113,27 @@ class _ProfileBanner extends StatelessWidget {
                                   state.profile.nickname,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .headlineMedium
-                                      ?.copyWith(
-                                        color: AppColors.text,
-                                        fontWeight: FontWeight.w900,
-                                      ),
+                                  style:
+                                      (compact
+                                              ? Theme.of(
+                                                  context,
+                                                ).textTheme.titleLarge
+                                              : Theme.of(
+                                                  context,
+                                                ).textTheme.headlineMedium)
+                                          ?.copyWith(
+                                            color: AppColors.text,
+                                            fontWeight: FontWeight.w900,
+                                          ),
                                 ),
                               ),
-                              const SizedBox(width: 10),
-                              const SmallBadge(label: '年度大会员', active: true),
+                              if (!compact) ...[
+                                const SizedBox(width: 10),
+                                const SmallBadge(label: '年度大会员', active: true),
+                              ],
                             ],
                           ),
-                          const SizedBox(height: 8),
+                          SizedBox(height: compact ? 4 : 8),
                           Text(
                             'UID ${state.profile.uid} · 浓度 ${state.profile.density} · 硬币 ${state.profile.coins}',
                             maxLines: 1,
@@ -127,29 +144,33 @@ class _ProfileBanner extends StatelessWidget {
                                   fontWeight: FontWeight.w700,
                                 ),
                           ),
-                          const SizedBox(height: 10),
-                          Text(
-                            '在浩瀚的星海之中，总有一束光是为你而亮。',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(color: AppColors.text),
-                          ),
+                          if (!compact) ...[
+                            const SizedBox(height: 10),
+                            Text(
+                              '在浩瀚的星海之中，总有一束光是为你而亮。',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: AppColors.text),
+                            ),
+                          ],
                         ],
                       ),
                     ),
-                    _BannerMetric(
-                      label: '片单',
-                      value: '${state.favorites.length + 24}',
-                    ),
-                    _BannerMetric(
-                      label: '收藏',
-                      value: '${state.favorites.length + 156}',
-                    ),
-                    _BannerMetric(
-                      label: '关注',
-                      value: '${state.following.length + 36}',
-                    ),
+                    if (!compact) ...[
+                      _BannerMetric(
+                        label: '片单',
+                        value: '${state.favorites.length + 24}',
+                      ),
+                      _BannerMetric(
+                        label: '收藏',
+                        value: '${state.favorites.length + 156}',
+                      ),
+                      _BannerMetric(
+                        label: '关注',
+                        value: '${state.following.length + 36}',
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -201,6 +222,7 @@ class _ProfilePlaylistSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     final subjects = [
       state.homeFeed.hero,
       ...state.homeFeed.recommended,
@@ -216,9 +238,9 @@ class _ProfilePlaylistSection extends StatelessWidget {
               child: Text('全部 ${state.following.length} ›'),
             ),
           ),
-          const SizedBox(height: 14),
+          SizedBox(height: compact ? 10 : 14),
           SizedBox(
-            height: 150,
+            height: compact ? 124 : 150,
             child: ListView.separated(
               scrollDirection: Axis.horizontal,
               itemBuilder: (context, index) {
@@ -253,19 +275,24 @@ class _CreatePlaylistCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: SizedBox(
-        width: 150,
+        width: compact ? 132 : 150,
         child: AppPanel(
-          padding: const EdgeInsets.all(14),
+          padding: EdgeInsets.all(compact ? 10 : 14),
           color: AppColors.panelHigh,
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.add, color: AppColors.primary, size: 34),
-              const SizedBox(height: 12),
+              Icon(
+                Icons.add,
+                color: AppColors.primary,
+                size: compact ? 28 : 34,
+              ),
+              SizedBox(height: compact ? 8 : 12),
               Text(
                 '新建片单',
                 style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -273,13 +300,15 @@ class _CreatePlaylistCard extends StatelessWidget {
                   fontWeight: FontWeight.w900,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                '打开片单管理',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-              ),
+              if (!compact) ...[
+                const SizedBox(height: 4),
+                Text(
+                  '打开片单管理',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                ),
+              ],
             ],
           ),
         ),
@@ -303,8 +332,9 @@ class _PlaylistCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return SizedBox(
-      width: 170,
+      width: compact ? 150 : 170,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
@@ -370,69 +400,79 @@ class _ProfileShortcutSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return AppPanel(
+      padding: EdgeInsets.all(compact ? 12 : 16),
       child: Column(
         children: [
           const SectionTitle(title: '我的内容'),
-          const SizedBox(height: 14),
-          GridView.count(
-            crossAxisCount: 6,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            mainAxisSpacing: 12,
-            crossAxisSpacing: 12,
-            childAspectRatio: 2.15,
-            children: [
-              _ShortcutTile(
-                icon: Icons.bookmark_border,
-                title: '追番列表',
-                value: '${state.following.length}',
-                onTap: () => context.push('/profile/following'),
-              ),
-              _ShortcutTile(
-                icon: Icons.favorite,
-                title: '全部收藏',
-                value: '${state.favorites.length}',
-                onTap: () => context.push('/profile/images'),
-              ),
-              _ShortcutTile(
-                icon: Icons.history,
-                title: '观看记录',
-                value: '${state.history.length}',
-                onTap: () => _scrollToHistory(context),
-              ),
-              _ShortcutTile(
-                icon: Icons.download_done,
-                title: '下载管理',
-                value: '${state.offlineTasks.length}',
-                onTap: () => context.push('/profile/offline'),
-              ),
-              _ShortcutTile(
-                icon: Icons.extension_outlined,
-                title: '规则管理',
-                value: '资源',
-                onTap: () => context.push('/profile/rules'),
-              ),
-              _ShortcutTile(
-                icon: Icons.hub_outlined,
-                title: '视频源',
-                value:
-                    '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
-                onTap: () => context.push('/profile/sources'),
-              ),
-              _ShortcutTile(
-                icon: Icons.subtitles,
-                title: '弹幕设置',
-                value: '过滤',
-                onTap: () => context.push('/profile/danmaku'),
-              ),
-              _ShortcutTile(
-                icon: Icons.play_circle_outline,
-                title: '播放设置',
-                value: '偏好',
-                onTap: () => context.push('/settings/playback'),
-              ),
-            ],
+          SizedBox(height: compact ? 10 : 14),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = compact
+                  ? 2
+                  : (constraints.maxWidth / 168).floor().clamp(3, 6);
+              final shortcuts = [
+                _ShortcutTile(
+                  icon: Icons.bookmark_border,
+                  title: '追番列表',
+                  value: '${state.following.length}',
+                  onTap: () => context.push('/profile/following'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.favorite,
+                  title: '全部收藏',
+                  value: '${state.favorites.length}',
+                  onTap: () => context.push('/profile/images'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.history,
+                  title: '观看记录',
+                  value: '${state.history.length}',
+                  onTap: () => _scrollToHistory(context),
+                ),
+                _ShortcutTile(
+                  icon: Icons.download_done,
+                  title: '下载管理',
+                  value: '${state.offlineTasks.length}',
+                  onTap: () => context.push('/profile/offline'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.extension_outlined,
+                  title: '规则管理',
+                  value: '资源',
+                  onTap: () => context.push('/profile/rules'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.hub_outlined,
+                  title: '视频源',
+                  value:
+                      '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
+                  onTap: () => context.push('/profile/sources'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.subtitles,
+                  title: '弹幕设置',
+                  value: '过滤',
+                  onTap: () => context.push('/profile/danmaku'),
+                ),
+                _ShortcutTile(
+                  icon: Icons.play_circle_outline,
+                  title: '播放设置',
+                  value: '偏好',
+                  onTap: () => context.push('/settings/playback'),
+                ),
+              ];
+              return GridView.count(
+                crossAxisCount: columns,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: compact ? 8 : 12,
+                crossAxisSpacing: compact ? 8 : 12,
+                childAspectRatio: compact ? 2.65 : 2.15,
+                children: shortcuts,
+              );
+            },
           ),
         ],
       ),
@@ -455,6 +495,7 @@ class _ShortcutTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -465,11 +506,14 @@ class _ShortcutTile extends StatelessWidget {
           border: Border.all(color: AppColors.border),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 11 : 10,
+            vertical: compact ? 9 : 8,
+          ),
           child: Row(
             children: [
-              Icon(icon, color: AppColors.primary, size: 20),
-              const SizedBox(width: 8),
+              Icon(icon, color: AppColors.primary, size: compact ? 22 : 20),
+              SizedBox(width: compact ? 9 : 8),
               Expanded(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
@@ -479,11 +523,15 @@ class _ShortcutTile extends StatelessWidget {
                       title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: AppColors.text,
-                        fontWeight: FontWeight.w900,
-                        height: 1.0,
-                      ),
+                      style:
+                          (compact
+                                  ? Theme.of(context).textTheme.labelLarge
+                                  : Theme.of(context).textTheme.labelSmall)
+                              ?.copyWith(
+                                color: AppColors.text,
+                                fontWeight: FontWeight.w900,
+                                height: 1.0,
+                              ),
                     ),
                     Text(
                       value,

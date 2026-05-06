@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -13,6 +14,7 @@ import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
+import 'anime4k_shader_manager.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key, required this.request});
@@ -28,6 +30,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   late final Player _player;
   late final VideoController _controller;
   late final FocusNode _shortcutFocusNode;
+  final _anime4kShaders = const Anime4KShaderManager();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   final _failedLineIds = <String>{};
   PlaybackLine? _line;
@@ -42,7 +45,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
   double? _appliedVolume;
+  bool? _appliedSuperResolution;
+  bool _superResolutionAvailable = true;
   bool _controlsVisible = true;
+  bool _pointerInChromeHotZone = false;
   var _playing = false;
   var _buffering = false;
   var _loadingLine = false;
@@ -54,6 +60,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   var _leaving = false;
   var _lineLookupSerial = 0;
   var _openLineSerial = 0;
+  var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
   bool _episodePanel = false;
@@ -142,6 +149,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       autoHideChrome: _shouldAutoHidePlayerControls,
                       playerMessage: _surfaceMessage,
                       onUserInteraction: _revealPlayerControls,
+                      onChromeHotZoneChanged: _handlePlayerChromeHotZoneChanged,
                       onBack: _handleBack,
                       onReload: _reloadCurrentLine,
                       onPlayPause: _togglePlayPause,
@@ -192,6 +200,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                           episode: _episode,
                           selected: _line,
                           initialLines: _lines,
+                          onLinesLoaded: _mergeLinesFromPanel,
                           onSelected: _selectLine,
                         ),
                       ),
@@ -266,9 +275,30 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
     }
+    if (!_shouldAutoHidePlayerControls || _pointerInChromeHotZone) return;
+    _scheduleControlsHide();
+  }
+
+  void _handlePlayerChromeHotZoneChanged(bool inHotZone) {
+    if (!mounted || _pointerInChromeHotZone == inHotZone) return;
+    _pointerInChromeHotZone = inHotZone;
+    if (inHotZone) {
+      _controlsHideTimer?.cancel();
+      if (!_controlsVisible) setState(() => _controlsVisible = true);
+      return;
+    }
+    _scheduleControlsHide();
+  }
+
+  void _scheduleControlsHide() {
+    _controlsHideTimer?.cancel();
     if (!_shouldAutoHidePlayerControls) return;
     _controlsHideTimer = Timer(const Duration(seconds: 3), () {
-      if (!mounted || !_shouldAutoHidePlayerControls) return;
+      if (!mounted ||
+          !_shouldAutoHidePlayerControls ||
+          _pointerInChromeHotZone) {
+        return;
+      }
       setState(() => _controlsVisible = false);
     });
   }
@@ -337,7 +367,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
           if (!mounted) return;
           setState(() => _playing = value);
           if (value) {
-            _revealPlayerControls();
+            _scheduleControlsHide();
           } else {
             _controlsHideTimer?.cancel();
             if (!_controlsVisible) setState(() => _controlsVisible = true);
@@ -357,6 +387,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       ..add(
         _player.stream.buffer.listen((value) {
           if (mounted) setState(() => _buffer = value);
+        }),
+      )
+      ..add(
+        _player.stream.videoParams.listen((value) {
+          if (mounted) _refreshSuperResolutionShader();
         }),
       )
       ..add(
@@ -398,11 +433,64 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _appliedVolume = targetVolume;
       unawaited(_player.setVolume(targetVolume));
     }
+    _applyVideoRenderSettings(settings);
     if (settings.autoFullscreen && !_fullscreen) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && !_fullscreen) unawaited(_setFullscreen(true));
       });
     }
+  }
+
+  void _applyVideoRenderSettings(
+    PlaybackSettings settings, {
+    bool force = false,
+  }) {
+    if (!force && _appliedSuperResolution == settings.superResolution) {
+      return;
+    }
+    _appliedSuperResolution = settings.superResolution;
+    final serial = ++_superResolutionApplySerial;
+    unawaited(_setSuperResolutionShader(settings.superResolution, serial));
+  }
+
+  Future<void> _setSuperResolutionShader(bool enabled, int serial) async {
+    if (!_superResolutionAvailable && enabled) return;
+    try {
+      if (!enabled) {
+        if (serial != _superResolutionApplySerial) return;
+        await _setMpvProperty('glsl-shaders', '');
+        await _setMpvProperty('scale', 'bilinear');
+        await _setMpvProperty('cscale', 'bilinear');
+        await _setMpvProperty('dscale', 'mitchell');
+        return;
+      }
+
+      final shaderPaths = await _anime4kShaders.ensureInstalled();
+      if (serial != _superResolutionApplySerial) return;
+      await _setMpvProperty('scale', 'ewa_lanczossharp');
+      await _setMpvProperty('cscale', 'ewa_lanczossharp');
+      await _setMpvProperty('dscale', 'mitchell');
+      await _setMpvProperty('linear-downscaling', 'no');
+      await _setMpvProperty('sigmoid-upscaling', 'yes');
+      await _setMpvProperty('glsl-shaders', shaderPaths.join(';'));
+    } catch (error) {
+      _superResolutionAvailable = false;
+      if (!mounted || !enabled) return;
+      setState(() {
+        _playerMessage = '当前设备未能启用 Anime4K 超分，已继续使用普通播放。';
+      });
+    }
+  }
+
+  Future<void> _setMpvProperty(String property, String value) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    await (platform as dynamic).setProperty(property, value);
+  }
+
+  void _refreshSuperResolutionShader() {
+    _superResolutionAvailable = true;
+    _applyVideoRenderSettings(_currentSettings, force: true);
   }
 
   double _volumeFromSettings(PlaybackSettings settings) {
@@ -486,6 +574,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _muted ? 0 : _volumeFromSettings(_currentSettings),
       );
       await _player.open(Media(url, httpHeaders: line.headers), play: true);
+      _refreshSuperResolutionShader();
       if (!mounted || serial != _openLineSerial) return;
       setState(() {
         _loadingLine = false;
@@ -648,6 +737,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _playbackFailed = false;
     });
     unawaited(_openLine(line, force: true));
+  }
+
+  void _mergeLinesFromPanel(List<PlaybackLine> lines) {
+    if (!mounted || lines.isEmpty) return;
+    final merged = <String, PlaybackLine>{
+      for (final line in _lines) line.id: line,
+      for (final line in lines) line.id: line,
+    };
+    setState(() {
+      _lines = merged.values.toList(growable: false);
+      if (!_isPlayableLine(_line)) {
+        final available = _availableLines(_lines);
+        if (available.isNotEmpty) _line = available.first;
+      }
+    });
   }
 
   Future<void> _playNextEpisode() async {
@@ -827,6 +931,7 @@ class _PlayerCanvas extends StatelessWidget {
     required this.controlsVisible,
     required this.autoHideChrome,
     required this.onUserInteraction,
+    required this.onChromeHotZoneChanged,
   });
 
   final VideoController controller;
@@ -864,157 +969,172 @@ class _PlayerCanvas extends StatelessWidget {
   final VoidCallback onDanmakuPanel;
   final VoidCallback onSettingsPanel;
   final VoidCallback onUserInteraction;
+  final ValueChanged<bool> onChromeHotZoneChanged;
 
   @override
   Widget build(BuildContext context) {
     final showSideList = MediaQuery.sizeOf(context).width >= 1120;
     final chromeVisible = controlsVisible || !autoHideChrome;
+    final compact = MediaQuery.sizeOf(context).width < 640;
+    final horizontalInset = compact ? 14.0 : (fullscreen ? 28.0 : 18.0);
+    final topInset = fullscreen ? 10.0 : 12.0;
     return Stack(
       fit: StackFit.expand,
       children: [
         const ColoredBox(color: AppColors.bg),
         Padding(
-          padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+          padding: EdgeInsets.fromLTRB(
+            fullscreen ? 0 : 18,
+            fullscreen ? 0 : 14,
+            fullscreen ? 0 : 18,
+            fullscreen ? 0 : 18,
+          ),
           child: Row(
             children: [
               Expanded(
-                child: Column(
-                  children: [
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.topCenter,
-                      child: (!fullscreen && chromeVisible)
-                          ? Column(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black,
+                    borderRadius: fullscreen
+                        ? BorderRadius.zero
+                        : BorderRadius.circular(8),
+                    border: fullscreen
+                        ? null
+                        : Border.all(color: AppColors.borderBright),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: fullscreen
+                        ? BorderRadius.zero
+                        : BorderRadius.circular(8),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final hotZoneHeight = math.min(
+                          constraints.maxHeight * 0.28,
+                          compact ? 132.0 : 116.0,
+                        );
+                        final bottomHotZoneStart =
+                            constraints.maxHeight - hotZoneHeight;
+
+                        void updateHotZone(Offset localPosition) {
+                          final inHotZone =
+                              localPosition.dy <= hotZoneHeight ||
+                              localPosition.dy >= bottomHotZoneStart;
+                          onChromeHotZoneChanged(inHotZone);
+                        }
+
+                        return MouseRegion(
+                          hitTestBehavior: HitTestBehavior.translucent,
+                          onEnter: (event) =>
+                              updateHotZone(event.localPosition),
+                          onHover: (event) =>
+                              updateHotZone(event.localPosition),
+                          onExit: (_) => onChromeHotZoneChanged(false),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTapDown: (_) => onUserInteraction(),
+                            onPanDown: (_) => onUserInteraction(),
+                            onTap: () {
+                              onUserInteraction();
+                              if (chromeVisible) onPlayPause();
+                            },
+                            onDoubleTap: () {
+                              onUserInteraction();
+                              onFullscreen();
+                            },
+                            child: Stack(
+                              fit: StackFit.expand,
                               children: [
-                                _PlayerHeader(
-                                  subject: subject,
-                                  episode: episode,
+                                _StreamVideoSurface(
+                                  controller: controller,
                                   line: line,
-                                  onBack: onBack,
-                                  onReload: onReload,
-                                  onSettings: onSettingsPanel,
+                                  settings: settings,
+                                  loading: loadingLine || lineLookupInProgress,
+                                  failed: playbackFailed,
+                                  message: playerMessage,
+                                  poster: PosterArt(
+                                    coverUrl:
+                                        subject.bannerUrl ?? subject.coverUrl,
+                                    title: subject.title,
+                                  ),
                                 ),
-                                const SizedBox(height: 12),
-                              ],
-                            )
-                          : const SizedBox.shrink(),
-                    ),
-                    Expanded(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          color: Colors.black,
-                          borderRadius: fullscreen
-                              ? BorderRadius.zero
-                              : BorderRadius.circular(8),
-                          border: fullscreen
-                              ? null
-                              : Border.all(color: AppColors.borderBright),
-                        ),
-                        child: ClipRRect(
-                          borderRadius: fullscreen
-                              ? BorderRadius.zero
-                              : BorderRadius.circular(8),
-                          child: MouseRegion(
-                            onEnter: (_) => onUserInteraction(),
-                            onHover: (_) => onUserInteraction(),
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTapDown: (_) => onUserInteraction(),
-                              onPanDown: (_) => onUserInteraction(),
-                              onTap: () {
-                                onUserInteraction();
-                                if (chromeVisible) onPlayPause();
-                              },
-                              onDoubleTap: () {
-                                onUserInteraction();
-                                onFullscreen();
-                              },
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  _StreamVideoSurface(
-                                    controller: controller,
-                                    line: line,
-                                    settings: settings,
-                                    loading:
-                                        loadingLine || lineLookupInProgress,
-                                    failed: playbackFailed,
-                                    message: playerMessage,
-                                    poster: PosterArt(
-                                      coverUrl:
-                                          subject.bannerUrl ?? subject.coverUrl,
-                                      title: subject.title,
-                                    ),
-                                  ),
-                                  if (chromeVisible)
-                                    Positioned(
-                                      right: 18,
-                                      top: 18,
-                                      child: SmallBadge(
-                                        label: line?.quality ?? '????',
-                                      ),
-                                    ),
-                                  AnimatedOpacity(
-                                    opacity: chromeVisible ? 1 : 0,
-                                    duration: const Duration(milliseconds: 180),
-                                    child: IgnorePointer(
-                                      ignoring: !chromeVisible,
-                                      child: Stack(
-                                        fit: StackFit.expand,
-                                        children: [
-                                          _PlayerBottomBar(
-                                            line: line,
-                                            settings: settings,
-                                            services: services,
-                                            danmaku: danmaku,
-                                            position: position,
-                                            duration: duration,
-                                            buffer: buffer,
-                                            volume: volume,
-                                            playing: playing,
-                                            buffering: buffering,
-                                            loadingLine:
-                                                loadingLine ||
-                                                lineLookupInProgress,
-                                            fullscreen: fullscreen,
-                                            muted: muted,
-                                            onPlayPause: onPlayPause,
-                                            onRewind: onRewind,
-                                            onForward: onForward,
-                                            onSeek: onSeek,
-                                            onMute: onMute,
-                                            onFullscreen: onFullscreen,
-                                            onSubtitlePanel: onSubtitlePanel,
-                                            onDanmakuPanel: onDanmakuPanel,
-                                            onEpisodePanel: onEpisodePanel,
-                                            onLinePanel: onLinePanel,
-                                          ),
-                                          if (fullscreen)
-                                            Positioned(
-                                              left: 12,
-                                              top: 10,
-                                              child: IconButton(
-                                                tooltip: '??',
-                                                onPressed: onBack,
-                                                icon: const Icon(
-                                                  Icons.arrow_back,
-                                                  color: Colors.white,
-                                                ),
-                                              ),
+                                AnimatedOpacity(
+                                  opacity: chromeVisible ? 1 : 0,
+                                  duration: const Duration(milliseconds: 180),
+                                  child: IgnorePointer(
+                                    ignoring: !chromeVisible,
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        Positioned(
+                                          left: horizontalInset,
+                                          right: horizontalInset,
+                                          top: topInset,
+                                          child: _PlayerChromePanel(
+                                            child: _PlayerHeader(
+                                              subject: subject,
+                                              episode: episode,
+                                              line: line,
+                                              onBack: onBack,
+                                              onReload: onReload,
+                                              onSettings: onSettingsPanel,
                                             ),
-                                        ],
-                                      ),
+                                          ),
+                                        ),
+                                        Positioned(
+                                          right: horizontalInset,
+                                          top: compact ? 62 : 72,
+                                          child: Wrap(
+                                            spacing: 8,
+                                            children: [
+                                              if (settings.superResolution)
+                                                const SmallBadge(
+                                                  label: 'SR',
+                                                  active: true,
+                                                ),
+                                              SmallBadge(
+                                                label: line?.quality ?? '高清',
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        _PlayerBottomBar(
+                                          line: line,
+                                          settings: settings,
+                                          services: services,
+                                          danmaku: danmaku,
+                                          position: position,
+                                          duration: duration,
+                                          buffer: buffer,
+                                          volume: volume,
+                                          playing: playing,
+                                          buffering: buffering,
+                                          loadingLine:
+                                              loadingLine ||
+                                              lineLookupInProgress,
+                                          fullscreen: fullscreen,
+                                          muted: muted,
+                                          onPlayPause: onPlayPause,
+                                          onRewind: onRewind,
+                                          onForward: onForward,
+                                          onSeek: onSeek,
+                                          onMute: onMute,
+                                          onFullscreen: onFullscreen,
+                                          onSubtitlePanel: onSubtitlePanel,
+                                          onDanmakuPanel: onDanmakuPanel,
+                                          onEpisodePanel: onEpisodePanel,
+                                          onLinePanel: onLinePanel,
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
                           ),
-                        ),
-                      ),
+                        );
+                      },
                     ),
-                  ],
+                  ),
                 ),
               ),
               if (showSideList && !fullscreen) ...[
@@ -1061,17 +1181,18 @@ class _StreamVideoSurface extends StatelessWidget {
     final hasStream =
         line?.available == true && (line?.url?.trim().isNotEmpty ?? false);
     final shouldShowVideo = hasStream && !failed;
+    final video = Video(
+      controller: controller,
+      controls: null,
+      fit: _fitForVideoScale(settings.videoScale),
+      filterQuality: settings.superResolution
+          ? FilterQuality.high
+          : FilterQuality.low,
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (shouldShowVideo)
-          Video(
-            controller: controller,
-            controls: null,
-            fit: _fitForVideoScale(settings.videoScale),
-          )
-        else
-          poster,
+        if (shouldShowVideo) video else poster,
         DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -1146,6 +1267,27 @@ class _StreamVideoSurface extends StatelessWidget {
   }
 }
 
+class _PlayerChromePanel extends StatelessWidget {
+  const _PlayerChromePanel({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.bg.withValues(alpha: 0.74),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        child: child,
+      ),
+    );
+  }
+}
+
 BoxFit _fitForVideoScale(String value) {
   return switch (value) {
     '铺满' => BoxFit.cover,
@@ -1174,6 +1316,37 @@ class _PlayerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 640;
+    if (compact) {
+      return SizedBox(
+        height: 44,
+        child: Row(
+          children: [
+            IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back)),
+            Expanded(
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  SmallBadge(label: '第${episode.number}集', active: true),
+                  SmallBadge(label: line?.providerName ?? '找线路'),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: '刷新线路',
+              onPressed: onReload,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+            IconButton(
+              tooltip: '播放设置',
+              onPressed: onSettings,
+              icon: const Icon(Icons.tune_rounded),
+            ),
+          ],
+        ),
+      );
+    }
     return SizedBox(
       height: 44,
       child: Row(
@@ -1268,6 +1441,7 @@ class _PlayerBottomBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 640;
     final progress = _progress(position, duration);
     final bufferProgress = _progress(
       buffer > position ? buffer : position,
@@ -1275,9 +1449,9 @@ class _PlayerBottomBar extends StatelessWidget {
     );
     final canSeek = duration > Duration.zero;
     return Positioned(
-      left: fullscreen ? 28 : 18,
-      right: fullscreen ? 28 : 18,
-      bottom: fullscreen ? 18 : 12,
+      left: compact ? 14 : (fullscreen ? 28 : 18),
+      right: compact ? 14 : (fullscreen ? 28 : 18),
+      bottom: compact ? 14 : (fullscreen ? 18 : 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1302,134 +1476,258 @@ class _PlayerBottomBar extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: 52,
-            child: Row(
-              children: [
-                _ControlIconButton(
-                  icon: Icons.replay_10_rounded,
-                  tooltip: '快退 ${settings.rewindSeconds} 秒',
-                  onPressed: onRewind,
-                ),
-                const SizedBox(width: 10),
-                _ControlIconButton(
-                  icon: playing
-                      ? Icons.pause_rounded
-                      : Icons.play_arrow_rounded,
-                  tooltip: playing ? '暂停' : '播放',
-                  size: 34,
-                  busy: loadingLine || buffering,
-                  onPressed: onPlayPause,
-                ),
-                const SizedBox(width: 10),
-                _ControlIconButton(
-                  icon: Icons.forward_10_rounded,
-                  tooltip: '快进 ${settings.forwardSeconds} 秒',
-                  onPressed: onForward,
-                ),
-                const SizedBox(width: 16),
-                SmallBadge(label: _speedLabel(settings.speed)),
-                const SizedBox(width: 12),
-                Tooltip(
-                  message: services.bilibiliSubtitleEnabled
-                      ? 'Bilibili 字幕 · ${services.subtitleLanguage}'
-                      : 'Bilibili 字幕已关闭',
-                  child: IconButton(
-                    onPressed: onSubtitlePanel,
-                    padding: EdgeInsets.zero,
-                    icon: Icon(
-                      Icons.subtitles_outlined,
-                      color: services.bilibiliSubtitleEnabled
-                          ? Colors.white
-                          : Colors.white38,
-                    ),
-                    iconSize: 26,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Tooltip(
-                  message:
-                      services.dandanplayDanmakuEnabled ||
-                          services.bilibiliDanmakuEnabled
-                      ? '弹幕源'
-                      : '弹幕源已关闭',
-                  child: IconButton(
-                    onPressed: onDanmakuPanel,
-                    padding: EdgeInsets.zero,
-                    icon: Icon(
-                      Icons.sports_esports_outlined,
-                      color:
-                          services.dandanplayDanmakuEnabled ||
-                              services.bilibiliDanmakuEnabled
-                          ? Colors.white
-                          : Colors.white38,
-                    ),
-                    iconSize: 26,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: AppColors.bg.withValues(alpha: 0.72),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.white12),
-                    ),
-                    child: Container(
-                      height: 40,
-                      alignment: Alignment.centerLeft,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: const Text(
-                        '发送弹幕',
-                        style: TextStyle(color: Colors.white54),
+            height: compact ? 104 : 52,
+            child: compact
+                ? _MobilePlayerControls(
+                    line: line,
+                    settings: settings,
+                    playing: playing,
+                    buffering: buffering,
+                    loadingLine: loadingLine,
+                    fullscreen: fullscreen,
+                    muted: muted,
+                    onPlayPause: onPlayPause,
+                    onRewind: onRewind,
+                    onForward: onForward,
+                    onMute: onMute,
+                    onFullscreen: onFullscreen,
+                    onEpisodePanel: onEpisodePanel,
+                    onLinePanel: onLinePanel,
+                  )
+                : Row(
+                    children: [
+                      _ControlIconButton(
+                        icon: Icons.replay_10_rounded,
+                        tooltip: '快退 ${settings.rewindSeconds} 秒',
+                        onPressed: onRewind,
                       ),
-                    ),
+                      const SizedBox(width: 10),
+                      _ControlIconButton(
+                        icon: playing
+                            ? Icons.pause_rounded
+                            : Icons.play_arrow_rounded,
+                        tooltip: playing ? '暂停' : '播放',
+                        size: 34,
+                        busy: loadingLine || buffering,
+                        onPressed: onPlayPause,
+                      ),
+                      const SizedBox(width: 10),
+                      _ControlIconButton(
+                        icon: Icons.forward_10_rounded,
+                        tooltip: '快进 ${settings.forwardSeconds} 秒',
+                        onPressed: onForward,
+                      ),
+                      const SizedBox(width: 16),
+                      SmallBadge(label: _speedLabel(settings.speed)),
+                      const SizedBox(width: 12),
+                      Tooltip(
+                        message: services.bilibiliSubtitleEnabled
+                            ? 'Bilibili 字幕 · ${services.subtitleLanguage}'
+                            : 'Bilibili 字幕已关闭',
+                        child: IconButton(
+                          onPressed: onSubtitlePanel,
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            Icons.subtitles_outlined,
+                            color: services.bilibiliSubtitleEnabled
+                                ? Colors.white
+                                : Colors.white38,
+                          ),
+                          iconSize: 26,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Tooltip(
+                        message:
+                            services.dandanplayDanmakuEnabled ||
+                                services.bilibiliDanmakuEnabled
+                            ? '弹幕源'
+                            : '弹幕源已关闭',
+                        child: IconButton(
+                          onPressed: onDanmakuPanel,
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            Icons.sports_esports_outlined,
+                            color:
+                                services.dandanplayDanmakuEnabled ||
+                                    services.bilibiliDanmakuEnabled
+                                ? Colors.white
+                                : Colors.white38,
+                          ),
+                          iconSize: 26,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: AppColors.bg.withValues(alpha: 0.72),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: Container(
+                            height: 40,
+                            alignment: Alignment.centerLeft,
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: const Text(
+                              '发送弹幕',
+                              style: TextStyle(color: Colors.white54),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Tooltip(
+                        message: muted
+                            ? '已静音，点击恢复'
+                            : '音量 ${volume.round()}%，点击静音',
+                        child: IconButton(
+                          onPressed: onMute,
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            muted || volume <= 0
+                                ? Icons.volume_off_rounded
+                                : Icons.volume_up_rounded,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      TextButton.icon(
+                        onPressed: onEpisodePanel,
+                        icon: const Icon(
+                          Icons.video_library_outlined,
+                          size: 18,
+                          color: Colors.white,
+                        ),
+                        label: const Text(
+                          '选集',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: onLinePanel,
+                        child: Text(
+                          line?.providerName ?? '线路',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      _ControlIconButton(
+                        icon: fullscreen
+                            ? Icons.fullscreen_exit_rounded
+                            : Icons.fullscreen_rounded,
+                        tooltip: fullscreen ? '退出全屏' : '全屏',
+                        onPressed: onFullscreen,
+                      ),
+                    ],
                   ),
-                ),
-                const SizedBox(width: 14),
-                Tooltip(
-                  message: muted ? '已静音，点击恢复' : '音量 ${volume.round()}%，点击静音',
-                  child: IconButton(
-                    onPressed: onMute,
-                    padding: EdgeInsets.zero,
-                    icon: Icon(
-                      muted || volume <= 0
-                          ? Icons.volume_off_rounded
-                          : Icons.volume_up_rounded,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                if (!fullscreen) ...[
-                  TextButton(
-                    onPressed: onEpisodePanel,
-                    child: const Text(
-                      '选集',
-                      style: TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                TextButton(
-                  onPressed: onLinePanel,
-                  child: Text(
-                    line?.providerName ?? '线路',
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                _ControlIconButton(
-                  icon: fullscreen
-                      ? Icons.fullscreen_exit_rounded
-                      : Icons.fullscreen_rounded,
-                  tooltip: fullscreen ? '退出全屏' : '全屏',
-                  onPressed: onFullscreen,
-                ),
-              ],
-            ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _MobilePlayerControls extends StatelessWidget {
+  const _MobilePlayerControls({
+    required this.line,
+    required this.settings,
+    required this.playing,
+    required this.buffering,
+    required this.loadingLine,
+    required this.fullscreen,
+    required this.muted,
+    required this.onPlayPause,
+    required this.onRewind,
+    required this.onForward,
+    required this.onMute,
+    required this.onFullscreen,
+    required this.onEpisodePanel,
+    required this.onLinePanel,
+  });
+
+  final PlaybackLine? line;
+  final PlaybackSettings settings;
+  final bool playing;
+  final bool buffering;
+  final bool loadingLine;
+  final bool fullscreen;
+  final bool muted;
+  final Future<void> Function() onPlayPause;
+  final Future<void> Function() onRewind;
+  final Future<void> Function() onForward;
+  final Future<void> Function() onMute;
+  final Future<void> Function() onFullscreen;
+  final VoidCallback onEpisodePanel;
+  final VoidCallback onLinePanel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            _ControlIconButton(
+              icon: Icons.replay_10_rounded,
+              tooltip: '快退 ${settings.rewindSeconds} 秒',
+              onPressed: onRewind,
+            ),
+            _ControlIconButton(
+              icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+              tooltip: playing ? '暂停' : '播放',
+              size: 38,
+              busy: loadingLine || buffering,
+              onPressed: onPlayPause,
+            ),
+            _ControlIconButton(
+              icon: Icons.forward_10_rounded,
+              tooltip: '快进 ${settings.forwardSeconds} 秒',
+              onPressed: onForward,
+            ),
+            _ControlIconButton(
+              icon: muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+              tooltip: muted ? '取消静音' : '静音',
+              onPressed: onMute,
+            ),
+            _ControlIconButton(
+              icon: fullscreen
+                  ? Icons.fullscreen_exit_rounded
+                  : Icons.fullscreen_rounded,
+              tooltip: fullscreen ? '退出全屏' : '全屏',
+              onPressed: onFullscreen,
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            SmallBadge(label: _speedLabel(settings.speed)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextButton.icon(
+                onPressed: onLinePanel,
+                icon: const Icon(Icons.alt_route_rounded, size: 18),
+                label: Text(
+                  line?.providerName ?? '线路',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextButton.icon(
+                onPressed: onEpisodePanel,
+                icon: const Icon(Icons.video_library_outlined, size: 18),
+                label: const Text('选集'),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -1746,12 +2044,45 @@ List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
   return lines.where(_isPlayableLine).toList(growable: false);
 }
 
+List<PlaybackLine> _mergeLineLists(
+  List<PlaybackLine> first,
+  List<PlaybackLine> second,
+) {
+  if (first.isEmpty) return second;
+  if (second.isEmpty) return first;
+  return <String, PlaybackLine>{
+    for (final line in first) line.id: line,
+    for (final line in second) line.id: line,
+  }.values.toList(growable: false);
+}
+
 String _emptyLineMessage(List<PlaybackLine> lines) {
   if (lines.isEmpty) {
     return '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。';
   }
   final unavailableCount = lines.where((line) => !line.available).length;
-  return '找到 $unavailableCount 条规则，但它们需要验证码、WebView 或对应执行器，暂时无法直接播放。';
+  return _unavailableLinesMessage(lines, count: unavailableCount);
+}
+
+String _unavailableLinesMessage(List<PlaybackLine> lines, {int? count}) {
+  final unavailableLines = lines.where((line) => !line.available).toList();
+  final total = count ?? unavailableLines.length;
+  final deadCount = unavailableLines
+      .where((line) => (line.message ?? '').contains('视频 CDN'))
+      .length;
+  if (deadCount > 0) {
+    return '找到 $total 条线路，但其中 $deadCount 条视频 CDN 已失效、拒绝访问或连接超时，暂时不会当作可播放线路。';
+  }
+  return '找到 $total 条规则，但它们需要验证码、WebView 或对应执行器，暂时无法直接播放。';
+}
+
+String _hiddenLinesMessage(List<PlaybackLine> lines) {
+  final unavailableLines = lines.where((line) => !line.available).toList();
+  final deadCount = unavailableLines
+      .where((line) => (line.message ?? '').contains('视频 CDN'))
+      .length;
+  if (deadCount > 0) return '已隐藏 $deadCount 条失效或被拒绝的 CDN 线路';
+  return '已隐藏 ${unavailableLines.length} 条不可直接播放的规则';
 }
 
 String _friendlyPlaybackError(Object error) {
@@ -1855,12 +2186,13 @@ class _EpisodePanel extends StatelessWidget {
   }
 }
 
-class _LinePanel extends ConsumerWidget {
+class _LinePanel extends ConsumerStatefulWidget {
   const _LinePanel({
     required this.subject,
     required this.episode,
     required this.selected,
     required this.initialLines,
+    required this.onLinesLoaded,
     required this.onSelected,
   });
 
@@ -1868,71 +2200,143 @@ class _LinePanel extends ConsumerWidget {
   final AnimeEpisode episode;
   final PlaybackLine? selected;
   final List<PlaybackLine> initialLines;
+  final ValueChanged<List<PlaybackLine>> onLinesLoaded;
   final ValueChanged<PlaybackLine> onSelected;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_LinePanel> createState() => _LinePanelState();
+}
+
+class _LinePanelState extends ConsumerState<_LinePanel> {
+  Future<List<PlaybackLine>>? _future;
+  var _notifiedFutureResult = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _futureForWidget();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LinePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.episode.id != widget.episode.id ||
+        oldWidget.subject.id != widget.subject.id) {
+      _notifiedFutureResult = false;
+      _future = _futureForWidget();
+    }
+  }
+
+  Future<List<PlaybackLine>> _futureForWidget() {
+    return ref
+        .read(animeControllerProvider.notifier)
+        .linesForEpisodeMode(widget.subject, widget.episode, expandAll: true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final initialLines = widget.initialLines;
     return FutureBuilder<List<PlaybackLine>>(
-      initialData: initialLines.isEmpty ? null : initialLines,
-      future: ref
-          .read(animeControllerProvider.notifier)
-          .linesForEpisode(subject, episode),
+      future: _future,
       builder: (context, snapshot) {
-        final lines = snapshot.data ?? const <PlaybackLine>[];
-        final availableLines = lines.where((line) => line.available).toList();
-        final unavailableCount = lines.length - availableLines.length;
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-          children: [
-            const _LineModeBar(),
-            const SizedBox(height: 14),
-            if (snapshot.connectionState == ConnectionState.waiting)
-              const Center(child: CircularProgressIndicator())
-            else if (availableLines.isEmpty)
-              _PanelEmpty(
-                title: '当前没有可播放线路',
-                message: lines.isEmpty
-                    ? '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。'
-                    : '找到 $unavailableCount 条规则，但它们需要验证码、WebView 或对应执行器，暂时不会当作可播放线路。',
-              )
-            else
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF202020),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  child: Column(
-                    children: [
-                      if (unavailableCount > 0) ...[
-                        Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          child: Text(
-                            '已隐藏 $unavailableCount 条不可直接播放的规则',
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: Colors.white54),
-                          ),
-                        ),
-                        const Divider(height: 1, color: Color(0xFF303030)),
-                      ],
-                      for (var i = 0; i < availableLines.length; i++) ...[
-                        _LineTile(
-                          index: i,
-                          line: availableLines[i],
-                          selected: selected?.id == availableLines[i].id,
-                          onTap: () => onSelected(availableLines[i]),
-                        ),
-                        if (i != availableLines.length - 1)
-                          const Divider(height: 1, color: Color(0xFF303030)),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-          ],
+        final expandedLines = snapshot.data ?? const <PlaybackLine>[];
+        if (expandedLines.isNotEmpty && !_notifiedFutureResult) {
+          _notifiedFutureResult = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) widget.onLinesLoaded(expandedLines);
+          });
+        }
+        final lines = _mergeLineLists(initialLines, expandedLines);
+        return _LinePanelBody(
+          lines: lines,
+          selected: widget.selected,
+          loading:
+              snapshot.connectionState == ConnectionState.waiting &&
+              initialLines.isEmpty,
+          expanding:
+              snapshot.connectionState == ConnectionState.waiting &&
+              initialLines.isNotEmpty,
+          onSelected: widget.onSelected,
         );
       },
+    );
+  }
+}
+
+class _LinePanelBody extends StatelessWidget {
+  const _LinePanelBody({
+    required this.lines,
+    required this.selected,
+    required this.loading,
+    required this.expanding,
+    required this.onSelected,
+  });
+
+  final List<PlaybackLine> lines;
+  final PlaybackLine? selected;
+  final bool loading;
+  final bool expanding;
+  final ValueChanged<PlaybackLine> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final availableLines = lines.where((line) => line.available).toList();
+    final unavailableCount = lines.length - availableLines.length;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
+      children: [
+        const _LineModeBar(),
+        const SizedBox(height: 14),
+        if (expanding) ...[
+          _PanelInlineStatus(text: '正在继续扫描更多已启用规则，已找到的线路可以先用。'),
+          const SizedBox(height: 12),
+        ],
+        if (loading)
+          const Center(child: CircularProgressIndicator())
+        else if (availableLines.isEmpty)
+          _PanelEmpty(
+            title: '当前没有可播放线路',
+            message: lines.isEmpty
+                ? '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。'
+                : _unavailableLinesMessage(lines),
+          )
+        else
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: const Color(0xFF202020),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Column(
+                children: [
+                  if (unavailableCount > 0) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      child: Text(
+                        _hiddenLinesMessage(lines),
+                        style: Theme.of(
+                          context,
+                        ).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                      ),
+                    ),
+                    const Divider(height: 1, color: Color(0xFF303030)),
+                  ],
+                  for (var i = 0; i < availableLines.length; i++) ...[
+                    _LineTile(
+                      index: i,
+                      line: availableLines[i],
+                      selected: selected?.id == availableLines[i].id,
+                      onTap: () => onSelected(availableLines[i]),
+                    ),
+                    if (i != availableLines.length - 1)
+                      const Divider(height: 1, color: Color(0xFF303030)),
+                  ],
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -2118,6 +2522,46 @@ class _PanelEmpty extends StatelessWidget {
               style: Theme.of(
                 context,
               ).textTheme.bodyMedium?.copyWith(color: Colors.white60),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PanelInlineStatus extends StatelessWidget {
+  const _PanelInlineStatus({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF202020),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFF303030)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.white60),
+              ),
             ),
           ],
         ),

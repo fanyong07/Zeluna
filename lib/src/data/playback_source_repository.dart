@@ -3,11 +3,22 @@ import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
 
+const _maxRulesPerQuickLookup = 12;
+const _maxRulesPerFullLookup = 48;
+const _maxRulesPerGroupPerLookup = 6;
+const _deferredRulesAfterFirstHit = 2;
+
 abstract class PlaybackSourceRepository {
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
   );
+
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+  });
 }
 
 class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
@@ -17,7 +28,16 @@ class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-  ) async {
+  ) {
+    return linesForEpisodeMode(subject, episode);
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+  }) async {
     return [
       PlaybackLine(
         id: 'placeholder:${subject.id}:${episode.id}',
@@ -51,25 +71,84 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-  ) async {
+  ) {
+    return linesForEpisodeMode(subject, episode);
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+  }) async {
     final type = _contentTypeFor(subject);
-    final rules = _repository.enabledRulesFor(_ruleState, type);
+    final rules = _selectLookupRules(
+      _repository.enabledRulesFor(_ruleState, type),
+      expandAll: expandAll,
+    );
     if (rules.isEmpty) {
       return const EmptyPlaybackSourceRepository().linesForEpisode(
         subject,
         episode,
       );
     }
-    final groups = await Future.wait(
-      rules.map(
-        (rule) => _resolver.resolveRule(
-          rule: rule,
-          subject: subject,
-          episode: episode,
-        ),
-      ),
-    );
-    return groups.expand((items) => items).toList(growable: false);
+    final lines = <PlaybackLine>[];
+    for (var index = 0; index < rules.length; index++) {
+      final rule = rules[index];
+      final group = await _resolver.resolveRule(
+        rule: rule,
+        subject: subject,
+        episode: episode,
+      );
+      lines.addAll(group);
+      if (!expandAll && group.any((line) => line.available)) {
+        for (final rule
+            in rules.skip(index + 1).take(_deferredRulesAfterFirstHit)) {
+          final extraGroup = await _resolver.resolveRule(
+            rule: rule,
+            subject: subject,
+            episode: episode,
+          );
+          lines.addAll(extraGroup);
+        }
+        break;
+      }
+    }
+    return lines;
+  }
+
+  List<RulePlugin> _selectLookupRules(
+    List<RulePlugin> rules, {
+    required bool expandAll,
+  }) {
+    if (rules.isEmpty) return const [];
+    final sorted = [...rules]
+      ..sort((a, b) {
+        final priority = a.priority.compareTo(b.priority);
+        if (priority != 0) return priority;
+        final quality = b.qualityScore.compareTo(a.qualityScore);
+        if (quality != 0) return quality;
+        return a.name.compareTo(b.name);
+      });
+    final groupedCount = <String, int>{};
+    final selected = <RulePlugin>[];
+    final maxRules = expandAll
+        ? _maxRulesPerFullLookup
+        : _maxRulesPerQuickLookup;
+    final maxRulesPerGroup = expandAll
+        ? _maxRulesPerFullLookup
+        : _maxRulesPerGroupPerLookup;
+    for (final rule in sorted) {
+      final groupId = rule.groupId.trim();
+      if (groupId.isNotEmpty) {
+        final count = groupedCount[groupId] ?? 0;
+        if (count >= maxRulesPerGroup) continue;
+        groupedCount[groupId] = count + 1;
+      }
+      selected.add(rule);
+      if (selected.length >= maxRules) break;
+    }
+    return selected;
   }
 
   RuleContentType _contentTypeFor(AnimeSubject subject) {
