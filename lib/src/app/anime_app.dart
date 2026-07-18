@@ -6,11 +6,11 @@ import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/player_page.dart';
+import '../player/open_media_page.dart';
 import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
-import '../sources/source_management_page.dart';
 import 'app_theme.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -44,7 +44,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       builder: (context, state) => LibraryPage(
         title: '离线缓存',
         emptyTitle: '还没有缓存任务',
-        emptyMessage: '在详情页点下载后会加入队列，视频源接入后再执行真实缓存。',
+        emptyMessage: '在详情页点下载后会加入队列，找到可下载播放线路后即可缓存。',
         entriesOf: (state) => state.offlineTasks,
         clearKey: 'offlineTasks',
       ),
@@ -106,7 +106,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     ),
     GoRoute(
       path: '/profile/sources',
-      builder: (context, state) => const SourceManagementPage(),
+      redirect: (context, state) => '/profile/rules',
     ),
     GoRoute(
       path: '/profile/rules/repository',
@@ -130,17 +130,18 @@ final routerProvider = Provider<GoRouter>((ref) {
         return const MissingPlayerPage();
       },
     ),
+    GoRoute(
+      path: '/player/open',
+      builder: (context, state) => const OpenMediaPage(),
+    ),
   ];
-  assert(() {
-    routes.add(
-      GoRoute(
-        path: '/settings/services/:kind',
-        builder: (context, state) =>
-            ServiceSettingsPage(kind: state.pathParameters['kind'] ?? ''),
-      ),
-    );
-    return true;
-  }());
+  routes.add(
+    GoRoute(
+      path: '/settings/services/:kind',
+      builder: (context, state) =>
+          ServiceSettingsPage(kind: state.pathParameters['kind'] ?? ''),
+    ),
+  );
   return GoRouter(routes: routes);
 });
 
@@ -150,10 +151,25 @@ class AnimeApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
+    final appearance =
+        ref.watch(animeControllerProvider).value?.appearance ??
+        const AppearanceSettings();
     return MaterialApp.router(
       title: 'anime',
       debugShowCheckedModeBanner: false,
-      theme: AnimeTheme.dark(),
+      theme: AnimeTheme.light(
+        compact: appearance.compactMode,
+        reduceMotion: appearance.reduceMotion,
+      ),
+      darkTheme: AnimeTheme.dark(
+        compact: appearance.compactMode,
+        reduceMotion: appearance.reduceMotion,
+      ),
+      themeMode: appearance.followSystem
+          ? ThemeMode.system
+          : appearance.darkMode
+          ? ThemeMode.dark
+          : ThemeMode.light,
       routerConfig: router,
     );
   }
@@ -178,10 +194,7 @@ class AsyncAnimeGate extends ConsumerWidget {
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 360),
-            child: Text(
-              'Bangumi 数据暂时加载失败，稍后可重试。\n$error',
-              textAlign: TextAlign.center,
-            ),
+            child: const Text('内容暂时加载失败，请稍后重试。', textAlign: TextAlign.center),
           ),
         ),
       ),

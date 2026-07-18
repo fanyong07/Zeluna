@@ -10,6 +10,25 @@ extension _DateSeed on DateTime {
   int get dayOfYear => difference(DateTime(year)).inDays + 1;
 }
 
+class _PagedResponse {
+  const _PagedResponse.succeeded({
+    required this.data,
+    required this.total,
+    required this.limit,
+  }) : succeeded = true;
+
+  const _PagedResponse.failed()
+    : data = const [],
+      total = 0,
+      limit = 0,
+      succeeded = false;
+
+  final List<dynamic> data;
+  final int total;
+  final int limit;
+  final bool succeeded;
+}
+
 class BangumiMetadataRepository {
   BangumiMetadataRepository({http.Client? client})
     : _client = client ?? http.Client();
@@ -17,20 +36,27 @@ class BangumiMetadataRepository {
   final http.Client _client;
 
   static const _baseUrl = 'https://api.bgm.tv';
+  static const _recentWindow = Duration(days: 180);
+  static const _distinctHomePrefix = 18;
+  static const _subjectPageSize = 20;
+  static const _episodePageSize = 100;
   static const _headers = {
     'User-Agent': 'anime-app/1.0 (AniCh-style client)',
     'Accept': 'application/json',
   };
 
+  AnimeHomeFeed fallbackHomeFeed() => _fallbackFeed;
+
   Future<AnimeHomeFeed> homeFeed() async {
     try {
+      final recentFloor = _dateText(DateTime.now().subtract(_recentWindow));
       final batches = await Future.wait([
         _searchSubjectPages(
           keyword: '',
           sort: 'heat',
-          filters: const {
-            'type': [2],
-            'air_date': ['>=2025-01-01'],
+          filters: {
+            'type': const [2],
+            'air_date': ['>=$recentFloor'],
           },
           pageSize: 28,
           pages: 3,
@@ -55,18 +81,55 @@ class BangumiMetadataRepository {
         ),
       ]).timeout(const Duration(seconds: 20));
 
-      final recent = batches[0].isEmpty ? _fallbackSubjects : batches[0];
-      final recommended = _dailyRotate(
-        batches[1].isEmpty ? _fallbackSubjects : batches[1],
+      if (batches.every((items) => items.isEmpty)) return _fallbackFeed;
+
+      final recentCandidates = _rankHomeSubjects(
+        batches[0].isEmpty ? _fallbackSubjects : batches[0],
       );
-      final index = batches[2].isEmpty ? _fallbackSubjects : batches[2];
+      final recommendedCandidates = _rankHomeSubjects([
+        ...(batches[1].isEmpty ? _fallbackSubjects : batches[1]),
+        ...(batches[2].isEmpty ? _fallbackSubjects : batches[2]),
+      ]);
+      final index = _uniqueSubjects(
+        batches[2].isEmpty ? _fallbackSubjects : batches[2],
+      );
+      final hero = _rankHomeSubjects([
+        ...recentCandidates,
+        ...recommendedCandidates,
+      ]).firstOrNull;
+      if (hero == null) return _fallbackFeed;
+
+      final recent = recentCandidates
+          .where((subject) => subject.id != hero.id)
+          .toList(growable: false);
+      final reservedIds = <int>{
+        hero.id,
+        ...recent.take(_distinctHomePrefix).map((subject) => subject.id),
+      };
+      final unseenRecommended = recommendedCandidates
+          .where((subject) => !reservedIds.contains(subject.id))
+          .toList(growable: false);
+      final recommended = unseenRecommended.length < _distinctHomePrefix
+          ? unseenRecommended
+          : [
+              ...unseenRecommended,
+              ...recommendedCandidates.where(
+                (subject) =>
+                    subject.id != hero.id && reservedIds.contains(subject.id),
+              ),
+            ];
       return AnimeHomeFeed(
-        hero: recommended.firstOrNull ?? _fallbackSubjects.first,
+        hero: hero,
         recent: recent,
         recommended: recommended,
         index: index,
-        categories: _buildCategories([...recent, ...recommended, ...index]),
-        tags: _buildTags([...recent, ...recommended, ...index]),
+        categories: _buildCategories([
+          hero,
+          ...recent,
+          ...recommended,
+          ...index,
+        ]),
+        tags: _buildTags([hero, ...recent, ...recommended, ...index]),
       );
     } catch (_) {
       return _fallbackFeed;
@@ -119,12 +182,13 @@ class BangumiMetadataRepository {
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
+    final recentFloor = _dateText(DateTime.now().subtract(_recentWindow));
     final subjects = await _searchSubjectPages(
       keyword: '',
       sort: 'heat',
-      filters: const {
-        'type': [2],
-        'air_date': ['>=2025-01-01'],
+      filters: {
+        'type': const [2],
+        'air_date': ['>=$recentFloor'],
       },
       pageSize: 42,
       pages: 3,
@@ -141,7 +205,7 @@ class BangumiMetadataRepository {
           'type': [2],
         },
         pageSize: 36,
-        pages: 3,
+        pages: 4,
       ).onError((_, _) => const <AnimeSubject>[]),
       _searchSubjectPages(
         keyword: '',
@@ -150,7 +214,7 @@ class BangumiMetadataRepository {
           'type': [2],
         },
         pageSize: 36,
-        pages: 3,
+        pages: 4,
       ).onError((_, _) => const <AnimeSubject>[]),
       _searchSubjectPages(
         keyword: '',
@@ -159,7 +223,7 @@ class BangumiMetadataRepository {
           'type': [2],
         },
         pageSize: 36,
-        pages: 3,
+        pages: 4,
       ).onError((_, _) => const <AnimeSubject>[]),
     ]).timeout(const Duration(seconds: 20), onTimeout: () => const []);
     return _uniqueSubjects(batches.expand((items) => items));
@@ -174,9 +238,10 @@ class BangumiMetadataRepository {
     int limit = 24,
     int offset = 0,
   }) async {
+    final requestLimit = limit.clamp(1, _subjectPageSize).toInt();
     final uri = Uri.parse(
       '$_baseUrl/v0/search/subjects',
-    ).replace(queryParameters: {'limit': '$limit', 'offset': '$offset'});
+    ).replace(queryParameters: {'limit': '$requestLimit', 'offset': '$offset'});
     final response = await _client.post(
       uri,
       headers: const {..._headers, 'Content-Type': 'application/json'},
@@ -200,32 +265,25 @@ class BangumiMetadataRepository {
     required int pageSize,
     required int pages,
   }) async {
+    final requestPageSize = pageSize.clamp(1, _subjectPageSize).toInt();
     final batches = await Future.wait([
       for (var page = 0; page < pages; page++)
         searchSubjects(
           keyword: keyword,
           sort: sort,
           filters: filters,
-          limit: pageSize,
-          offset: page * pageSize,
+          limit: requestPageSize,
+          offset: page * requestPageSize,
         ).onError((_, _) => const <AnimeSubject>[]),
     ]);
     return _uniqueSubjects(batches.expand((items) => items));
-  }
-
-  List<AnimeSubject> _dailyRotate(List<AnimeSubject> subjects) {
-    return _rotateSubjectsForToday(_uniqueSubjects(subjects));
   }
 
   Future<AnimeDetailBundle> detail(int subjectId) async {
     try {
       final results = await Future.wait([
         _getObject('/v0/subjects/$subjectId'),
-        _getPaged('/v0/episodes', {
-          'subject_id': '$subjectId',
-          'type': '0',
-          'limit': '200',
-        }),
+        _getAllPaged('/v0/episodes', {'subject_id': '$subjectId', 'type': '0'}),
         _getList('/v0/subjects/$subjectId/characters'),
         _getList('/v0/subjects/$subjectId/persons'),
         _getList('/v0/subjects/$subjectId/subjects'),
@@ -304,7 +362,37 @@ class BangumiMetadataRepository {
     return decoded is List ? decoded : const [];
   }
 
-  Future<List<dynamic>> _getPaged(
+  Future<List<dynamic>> _getAllPaged(
+    String path,
+    Map<String, String> query,
+  ) async {
+    final firstPage = await _getPagedPage(path, {
+      ...query,
+      'limit': '$_episodePageSize',
+      'offset': '0',
+    });
+    if (!firstPage.succeeded) return const [];
+
+    final items = <dynamic>[...firstPage.data];
+    final total = firstPage.total > 0 ? firstPage.total : items.length;
+    final pageSize = firstPage.limit > 0 ? firstPage.limit : _episodePageSize;
+    if (items.length >= total || pageSize <= 0) return items;
+
+    final remainingPages = await Future.wait([
+      for (var offset = pageSize; offset < total; offset += pageSize)
+        _getPagedPage(path, {
+          ...query,
+          'limit': '$pageSize',
+          'offset': '$offset',
+        }).onError((_, _) => const _PagedResponse.failed()),
+    ]);
+    for (final page in remainingPages) {
+      if (page.succeeded) items.addAll(page.data);
+    }
+    return items;
+  }
+
+  Future<_PagedResponse> _getPagedPage(
     String path,
     Map<String, String> query,
   ) async {
@@ -312,10 +400,18 @@ class BangumiMetadataRepository {
       Uri.parse('$_baseUrl$path').replace(queryParameters: query),
       headers: _headers,
     );
-    if (response.statusCode != 200) return const [];
+    if (response.statusCode != 200) return const _PagedResponse.failed();
     final json = _decodeResponse(response);
     final data = json['data'];
-    return data is List ? data : const [];
+    if (data is! List) return const _PagedResponse.failed();
+    return _PagedResponse.succeeded(
+      data: data,
+      total: _intValue(json['total']) ?? data.length,
+      limit:
+          _intValue(json['limit']) ??
+          int.tryParse(query['limit'] ?? '') ??
+          data.length,
+    );
   }
 
   Map<String, dynamic> _decodeResponse(http.Response response) {
@@ -348,9 +444,7 @@ class BangumiMetadataRepository {
           _blankToNull(images['large']?.toString()) ??
           _blankToNull(images['common']?.toString()) ??
           _blankToNull(json['image']?.toString()),
-      bannerUrl:
-          _blankToNull(images['large']?.toString()) ??
-          _blankToNull(images['medium']?.toString()),
+      bannerUrl: null,
       date: date,
       platform: platform,
       language: _languageFrom(metaTags, originalTitle),
@@ -427,7 +521,7 @@ class BangumiMetadataRepository {
       originalTitle: json['name']?.toString() ?? '',
       summary: '',
       coverUrl: _imageFrom(json['images']),
-      bannerUrl: _imageFrom(json['images']),
+      bannerUrl: null,
       date: null,
       platform: '',
       language: '日语',
@@ -481,55 +575,61 @@ class BangumiMetadataRepository {
   }
 
   List<AnimeCategory> _buildCategories(List<AnimeSubject> subjects) {
+    final uniqueSubjects = _uniqueSubjects(subjects);
     final counts = <String, int>{};
-    final images = <String, String?>{};
-    for (final subject in subjects) {
+    final candidates = <String, List<AnimeSubject>>{};
+    for (final subject in uniqueSubjects) {
       for (final category in subject.categories) {
         counts[category.name] = (counts[category.name] ?? 0) + 1;
-        images.putIfAbsent(
-          category.name,
-          () => subject.bannerUrl ?? subject.coverUrl,
-        );
+        candidates.putIfAbsent(category.name, () => []).add(subject);
       }
     }
-    final list =
-        counts.entries
-            .map(
-              (entry) => AnimeCategory(
-                name: entry.key,
-                count: entry.value,
-                imageUrl: images[entry.key],
-              ),
-            )
-            .toList()
-          ..sort((a, b) => b.count.compareTo(a.count));
-    return list.take(60).toList();
+    final entries = counts.entries.toList()
+      ..sort((a, b) {
+        final countOrder = b.value.compareTo(a.value);
+        return countOrder != 0 ? countOrder : a.key.compareTo(b.key);
+      });
+    final usedImages = <String>{};
+    return [
+      for (final entry in entries.take(60))
+        AnimeCategory(
+          name: entry.key,
+          count: entry.value,
+          imageUrl: _representativeImage(
+            candidates[entry.key] ?? const [],
+            usedImages,
+          ),
+        ),
+    ];
   }
 
   List<AnimeTag> _buildTags(List<AnimeSubject> subjects) {
+    final uniqueSubjects = _uniqueSubjects(subjects);
     final counts = <String, int>{};
-    final images = <String, String?>{};
-    for (final subject in subjects) {
+    final candidates = <String, List<AnimeSubject>>{};
+    for (final subject in uniqueSubjects) {
       for (final tag in subject.tags) {
         counts[tag.name] = max(counts[tag.name] ?? 0, tag.count);
-        images.putIfAbsent(
-          tag.name,
-          () => subject.bannerUrl ?? subject.coverUrl,
-        );
+        candidates.putIfAbsent(tag.name, () => []).add(subject);
       }
     }
-    final list =
-        counts.entries
-            .map(
-              (entry) => AnimeTag(
-                name: entry.key,
-                count: entry.value,
-                imageUrl: images[entry.key],
-              ),
-            )
-            .toList()
-          ..sort((a, b) => b.count.compareTo(a.count));
-    return list.take(90).toList();
+    final entries = counts.entries.toList()
+      ..sort((a, b) {
+        final countOrder = b.value.compareTo(a.value);
+        return countOrder != 0 ? countOrder : a.key.compareTo(b.key);
+      });
+    final usedImages = <String>{};
+    return [
+      for (final entry in entries.take(90))
+        AnimeTag(
+          name: entry.key,
+          count: entry.value,
+          imageUrl: _representativeImage(
+            candidates[entry.key] ?? const [],
+            usedImages,
+          ),
+        ),
+    ];
   }
 
   List<AnimeSubject> _uniqueSubjects(Iterable<AnimeSubject> subjects) {
@@ -539,8 +639,69 @@ class BangumiMetadataRepository {
       if (subject.id <= 0 || !seen.add(subject.id)) continue;
       unique.add(subject);
     }
-    if (unique.isEmpty) return _fallbackSubjects;
     return unique;
+  }
+
+  List<AnimeSubject> _rankHomeSubjects(Iterable<AnimeSubject> subjects) {
+    final unique = _uniqueSubjects(subjects);
+    if (unique.length <= 1) return unique;
+    final now = DateTime.now();
+    final seed = now.year * 1000 + now.dayOfYear;
+    final ranked =
+        [
+          for (final subject in unique)
+            MapEntry(_homeQualityScore(subject, now), subject),
+        ]..sort((a, b) {
+          final scoreOrder = b.key.compareTo(a.key);
+          if (scoreOrder != 0) return scoreOrder;
+          return _stableDailyScore(
+            a.value,
+            seed,
+          ).compareTo(_stableDailyScore(b.value, seed));
+        });
+    return ranked.map((entry) => entry.value).toList(growable: false);
+  }
+
+  int _homeQualityScore(AnimeSubject subject, DateTime now) {
+    var score = 0;
+    if (subject.coverUrl != null) score += 1000;
+    if (subject.bannerUrl != null) score += 250;
+
+    final date = DateTime.tryParse(subject.date ?? '');
+    if (date != null) {
+      final age = now.difference(date).inDays;
+      score += age < 0 ? 620 : max(0, 600 - age * 2);
+    }
+
+    final ratingScore = subject.ratingScore;
+    if (ratingScore != null) score += 180 + (ratingScore * 18).round();
+    final ratingTotal = subject.ratingTotal;
+    if (ratingTotal != null && ratingTotal > 0) {
+      score += min(180, (log(ratingTotal + 1) * 18).round());
+    }
+    final ratingRank = subject.ratingRank;
+    if (ratingRank != null && ratingRank > 0) {
+      score += max(0, 120 - ratingRank ~/ 100);
+    }
+    if (ratingScore != null && ratingTotal != null && ratingRank != null) {
+      score += 120;
+    }
+    return score;
+  }
+
+  String? _representativeImage(
+    Iterable<AnimeSubject> subjects,
+    Set<String> usedImages,
+  ) {
+    final images = _rankHomeSubjects(subjects)
+        .map((subject) => subject.bannerUrl ?? subject.coverUrl)
+        .whereType<String>()
+        .where((image) => image.trim().isNotEmpty)
+        .toList(growable: false);
+    for (final image in images) {
+      if (usedImages.add(image)) return image;
+    }
+    return images.firstOrNull;
   }
 
   Map<int, List<AnimeSubject>> _groupByWeekday(List<AnimeSubject> subjects) {
@@ -606,6 +767,12 @@ class BangumiMetadataRepository {
     return '$minutes:$rest';
   }
 
+  String _dateText(DateTime date) {
+    final month = '${date.month}'.padLeft(2, '0');
+    final day = '${date.day}'.padLeft(2, '0');
+    return '${date.year}-$month-$day';
+  }
+
   String _languageFrom(List<String> tags, String originalTitle) {
     final text = '${tags.join('/')} $originalTitle'.toLowerCase();
     if (text.contains('国产') || text.contains('中国')) return '国语';
@@ -649,7 +816,7 @@ final _fallbackSubjects = [
     originalTitle: 'ぼっち・ざ・ろっく！',
     summary: '极度怕生的少女后藤一里因为吉他结识乐队伙伴，在舞台和日常里一点点靠近自己真正想成为的样子。',
     coverUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
-    bannerUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
+    bannerUrl: null,
     date: '2022-10-08',
     platform: 'TV',
     language: '日语',
@@ -676,7 +843,7 @@ final _fallbackSubjects = [
     originalTitle: '葬送のフリーレン',
     summary: '勇者一行讨伐魔王之后，长寿精灵芙莉莲重新踏上旅途，学习理解人类短暂却明亮的一生。',
     coverUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
-    bannerUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
+    bannerUrl: null,
     date: '2023-09-29',
     platform: 'TV',
     language: '日语',
@@ -703,7 +870,7 @@ final _fallbackSubjects = [
     originalTitle: 'ダンジョン飯',
     summary: '一支冒险队深入地下城救人，同时认真研究如何把沿途魔物做成一顿像样的饭。',
     coverUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
-    bannerUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+    bannerUrl: null,
     date: '2024-01-04',
     platform: 'TV',
     language: '日语',

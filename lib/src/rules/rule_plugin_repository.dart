@@ -5,7 +5,9 @@ class RulePluginRepository {
 
   final List<RulePlugin> extraRules;
 
-  List<RulePlugin> get allRules => _mergeRules(_curatedRules, extraRules);
+  _RuleCollection get _collection => _collectRules(_curatedRules, extraRules);
+
+  List<RulePlugin> get allRules => _collection.rules;
 
   List<RulePlugin> rulesFor(RuleContentType type) {
     return allRules
@@ -14,8 +16,9 @@ class RulePluginRepository {
   }
 
   List<RulePlugin> installedRules(RulePluginState state) {
-    return allRules
-        .where((rule) => state.installedIds.contains(rule.id))
+    final collection = _collection;
+    return collection.rules
+        .where((rule) => collection.anyAliasIn(rule.id, state.installedIds))
         .toList(growable: false);
   }
 
@@ -23,21 +26,34 @@ class RulePluginRepository {
     RulePluginState state,
     RuleContentType type,
   ) {
-    return allRules
+    final collection = _collection;
+    return collection.rules
         .where(
           (rule) =>
               rule.contentType == type &&
-              state.installedIds.contains(rule.id) &&
-              state.enabledIds.contains(rule.id) &&
-              rule.canResolveNatively,
+              collection.anyAliasIn(rule.id, state.installedIds) &&
+              collection.anyAliasIn(rule.id, state.enabledIds),
         )
         .toList(growable: false);
   }
 
+  List<RulePlugin> playbackRulesFor(
+    RulePluginState state,
+    RuleContentType type,
+  ) {
+    return enabledRulesFor(state, type)
+        .where((rule) => rule.searchable && rule.canResolveNatively)
+        .toList(growable: false);
+  }
+
   RulePluginState defaultState() {
+    final collection = _collection;
     final installed = {
-      for (final rule in allRules)
-        if (rule.installedByDefault) rule.id,
+      for (final rule in collection.rules)
+        if (collection
+            .aliasRules(rule.id)
+            .any((candidate) => candidate.installedByDefault))
+          rule.id,
     };
     final enabled = {
       for (final rule in allRules)
@@ -46,25 +62,221 @@ class RulePluginRepository {
     return RulePluginState(
       installedIds: installed,
       enabledIds: enabled,
-      customRules: extraRules,
+      customRules: collection.rules
+          .where((rule) => extraRules.any((extra) => extra.id == rule.id))
+          .toList(growable: false),
     );
   }
 
   RulePlugin? byId(String id) {
-    for (final rule in allRules) {
-      if (rule.id == id) return rule;
-    }
-    return null;
+    final collection = _collection;
+    final canonicalId = collection.canonicalIdByAlias[id] ?? id;
+    return collection.byCanonicalId[canonicalId];
+  }
+
+  RulePluginState normalizeState(RulePluginState state) {
+    final collection = _collection;
+    final installed = collection.canonicalizeIds(state.installedIds);
+    final enabled = collection
+        .canonicalizeIds(state.enabledIds)
+        .where(installed.contains)
+        .toSet();
+    final customIds = extraRules.map((rule) => rule.id).toSet();
+    final customRules = collection.rules
+        .where((rule) => customIds.contains(rule.id))
+        .toList(growable: false);
+    return state.copyWith(
+      installedIds: installed,
+      enabledIds: enabled,
+      customRules: customRules,
+      repositories: _deduplicateRepositories(state.repositories),
+    );
   }
 }
 
-List<RulePlugin> _mergeRules(List<RulePlugin> curated, List<RulePlugin> extra) {
-  if (extra.isEmpty) return curated;
-  final byId = <String, RulePlugin>{for (final rule in curated) rule.id: rule};
-  for (final rule in extra) {
-    byId[rule.id] = rule;
+class _RuleCollection {
+  const _RuleCollection({
+    required this.rules,
+    required this.byCanonicalId,
+    required this.canonicalIdByAlias,
+    required this.aliasesByCanonicalId,
+    required this.rulesByCanonicalId,
+  });
+
+  final List<RulePlugin> rules;
+  final Map<String, RulePlugin> byCanonicalId;
+  final Map<String, String> canonicalIdByAlias;
+  final Map<String, Set<String>> aliasesByCanonicalId;
+  final Map<String, List<RulePlugin>> rulesByCanonicalId;
+
+  bool anyAliasIn(String canonicalId, Set<String> ids) {
+    final aliases = aliasesByCanonicalId[canonicalId] ?? {canonicalId};
+    return aliases.any(ids.contains);
   }
-  return byId.values.toList(growable: false);
+
+  Iterable<RulePlugin> aliasRules(String canonicalId) =>
+      rulesByCanonicalId[canonicalId] ?? const <RulePlugin>[];
+
+  Set<String> canonicalizeIds(Set<String> ids) {
+    final canonicalIds = <String>{};
+    for (final id in ids) {
+      final canonicalId = canonicalIdByAlias[id];
+      if (canonicalId != null) canonicalIds.add(canonicalId);
+    }
+    return canonicalIds;
+  }
+}
+
+_RuleCollection _collectRules(
+  List<RulePlugin> curated,
+  List<RulePlugin> extra,
+) {
+  final exactById = <String, RulePlugin>{};
+  for (final rule in [...curated, ...extra]) {
+    final existing = exactById[rule.id];
+    exactById[rule.id] = existing == null ? rule : _preferRule(existing, rule);
+  }
+
+  final groups = <String, List<RulePlugin>>{};
+  for (final rule in exactById.values) {
+    groups.putIfAbsent(_semanticRuleKey(rule), () => []).add(rule);
+  }
+
+  final rules = <RulePlugin>[];
+  final byCanonicalId = <String, RulePlugin>{};
+  final canonicalIdByAlias = <String, String>{};
+  final aliasesByCanonicalId = <String, Set<String>>{};
+  final rulesByCanonicalId = <String, List<RulePlugin>>{};
+  for (final candidates in groups.values) {
+    var preferred = candidates.first;
+    for (final candidate in candidates.skip(1)) {
+      preferred = _preferRule(preferred, candidate);
+    }
+    final merged = _mergeRuleMetadata(preferred, candidates);
+    rules.add(merged);
+    byCanonicalId[merged.id] = merged;
+    aliasesByCanonicalId[merged.id] = {
+      for (final candidate in candidates) candidate.id,
+      merged.id,
+    };
+    rulesByCanonicalId[merged.id] = List.unmodifiable(candidates);
+    for (final candidate in candidates) {
+      canonicalIdByAlias[candidate.id] = merged.id;
+    }
+  }
+  return _RuleCollection(
+    rules: List.unmodifiable(rules),
+    byCanonicalId: Map.unmodifiable(byCanonicalId),
+    canonicalIdByAlias: Map.unmodifiable(canonicalIdByAlias),
+    aliasesByCanonicalId: Map.unmodifiable(aliasesByCanonicalId),
+    rulesByCanonicalId: Map.unmodifiable(rulesByCanonicalId),
+  );
+}
+
+String _semanticRuleKey(RulePlugin rule) {
+  final base = _canonicalRuleEndpoint(rule.baseUrl);
+  final search = _canonicalRuleEndpoint(rule.searchUrl);
+  final name = _canonicalRuleName(rule.name, fallback: rule.id);
+  final engine = rule.engine.trim().toLowerCase();
+  return '${rule.contentType.name}|$engine|$name|$base|$search';
+}
+
+String _canonicalRuleEndpoint(String value) {
+  final text = value.trim();
+  if (text.isEmpty) return '';
+  final uri = Uri.tryParse(text);
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    return text.replaceAll(RegExp(r'/+$'), '');
+  }
+  final scheme = uri.scheme.toLowerCase();
+  final port = uri.port;
+  final includePort =
+      port != 0 &&
+      !((scheme == 'http' && port == 80) || (scheme == 'https' && port == 443));
+  final host = uri.host.contains(':')
+      ? '[${uri.host.toLowerCase()}]'
+      : uri.host.toLowerCase();
+  final path = uri.path == '/' ? '' : uri.path.replaceAll(RegExp(r'/+$'), '');
+  final query = uri.hasQuery ? '?${uri.query}' : '';
+  return '$scheme://$host${includePort ? ':$port' : ''}$path$query';
+}
+
+String _canonicalRuleName(String value, {required String fallback}) {
+  final normalized = value
+      .trim()
+      .toLowerCase()
+      .replaceAll(RegExp(r'\s+'), '')
+      .replaceAll(RegExp(r'[\[\]【】()（）{}<>《》「」『』._\-·•|/\\:：,，。!！?？]+'), '');
+  return normalized.isEmpty ? fallback.trim().toLowerCase() : normalized;
+}
+
+RulePlugin _preferRule(RulePlugin first, RulePlugin second) {
+  final firstRank = _ruleRank(first);
+  final secondRank = _ruleRank(second);
+  for (var index = 0; index < firstRank.length; index++) {
+    final compared = secondRank[index].compareTo(firstRank[index]);
+    if (compared > 0) return second;
+    if (compared < 0) return first;
+  }
+  return first;
+}
+
+List<int> _ruleRank(RulePlugin rule) => [
+  rule.canResolveNatively ? 1 : 0,
+  rule.requiresCaptcha || rule.requiresPrivateAuth ? 0 : 1,
+  rule.updatedAt.millisecondsSinceEpoch,
+  rule.qualityScore,
+  _ruleCompleteness(rule),
+];
+
+int _ruleCompleteness(RulePlugin rule) {
+  var score = 0;
+  if (rule.baseUrl.trim().isNotEmpty) score += 4;
+  if (rule.searchUrl.trim().isNotEmpty) score += 4;
+  if (rule.kazumi != null) score += 6;
+  if (rule.xbpq != null) score += 6;
+  if (rule.animeko != null) score += 6;
+  score += rule.requestHeaders.length;
+  score += rule.rawConfig.length.clamp(0, 12);
+  return score;
+}
+
+RulePlugin _mergeRuleMetadata(
+  RulePlugin preferred,
+  List<RulePlugin> candidates,
+) {
+  final tags = <String>{...preferred.tags};
+  final headers = <String, String>{};
+  var installedByDefault = preferred.installedByDefault;
+  var priority = preferred.priority;
+  for (final candidate in candidates) {
+    tags.addAll(candidate.tags);
+    headers.addAll(candidate.requestHeaders);
+    installedByDefault = installedByDefault || candidate.installedByDefault;
+    if (candidate.priority < priority) priority = candidate.priority;
+  }
+  return preferred.copyWith(
+    tags: tags.toList(growable: false),
+    requestHeaders: {...headers, ...preferred.requestHeaders},
+    installedByDefault: installedByDefault,
+    priority: priority,
+  );
+}
+
+List<RuleRepositoryRecord> _deduplicateRepositories(
+  List<RuleRepositoryRecord> repositories,
+) {
+  final unique = <String, RuleRepositoryRecord>{};
+  for (final repository in repositories) {
+    final url = _canonicalRuleEndpoint(repository.url);
+    final key = url.isEmpty ? repository.id : url;
+    final existing = unique[key];
+    if (existing == null ||
+        repository.importedAt.isAfter(existing.importedAt)) {
+      unique[key] = repository;
+    }
+  }
+  return unique.values.toList(growable: false);
 }
 
 DateTime _date(
@@ -246,7 +458,7 @@ final _curatedRules = <RulePlugin>[
     note: 'KazumiRules 已列入索引，作为番剧规则的兜底线路。',
   ),
   RulePlugin(
-    id: 'kazumi:mxdp',
+    id: 'kazumi:mxdm',
     name: 'MXdm',
     version: '2.3',
     source: RuleSourceKind.kazumi,

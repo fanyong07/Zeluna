@@ -106,7 +106,11 @@ void main() {
     final json = settings.toJson();
 
     expect(settings.mediaMetadataEnabled, isTrue);
-    expect(settings.mediaMetadataProvider, 'TVMaze');
+    expect(settings.mediaMetadataProvider, 'Cinemeta + TVMaze');
+    expect(settings.cinemetaEnabled, isTrue);
+    expect(settings.watchHubEnabled, isFalse);
+    expect(settings.peerTubeEnabled, isTrue);
+    expect(settings.wikimediaCommonsEnabled, isTrue);
     expect(settings.publicCollectionSyncEnabled, isTrue);
     expect(settings.bilibiliSubtitleEnabled, isTrue);
     expect(settings.dandanplayDanmakuEnabled, isTrue);
@@ -114,11 +118,22 @@ void main() {
     expect(json, contains('dandanplayDanmakuEnabled'));
     expect(json, contains('dandanplayAppId'));
     expect(json, contains('dandanplayAppSecret'));
+    expect(json, contains('cinemetaEnabled'));
+    expect(json, contains('watchHubEnabled'));
+    expect(json['watchHubEnabled'], isFalse);
+    expect(json, contains('peerTubeEnabled'));
+    expect(json, contains('wikimediaCommonsEnabled'));
     expect(json, isNot(contains('tmdbEnabled')));
     expect(json, isNot(contains('tmdbLanguage')));
     expect(json, isNot(contains('traktEnabled')));
     expect(json, isNot(contains('openSubtitlesEnabled')));
     expect(json, isNot(contains('dandanplayEnabled')));
+
+    final migrated = ExternalServiceSettings.fromJson({
+      ...json,
+      'watchHubEnabled': true,
+    });
+    expect(migrated.watchHubEnabled, isFalse);
   });
 
   test('playback settings persist shortcut configuration', () {
@@ -351,8 +366,9 @@ void main() {
 
     final quickLines = await source.linesForEpisode(_animeSubject, _episode);
 
-    expect(requestedHosts, hasLength(6));
-    expect(requestedHosts, [
+    final quickHosts = requestedHosts.toSet().toList(growable: false);
+    expect(quickHosts, hasLength(6));
+    expect(quickHosts, [
       'rule0.example',
       'rule1.example',
       'rule2.example',
@@ -372,10 +388,203 @@ void main() {
       expandAll: true,
     );
 
-    expect(requestedHosts, hasLength(10));
-    expect(requestedHosts.last, 'rule9.example');
+    final expandedHosts = requestedHosts.toSet().toList(growable: false);
+    expect(expandedHosts, hasLength(10));
+    expect(expandedHosts, [
+      for (var index = 0; index < 10; index++) 'rule$index.example',
+    ]);
+    expect(expandedHosts.last, 'rule9.example');
     expect(expandedLines.map((line) => line.providerName), contains('Bulk 9'));
   });
+
+  test(
+    'quick rule lookup returns a fast playable line without waiting for slow rules',
+    () async {
+      final rules = List.generate(
+        5,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:quick-performance-$index',
+          name: 'Quick performance $index',
+          host: 'quick-performance-$index.example',
+          groupId: 'group:$index',
+          priority: index == 4 ? -100 : index,
+          quickSearch: index != 4,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          rules[0].id: const Duration(milliseconds: 600),
+          rules[1].id: const Duration(milliseconds: 20),
+          rules[2].id: const Duration(milliseconds: 600),
+          rules[3].id: const Duration(milliseconds: 600),
+          rules[4].id: Duration.zero,
+        },
+        availableRuleIds: {rules[1].id},
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+      );
+
+      final stopwatch = Stopwatch()..start();
+      final lines = await source.linesForEpisode(_animeSubject, _episode);
+      stopwatch.stop();
+
+      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 500)));
+      expect(resolver.calls, hasLength(4));
+      expect(resolver.calls, isNot(contains(rules[4].id)));
+      expect(resolver.maxActive, 4);
+      expect(
+        lines.where((line) => line.available).map((line) => line.providerId),
+        contains(rules[1].id),
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+      resolver.calls.clear();
+      const nextEpisode = AnimeEpisode(
+        id: 102,
+        subjectId: 1,
+        number: 2,
+        title: '',
+        airdate: '2026-01-08',
+        duration: '24:00',
+        description: 'second episode',
+      );
+      await source.linesForEpisode(_animeSubject, nextEpisode);
+      expect(resolver.calls.first, rules[1].id);
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+    },
+  );
+
+  test(
+    'quick and expanded rule lookups keep verification caches separate',
+    () async {
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:verification-cache',
+        name: 'Verification cache',
+        host: 'verification-cache.example',
+        groupId: 'verification-cache',
+        priority: 0,
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {rule.id: Duration.zero},
+        availableRuleIds: {rule.id},
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: resolver,
+      );
+
+      await source.linesForEpisode(_animeSubject, _episode);
+      await source.linesForEpisodeMode(
+        _animeSubject,
+        _episode,
+        expandAll: true,
+      );
+
+      expect(resolver.calls, [rule.id, rule.id]);
+      expect(resolver.verifyPlayableCalls, [false, true]);
+    },
+  );
+
+  test(
+    'quick lookup total budget does not accumulate across rule waves',
+    () async {
+      final rules = List.generate(
+        8,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:budget-$index',
+          name: 'Budget $index',
+          host: 'budget-$index.example',
+          groupId: 'budget-group:$index',
+          priority: index,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          for (var index = 0; index < rules.length; index++)
+            rules[index].id: index < 4
+                ? const Duration(milliseconds: 30)
+                : const Duration(milliseconds: 500),
+        },
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+        quickLookupBudget: const Duration(milliseconds: 120),
+      );
+
+      final stopwatch = Stopwatch()..start();
+      await source.linesForEpisode(_animeSubject, _episode);
+      stopwatch.stop();
+
+      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 350)));
+      expect(resolver.calls, hasLength(8));
+      expect(resolver.verifyPlayableCalls, everyElement(isFalse));
+
+      await Future<void>.delayed(const Duration(milliseconds: 550));
+      resolver.calls.clear();
+      resolver.verifyPlayableCalls.clear();
+      await source.linesForEpisode(_animeSubject, _episode);
+      expect(resolver.calls, isEmpty);
+    },
+  );
+
+  test(
+    'expanded rule lookup scans every rule with bounded concurrency',
+    () async {
+      final rules = List.generate(
+        52,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:expanded-performance-$index',
+          name: 'Expanded performance $index',
+          host: 'expanded-performance-$index.example',
+          groupId: 'expanded-group:$index',
+          priority: index,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          for (final rule in rules) rule.id: const Duration(milliseconds: 8),
+        },
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+      );
+
+      final lines = await source.linesForEpisodeMode(
+        _animeSubject,
+        _episode,
+        expandAll: true,
+      );
+
+      expect(resolver.calls, hasLength(52));
+      expect(resolver.maxActive, 6);
+      expect(lines, hasLength(52));
+      expect(lines.last.providerId, rules.last.id);
+    },
+  );
 }
 
 const _animeSubject = AnimeSubject(
@@ -447,6 +656,7 @@ RulePlugin _animekoLookupRule({
   required String host,
   required String groupId,
   required int priority,
+  bool quickSearch = true,
 }) {
   return RulePlugin(
     id: id,
@@ -461,7 +671,7 @@ RulePlugin _animekoLookupRule({
     baseUrl: 'https://$host/',
     searchUrl: 'https://$host/search?wd={keyword}',
     searchable: true,
-    quickSearch: true,
+    quickSearch: quickSearch,
     filterable: false,
     groupId: groupId,
     priority: priority,
@@ -486,4 +696,53 @@ String? _headerValue(http.BaseRequest request, String name) {
     if (entry.key.toLowerCase() == normalized) return entry.value;
   }
   return null;
+}
+
+class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
+  _DelayedRulePlaybackResolver({
+    required this.delays,
+    this.availableRuleIds = const {},
+  });
+
+  final Map<String, Duration> delays;
+  final Set<String> availableRuleIds;
+  final List<String> calls = <String>[];
+  final List<bool> verifyPlayableCalls = <bool>[];
+  int active = 0;
+  int maxActive = 0;
+
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+  }) async {
+    calls.add(rule.id);
+    verifyPlayableCalls.add(verifyPlayable);
+    active++;
+    if (active > maxActive) maxActive = active;
+    try {
+      await Future<void>.delayed(delays[rule.id] ?? Duration.zero);
+      final available = availableRuleIds.contains(rule.id);
+      return [
+        PlaybackLine(
+          id: '${rule.id}:${episode.id}',
+          episodeId: episode.id,
+          providerId: rule.id,
+          providerName: rule.name,
+          title: '${subject.title} ${episode.number}',
+          quality: available ? '1080P' : 'unknown',
+          format: available ? 'HLS' : 'unknown',
+          url: available
+              ? 'https://${rule.id.hashCode}.example/video.m3u8'
+              : null,
+          available: available,
+          message: available ? null : 'not found',
+        ),
+      ];
+    } finally {
+      active--;
+    }
+  }
 }

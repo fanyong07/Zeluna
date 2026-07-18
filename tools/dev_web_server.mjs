@@ -98,11 +98,29 @@ async function proxyMedia(request, response, requestUrl) {
   }
 
   const headers = {
-    'user-agent': request.headers['user-agent'] || 'Mozilla/5.0',
+    'user-agent':
+      request.headers['x-upstream-user-agent'] ||
+      request.headers['user-agent'] ||
+      'Mozilla/5.0',
     accept: request.headers.accept || '*/*',
-    referer: targetUrl.origin,
+    referer: request.headers['x-upstream-referer'] || targetUrl.origin,
   };
   if (request.headers.range) headers.range = request.headers.range;
+  if (request.headers['x-upstream-authorization']) {
+    headers.authorization = request.headers['x-upstream-authorization'];
+  }
+  if (request.headers['x-upstream-cookie']) {
+    headers.cookie = request.headers['x-upstream-cookie'];
+  }
+  if (request.headers['x-upstream-x-appid']) {
+    headers['x-appid'] = request.headers['x-upstream-x-appid'];
+  }
+  if (request.headers['x-upstream-x-timestamp']) {
+    headers['x-timestamp'] = request.headers['x-upstream-x-timestamp'];
+  }
+  if (request.headers['x-upstream-x-signature']) {
+    headers['x-signature'] = request.headers['x-upstream-x-signature'];
+  }
 
   const upstream = await fetch(targetUrl, {
     headers,
@@ -146,7 +164,10 @@ function corsHeaders(extra) {
   return {
     'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,HEAD,OPTIONS',
-    'access-control-allow-headers': 'range,content-type,accept,origin',
+    'access-control-allow-headers':
+      'range,content-type,accept,origin,x-upstream-user-agent,' +
+      'x-upstream-referer,x-upstream-authorization,x-upstream-cookie,' +
+      'x-upstream-x-appid,x-upstream-x-timestamp,x-upstream-x-signature',
     ...extra,
   };
 }
@@ -156,6 +177,28 @@ function validateTarget(value) {
   try {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    if (url.username || url.password) return null;
+    const host = url.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    ) return null;
+    const ipv4 = host.split('.').map((part) => Number(part));
+    if (ipv4.length === 4 && ipv4.every((part) => Number.isInteger(part))) {
+      const [first, second] = ipv4;
+      if (
+        first === 0 ||
+        first === 10 ||
+        first === 127 ||
+        first >= 224 ||
+        (first === 169 && second === 254) ||
+        (first === 172 && second >= 16 && second <= 31) ||
+        (first === 192 && second === 168)
+      ) return null;
+    }
     return url;
   } catch {
     return null;

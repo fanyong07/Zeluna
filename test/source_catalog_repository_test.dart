@@ -10,14 +10,28 @@ void main() {
     () async {
       final catalog = await const SourceCatalogRepository().loadCatalog();
 
-      expect(catalog.version, 1);
-      expect(catalog.importedCount, 10);
-      expect(catalog.enabledCount, 10);
+      expect(catalog.version, 2);
+      expect(catalog.importedCount, 12);
+      expect(catalog.enabledCount, 12);
+      expect(
+        catalog.sourceById('public:internet_archive')?.kind,
+        VideoSourceKind.publicMedia,
+      );
+      expect(
+        catalog.sourceById('public:wikimedia_commons')?.kind,
+        VideoSourceKind.publicMedia,
+      );
       expect(catalog.sourceById('torrent:dmhy')?.displayName, '动漫花园');
       expect(catalog.sourceById('torrent:dmhy')?.supportsSearch, isTrue);
       expect(
         catalog.sources.any((source) => source.kind == VideoSourceKind.tvBox),
         isTrue,
+      );
+      expect(
+        catalog
+            .sourceById('tvbox:0ceee47b675d78d6320a8b53')
+            ?.rawConfig['sites'],
+        isA<List>(),
       );
       expect(
         catalog.sources.any((source) => source.kind == VideoSourceKind.liveM3u),
@@ -39,6 +53,6 @@ void main() {
       catalog.sourceById('tvbox:0ceee47b675d78d6320a8b53')?.enabled,
       isFalse,
     );
-    expect(catalog.enabledCount, 9);
+    expect(catalog.enabledCount, 11);
   });
 }

@@ -259,6 +259,35 @@ class DanmakuMatch {
   final String? message;
 }
 
+enum DanmakuMode { scroll, bottom, top, reverse, advanced }
+
+class DanmakuComment {
+  const DanmakuComment({
+    required this.id,
+    required this.provider,
+    required this.time,
+    required this.mode,
+    required this.color,
+    required this.text,
+  });
+
+  final String id;
+  final String provider;
+  final Duration time;
+  final DanmakuMode mode;
+  final int color;
+  final String text;
+}
+
+class DanmakuTimeline {
+  const DanmakuTimeline({this.sources = const [], this.comments = const []});
+
+  final List<DanmakuMatch> sources;
+  final List<DanmakuComment> comments;
+
+  bool get isEmpty => comments.isEmpty;
+}
+
 class AnimeCharacter {
   const AnimeCharacter({
     required this.id,
@@ -352,6 +381,8 @@ class AnimeHomeFeed {
     required this.index,
     required this.categories,
     required this.tags,
+    this.seriesHighlights = const [],
+    this.movieHighlights = const [],
   });
 
   final AnimeSubject hero;
@@ -360,6 +391,54 @@ class AnimeHomeFeed {
   final List<AnimeSubject> index;
   final List<AnimeCategory> categories;
   final List<AnimeTag> tags;
+  final List<AnimeSubject> seriesHighlights;
+  final List<AnimeSubject> movieHighlights;
+
+  Map<String, dynamic> toJson() => {
+    'hero': hero.toJson(),
+    'recent': recent.map((item) => item.toJson()).toList(),
+    'recommended': recommended.map((item) => item.toJson()).toList(),
+    'index': index.map((item) => item.toJson()).toList(),
+    'categories': categories.map((item) => item.toJson()).toList(),
+    'tags': tags.map((item) => item.toJson()).toList(),
+    'seriesHighlights': seriesHighlights.map((item) => item.toJson()).toList(),
+    'movieHighlights': movieHighlights.map((item) => item.toJson()).toList(),
+  };
+
+  factory AnimeHomeFeed.fromJson(Map<String, dynamic> json) {
+    final heroJson = json['hero'];
+    if (heroJson is! Map) {
+      throw const FormatException('home feed hero is missing');
+    }
+    return AnimeHomeFeed(
+      hero: AnimeSubject.fromJson(heroJson.cast<String, dynamic>()),
+      recent: _listFromJson(json['recent'], AnimeSubject.fromJson),
+      recommended: _listFromJson(json['recommended'], AnimeSubject.fromJson),
+      index: _listFromJson(json['index'], AnimeSubject.fromJson),
+      categories: _listFromJson(json['categories'], AnimeCategory.fromJson),
+      tags: _listFromJson(json['tags'], AnimeTag.fromJson),
+      seriesHighlights: _listFromJson(
+        json['seriesHighlights'],
+        AnimeSubject.fromJson,
+      ),
+      movieHighlights: _listFromJson(
+        json['movieHighlights'],
+        AnimeSubject.fromJson,
+      ),
+    );
+  }
+}
+
+class ExternalWatchLink {
+  const ExternalWatchLink({
+    required this.provider,
+    required this.title,
+    required this.url,
+  });
+
+  final String provider;
+  final String title;
+  final String url;
 }
 
 class AnimeDetailBundle {
@@ -369,6 +448,7 @@ class AnimeDetailBundle {
     required this.characters,
     required this.staff,
     required this.recommendations,
+    this.watchLinks = const [],
   });
 
   final AnimeSubject subject;
@@ -376,6 +456,7 @@ class AnimeDetailBundle {
   final List<AnimeCharacter> characters;
   final List<AnimeStaff> staff;
   final List<AnimeRecommendation> recommendations;
+  final List<ExternalWatchLink> watchLinks;
 }
 
 class PlaySessionRequest {
@@ -667,8 +748,14 @@ class MiscSettings {
 class ExternalServiceSettings {
   const ExternalServiceSettings({
     this.mediaMetadataEnabled = true,
-    this.mediaMetadataProvider = 'TVMaze',
+    this.mediaMetadataProvider = 'Cinemeta + TVMaze',
+    this.cinemetaEnabled = true,
+    this.watchHubEnabled = false,
+    this.peerTubeEnabled = true,
+    this.wikimediaCommonsEnabled = true,
     this.anilistEnabled = true,
+    this.jikanEnabled = true,
+    this.kitsuEnabled = true,
     this.bangumiEnabled = true,
     this.preferBangumiChinese = true,
     this.publicCollectionSyncEnabled = true,
@@ -686,7 +773,13 @@ class ExternalServiceSettings {
 
   final bool mediaMetadataEnabled;
   final String mediaMetadataProvider;
+  final bool cinemetaEnabled;
+  final bool watchHubEnabled;
+  final bool peerTubeEnabled;
+  final bool wikimediaCommonsEnabled;
   final bool anilistEnabled;
+  final bool jikanEnabled;
+  final bool kitsuEnabled;
   final bool bangumiEnabled;
   final bool preferBangumiChinese;
   final bool publicCollectionSyncEnabled;
@@ -704,7 +797,13 @@ class ExternalServiceSettings {
   ExternalServiceSettings copyWith({
     bool? mediaMetadataEnabled,
     String? mediaMetadataProvider,
+    bool? cinemetaEnabled,
+    bool? watchHubEnabled,
+    bool? peerTubeEnabled,
+    bool? wikimediaCommonsEnabled,
     bool? anilistEnabled,
+    bool? jikanEnabled,
+    bool? kitsuEnabled,
     bool? bangumiEnabled,
     bool? preferBangumiChinese,
     bool? publicCollectionSyncEnabled,
@@ -723,7 +822,14 @@ class ExternalServiceSettings {
       mediaMetadataEnabled: mediaMetadataEnabled ?? this.mediaMetadataEnabled,
       mediaMetadataProvider:
           mediaMetadataProvider ?? this.mediaMetadataProvider,
+      cinemetaEnabled: cinemetaEnabled ?? this.cinemetaEnabled,
+      watchHubEnabled: watchHubEnabled ?? this.watchHubEnabled,
+      peerTubeEnabled: peerTubeEnabled ?? this.peerTubeEnabled,
+      wikimediaCommonsEnabled:
+          wikimediaCommonsEnabled ?? this.wikimediaCommonsEnabled,
       anilistEnabled: anilistEnabled ?? this.anilistEnabled,
+      jikanEnabled: jikanEnabled ?? this.jikanEnabled,
+      kitsuEnabled: kitsuEnabled ?? this.kitsuEnabled,
       bangumiEnabled: bangumiEnabled ?? this.bangumiEnabled,
       preferBangumiChinese: preferBangumiChinese ?? this.preferBangumiChinese,
       publicCollectionSyncEnabled:
@@ -748,7 +854,13 @@ class ExternalServiceSettings {
   Map<String, dynamic> toJson() => {
     'mediaMetadataEnabled': mediaMetadataEnabled,
     'mediaMetadataProvider': mediaMetadataProvider,
+    'cinemetaEnabled': cinemetaEnabled,
+    'watchHubEnabled': watchHubEnabled,
+    'peerTubeEnabled': peerTubeEnabled,
+    'wikimediaCommonsEnabled': wikimediaCommonsEnabled,
     'anilistEnabled': anilistEnabled,
+    'jikanEnabled': jikanEnabled,
+    'kitsuEnabled': kitsuEnabled,
     'bangumiEnabled': bangumiEnabled,
     'preferBangumiChinese': preferBangumiChinese,
     'publicCollectionSyncEnabled': publicCollectionSyncEnabled,
@@ -768,8 +880,16 @@ class ExternalServiceSettings {
     return ExternalServiceSettings(
       mediaMetadataEnabled: json['mediaMetadataEnabled'] as bool? ?? true,
       mediaMetadataProvider:
-          json['mediaMetadataProvider']?.toString() ?? 'TVMaze',
+          json['mediaMetadataProvider']?.toString() ?? 'Cinemeta + TVMaze',
+      cinemetaEnabled: json['cinemetaEnabled'] as bool? ?? true,
+      // Keep reading legacy settings JSON, but permanently migrate the
+      // Retired external platform-link integration stays disabled.
+      watchHubEnabled: false,
+      peerTubeEnabled: json['peerTubeEnabled'] as bool? ?? true,
+      wikimediaCommonsEnabled: json['wikimediaCommonsEnabled'] as bool? ?? true,
       anilistEnabled: json['anilistEnabled'] as bool? ?? true,
+      jikanEnabled: json['jikanEnabled'] as bool? ?? true,
+      kitsuEnabled: json['kitsuEnabled'] as bool? ?? true,
       bangumiEnabled: json['bangumiEnabled'] as bool? ?? true,
       preferBangumiChinese: json['preferBangumiChinese'] as bool? ?? true,
       publicCollectionSyncEnabled:
@@ -832,6 +952,7 @@ class PlaybackSettings {
   const PlaybackSettings({
     this.volumeBoost = 0.26,
     this.superResolution = false,
+    this.superResolutionProfile = 'balanced',
     this.videoScale = '适应',
     this.speed = 1.0,
     this.defaultSpeed = 1.0,
@@ -855,6 +976,7 @@ class PlaybackSettings {
 
   final double volumeBoost;
   final bool superResolution;
+  final String superResolutionProfile;
   final String videoScale;
   final double speed;
   final double defaultSpeed;
@@ -878,6 +1000,7 @@ class PlaybackSettings {
   PlaybackSettings copyWith({
     double? volumeBoost,
     bool? superResolution,
+    String? superResolutionProfile,
     String? videoScale,
     double? speed,
     double? defaultSpeed,
@@ -901,6 +1024,8 @@ class PlaybackSettings {
     return PlaybackSettings(
       volumeBoost: volumeBoost ?? this.volumeBoost,
       superResolution: superResolution ?? this.superResolution,
+      superResolutionProfile:
+          superResolutionProfile ?? this.superResolutionProfile,
       videoScale: videoScale ?? this.videoScale,
       speed: speed ?? this.speed,
       defaultSpeed: defaultSpeed ?? this.defaultSpeed,
@@ -927,6 +1052,7 @@ class PlaybackSettings {
   Map<String, dynamic> toJson() => {
     'volumeBoost': volumeBoost,
     'superResolution': superResolution,
+    'superResolutionProfile': superResolutionProfile,
     'videoScale': videoScale,
     'speed': speed,
     'defaultSpeed': defaultSpeed,
@@ -952,6 +1078,9 @@ class PlaybackSettings {
     return PlaybackSettings(
       volumeBoost: (json['volumeBoost'] as num?)?.toDouble() ?? 0.26,
       superResolution: json['superResolution'] as bool? ?? false,
+      superResolutionProfile: _normalizeSuperResolutionProfile(
+        json['superResolutionProfile'],
+      ),
       videoScale: json['videoScale'] as String? ?? '适应',
       speed: (json['speed'] as num?)?.toDouble() ?? 1.0,
       defaultSpeed: (json['defaultSpeed'] as num?)?.toDouble() ?? 1.0,
@@ -973,6 +1102,16 @@ class PlaybackSettings {
       shortcutMute: json['shortcutMute'] as bool? ?? true,
       shortcutReload: json['shortcutReload'] as bool? ?? true,
     );
+  }
+
+  static String _normalizeSuperResolutionProfile(Object? value) {
+    final profile = value?.toString();
+    if (profile == 'performance' ||
+        profile == 'balanced' ||
+        profile == 'quality') {
+      return profile!;
+    }
+    return 'balanced';
   }
 }
 

@@ -7,7 +7,7 @@ import 'source_catalog_models.dart';
 class SourceCatalogRepository {
   const SourceCatalogRepository({
     this.bundle,
-    this.assetPath = 'output/sources_catalog.json',
+    this.assetPath = 'assets/data/sources_catalog.json',
   });
 
   final AssetBundle? bundle;

@@ -10,6 +10,13 @@ class ExternalServiceRepository {
     : _client = client ?? http.Client();
 
   final http.Client _client;
+  static const _cinemetaBase = 'https://v3-cinemeta.strem.io';
+  static const _archiveCollections = <String>[
+    'animationandcartoons',
+    'feature_films',
+    'classic_tv',
+    'prelinger',
+  ];
   static const _browserHeaders = {
     'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -47,13 +54,14 @@ query ($perPage: Int, $search: String) {
 
   Future<List<AnimeSubject>> anilistTrending({
     int perPage = 24,
+    int page = 1,
     String season = '',
     int? seasonYear,
   }) async {
     return _anilistSubjects(
       r'''
-query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
-  Page(page: 1, perPage: $perPage) {
+query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
+  Page(page: $page, perPage: $perPage) {
     media(type: ANIME, sort: TRENDING_DESC, season: $season, seasonYear: $seasonYear) {
       id
       title { romaji english native }
@@ -68,14 +76,169 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       studios(isMain: true) { nodes { name } }
     }
   }
+
 }
 ''',
       {
+        'page': page.clamp(1, 10),
         'perPage': perPage,
         if (season.isNotEmpty) 'season': season,
         'seasonYear': ?seasonYear,
       },
     );
+  }
+
+  Future<List<AnimeSubject>> anilistTrendingFeed({
+    int pages = 3,
+    int perPage = 50,
+  }) async {
+    final safePages = pages.clamp(1, 5);
+    final groups = await Future.wait([
+      for (var page = 1; page <= safePages; page++)
+        anilistTrending(
+          page: page,
+          perPage: perPage.clamp(1, 50),
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<List<AnimeSubject>> jikanSearch(
+    String keyword, {
+    int limit = 24,
+  }) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    final response = await _client
+        .get(
+          Uri.parse('https://api.jikan.moe/v4/anime').replace(
+            queryParameters: {
+              'q': query,
+              'limit': '${limit.clamp(1, 25)}',
+              'sfw': 'true',
+              'order_by': 'score',
+              'sort': 'desc',
+            },
+          ),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 16));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final data = decoded is Map ? decoded['data'] : null;
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((item) => _subjectFromJikan(item.cast<String, dynamic>()))
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<List<AnimeSubject>> jikanTop({
+    int limit = 24,
+    int page = 1,
+    String filter = 'airing',
+  }) async {
+    final queryParameters = <String, String>{
+      'page': '${page.clamp(1, 20)}',
+      'limit': '${limit.clamp(1, 25)}',
+      'sfw': 'true',
+    };
+    if (filter.trim().isNotEmpty) {
+      queryParameters['filter'] = filter.trim();
+    }
+    final response = await _client
+        .get(
+          Uri.parse(
+            'https://api.jikan.moe/v4/top/anime',
+          ).replace(queryParameters: queryParameters),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 16));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final data = decoded is Map ? decoded['data'] : null;
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((item) => _subjectFromJikan(item.cast<String, dynamic>()))
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<List<AnimeSubject>> jikanDiscoveryFeed({int pages = 2}) async {
+    final safePages = pages.clamp(1, 4);
+    final groups = await Future.wait([
+      jikanTop(
+        limit: 25,
+        filter: 'airing',
+      ).onError((_, _) => const <AnimeSubject>[]),
+      for (var page = 1; page <= safePages; page++)
+        jikanTop(
+          limit: 25,
+          page: page,
+          filter: 'bypopularity',
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<List<AnimeSubject>> kitsuSearch(
+    String keyword, {
+    int limit = 20,
+  }) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    return _kitsuSubjects(
+      queryParameters: {
+        'filter[text]': query,
+        'page[limit]': '${limit.clamp(1, 20)}',
+      },
+    );
+  }
+
+  Future<List<AnimeSubject>> kitsuTrending({int limit = 20, int offset = 0}) {
+    return _kitsuSubjects(
+      queryParameters: {
+        'sort': '-userCount',
+        'page[limit]': '${limit.clamp(1, 20)}',
+        'page[offset]': '${offset < 0 ? 0 : offset}',
+      },
+    );
+  }
+
+  Future<List<AnimeSubject>> kitsuTrendingFeed({int pages = 4}) async {
+    final safePages = pages.clamp(1, 6);
+    final groups = await Future.wait([
+      for (var page = 0; page < safePages; page++)
+        kitsuTrending(
+          limit: 20,
+          offset: page * 20,
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<List<AnimeSubject>> _kitsuSubjects({
+    required Map<String, String> queryParameters,
+  }) async {
+    final response = await _client
+        .get(
+          Uri.parse(
+            'https://kitsu.io/api/edge/anime',
+          ).replace(queryParameters: queryParameters),
+          headers: const {'Accept': 'application/vnd.api+json'},
+        )
+        .timeout(const Duration(seconds: 16));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final data = decoded is Map ? decoded['data'] : null;
+    if (data is! List) return const [];
+    return data
+        .whereType<Map>()
+        .map((item) => _subjectFromKitsu(item.cast<String, dynamic>()))
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList(growable: false);
   }
 
   Future<List<AnimeSubject>> _anilistSubjects(
@@ -104,11 +267,86 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         .toList();
   }
 
+  Future<List<AnimeSubject>> cinemetaCatalog({
+    required String type,
+    int skip = 0,
+    String genre = '',
+    String search = '',
+  }) async {
+    final mediaType = type == 'series' ? 'series' : 'movie';
+    final extras = <String>[];
+    if (genre.trim().isNotEmpty) {
+      extras.add('genre=${Uri.encodeComponent(genre.trim())}');
+    }
+    if (search.trim().isNotEmpty) {
+      extras.add('search=${Uri.encodeComponent(search.trim())}');
+    }
+    if (skip > 0) extras.add('skip=$skip');
+    final extraPath = extras.isEmpty ? '' : '/${extras.join('&')}';
+    final response = await _client
+        .get(
+          Uri.parse('$_cinemetaBase/catalog/$mediaType/top$extraPath.json'),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 16));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final metas = decoded is Map ? decoded['metas'] : null;
+    if (metas is! List) return const [];
+    return metas
+        .whereType<Map>()
+        .map(
+          (item) =>
+              _subjectFromCinemeta(item.cast<String, dynamic>(), mediaType),
+        )
+        .where((item) => item.title.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<List<AnimeSubject>> cinemetaFeed({
+    required String type,
+    int pages = 6,
+    String genre = '',
+  }) async {
+    final safePages = pages.clamp(1, 6);
+    final requests = <Future<List<AnimeSubject>>>[];
+    for (var page = 0; page < safePages; page++) {
+      final skip = page * 50;
+      requests.add(
+        cinemetaCatalog(
+          type: type,
+          skip: skip,
+          genre: genre,
+        ).onError((_, _) => const <AnimeSubject>[]),
+      );
+    }
+    final groups = await Future.wait(requests);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<List<AnimeSubject>> cinemetaSearch(String keyword) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    final groups = await Future.wait([
+      cinemetaCatalog(
+        type: 'movie',
+        search: query,
+      ).onError((_, _) => const <AnimeSubject>[]),
+      cinemetaCatalog(
+        type: 'series',
+        search: query,
+      ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
   Future<List<AnimeSubject>> mediaSearch(String keyword) async {
     if (keyword.trim().isEmpty) return const [];
     final groups = await Future.wait([
+      cinemetaSearch(keyword).onError((_, _) => const <AnimeSubject>[]),
       tvMazeSearch(keyword).onError((_, _) => const <AnimeSubject>[]),
       wikidataMovieSearch(keyword).onError((_, _) => const <AnimeSubject>[]),
+      internetArchiveSearch(keyword).onError((_, _) => const <AnimeSubject>[]),
     ]);
     return _uniqueSubjects(groups.expand((items) => items));
   }
@@ -134,12 +372,14 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         .toList();
   }
 
-  Future<List<AnimeSubject>> tvMazeShows({int page = 0}) async {
+  Future<List<AnimeSubject>> tvMazeShows({int page = 0, int limit = 80}) async {
+    final safePage = page < 0 ? 0 : page;
+    final safeLimit = limit.clamp(1, 250).toInt();
     final response = await _client
         .get(
           Uri.parse(
             'https://api.tvmaze.com/shows',
-          ).replace(queryParameters: {'page': '$page'}),
+          ).replace(queryParameters: {'page': '$safePage'}),
           headers: const {'Accept': 'application/json'},
         )
         .timeout(const Duration(seconds: 16));
@@ -151,8 +391,26 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         .whereType<Map>()
         .map((item) => _subjectFromTvMaze(item.cast<String, dynamic>()))
         .where((item) => item.title.trim().isNotEmpty)
-        .take(80)
+        .take(safeLimit)
         .toList();
+  }
+
+  Future<List<AnimeSubject>> tvMazeShowsFeed({
+    int pages = 3,
+    int startPage = 0,
+    int limitPerPage = 220,
+  }) async {
+    final safePages = pages.clamp(1, 10).toInt();
+    final safeStartPage = startPage < 0 ? 0 : startPage;
+    final safeLimit = limitPerPage.clamp(1, 250).toInt();
+    final groups = await Future.wait([
+      for (var offset = 0; offset < safePages; offset++)
+        tvMazeShows(
+          page: safeStartPage + offset,
+          limit: safeLimit,
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
   }
 
   Future<List<AnimeSubject>> tvMazeSchedule({
@@ -181,11 +439,15 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         .toList();
   }
 
-  Future<List<AnimeSubject>> seriesMetadataFeed() async {
+  Future<List<AnimeSubject>> seriesMetadataFeed({
+    bool includeCinemeta = true,
+    int cinemetaPages = 6,
+    int tvMazePages = 3,
+  }) async {
     final now = DateTime.now();
     final scheduleRequests = <Future<List<AnimeSubject>>>[];
     for (final country in const ['US', 'GB', 'KR', 'JP', 'CN']) {
-      for (var days = 0; days < 4; days++) {
+      for (var days = 0; days < 2; days++) {
         scheduleRequests.add(
           tvMazeSchedule(
             country: country,
@@ -194,28 +456,89 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
         );
       }
     }
-    final groups =
-        await Future.wait([
-          ...scheduleRequests,
-          tvMazeSearch('drama').onError((_, _) => const <AnimeSubject>[]),
-          tvMazeSearch(
-            'korean drama',
-          ).onError((_, _) => const <AnimeSubject>[]),
-          tvMazeSearch(
-            'chinese drama',
-          ).onError((_, _) => const <AnimeSubject>[]),
-          tvMazeSearch('crime').onError((_, _) => const <AnimeSubject>[]),
-        ]).timeout(
-          const Duration(seconds: 24),
-          onTimeout: () => const <List<AnimeSubject>>[],
-        );
-    final subjects = _uniqueSubjects(groups.expand((items) => items));
-    subjects.sort((a, b) => (b.date ?? '').compareTo(a.date ?? ''));
-    return subjects.take(96).toList();
+    final groups = await Future.wait([
+      if (includeCinemeta)
+        cinemetaFeed(
+          type: 'series',
+          pages: cinemetaPages,
+        ).onError((_, _) => const <AnimeSubject>[])
+      else
+        Future.value(const <AnimeSubject>[]),
+      tvMazeShowsFeed(
+        pages: tvMazePages,
+      ).onError((_, _) => const <AnimeSubject>[]),
+      ...scheduleRequests,
+      tvMazeSearch('drama').onError((_, _) => const <AnimeSubject>[]),
+      tvMazeSearch('korean drama').onError((_, _) => const <AnimeSubject>[]),
+      tvMazeSearch('chinese drama').onError((_, _) => const <AnimeSubject>[]),
+      tvMazeSearch('crime').onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    final cinemeta = groups.first;
+    final recent = _uniqueSubjects(groups.skip(1).expand((items) => items))
+      ..sort((a, b) => (b.date ?? '').compareTo(a.date ?? ''));
+    return _uniqueSubjects([
+      ..._interleaveSubjectGroups([cinemeta, recent], limitPerRound: 8),
+      ...cinemeta,
+      ...recent,
+    ]).take(900).toList(growable: false);
   }
 
-  Future<List<AnimeSubject>> movieMetadataFeed({String keyword = ''}) {
-    return _wikidataMovies(keyword: keyword, limit: keyword.isEmpty ? 72 : 36);
+  Future<List<AnimeSubject>> movieMetadataFeed({
+    String keyword = '',
+    bool includeCinemeta = true,
+    bool includeArchive = true,
+    int cinemetaPages = 6,
+  }) async {
+    final query = keyword.trim();
+    final groups = await Future.wait([
+      if (!includeCinemeta)
+        Future.value(const <AnimeSubject>[])
+      else if (query.isEmpty)
+        cinemetaFeed(
+          type: 'movie',
+          pages: cinemetaPages,
+        ).onError((_, _) => const <AnimeSubject>[])
+      else
+        cinemetaCatalog(
+          type: 'movie',
+          search: query,
+        ).onError((_, _) => const <AnimeSubject>[]),
+      _wikidataMovies(
+        keyword: query,
+        limit: query.isEmpty ? 60 : 30,
+      ).onError((_, _) => const <AnimeSubject>[]),
+      if (includeArchive && query.isEmpty)
+        internetArchiveCatalog(
+          limit: 96,
+          page: 1,
+        ).onError((_, _) => const <AnimeSubject>[])
+      else if (includeArchive)
+        internetArchiveSearch(
+          query,
+          limit: 28,
+          page: 1,
+        ).onError((_, _) => const <AnimeSubject>[])
+      else
+        Future.value(const <AnimeSubject>[]),
+      if (query.isEmpty && includeArchive)
+        internetArchiveCatalog(
+          limit: 96,
+          page: 2,
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    final cinemeta = groups.first;
+    final metadata = groups.length > 1 ? groups[1] : const <AnimeSubject>[];
+    final playable = groups.skip(2).expand((items) => items).toList();
+    return _uniqueSubjects([
+      ..._interleaveSubjectGroups([
+        cinemeta,
+        playable,
+        metadata,
+      ], limitPerRound: 10),
+      ...cinemeta,
+      ...playable,
+      ...metadata,
+    ]).take(1000).toList(growable: false);
   }
 
   Future<List<AnimeSubject>> wikidataMovieSearch(String keyword) {
@@ -223,8 +546,91 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
     return _wikidataMovies(keyword: keyword.trim(), limit: 24);
   }
 
+  Future<List<AnimeSubject>> internetArchiveSearch(
+    String keyword, {
+    int limit = 18,
+    int page = 1,
+    String? collection,
+  }) async {
+    final query = keyword.trim();
+    final requestedCollection = collection?.trim() ?? '';
+    final trustedCollections =
+        requestedCollection.isNotEmpty &&
+            _archiveCollections.contains(requestedCollection)
+        ? 'collection:$requestedCollection'
+        : '(${_archiveCollections.map((item) => 'collection:$item').join(' OR ')})';
+    final search = query.isEmpty
+        ? 'mediatype:movies AND $trustedCollections AND '
+              '(format:"MPEG4" OR format:"h.264")'
+        : 'mediatype:movies AND $trustedCollections AND '
+              'title:(${_archiveQuery(query)}) AND '
+              '(format:"MPEG4" OR format:"h.264")';
+    final response = await _client
+        .get(
+          Uri.parse('https://archive.org/advancedsearch.php').replace(
+            queryParameters: {
+              'q': search,
+              'fl[]':
+                  'identifier,title,description,date,language,downloads,'
+                  'collection,licenseurl,rights',
+              'rows': '${(limit * 4).clamp(limit, 100)}',
+              'page': '${page.clamp(1, 20)}',
+              'sort[]': 'downloads desc',
+              'output': 'json',
+            },
+          ),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 18));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final docs = decoded is Map && decoded['response'] is Map
+        ? (decoded['response'] as Map)['docs']
+        : null;
+    if (docs is! List) return const [];
+    return docs
+        .whereType<Map>()
+        .map(
+          (item) => _subjectFromInternetArchive(item.cast<String, dynamic>()),
+        )
+        .whereType<AnimeSubject>()
+        .where((item) => item.title.trim().isNotEmpty)
+        .take(limit.clamp(1, 100))
+        .toList(growable: false);
+  }
+
+  /// Builds a broader playable catalogue from separately paged, curated
+  /// Internet Archive collections. Items still need an explicit Public
+  /// Domain, CC0, CC BY or CC BY-SA marker before they are returned.
+  Future<List<AnimeSubject>> internetArchiveCatalog({
+    int page = 1,
+    int limit = 96,
+  }) async {
+    final safeLimit = limit.clamp(1, 240).toInt();
+    final perCollection = ((safeLimit / _archiveCollections.length).ceil() * 2)
+        .clamp(24, 60)
+        .toInt();
+    final groups = await Future.wait([
+      for (final collection in _archiveCollections)
+        internetArchiveSearch(
+          '',
+          collection: collection,
+          page: page,
+          limit: perCollection,
+        ).onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    return _uniqueSubjects([
+      ..._interleaveSubjectGroups(groups, limitPerRound: 6),
+      ...groups.expand((items) => items),
+    ]).take(safeLimit).toList(growable: false);
+  }
+
   Future<AnimeDetailBundle> externalDetail(AnimeSubject subject) async {
-    if (subject.source == 'tvmaze') {
+    if (subject.source.startsWith('cinemeta:')) {
+      final detail = await _cinemetaDetail(subject);
+      if (detail != null) return detail;
+    }
+    if (subject.source.startsWith('tvmaze')) {
       final detail = await _tvMazeDetail(subject);
       if (detail != null) return detail;
     }
@@ -254,6 +660,45 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       characters: const [],
       staff: const [],
       recommendations: const [],
+    );
+  }
+
+  Future<AnimeDetailBundle?> _cinemetaDetail(AnimeSubject subject) async {
+    final identity = _cinemetaIdentity(subject);
+    if (identity == null) return null;
+    final response = await _client
+        .get(
+          Uri.parse('$_cinemetaBase/meta/${identity.$1}/${identity.$2}.json'),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 16));
+    if (response.statusCode != 200) return null;
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final meta = decoded is Map ? decoded['meta'] : null;
+    if (meta is! Map) return null;
+    final json = meta.cast<String, dynamic>();
+    final detailedSubject = _subjectFromCinemeta(json, identity.$1);
+    final episodes = _cinemetaEpisodes(json, detailedSubject);
+    final genres = _stringList(json['genres']);
+    final related = genres.isEmpty
+        ? const <AnimeSubject>[]
+        : await cinemetaCatalog(
+            type: identity.$1,
+            genre: genres.first,
+          ).onError((_, _) => const <AnimeSubject>[]);
+    return AnimeDetailBundle(
+      subject: detailedSubject,
+      episodes: episodes,
+      characters: _cinemetaCharacters(json),
+      staff: _cinemetaStaff(json),
+      recommendations: related
+          .where((item) => item.source != detailedSubject.source)
+          .take(12)
+          .map(
+            (item) =>
+                AnimeRecommendation(subject: item, relation: genres.first),
+          )
+          .toList(growable: false),
     );
   }
 
@@ -803,6 +1248,236 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
     );
   }
 
+  AnimeSubject _subjectFromJikan(Map<String, dynamic> json) {
+    final titles = json['titles'] is List ? json['titles'] as List : const [];
+    final images = json['images'] is Map ? json['images'] as Map : const {};
+    final jpg = images['jpg'] is Map ? images['jpg'] as Map : const {};
+    final trailer = json['trailer'] is Map ? json['trailer'] as Map : const {};
+    final title = titles
+        .whereType<Map>()
+        .map((item) => item['title']?.toString() ?? '')
+        .firstWhere(
+          (item) => item.trim().isNotEmpty,
+          orElse: () => json['title']?.toString() ?? '',
+        );
+    final genres = <Object?>[
+      if (json['genres'] is List) ...(json['genres'] as List),
+      if (json['themes'] is List) ...(json['themes'] as List),
+    ];
+    final studios = json['studios'] is List
+        ? json['studios'] as List
+        : const [];
+    return AnimeSubject(
+      id: _intValue(json['mal_id']) ?? 0,
+      title: title,
+      originalTitle: json['title_japanese']?.toString() ?? title,
+      summary: _cleanText(json['synopsis']?.toString()),
+      coverUrl:
+          jpg['large_image_url']?.toString() ?? jpg['image_url']?.toString(),
+      bannerUrl: trailer['images'] is Map
+          ? ((trailer['images'] as Map)['maximum_image_url']?.toString() ??
+                jpg['large_image_url']?.toString())
+          : jpg['large_image_url']?.toString(),
+      date: json['aired'] is Map
+          ? ((json['aired'] as Map)['from']?.toString())
+          : null,
+      platform: json['type']?.toString() ?? 'TV',
+      language: '日语',
+      region: '日本',
+      status: json['status']?.toString() ?? '动画',
+      categories: genres
+          .whereType<Map>()
+          .map((item) => AnimeCategory(name: item['name']?.toString() ?? ''))
+          .where((item) => item.name.isNotEmpty)
+          .take(6)
+          .toList(),
+      tags: studios
+          .whereType<Map>()
+          .map((item) => AnimeTag(name: item['name']?.toString() ?? ''))
+          .where((item) => item.name.isNotEmpty)
+          .take(6)
+          .toList(),
+      totalEpisodes: _intValue(json['episodes']) ?? 0,
+      ratingScore: (json['score'] as num?)?.toDouble(),
+      ratingRank: _intValue(json['rank']),
+      ratingTotal: _intValue(json['scored_by']),
+      source: 'jikan',
+    );
+  }
+
+  AnimeSubject _subjectFromKitsu(Map<String, dynamic> json) {
+    final attributes = json['attributes'] is Map
+        ? json['attributes'] as Map
+        : const {};
+    final titles = attributes['titles'] is Map
+        ? attributes['titles'] as Map
+        : const {};
+    final poster = attributes['posterImage'] is Map
+        ? attributes['posterImage'] as Map
+        : const {};
+    final cover = attributes['coverImage'] is Map
+        ? attributes['coverImage'] as Map
+        : const {};
+    final title = _bestText(
+      titles['zh_cn'],
+      attributes['canonicalTitle'],
+      titles['en_jp'],
+    );
+    final subtype = attributes['subtype']?.toString() ?? 'TV';
+    final averageRating = double.tryParse(
+      attributes['averageRating']?.toString() ?? '',
+    );
+    return AnimeSubject(
+      id: int.tryParse(json['id']?.toString() ?? '') ?? title.hashCode.abs(),
+      title: title,
+      originalTitle: titles['ja_jp']?.toString() ?? title,
+      summary: _cleanText(attributes['synopsis']?.toString()),
+      coverUrl: poster['original']?.toString() ?? poster['large']?.toString(),
+      bannerUrl: cover['original']?.toString() ?? cover['large']?.toString(),
+      date: attributes['startDate']?.toString(),
+      platform: subtype,
+      language: '日语',
+      region: '日本',
+      status: attributes['status']?.toString() ?? '动画',
+      categories: [AnimeCategory(name: subtype)],
+      tags: const [AnimeTag(name: 'Kitsu')],
+      totalEpisodes: _intValue(attributes['episodeCount']) ?? 0,
+      ratingScore: averageRating == null ? null : averageRating / 10,
+      ratingTotal: _intValue(attributes['userCount']),
+      source: 'kitsu',
+    );
+  }
+
+  AnimeSubject _subjectFromCinemeta(
+    Map<String, dynamic> json,
+    String fallbackType,
+  ) {
+    final type = json['type']?.toString() == 'series' ? 'series' : fallbackType;
+    final imdbId = json['id']?.toString().trim() ?? '';
+    final title = _bestText(json['name'], json['title'], imdbId);
+    final genres = _stringList(json['genres']);
+    final cast = _stringList(json['cast']);
+    final directors = _stringList(json['director']);
+    final releaseInfo = json['releaseInfo']?.toString().trim() ?? '';
+    final released = json['released']?.toString().trim() ?? '';
+    final yearMatch = RegExp(r'(19|20)\d{2}').firstMatch(releaseInfo);
+    final date = released.length >= 10
+        ? released.substring(0, 10)
+        : yearMatch?.group(0);
+    final poster = json['poster']?.toString().trim();
+    final background = json['background']?.toString().trim();
+    final videos = json['videos'] is List ? json['videos'] as List : const [];
+    final rating = double.tryParse(json['imdbRating']?.toString() ?? '');
+    final categories = <AnimeCategory>[
+      AnimeCategory(name: type == 'series' ? '剧集' : '电影'),
+      ...genres.take(5).map((item) => AnimeCategory(name: item)),
+    ];
+    final tags = <AnimeTag>[
+      const AnimeTag(name: 'Cinemeta'),
+      if (imdbId.startsWith('tt')) const AnimeTag(name: 'IMDb'),
+      ...cast.take(3).map((item) => AnimeTag(name: item)),
+      ...directors.take(2).map((item) => AnimeTag(name: item)),
+    ];
+    return AnimeSubject(
+      id: _stableInt('$type:$imdbId:$title'),
+      title: title,
+      originalTitle: title,
+      summary: _cleanText(json['description']?.toString()),
+      coverUrl: poster == null || poster.isEmpty ? null : poster,
+      bannerUrl: background == null || background.isEmpty ? null : background,
+      date: date,
+      platform: type == 'series' ? 'Series' : 'Movie',
+      language: _bestText(json['language'], '', ''),
+      region: _bestText(json['country'], 'Cinemeta', ''),
+      status: type == 'series'
+          ? (videos.isEmpty ? '剧集' : '共${videos.length}集')
+          : _bestText(json['runtime'], '电影', ''),
+      categories: categories,
+      tags: tags,
+      totalEpisodes: type == 'series' ? videos.length : 1,
+      ratingScore: rating,
+      source: 'cinemeta:$type:$imdbId',
+    );
+  }
+
+  List<AnimeEpisode> _cinemetaEpisodes(
+    Map<String, dynamic> json,
+    AnimeSubject subject,
+  ) {
+    final rawVideos = json['videos'];
+    if (rawVideos is! List || rawVideos.isEmpty) {
+      return _externalEpisodes(subject);
+    }
+    final videos = rawVideos.whereType<Map>().toList()
+      ..sort((a, b) {
+        final aSeason = _intValue(a['season']) ?? 0;
+        final bSeason = _intValue(b['season']) ?? 0;
+        final seasonOrder = aSeason.compareTo(bSeason);
+        if (seasonOrder != 0) return seasonOrder;
+        return (_intValue(a['episode']) ?? 0).compareTo(
+          _intValue(b['episode']) ?? 0,
+        );
+      });
+    return videos.indexed
+        .map((entry) {
+          final index = entry.$1;
+          final video = entry.$2;
+          final season = _intValue(video['season']) ?? 0;
+          final episode = _intValue(video['episode']) ?? index + 1;
+          final videoId =
+              video['id']?.toString() ?? '${subject.source}:$season:$episode';
+          final name = video['title']?.toString().trim() ?? '';
+          final prefix = season > 0 ? '第$season季 第$episode集' : '第$episode集';
+          return AnimeEpisode(
+            id: _stableInt(videoId),
+            subjectId: subject.id,
+            number: index + 1,
+            title: name.isEmpty ? prefix : '$prefix $name',
+            airdate: _dateOnly(video['released']?.toString()),
+            duration: _bestText(video['runtime'], json['runtime'], '待补'),
+            description: subject.summary,
+            thumbnailUrl:
+                video['thumbnail']?.toString() ??
+                subject.bannerUrl ??
+                subject.coverUrl,
+          );
+        })
+        .toList(growable: false);
+  }
+
+  List<AnimeCharacter> _cinemetaCharacters(Map<String, dynamic> json) {
+    return _stringList(json['cast'])
+        .take(24)
+        .map((name) {
+          return AnimeCharacter(
+            id: _stableInt('cast:$name'),
+            name: name,
+            relation: '演员',
+            cv: '',
+            summary: '',
+          );
+        })
+        .toList(growable: false);
+  }
+
+  List<AnimeStaff> _cinemetaStaff(Map<String, dynamic> json) {
+    final items = <(String, String)>[
+      ..._stringList(json['director']).map((name) => (name, '导演')),
+      ..._stringList(json['writer']).map((name) => (name, '编剧')),
+    ];
+    return items
+        .take(16)
+        .map((item) {
+          return AnimeStaff(
+            id: _stableInt('${item.$2}:${item.$1}'),
+            name: item.$1,
+            role: item.$2,
+            career: '',
+          );
+        })
+        .toList(growable: false);
+  }
+
   AnimeSubject _subjectFromTvMaze(Map<String, dynamic> json) {
     final showJson = json['show'] is Map ? json['show'] as Map : json;
     final images = showJson['image'] is Map
@@ -814,6 +1489,10 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
     final genres = showJson['genres'] is List
         ? showJson['genres'] as List
         : const [];
+    final externals = showJson['externals'] is Map
+        ? showJson['externals'] as Map
+        : const {};
+    final imdbId = externals['imdb']?.toString().trim() ?? '';
     final title = showJson['name']?.toString() ?? '';
     return AnimeSubject(
       id: _intValue(showJson['id']) ?? 0,
@@ -821,7 +1500,7 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       originalTitle: title,
       summary: _cleanText(showJson['summary']?.toString()),
       coverUrl: images['original']?.toString() ?? images['medium']?.toString(),
-      bannerUrl: images['original']?.toString() ?? images['medium']?.toString(),
+      bannerUrl: null,
       date: showJson['premiered']?.toString(),
       platform: showJson['type']?.toString() ?? 'TV',
       language: showJson['language']?.toString() ?? '',
@@ -840,7 +1519,56 @@ query ($perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       tags: const [AnimeTag(name: 'TVMaze')],
       totalEpisodes: 0,
       ratingScore: (rating['average'] as num?)?.toDouble(),
-      source: 'tvmaze',
+      source: imdbId.isEmpty ? 'tvmaze' : 'tvmaze:$imdbId',
+    );
+  }
+
+  AnimeSubject? _subjectFromInternetArchive(Map<String, dynamic> json) {
+    final license = _internetArchiveLicense(json);
+    if (license == null) return null;
+    final identifier = json['identifier']?.toString() ?? '';
+    if (identifier.trim().isEmpty) return null;
+    final title = json['title'] is List
+        ? (json['title'] as List).firstOrNull?.toString() ?? ''
+        : json['title']?.toString() ?? '';
+    final rawDescription = json['description'] is List
+        ? (json['description'] as List).firstOrNull?.toString()
+        : json['description']?.toString();
+    final language = json['language'] is List
+        ? (json['language'] as List).firstOrNull?.toString() ?? ''
+        : json['language']?.toString() ?? '';
+    final description = _cleanText(rawDescription);
+    final chineseDescription = RegExp(r'[\u3400-\u9fff]').hasMatch(description);
+    final summary = chineseDescription
+        ? description
+        : [
+            '来自 Internet Archive 的公开授权影视，可直接解析可播放文件。',
+            '许可：${license.label}。',
+            if (json['date']?.toString().trim().isNotEmpty == true)
+              '公开日期：${json['date']}。',
+            '作品原名：$title。',
+          ].join();
+    return AnimeSubject(
+      id: identifier.hashCode.abs(),
+      title: title,
+      originalTitle: title,
+      summary: summary,
+      coverUrl: identifier.isEmpty
+          ? null
+          : 'https://archive.org/services/img/$identifier',
+      bannerUrl: null,
+      date: json['date']?.toString(),
+      platform: 'Movie',
+      language: language,
+      region: 'Internet Archive',
+      status: '公开授权 · ${license.label}',
+      categories: const [AnimeCategory(name: '公共领域/公开授权')],
+      tags: [
+        const AnimeTag(name: 'Internet Archive'),
+        AnimeTag(name: license.label),
+      ],
+      totalEpisodes: 1,
+      source: 'archive:$identifier',
     );
   }
 
@@ -938,7 +1666,7 @@ LIMIT $limit
       originalTitle: title,
       summary: description.isEmpty ? '暂无简介。' : description,
       coverUrl: image.isEmpty ? null : image,
-      bannerUrl: image.isEmpty ? null : image,
+      bannerUrl: null,
       date: date.length >= 10 ? date.substring(0, 10) : null,
       platform: 'Movie',
       language: language,
@@ -1108,20 +1836,182 @@ LIMIT $limit
     return value['original']?.toString() ?? value['medium']?.toString();
   }
 
+  (String, String)? _cinemetaIdentity(AnimeSubject subject) {
+    final parts = subject.source.split(':');
+    if (parts.length < 3 || parts.first != 'cinemeta') return null;
+    final type = parts[1] == 'series' ? 'series' : 'movie';
+    final id = parts.sublist(2).join(':').trim();
+    if (id.isEmpty) return null;
+    return (type, id);
+  }
+
+  String? _dateOnly(String? value) {
+    final text = value?.trim() ?? '';
+    if (text.length >= 10) return text.substring(0, 10);
+    final year = RegExp(r'(19|20)\d{2}').firstMatch(text)?.group(0);
+    return year;
+  }
+
+  List<String> _stringList(Object? value) {
+    if (value is List) {
+      return value
+          .map((item) => item.toString().trim())
+          .where((item) => item.isNotEmpty)
+          .toList(growable: false);
+    }
+    final text = value?.toString().trim() ?? '';
+    if (text.isEmpty) return const [];
+    return text
+        .split(RegExp(r'\s*,\s*'))
+        .where((item) => item.isNotEmpty)
+        .toList(growable: false);
+  }
+
+  int _stableInt(String value) {
+    final bytes = sha256.convert(utf8.encode(value)).bytes;
+    final result =
+        (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
+    return result & 0x7fffffff;
+  }
+
+  List<AnimeSubject> _interleaveSubjectGroups(
+    List<List<AnimeSubject>> groups, {
+    int limitPerRound = 6,
+  }) {
+    final result = <AnimeSubject>[];
+    final offsets = List<int>.filled(groups.length, 0);
+    var added = true;
+    while (added) {
+      added = false;
+      for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+        final group = groups[groupIndex];
+        final start = offsets[groupIndex];
+        if (start >= group.length) continue;
+        final end = (start + limitPerRound).clamp(0, group.length);
+        result.addAll(group.sublist(start, end));
+        offsets[groupIndex] = end;
+        added = true;
+      }
+    }
+    return result;
+  }
+
   String _bindingValue(Object? value) {
     if (value is! Map) return '';
     return value['value']?.toString() ?? '';
   }
 
+  _InternetArchiveLicense? _internetArchiveLicense(Map<String, dynamic> json) {
+    final rawUrl = json['licenseurl'] is List
+        ? (json['licenseurl'] as List).firstOrNull?.toString() ?? ''
+        : json['licenseurl']?.toString() ?? '';
+    final uri = Uri.tryParse(rawUrl.trim());
+    if (uri != null &&
+        (uri.host == 'creativecommons.org' ||
+            uri.host == 'www.creativecommons.org')) {
+      final path = uri.path.toLowerCase();
+      if (path.contains('/publicdomain/mark/') ||
+          path.contains('/publicdomain/zero/')) {
+        return const _InternetArchiveLicense('公共领域 / CC0');
+      }
+      if (path.contains('/licenses/by-sa/')) {
+        return const _InternetArchiveLicense('CC BY-SA');
+      }
+      if (RegExp(r'/licenses/by/').hasMatch(path)) {
+        return const _InternetArchiveLicense('CC BY');
+      }
+      return null;
+    }
+
+    final rights = json['rights'] is List
+        ? (json['rights'] as List).join(' ')
+        : json['rights']?.toString() ?? '';
+    final normalized = rights.toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+    if (normalized.contains('public domain') || normalized.contains('cc0')) {
+      return const _InternetArchiveLicense('公共领域 / CC0');
+    }
+    if (normalized.contains('noncommercial') ||
+        normalized.contains('no derivatives') ||
+        normalized.contains('cc by-nc') ||
+        normalized.contains('cc by-nd')) {
+      return null;
+    }
+    if (normalized.contains('attribution-sharealike') ||
+        normalized.contains('cc by-sa')) {
+      return const _InternetArchiveLicense('CC BY-SA');
+    }
+    if (normalized.contains('creative commons attribution') ||
+        normalized.contains('cc by')) {
+      return const _InternetArchiveLicense('CC BY');
+    }
+    return null;
+  }
+
   List<AnimeSubject> _uniqueSubjects(Iterable<AnimeSubject> subjects) {
-    final seen = <String>{};
+    final keyToIndex = <String, int>{};
     final unique = <AnimeSubject>[];
     for (final subject in subjects) {
-      final key = '${subject.source}:${subject.id}:${subject.title}';
-      if (subject.title.trim().isEmpty || !seen.add(key)) continue;
-      unique.add(subject);
+      if (subject.title.trim().isEmpty) continue;
+      final keys = _subjectKeys(subject);
+      int? existingIndex;
+      for (final key in keys) {
+        final index = keyToIndex[key];
+        if (index != null) {
+          existingIndex = index;
+          break;
+        }
+      }
+      if (existingIndex == null) {
+        final index = unique.length;
+        unique.add(subject);
+        for (final key in keys) {
+          keyToIndex[key] = index;
+        }
+        continue;
+      }
+      final existing = unique[existingIndex];
+      if (_subjectQuality(subject) <= _subjectQuality(existing)) continue;
+      unique[existingIndex] = subject;
+      for (final key in keys) {
+        keyToIndex[key] = existingIndex;
+      }
     }
     return unique;
+  }
+
+  Set<String> _subjectKeys(AnimeSubject subject) {
+    final kind = subject.source.startsWith('archive:')
+        ? 'movie-direct'
+        : subject.platform.toLowerCase().contains('movie')
+        ? 'movie'
+        : subject.platform.toLowerCase().contains('series') ||
+              subject.source.startsWith('tvmaze')
+        ? 'series'
+        : 'anime';
+    final year = subject.year == '未知' ? '' : subject.year;
+    final titles = <String>{subject.title, subject.originalTitle}
+        .map(
+          (item) => item.toLowerCase().replaceAll(
+            RegExp(r'[^\p{L}\p{N}]', unicode: true),
+            '',
+          ),
+        )
+        .where((item) => item.isNotEmpty);
+    final keys = titles.map((title) => '$kind:$year:$title').toSet();
+    if (keys.isEmpty) keys.add('$kind:$year:${subject.id}');
+    return keys;
+  }
+
+  int _subjectQuality(AnimeSubject subject) {
+    var score = 0;
+    if ((subject.bannerUrl ?? '').isNotEmpty) score += 16;
+    if ((subject.coverUrl ?? '').isNotEmpty) score += 8;
+    if (RegExp(r'[\u3400-\u9fff]').hasMatch(subject.title)) score += 4;
+    if (subject.summary.length >= 80) score += 3;
+    if (subject.ratingScore != null) score += 3;
+    if (subject.totalEpisodes > 0) score += 2;
+    if (subject.source.startsWith('cinemeta:')) score += 2;
+    return score;
   }
 
   int? _intValue(Object? value) {
@@ -1129,6 +2019,22 @@ LIMIT $limit
     if (value is num) return value.round();
     return int.tryParse(value?.toString() ?? '');
   }
+}
+
+class _InternetArchiveLicense {
+  const _InternetArchiveLicense(this.label);
+
+  final String label;
+}
+
+String _archiveQuery(String value) {
+  return value
+      .replaceAll(RegExp(r'[^\p{L}\p{N}\s-]', unicode: true), ' ')
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((item) => item.isNotEmpty)
+      .map((item) => '"$item"')
+      .join(' AND ');
 }
 
 class _BilibiliEpisodeMatch {

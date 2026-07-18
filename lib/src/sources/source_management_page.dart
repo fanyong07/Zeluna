@@ -18,7 +18,7 @@ class SourceManagementPage extends ConsumerWidget {
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
-          title: '视频源管理',
+          title: '外部源目录',
           onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
           rightRail: _SourceStatsRail(catalog: catalog),
           child: ListView(
@@ -34,6 +34,7 @@ class SourceManagementPage extends ConsumerWidget {
                 for (final source in catalog.sources) ...[
                   _SourceCard(
                     source: source,
+                    playbackRuleCount: catalog.playbackRuleCountFor(source.id),
                     onChanged: (enabled) => ref
                         .read(animeControllerProvider.notifier)
                         .toggleVideoSource(source.id, enabled),
@@ -66,8 +67,8 @@ class _SourceHeader extends StatelessWidget {
               SizedBox(width: 10),
               Expanded(
                 child: SectionTitle(
-                  title: '已导入视频源',
-                  subtitle: '来自 sources_catalog.json，本页只保存启用状态',
+                  title: '已登记外部资源',
+                  subtitle: '可解析的 TVBox 项会自动接入播放规则；其他项目保留各自用途',
                 ),
               ),
             ],
@@ -75,11 +76,14 @@ class _SourceHeader extends StatelessWidget {
           const SizedBox(height: 18),
           Row(
             children: [
-              _SourceMetric(label: '导入', value: '${catalog.importedCount}'),
+              _SourceMetric(label: '目录', value: '${catalog.importedCount}'),
               const SizedBox(width: 10),
               _SourceMetric(label: '启用', value: '${catalog.enabledCount}'),
               const SizedBox(width: 10),
-              _SourceMetric(label: '禁用', value: '${catalog.disabledCount}'),
+              _SourceMetric(
+                label: '播放规则',
+                value: '${catalog.activePlaybackRuleCount}',
+              ),
             ],
           ),
           if (catalog.generatedAt != null) ...[
@@ -139,9 +143,14 @@ class _SourceMetric extends StatelessWidget {
 }
 
 class _SourceCard extends StatelessWidget {
-  const _SourceCard({required this.source, required this.onChanged});
+  const _SourceCard({
+    required this.source,
+    required this.playbackRuleCount,
+    required this.onChanged,
+  });
 
   final VideoSource source;
+  final int playbackRuleCount;
   final ValueChanged<bool> onChanged;
 
   @override
@@ -160,7 +169,12 @@ class _SourceCard extends StatelessWidget {
       children: [
         _SourceIcon(source: source),
         const SizedBox(width: 14),
-        Expanded(child: _SourceText(source: source)),
+        Expanded(
+          child: _SourceText(
+            source: source,
+            playbackRuleCount: playbackRuleCount,
+          ),
+        ),
         const SizedBox(width: 14),
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
@@ -197,7 +211,11 @@ class _SourceCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
-        _SourceText(source: source, showTitle: false),
+        _SourceText(
+          source: source,
+          playbackRuleCount: playbackRuleCount,
+          showTitle: false,
+        ),
         const SizedBox(height: 10),
         _HealthBadge(source: source),
       ],
@@ -239,9 +257,14 @@ class _SourceIcon extends StatelessWidget {
 }
 
 class _SourceText extends StatelessWidget {
-  const _SourceText({required this.source, this.showTitle = true});
+  const _SourceText({
+    required this.source,
+    required this.playbackRuleCount,
+    this.showTitle = true,
+  });
 
   final VideoSource source;
+  final int playbackRuleCount;
   final bool showTitle;
 
   @override
@@ -281,6 +304,11 @@ class _SourceText extends StatelessWidget {
             if (source.supportsCategories) const SmallBadge(label: '分类'),
             if (source.supportsDanmaku) const SmallBadge(label: '弹幕'),
             if (source.usesNativePlayer) const SmallBadge(label: '原生播放'),
+            if (source.kind == VideoSourceKind.tvBox)
+              SmallBadge(
+                label: '接入 $playbackRuleCount 条规则',
+                active: source.enabled && playbackRuleCount > 0,
+              ),
             if (source.antiCrawlerEnabled) const SmallBadge(label: '需验证'),
             ...source.tags.take(3).map((tag) => SmallBadge(label: tag)),
           ],
@@ -382,6 +410,11 @@ class _SourceStatsRail extends StatelessWidget {
                 label: '支持搜索',
                 value: '${catalog.searchableCount}',
               ),
+              _RailSourceLine(
+                icon: Icons.rule_folder_outlined,
+                label: '参与播放查源',
+                value: '${catalog.activePlaybackRuleCount}',
+              ),
             ],
           ),
         ),
@@ -390,11 +423,11 @@ class _SourceStatsRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SectionTitle(title: '保存规则'),
+              SectionTitle(title: '目录与规则'),
               SizedBox(height: 12),
               _RailNote(text: '启用/禁用会保存到本地设置'),
-              _RailNote(text: '目录内容仍以 sources_catalog.json 为准'),
-              _RailNote(text: '健康状态只显示已导入的基础状态'),
+              _RailNote(text: 'TVBox JSON/XBPQ 可解析项会自动加入播放查源'),
+              _RailNote(text: 'M3U、BT 和公开媒体仍按各自功能使用'),
             ],
           ),
         ),
@@ -522,7 +555,7 @@ class _SourceEmpty extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            '生成 sources_catalog.json 后，这里会展示可管理的视频源。',
+            '生成 sources_catalog.json 后，这里会展示可管理的外部资源目录。',
             textAlign: TextAlign.center,
             style: Theme.of(
               context,
