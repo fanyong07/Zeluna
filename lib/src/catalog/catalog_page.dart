@@ -2,7 +2,9 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
@@ -11,6 +13,7 @@ import '../domain/subject_content_type.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
+import '../sources/external_source_adapters.dart';
 import 'subject_playability.dart';
 
 const _internalMetadataProviderNames = <String>[
@@ -1472,40 +1475,343 @@ class _SubjectResultView extends StatelessWidget {
   }
 }
 
-class SearchPage extends ConsumerWidget {
+class SearchPage extends ConsumerStatefulWidget {
   const SearchPage({super.key, required this.keyword});
 
   final String keyword;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SearchPage> createState() => _SearchPageState();
+}
+
+class _SearchPageState extends ConsumerState<SearchPage> {
+  late Future<_SearchPageData> _search;
+
+  @override
+  void initState() {
+    super.initState();
+    _search = _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant SearchPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.keyword != widget.keyword) _search = _load();
+  }
+
+  Future<_SearchPageData> _load() async {
+    final controller = ref.read(animeControllerProvider.notifier);
+    final subjectsFuture = controller.search(widget.keyword);
+    final torrentsFuture = controller.searchTorrentResources(widget.keyword);
+    final subjects = await subjectsFuture;
+    final torrents = await torrentsFuture;
+    return _SearchPageData(subjects: subjects, torrents: torrents);
+  }
+
+  void _retry() {
+    setState(() => _search = _load());
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return AppChrome(
       active: ChromeDestination.anime,
-      title: '搜索：$keyword',
+      title: '搜索：${widget.keyword}',
       showSearch: false,
       onBack: () => safeNavigateBack(context),
-      rightRail: _SearchRightRail(keyword: keyword),
-      child: FutureBuilder<List<AnimeSubject>>(
-        future: ref.read(animeControllerProvider.notifier).search(keyword),
+      rightRail: _SearchRightRail(keyword: widget.keyword),
+      child: FutureBuilder<_SearchPageData>(
+        future: _search,
         builder: (context, snapshot) {
-          final subjects = snapshot.data ?? const <AnimeSubject>[];
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
-            child: _SubjectGrid(
-              subjects: subjects,
-              onOpen: (subject) => Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (context) => DetailPage(subject: subject),
-                ),
+          if (snapshot.hasError || snapshot.data == null) {
+            return _SearchLoadError(onRetry: _retry);
+          }
+          return _SearchResultBody(
+            data: snapshot.data!,
+            onOpenSubject: (subject) => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (context) => DetailPage(subject: subject),
               ),
             ),
+            onOpenTorrent: (resource) =>
+                _openTorrentResource(context, resource),
           );
         },
       ),
     );
+  }
+}
+
+class _SearchPageData {
+  const _SearchPageData({required this.subjects, required this.torrents});
+
+  final List<AnimeSubject> subjects;
+  final SourceAdapterBatch<TorrentResource> torrents;
+}
+
+class _SearchResultBody extends StatelessWidget {
+  const _SearchResultBody({
+    required this.data,
+    required this.onOpenSubject,
+    required this.onOpenTorrent,
+  });
+
+  final _SearchPageData data;
+  final ValueChanged<AnimeSubject> onOpenSubject;
+  final ValueChanged<TorrentResource> onOpenTorrent;
+
+  @override
+  Widget build(BuildContext context) {
+    final liveSubjects = data.subjects
+        .where((item) => item.source.startsWith('m3u-channel:'))
+        .toList(growable: false);
+    final mediaSubjects = data.subjects
+        .where((item) => !item.source.startsWith('m3u-channel:'))
+        .toList(growable: false);
+    final torrents = data.torrents.items;
+    if (mediaSubjects.isEmpty && liveSubjects.isEmpty && torrents.isEmpty) {
+      return const _EmptyState(
+        icon: Icons.search_off_rounded,
+        title: '没有找到相关内容',
+        message: '可以换一个片名、频道名或字幕组关键词再试。',
+      );
+    }
+
+    return CustomScrollView(
+      slivers: [
+        if (data.torrents.hasFailures)
+          const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(24, 6, 8, 8),
+              child: AppPanel(
+                borderColor: AppColors.borderBright,
+                child: Text('部分外部资源源站暂时不可用，已展示其余可用结果。'),
+              ),
+            ),
+          ),
+        if (mediaSubjects.isNotEmpty) ...[
+          const _SearchSectionHeader(
+            icon: Icons.movie_filter_outlined,
+            title: '影视与资料',
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 0, 0),
+            sliver: _SubjectGridSliver(
+              subjects: mediaSubjects,
+              onOpen: onOpenSubject,
+            ),
+          ),
+        ],
+        if (liveSubjects.isNotEmpty) ...[
+          const _SearchSectionHeader(
+            icon: Icons.live_tv_outlined,
+            title: '直播频道',
+            subtitle: '来自已启用的 M3U 源，打开后会直接进入播放器',
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 0, 0),
+            sliver: _SubjectGridSliver(
+              subjects: liveSubjects,
+              onOpen: onOpenSubject,
+            ),
+          ),
+        ],
+        if (torrents.isNotEmpty) ...[
+          const _SearchSectionHeader(
+            icon: Icons.download_for_offline_outlined,
+            title: 'BT / 磁力资源',
+            subtitle: '仅交给外部 BT 客户端处理，不会伪装成内置在线播放',
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 8, 0),
+            sliver: SliverList.separated(
+              itemCount: torrents.length,
+              itemBuilder: (context, index) => _TorrentResourceCard(
+                resource: torrents[index],
+                onOpen: () => onOpenTorrent(torrents[index]),
+              ),
+              separatorBuilder: (context, index) => const SizedBox(height: 10),
+            ),
+          ),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: 120)),
+      ],
+    );
+  }
+}
+
+class _SearchSectionHeader extends StatelessWidget {
+  const _SearchSectionHeader({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 18, 8, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: AppColors.primary),
+            const SizedBox(width: 10),
+            Expanded(
+              child: SectionTitle(title: title, subtitle: subtitle),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TorrentResourceCard extends StatelessWidget {
+  const _TorrentResourceCard({required this.resource, required this.onOpen});
+
+  final TorrentResource resource;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = <String>[
+      resource.sourceName,
+      if (resource.category.trim().isNotEmpty) resource.category.trim(),
+      if ((resource.sizeLabel ?? '').trim().isNotEmpty) resource.sizeLabel!,
+      if (resource.seeders != null) '做种 ${resource.seeders}',
+    ];
+    return AppPanel(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 720;
+          final details = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                resource.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: AppColors.text,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                meta.join(' · '),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ),
+            ],
+          );
+          final action = FilledButton.icon(
+            onPressed: onOpen,
+            icon: const Icon(Icons.open_in_new, size: 18),
+            label: const Text('外部客户端打开'),
+          );
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [details, const SizedBox(height: 12), action],
+            );
+          }
+          return Row(
+            children: [
+              const Icon(
+                Icons.cloud_download_outlined,
+                color: AppColors.primary,
+                size: 30,
+              ),
+              const SizedBox(width: 14),
+              Expanded(child: details),
+              const SizedBox(width: 14),
+              action,
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SearchLoadError extends StatelessWidget {
+  const _SearchLoadError({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: AppPanel(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.wifi_off_rounded,
+              color: AppColors.muted,
+              size: 36,
+            ),
+            const SizedBox(height: 10),
+            const Text('搜索暂时失败，请检查网络后重试。'),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh),
+              label: const Text('重新搜索'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> _openTorrentResource(
+  BuildContext context,
+  TorrentResource resource,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('交给外部 BT 客户端？'),
+      content: const Text(
+        'BT 下载会向对等网络暴露你的公网 IP，并可能消耗较多流量和磁盘空间。应用本身不会在线播放或后台下载这个资源。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('继续打开'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  var launched = false;
+  try {
+    launched = await launchUrl(
+      resource.magnetUri,
+      mode: LaunchMode.externalApplication,
+    );
+  } catch (_) {}
+  if (launched || !context.mounted) return;
+
+  await Clipboard.setData(ClipboardData(text: resource.magnetUri.toString()));
+  if (context.mounted) {
+    _showToast(context, '未找到可用的 BT 客户端，磁力链接已复制。');
   }
 }
 
@@ -1532,11 +1838,11 @@ class DetailPage extends ConsumerWidget {
         final animeState = ref.watch(animeControllerProvider).value;
         final favorite =
             animeState?.following.any(
-              (item) => item.subject.id == bundle.subject.id,
+              (item) => sameSubjectIdentity(item.subject, bundle.subject),
             ) ??
             false;
         final historyEntry = animeState?.history
-            .where((item) => item.subject.id == bundle.subject.id)
+            .where((item) => sameSubjectIdentity(item.subject, bundle.subject))
             .firstOrNull;
 
         void play(AnimeEpisode episode) {
@@ -1611,15 +1917,29 @@ class DetailPage extends ConsumerWidget {
                             }
                           },
                           onDownload: () async {
+                            final controller = ref.read(
+                              animeControllerProvider.notifier,
+                            );
+                            if (!controller.supportsOfflineDownloads) {
+                              _showToast(context, '网页版暂不支持离线下载，请使用桌面或移动客户端。');
+                              return;
+                            }
+                            if (bundle.subject.source.startsWith(
+                              'm3u-channel:',
+                            )) {
+                              _showToast(context, '直播频道暂不支持离线下载。');
+                              return;
+                            }
                             final episode = continueEpisode();
                             if (episode == null) {
                               _showToast(context, '当前条目还没有可下载的集数');
                               return;
                             }
                             _showToast(context, '正在解析线路并开始下载…');
-                            final message = await ref
-                                .read(animeControllerProvider.notifier)
-                                .queueOffline(bundle.subject, episode);
+                            final message = await controller.queueOffline(
+                              bundle.subject,
+                              episode,
+                            );
                             if (context.mounted) _showToast(context, message);
                           },
                         ),

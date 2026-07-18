@@ -43,6 +43,27 @@ flutter test
 flutter build web --release
 ```
 
+## Android 内测与正式发布
+
+本地侧载内测使用 debug APK，不需要生产密钥：
+
+```powershell
+flutter build apk --debug
+```
+
+正式 APK / AAB 不允许使用 Android debug 证书。发布前先复制
+`android/key.properties.example` 为 `android/key.properties`，填写四项真实值并让
+`storeFile` 指向本机私有密钥库；密钥、密码和 `key.properties` 均不得提交。缺少字段、
+仍使用示例值、密钥库不存在、别名或密码无效时，release 构建会直接失败。
+
+```powershell
+flutter build appbundle --release
+flutter build apk --release
+powershell -ExecutionPolicy Bypass -File tool/check_release.ps1
+```
+
+公开发布前还必须确认最终包名和版本号。当前通用包名会被发布检查脚本主动阻断。
+
 ## 数据源说明
 
 - 资料源默认使用公开 API，不要求用户填写账号密钥。
@@ -57,7 +78,7 @@ flutter build web --release
 
 ## 当前限制
 
-- 离线下载目前支持 MP4、WebM 等单文件，HLS/DASH 分片缓存仍需继续完善。
+- 离线下载支持 MP4、WebM 等单文件及未加密 HLS VOD；DASH、直播清单和加密 HLS 暂不支持。
 - 网页端离线下载受浏览器限制，推荐使用桌面或移动客户端。
 - 原生 DLNA、AirPlay、Chromecast 投屏尚未统一接入；当前可以复制播放地址到外部播放器。
 - 云账号和跨设备同步尚未启用，收藏、历史和设置默认保存在本机。

@@ -331,9 +331,14 @@ class RuleImporter {
       final isJsonApi =
           type?.toString() == '1' &&
           (api.startsWith('http://') || api.startsWith('https://'));
+      final isXmlApi =
+          type?.toString() == '0' &&
+          (api.startsWith('http://') || api.startsWith('https://'));
       final isXbpq = api.toLowerCase().contains('xbpq');
       final engine = isJsonApi
           ? 'tvbox-json-api'
+          : isXmlApi
+          ? 'tvbox-xml-api'
           : isXbpq
           ? 'XBPQ'
           : api.trim().isNotEmpty
@@ -341,7 +346,7 @@ class RuleImporter {
           : 'tvbox-${type ?? 'site'}';
       final contentTypes = _tvBoxContentTypes(
         map,
-        supportsDirectLookup: isJsonApi,
+        supportsDirectLookup: isJsonApi || isXmlApi,
       );
       final baseId =
           'custom:tvbox:${_hash('$sourceUrl:${map['key'] ?? map['name'] ?? api}')}';
@@ -354,21 +359,27 @@ class RuleImporter {
           'source': 'tvbox',
           'engine': engine,
           'contentType': contentType,
-          'baseUrl': isJsonApi
+          'baseUrl': isJsonApi || isXmlApi
               ? api
               : extMap['主页url'] ?? extMap['baseUrl'] ?? '',
-          'searchUrl': isJsonApi
+          'searchUrl': isJsonApi || isXmlApi
               ? api
               : extMap['搜索url'] ?? extMap['searchUrl'] ?? '',
           'searchable': searchable,
-          'quickSearch': true,
+          'quickSearch': !isXmlApi,
           'filterable': false,
+          'priority': isXmlApi ? 180 : 100,
           'groupId': _importGroupId(sourceUrl, 'tvbox'),
           'requestHeaders': {
             ..._requestHeadersFromRaw(map),
             ..._requestHeadersFromRaw(extMap),
           },
-          'tags': ['TVBox', if (isJsonApi) 'JSON API', if (isXbpq) 'XBPQ'],
+          'tags': [
+            'TVBox',
+            if (isJsonApi) 'JSON API',
+            if (isXmlApi) 'XML API',
+            if (isXbpq) 'XBPQ',
+          ],
           'rawConfig': {
             'site': map,
             if (root.containsKey('spider')) 'spider': root['spider'],

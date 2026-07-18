@@ -5,6 +5,7 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
+import 'package:anime/src/sources/external_source_adapters.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -382,6 +383,40 @@ void main() {
     expect(find.text('播放速度'), findsOneWidget);
   });
 
+  testWidgets('search separates M3U live channels and external BT resources', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(home: SearchPage(keyword: '测试')),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('影视与资料'), findsOneWidget);
+    expect(find.text('直播频道'), findsOneWidget);
+    expect(find.text('BT / 磁力资源'), findsOneWidget);
+    expect(find.text('测试直播频道'), findsWidgets);
+    expect(find.text('测试字幕组资源'), findsOneWidget);
+
+    final openButton = find.widgetWithText(FilledButton, '外部客户端打开');
+    await tester.ensureVisible(openButton);
+    await tester.tap(openButton);
+    await tester.pumpAndSettle();
+    expect(find.text('交给外部 BT 客户端？'), findsOneWidget);
+    expect(find.textContaining('暴露你的公网 IP'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+  });
+
   testWidgets(
     'rule plugin pages separate anime series and movie repositories',
     (tester) async {
@@ -415,6 +450,36 @@ void main() {
       expect(find.text('番剧规则'), findsOneWidget);
       expect(find.text('全部启用'), findsOneWidget);
       expect(find.text('全部关闭'), findsOneWidget);
+      final executableRule = find.byKey(
+        const ValueKey('installedRule:kazumi:enlie'),
+      );
+      final webViewRule = find.byKey(
+        const ValueKey('installedRule:kazumi:omofun03'),
+      );
+      expect(
+        find.descendant(of: executableRule, matching: find.text('可执行')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: webViewRule, matching: find.text('需 WebView')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('ruleToggle:kazumi:enlie')),
+            )
+            .onChanged,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('ruleToggle:kazumi:omofun03')),
+            )
+            .onChanged,
+        isNull,
+      );
 
       await tester.tap(find.byTooltip('添加规则'));
       await tester.pumpAndSettle();
@@ -473,6 +538,13 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('韩剧看看'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('ruleCard:tvbox:meijutt')),
+          matching: find.text('缺执行器'),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('电影先生'), findsNothing);
       expect(find.text('omofun03'), findsNothing);
 
@@ -486,9 +558,7 @@ void main() {
     },
   );
 
-  testWidgets('legacy source route redirects to automatic rule packages', (
-    tester,
-  ) async {
+  testWidgets('external source route opens the source catalog', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -512,60 +582,20 @@ void main() {
     container.read(routerProvider).go('/profile/sources');
     await tester.pumpAndSettle();
 
-    expect(find.text('播放规则插件'), findsOneWidget);
-    expect(find.text('自动规则包'), findsOneWidget);
+    expect(find.text('播放规则插件'), findsNothing);
+    expect(find.text('自动规则包'), findsNothing);
     expect(find.text('测试 TVBox'), findsOneWidget);
-    expect(find.text('已登记外部资源'), findsNothing);
-    expect(find.text('测试直播'), findsNothing);
+    expect(find.text('已登记外部资源'), findsOneWidget);
+    expect(find.text('测试直播'), findsOneWidget);
 
-    final repository = const RulePluginRepository();
-    final installed = repository.installedRules(
-      _FakeAnimeController.lastRulePlugins,
-    );
-    final installedEnabled = installed
-        .where(
-          (rule) => _FakeAnimeController.lastRulePlugins.isEnabled(rule.id),
-        )
-        .length;
-    final installedPlayback = installed
-        .where(
-          (rule) =>
-              _FakeAnimeController.lastRulePlugins.isEnabled(rule.id) &&
-              rule.searchable &&
-              rule.canResolveNatively,
-        )
-        .length;
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:已安装')),
-        matching: find.text('${installed.length + 2}'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:已启用')),
-        matching: find.text('${installedEnabled + 2}'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:参与查源')),
-        matching: find.text('${installedPlayback + 2}'),
-      ),
-      findsOneWidget,
-    );
-
-    final packageSwitch = find.byKey(
-      const ValueKey('automaticRulePackage:source:tvbox'),
-    );
-    expect(packageSwitch, findsOneWidget);
-    await tester.tap(packageSwitch);
+    final sourceSwitch = find.byKey(const ValueKey('sourceToggle:source:m3u'));
+    expect(sourceSwitch, findsOneWidget);
+    expect(tester.widget<Switch>(sourceSwitch).value, isFalse);
+    await tester.tap(sourceSwitch);
     await tester.pumpAndSettle();
 
-    expect(_FakeAnimeController.lastSourceToggle, ('source:tvbox', false));
-    expect(tester.widget<Switch>(packageSwitch).value, isFalse);
+    expect(_FakeAnimeController.lastSourceToggle, ('source:m3u', true));
+    expect(tester.widget<Switch>(sourceSwitch).value, isTrue);
   });
 
   testWidgets('playback settings rows are actionable', (tester) async {
@@ -762,6 +792,34 @@ class _FakeAnimeController extends AnimeController {
   }
 
   @override
+  Future<List<AnimeSubject>> search(String keyword) async {
+    return const [_subject, _liveSubject];
+  }
+
+  @override
+  Future<SourceAdapterBatch<TorrentResource>> searchTorrentResources(
+    String keyword,
+  ) async {
+    return SourceAdapterBatch<TorrentResource>(
+      items: [
+        TorrentResource(
+          id: 'torrent:test',
+          sourceId: 'torrent:fixture',
+          sourceName: '测试 BT 源',
+          title: '测试字幕组资源',
+          category: '动画',
+          sizeLabel: '1.2 GB',
+          seeders: 12,
+          magnetUri: Uri.parse(
+            'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+          ),
+          infoHash: '0123456789abcdef0123456789abcdef01234567',
+        ),
+      ],
+    );
+  }
+
+  @override
   Future<List<AnimeSubject>> discoverSubjects({
     bool waitForRefresh = false,
   }) async {
@@ -858,6 +916,24 @@ const _subject = AnimeSubject(
   ],
   tags: [AnimeTag(name: '音乐', count: 100)],
   totalEpisodes: 12,
+);
+
+const _liveSubject = AnimeSubject(
+  id: 99001,
+  title: '测试直播频道',
+  originalTitle: '测试直播频道',
+  summary: '来自测试直播源的频道。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: null,
+  platform: '直播',
+  language: '未知',
+  region: '未知',
+  status: '直播',
+  categories: [AnimeCategory(name: '直播')],
+  tags: [AnimeTag(name: 'M3U')],
+  totalEpisodes: 1,
+  source: 'm3u-channel:source:m3u:fixture',
 );
 
 const _movieSubject = AnimeSubject(

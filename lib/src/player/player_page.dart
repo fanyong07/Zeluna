@@ -74,6 +74,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
+  Timer? _webLoadTimer;
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -102,13 +103,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestPlayerFocus();
       _applyPlaybackSettings(_currentSettings);
-      unawaited(_loadDanmakuForCurrentEpisode());
+      if (!widget.request.offlineOnly) {
+        unawaited(_loadDanmakuForCurrentEpisode());
+      }
       if (_isPlayableLine(_line)) {
         unawaited(_openLine(_line!, force: true));
-        if (widget.request.subject.source != 'direct') {
+        if (!widget.request.offlineOnly &&
+            widget.request.subject.source != 'direct') {
           unawaited(_resolveLinesForCurrentEpisode(autoplay: false));
         }
-      } else {
+      } else if (!widget.request.offlineOnly) {
         unawaited(_resolveLinesForCurrentEpisode());
       }
     });
@@ -120,6 +124,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       subscription.cancel();
     }
     _controlsHideTimer?.cancel();
+    _webLoadTimer?.cancel();
     unawaited(_restoreSystemUi());
     unawaited(_player.dispose());
     _danmakuInput.dispose();
@@ -243,6 +248,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                           episode: _episode,
                           selected: _line,
                           initialLines: _lines,
+                          offlineOnly: widget.request.offlineOnly,
                           onLinesLoaded: _mergeLinesFromPanel,
                           onSelected: _selectLine,
                         ),
@@ -790,10 +796,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
     if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
       if (!mounted || serial != _openLineSerial) return;
+      _webLoadTimer?.cancel();
+      _webLoadTimer = Timer(const Duration(seconds: 14), () {
+        if (!mounted ||
+            serial != _openLineSerial ||
+            _loadedUrl != url ||
+            !_loadingLine) {
+          return;
+        }
+        _handleWebError(message: '网页播放器连接超时，已尝试切换其他线路。');
+      });
       setState(() {
-        _loadingLine = false;
+        _loadingLine = true;
         _playbackFailed = false;
-        _playing = true;
+        _playing = false;
         _playerMessage = null;
       });
       return;
@@ -972,6 +988,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _selectEpisode(AnimeEpisode episode) {
     _revealPlayerControls();
+    if (widget.request.offlineOnly) {
+      if (episode.id != _episode.id) {
+        _showPlayerToast('离线播放只能打开已经下载的当前集。');
+      }
+      setState(() => _episodePanel = false);
+      return;
+    }
     setState(() {
       _episode = episode;
       _line = null;
@@ -1016,6 +1039,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   Future<void> _playNextEpisode() async {
+    if (widget.request.offlineOnly) return;
     final index = widget.request.episodes.indexWhere(
       (episode) => episode.id == _episode.id,
     );
@@ -1281,6 +1305,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _handleWebReady() {
     if (!mounted) return;
+    _webLoadTimer?.cancel();
     setState(() {
       _loadingLine = false;
       _playbackFailed = false;
@@ -1288,14 +1313,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
   }
 
-  void _handleWebError() {
+  void _handleWebError({String? message}) {
     if (!mounted) return;
+    _webLoadTimer?.cancel();
+    final current = _line;
+    if (current != null) _failedLineIds.add(current.id);
     setState(() {
       _loadingLine = false;
       _playbackFailed = true;
       _playing = false;
-      _playerMessage = '网页播放器无法打开当前地址，可能被源站跨域或防盗链限制。';
+      _playerMessage = message ?? '网页播放器无法打开当前地址，可能被源站跨域或防盗链限制。';
     });
+    unawaited(_tryAutoSwitchLine());
   }
 
   void _handleWebPosition(Duration value) {
@@ -1832,7 +1861,9 @@ class _StreamVideoSurface extends StatelessWidget {
         playing: playing,
         volume: volume.clamp(0.0, 1.0),
         position: position,
-        forceHls: url.toLowerCase().contains('.m3u8'),
+        rate: settings.speed,
+        headers: line?.headers ?? const {},
+        forceHls: _isHlsLine(line),
         onReady: onWebReady,
         onError: onWebError,
         onPosition: onWebPosition,
@@ -2757,6 +2788,20 @@ bool _isPlayableLine(PlaybackLine? line) {
   return line?.available == true && (line?.url?.trim().isNotEmpty ?? false);
 }
 
+bool _isHlsLine(PlaybackLine? line) {
+  if (line == null) return false;
+  final format = line.format.trim().toLowerCase();
+  if (format.contains('hls') ||
+      format.contains('m3u8') ||
+      format.contains('mpegurl')) {
+    return true;
+  }
+  final url = line.url?.trim().toLowerCase() ?? '';
+  return RegExp(r'\.m3u8(?:$|[?#])').hasMatch(url) ||
+      url.contains('type=m3u8') ||
+      url.contains('format=m3u8');
+}
+
 List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
   return lines.where(_isPlayableLine).toList(growable: false);
 }
@@ -2783,6 +2828,9 @@ String _emptyLineMessage(
       source.startsWith('tvmaze') ||
       source == 'wikidata';
   if (lines.isEmpty) {
+    if (source.startsWith('m3u-channel:')) {
+      return '这个直播频道暂时无法读取。请检查外部源是否启用，或稍后重试。';
+    }
     if (source.startsWith('archive:') ||
         source.startsWith('peertube:') ||
         source.startsWith('commons:')) {
@@ -2931,6 +2979,7 @@ class _LinePanel extends ConsumerStatefulWidget {
     required this.episode,
     required this.selected,
     required this.initialLines,
+    required this.offlineOnly,
     required this.onLinesLoaded,
     required this.onSelected,
   });
@@ -2939,6 +2988,7 @@ class _LinePanel extends ConsumerStatefulWidget {
   final AnimeEpisode episode;
   final PlaybackLine? selected;
   final List<PlaybackLine> initialLines;
+  final bool offlineOnly;
   final ValueChanged<List<PlaybackLine>> onLinesLoaded;
   final ValueChanged<PlaybackLine> onSelected;
 
@@ -2967,6 +3017,7 @@ class _LinePanelState extends ConsumerState<_LinePanel> {
   }
 
   Future<List<PlaybackLine>> _futureForWidget() {
+    if (widget.offlineOnly) return Future.value(widget.initialLines);
     return ref
         .read(animeControllerProvider.notifier)
         .linesForEpisodeMode(widget.subject, widget.episode, expandAll: true);

@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "app.anime" "\0"
-            VALUE "FileDescription", "anime" "\0"
+            VALUE "FileDescription", "Anime" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "anime" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 app.anime. All rights reserved." "\0"
             VALUE "OriginalFilename", "anime.exe" "\0"
-            VALUE "ProductName", "anime" "\0"
+            VALUE "ProductName", "Anime" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

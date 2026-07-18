@@ -6,6 +6,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../app/anime_app.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
+import '../data/media_download_task.dart';
 import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
@@ -447,6 +448,13 @@ class _ProfileShortcutSection extends StatelessWidget {
                   onTap: () => context.push('/profile/rules'),
                 ),
                 _ShortcutTile(
+                  icon: Icons.hub_outlined,
+                  title: '外部源目录',
+                  value:
+                      '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
+                  onTap: () => context.push('/profile/sources'),
+                ),
+                _ShortcutTile(
                   icon: Icons.subtitles,
                   title: '弹幕设置',
                   value: '过滤',
@@ -703,7 +711,7 @@ class _HistoryCard extends StatelessWidget {
 class _DownloadStrip extends StatelessWidget {
   const _DownloadStrip({required this.entries});
 
-  final List<LibraryEntry> entries;
+  final List<MediaDownloadTask> entries;
 
   @override
   Widget build(BuildContext context) {
@@ -728,13 +736,16 @@ class _DownloadStrip extends StatelessWidget {
   }
 }
 
-class _DownloadRow extends StatelessWidget {
+class _DownloadRow extends ConsumerWidget {
   const _DownloadRow({required this.entry});
 
-  final LibraryEntry entry;
+  final MediaDownloadTask entry;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = entry.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : entry.progress;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
@@ -764,9 +775,19 @@ class _DownloadRow extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
+                const SizedBox(height: 3),
+                Text(
+                  '${entry.statusLabel} · ${_downloadSizeText(entry)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.muted,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
                 const SizedBox(height: 7),
                 LinearProgressIndicator(
-                  value: 0.42,
+                  value: progress,
                   minHeight: 4,
                   borderRadius: BorderRadius.circular(4),
                   backgroundColor: AppColors.border,
@@ -776,18 +797,196 @@ class _DownloadRow extends StatelessWidget {
             ),
           ),
           IconButton(
-            tooltip: '继续播放',
-            onPressed: entry.episode == null
-                ? () => _openDetail(context, entry.subject)
-                : () => _playEntry(context, entry),
+            tooltip: entry.isPlayable ? '播放本地文件' : '查看下载任务',
+            onPressed: entry.isPlayable
+                ? () => _playDownloadTask(context, ref, entry)
+                : () => context.push('/profile/offline'),
             icon: Icon(
-              entry.episode == null
-                  ? Icons.chevron_right_rounded
-                  : Icons.play_arrow_rounded,
+              entry.isPlayable
+                  ? Icons.play_arrow_rounded
+                  : Icons.chevron_right_rounded,
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class DownloadManagementPage extends ConsumerWidget {
+  const DownloadManagementPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final tasks = state.offlineTasks;
+        return _ProfileScaffold(
+          title: '离线缓存',
+          active: ChromeDestination.download,
+          child: tasks.isEmpty
+              ? const _ProfileEmptyState(
+                  title: '还没有下载任务',
+                  message: '在详情页点击下载后，单文件线路会显示在这里。',
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+                  itemCount: tasks.length,
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(height: 10),
+                  itemBuilder: (context, index) =>
+                      _DownloadTaskCard(task: tasks[index]),
+                ),
+        );
+      },
+    );
+  }
+}
+
+class _DownloadTaskCard extends ConsumerWidget {
+  const _DownloadTaskCard({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = task.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : task.progress;
+    final statusColor = switch (task.status) {
+      MediaDownloadTaskStatus.completed => Colors.greenAccent,
+      MediaDownloadTaskStatus.failed => Colors.redAccent,
+      MediaDownloadTaskStatus.cancelled => AppColors.muted,
+      MediaDownloadTaskStatus.paused => Colors.orangeAccent,
+      _ => AppColors.primary,
+    };
+    return AppPanel(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(7),
+            child: SizedBox(
+              width: 116,
+              height: 68,
+              child: PosterArt(
+                coverUrl: task.subject.bannerUrl ?? task.subject.coverUrl,
+                title: task.title,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        task.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: AppColors.text,
+                              fontWeight: FontWeight.w900,
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      task.statusLabel,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: statusColor,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  [
+                    if (task.providerName?.trim().isNotEmpty == true)
+                      task.providerName!,
+                    _downloadSizeText(task),
+                    if (task.message.trim().isNotEmpty) task.message.trim(),
+                  ].join(' · '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.muted,
+                    height: 1.35,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 5,
+                  borderRadius: BorderRadius.circular(4),
+                  backgroundColor: AppColors.border,
+                  color: statusColor,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          _DownloadTaskActions(task: task),
+        ],
+      ),
+    );
+  }
+}
+
+class _DownloadTaskActions extends ConsumerWidget {
+  const _DownloadTaskActions({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.read(animeControllerProvider.notifier);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (task.isPlayable)
+          IconButton(
+            tooltip: '播放本地文件',
+            onPressed: () => _playDownloadTask(context, ref, task),
+            icon: const Icon(Icons.play_arrow_rounded),
+          ),
+        if (task.isActive)
+          IconButton(
+            tooltip: '暂停',
+            onPressed: () => controller.pauseDownload(task.id),
+            icon: const Icon(Icons.pause_rounded),
+          ),
+        if (task.status == MediaDownloadTaskStatus.paused ||
+            task.status == MediaDownloadTaskStatus.failed ||
+            task.status == MediaDownloadTaskStatus.cancelled)
+          IconButton(
+            tooltip: task.downloadedBytes > 0 ? '继续下载' : '重新下载',
+            onPressed: () => controller.resumeDownload(task.id),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        if (task.isActive || task.status == MediaDownloadTaskStatus.paused)
+          IconButton(
+            tooltip: '取消下载',
+            onPressed: () => controller.cancelDownload(task.id),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        IconButton(
+          tooltip: task.isPlayable ? '删除下载文件' : '移除任务',
+          onPressed: () async {
+            final confirmed = await _confirmRemoveDownload(context, task);
+            if (!confirmed) return;
+            await controller.removeDownload(task.id);
+          },
+          icon: const Icon(Icons.delete_outline_rounded),
+        ),
+      ],
     );
   }
 }
@@ -891,6 +1090,12 @@ class _ProfileRightRail extends StatelessWidget {
                 title: '播放规则',
                 value: '${state.rulePlugins.installedIds.length}',
                 onTap: () => context.push('/profile/rules'),
+              ),
+              _RailAction(
+                icon: Icons.hub_outlined,
+                title: '外部源目录',
+                value: '${state.sourceCatalog.enabledCount}',
+                onTap: () => context.push('/profile/sources'),
               ),
             ],
           ),
@@ -1555,7 +1760,7 @@ class MiscSettingsPage extends ConsumerWidget {
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
-                  const _ReadonlyRow(title: '离线下载', value: '支持 MP4/WebM 等单文件'),
+                  const _ReadonlyRow(title: '离线下载', value: '支持单文件与未加密 HLS VOD'),
                   const _ReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
                   const _ReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
@@ -2395,6 +2600,85 @@ String _formatDateTime(DateTime date) {
   if (date.millisecondsSinceEpoch <= 0) return '未知时间';
   String two(int value) => value.toString().padLeft(2, '0');
   return '${date.year}-${two(date.month)}-${two(date.day)} ${two(date.hour)}:${two(date.minute)}';
+}
+
+Future<void> _playDownloadTask(
+  BuildContext context,
+  WidgetRef ref,
+  MediaDownloadTask task,
+) async {
+  final line = task.localPlaybackLine;
+  if (line == null) {
+    _showToast(context, '本地文件尚不可播放');
+    return;
+  }
+  final controller = ref.read(animeControllerProvider.notifier);
+  await controller.addHistory(task.subject, task.episode);
+  if (!context.mounted) return;
+  context.push(
+    '/player',
+    extra: PlaySessionRequest(
+      subject: task.subject,
+      episodes: [task.episode],
+      episode: task.episode,
+      initialLine: line,
+      offlineOnly: true,
+    ),
+  );
+}
+
+Future<bool> _confirmRemoveDownload(
+  BuildContext context,
+  MediaDownloadTask task,
+) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(task.isPlayable ? '删除本地文件？' : '移除下载任务？'),
+      content: Text(
+        task.isPlayable
+            ? '将删除“${task.title}”的本地视频文件，此操作无法撤销。'
+            : '将移除“${task.title}”并清理未完成的临时文件。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('保留'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认删除'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+String _downloadSizeText(MediaDownloadTask task) {
+  final downloaded = _downloadBytesLabel(task.downloadedBytes);
+  final units = task.totalUnits > 0
+      ? '${task.completedUnits}/${task.totalUnits} 分片'
+      : null;
+  if (task.totalBytes <= 0) {
+    return units == null ? downloaded : '$units · $downloaded';
+  }
+  final bytes = '$downloaded / ${_downloadBytesLabel(task.totalBytes)}';
+  if (units != null && task.status != MediaDownloadTaskStatus.completed) {
+    return '$units · $bytes';
+  }
+  return bytes;
+}
+
+String _downloadBytesLabel(int bytes) {
+  if (bytes <= 0) return '0 KB';
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).toStringAsFixed(1)} KB';
 }
 
 Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {

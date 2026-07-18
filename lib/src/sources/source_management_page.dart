@@ -68,7 +68,7 @@ class _SourceHeader extends StatelessWidget {
               Expanded(
                 child: SectionTitle(
                   title: '已登记外部资源',
-                  subtitle: '可解析的 TVBox 项会自动接入播放规则；其他项目保留各自用途',
+                  subtitle: 'TVBox 参与影视查源，M3U 提供直播，BT 资源交给外部客户端',
                 ),
               ),
             ],
@@ -80,10 +80,7 @@ class _SourceHeader extends StatelessWidget {
               const SizedBox(width: 10),
               _SourceMetric(label: '启用', value: '${catalog.enabledCount}'),
               const SizedBox(width: 10),
-              _SourceMetric(
-                label: '播放规则',
-                value: '${catalog.activePlaybackRuleCount}',
-              ),
+              _SourceMetric(label: '可搜索', value: '${catalog.searchableCount}'),
             ],
           ),
           if (catalog.generatedAt != null) ...[
@@ -181,7 +178,11 @@ class _SourceCard extends StatelessWidget {
           children: [
             _HealthBadge(source: source),
             const SizedBox(height: 12),
-            Switch(value: source.enabled, onChanged: onChanged),
+            Switch(
+              key: ValueKey('sourceToggle:${source.id}'),
+              value: source.enabled,
+              onChanged: onChanged,
+            ),
           ],
         ),
       ],
@@ -207,7 +208,11 @@ class _SourceCard extends StatelessWidget {
                 ),
               ),
             ),
-            Switch(value: source.enabled, onChanged: onChanged),
+            Switch(
+              key: ValueKey('sourceToggle:${source.id}'),
+              value: source.enabled,
+              onChanged: onChanged,
+            ),
           ],
         ),
         const SizedBox(height: 10),
@@ -300,7 +305,7 @@ class _SourceText extends StatelessWidget {
           runSpacing: 7,
           children: [
             SmallBadge(label: source.kind.label, active: source.enabled),
-            if (source.supportsSearch) const SmallBadge(label: '可搜索'),
+            if (source.canSearchAtRuntime) const SmallBadge(label: '可搜索'),
             if (source.supportsCategories) const SmallBadge(label: '分类'),
             if (source.supportsDanmaku) const SmallBadge(label: '弹幕'),
             if (source.usesNativePlayer) const SmallBadge(label: '原生播放'),

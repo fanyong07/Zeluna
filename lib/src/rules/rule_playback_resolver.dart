@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
+import 'package:xml/xml.dart';
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import '../domain/anime_models.dart';
@@ -73,6 +74,14 @@ class RulePlaybackResolver {
           verifyPlayable: verifyPlayable,
         ),
         'tvbox-json-api' => await _resolveTvBoxJsonApi(
+          client,
+          rule,
+          subject,
+          episode,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+        'tvbox-xml-api' => await _resolveTvBoxXmlApi(
           client,
           rule,
           subject,
@@ -616,10 +625,57 @@ class RulePlaybackResolver {
     Stopwatch started, {
     required bool verifyPlayable,
   }) async {
+    return _resolveTvBoxApi(
+      client,
+      rule,
+      subject,
+      episode,
+      started,
+      apiLabel: 'JSON',
+      decodeItems: (text) => _tvBoxItems(jsonDecode(text)),
+      verifyPlayable: verifyPlayable,
+    );
+  }
+
+  Future<List<PlaybackLine>> _resolveTvBoxXmlApi(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    return _resolveTvBoxApi(
+      client,
+      rule,
+      subject,
+      episode,
+      started,
+      apiLabel: 'XML',
+      decodeItems: _tvBoxXmlItems,
+      verifyPlayable: verifyPlayable,
+    );
+  }
+
+  Future<List<PlaybackLine>> _resolveTvBoxApi(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Stopwatch started, {
+    required String apiLabel,
+    required List<Map<String, dynamic>> Function(String) decodeItems,
+    required bool verifyPlayable,
+  }) async {
     final endpoint = Uri.tryParse(rule.baseUrl.trim());
     if (endpoint == null || !endpoint.hasScheme || endpoint.host.isEmpty) {
       return [
-        _unavailableLine(rule, subject, episode, '该 TVBox JSON 源缺少有效接口地址。'),
+        _unavailableLine(
+          rule,
+          subject,
+          episode,
+          '该 TVBox $apiLabel 源缺少有效接口地址。',
+        ),
       ];
     }
 
@@ -635,6 +691,7 @@ class RulePlaybackResolver {
             endpoint,
             searchUri,
             preference++,
+            decodeItems,
           ),
         );
       }
@@ -647,18 +704,23 @@ class RulePlaybackResolver {
     if (_tvBoxPlayUrl(item).isEmpty) {
       final vodId = item['vod_id']?.toString().trim() ?? '';
       if (vodId.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(
-            await _get(
-              client,
-              _tvBoxDetailUri(endpoint, vodId),
-              _headers(rule: rule, referer: endpoint.toString()),
-            ),
-          );
-          final details = _tvBoxItems(decoded);
-          if (details.isNotEmpty) item = details.first;
-        } catch (_) {
-          // 搜索响应本身可能已经包含播放地址，详情补查失败时继续使用原数据。
+        for (final detailUri in _tvBoxDetailUris(endpoint, vodId)) {
+          try {
+            final details = decodeItems(
+              await _get(
+                client,
+                detailUri,
+                _headers(rule: rule, referer: endpoint.toString()),
+              ),
+            );
+            if (details.isEmpty) continue;
+            item = details.first;
+            if (_tvBoxPlayUrl(item).isNotEmpty) {
+              break;
+            }
+          } catch (_) {
+            // 聚合接口的 detail/videolist 支持并不一致，逐个尝试。
+          }
         }
       }
     }
@@ -691,16 +753,17 @@ class RulePlaybackResolver {
     Uri endpoint,
     Uri searchUri,
     int preference,
+    List<Map<String, dynamic>> Function(String) decodeItems,
   ) async {
     try {
-      final decoded = jsonDecode(
+      final items = decodeItems(
         await _get(
           client,
           searchUri,
           _headers(rule: rule, referer: endpoint.toString()),
         ),
       );
-      return _rankBestTvBoxItem(_tvBoxItems(decoded), subject, preference);
+      return _rankBestTvBoxItem(items, subject, preference);
     } catch (_) {
       // TVBox 聚合接口格式并不完全一致，单个查询失败时让其他查询继续。
       return null;
@@ -836,7 +899,7 @@ class RulePlaybackResolver {
     if (response.statusCode < 200 || response.statusCode >= 400) {
       throw HttpException('HTTP ${response.statusCode}');
     }
-    return response.body;
+    return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
 
   PlaybackLine _availableLine(
@@ -1173,12 +1236,17 @@ List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword) {
   return result.values.toList(growable: false);
 }
 
-Uri _tvBoxDetailUri(Uri endpoint, String vodId) {
-  final query = <String, String>{...endpoint.queryParameters}
-    ..remove('wd')
-    ..['ac'] = 'detail'
-    ..['ids'] = vodId;
-  return endpoint.replace(queryParameters: query);
+List<Uri> _tvBoxDetailUris(Uri endpoint, String vodId) {
+  final result = <String, Uri>{};
+  for (final action in const ['detail', 'videolist']) {
+    final query = <String, String>{...endpoint.queryParameters}
+      ..remove('wd')
+      ..['ac'] = action
+      ..['ids'] = vodId;
+    final uri = endpoint.replace(queryParameters: query);
+    result[uri.toString()] = uri;
+  }
+  return result.values.toList(growable: false);
 }
 
 List<Map<String, dynamic>> _tvBoxItems(Object? decoded) {
@@ -1192,6 +1260,45 @@ List<Map<String, dynamic>> _tvBoxItems(Object? decoded) {
       .whereType<Map>()
       .map((item) => item.cast<String, dynamic>())
       .toList(growable: false);
+}
+
+List<Map<String, dynamic>> _tvBoxXmlItems(String source) {
+  final document = XmlDocument.parse(source);
+  final videos = document.descendants.whereType<XmlElement>().where(
+    (element) => element.name.local.toLowerCase() == 'video',
+  );
+  return videos
+      .map((video) {
+        final playSources = <String>[];
+        final playGroups = <String>[];
+        final downloads = video.descendants.whereType<XmlElement>().where(
+          (element) => element.name.local.toLowerCase() == 'dd',
+        );
+        for (final download in downloads) {
+          final playText = download.innerText.trim();
+          if (playText.isEmpty) continue;
+          playGroups.add(playText);
+          final flag = download.getAttribute('flag')?.trim() ?? '';
+          playSources.add(flag.isEmpty ? '线路${playSources.length + 1}' : flag);
+        }
+        return <String, dynamic>{
+          'vod_id': _xmlChildText(video, const ['id', 'vod_id']),
+          'vod_name': _xmlChildText(video, const ['name', 'vod_name', 'title']),
+          'vod_play_from': playSources.join(r'$$$'),
+          'vod_play_url': playGroups.join(r'$$$'),
+        };
+      })
+      .toList(growable: false);
+}
+
+String _xmlChildText(XmlElement parent, List<String> names) {
+  final normalized = names.map((name) => name.toLowerCase()).toSet();
+  for (final child in parent.childElements) {
+    if (normalized.contains(child.name.local.toLowerCase())) {
+      return child.innerText.trim();
+    }
+  }
+  return '';
 }
 
 _RankedResult<Map<String, dynamic>>? _rankBestTvBoxItem(

@@ -12,7 +12,11 @@ void main() {
 
       expect(catalog.version, 2);
       expect(catalog.importedCount, 12);
-      expect(catalog.enabledCount, 12);
+      expect(catalog.enabledCount, 11);
+      expect(
+        catalog.sourceById('m3u:d4f93800591801a8a9053c6f')?.enabled,
+        isFalse,
+      );
       expect(
         catalog.sourceById('public:internet_archive')?.kind,
         VideoSourceKind.publicMedia,
@@ -53,6 +57,6 @@ void main() {
       catalog.sourceById('tvbox:0ceee47b675d78d6320a8b53')?.enabled,
       isFalse,
     );
-    expect(catalog.enabledCount, 11);
+    expect(catalog.enabledCount, 10);
   });
 }

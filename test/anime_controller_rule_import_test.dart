@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:anime/src/data/anime_controller.dart';
@@ -7,8 +8,12 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
+import 'package:anime/src/rules/tvbox_xbpq_hydrator.dart';
+import 'package:anime/src/sources/external_source_adapters.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:anime/src/sources/source_catalog_repository.dart';
+import 'package:anime/src/sources/source_rule_bridge.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -158,6 +163,139 @@ void main() {
     expect(resolver.calls, greaterThanOrEqualTo(1));
     expect(resolver.verifyPlayableCalls, everyElement(isFalse));
   });
+
+  test('M3U and BT catalog sources reach their real runtime paths', () async {
+    final tempDirectory = await Directory.systemTemp.createTemp(
+      'anime-controller-external-sources-',
+    );
+    Hive.init(tempDirectory.path);
+    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+    await settings.put('services', _offlineServices.toJson());
+    await settings.close();
+
+    final m3uAdapter = M3uSourceAdapter(
+      client: MockClient((request) async {
+        expect(request.url.host, 'feeds.example');
+        return http.Response.bytes(
+          utf8.encode('''
+#EXTM3U
+#EXTINF:-1 group-title="央视频道",CCTV-1 综合
+https://stream.example/live/cctv1.m3u8
+'''),
+          200,
+          headers: {'content-type': 'application/x-mpegURL; charset=utf-8'},
+        );
+      }),
+    );
+    final torrentAdapter = DmhySourceAdapter(
+      client: MockClient((request) async {
+        expect(request.url.host, 'dmhy.org');
+        return http.Response.bytes(
+          utf8.encode('''
+<table id="topic_list"><tbody><tr>
+  <td>2026/07/18 12:30</td><td>动画</td>
+  <td class="title"><a href="/topics/view/1.html">测试字幕组 CCTV 特辑</a></td>
+  <td><a href="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567">磁力</a></td>
+  <td>1.2GB</td><td>12</td><td>34</td><td>56</td><td>fixture</td>
+</tr></tbody></table>
+'''),
+          200,
+          headers: {'content-type': 'text/html; charset=utf-8'},
+        );
+      }),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        bangumiMetadataRepositoryProvider.overrideWithValue(
+          _FakeBangumiMetadataRepository(),
+        ),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _ExternalSourceCatalogRepository(),
+        ),
+        m3uSourceAdapterProvider.overrideWithValue(m3uAdapter),
+        torrentSourceAdapterProvider.overrideWithValue(torrentAdapter),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      m3uAdapter.close();
+      torrentAdapter.close();
+      await Hive.close();
+      if (await tempDirectory.exists()) {
+        await tempDirectory.delete(recursive: true);
+      }
+    });
+
+    await container.read(animeControllerProvider.future);
+    final controller = container.read(animeControllerProvider.notifier);
+    final search = await controller.search('CCTV');
+    final live = search.singleWhere(
+      (item) => item.source.startsWith('m3u-channel:'),
+    );
+    expect(live.title, 'CCTV-1 综合');
+
+    final detail = await controller.detail(live);
+    expect(detail.episodes, hasLength(1));
+    final lines = await controller.linesForEpisode(
+      detail.subject,
+      detail.episodes.single,
+    );
+    expect(lines.single.available, isTrue);
+    expect(lines.single.format, 'HLS');
+    expect(lines.single.url, 'https://stream.example/live/cctv1.m3u8');
+
+    final torrents = await controller.searchTorrentResources('CCTV');
+    expect(torrents.failures, isEmpty);
+    expect(torrents.items.single.title, contains('CCTV'));
+    expect(torrents.items.single.requiresExternalClient, isTrue);
+  });
+
+  test(
+    'library entries keep same numeric ids from different sources apart',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-library-identity-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _FakeBangumiMetadataRepository(),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      final sameIdFromJikan = _homeSubject.copyWith(source: 'jikan');
+      await controller.toggleFollowing(_homeSubject);
+      await controller.toggleFollowing(sameIdFromJikan);
+      await controller.addHistory(_homeSubject, null);
+      await controller.addHistory(sameIdFromJikan, null);
+
+      var current = container.read(animeControllerProvider).value!;
+      expect(current.following, hasLength(2));
+      expect(current.history, hasLength(2));
+
+      await controller.toggleFollowing(_homeSubject);
+      current = container.read(animeControllerProvider).value!;
+      expect(current.following, hasLength(1));
+      expect(current.following.single.subject.source, 'jikan');
+    },
+  );
 
   test(
     'controller installs only selected imported rules without enabling them',
@@ -380,35 +518,37 @@ void main() {
     },
   );
 
-  test('controller lets the user enable an imported custom engine', () async {
-    final tempDirectory = await Directory.systemTemp.createTemp(
-      'anime-controller-custom-engine-',
-    );
-    Hive.init(tempDirectory.path);
-    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-    await settings.put('services', _offlineServices.toJson());
-    await settings.close();
+  test(
+    'controller keeps unsupported custom engines installed but disabled',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-custom-engine-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
 
-    final container = ProviderContainer(
-      overrides: [
-        bangumiMetadataRepositoryProvider.overrideWithValue(
-          _FakeBangumiMetadataRepository(),
-        ),
-        sourceCatalogRepositoryProvider.overrideWithValue(
-          const _EmptySourceCatalogRepository(),
-        ),
-      ],
-    );
-    addTearDown(() async {
-      container.dispose();
-      await Hive.close();
-      if (await tempDirectory.exists()) {
-        await tempDirectory.delete(recursive: true);
-      }
-    });
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _FakeBangumiMetadataRepository(),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
 
-    await container.read(animeControllerProvider.future);
-    final bundle = const RuleImporter().importFromText('''
+      await container.read(animeControllerProvider.future);
+      final bundle = const RuleImporter().importFromText('''
       {
         "sites": [
           {
@@ -422,31 +562,40 @@ void main() {
         "spider": "https://example.com/spider.jar"
       }
     ''');
-    final rule = bundle.rules.single;
-    final controller = container.read(animeControllerProvider.notifier);
-    await controller.importSelectedRulePlugins(
-      repositoryName: bundle.name,
-      rules: [rule],
-      sourceUrl: 'https://example.com/tvbox.json',
-    );
-    await controller.toggleRulePlugin(rule.id, true);
+      final rule = bundle.rules.single;
+      final controller = container.read(animeControllerProvider.notifier);
+      await controller.importSelectedRulePlugins(
+        repositoryName: bundle.name,
+        rules: [rule],
+        sourceUrl: 'https://example.com/tvbox.json',
+      );
+      await controller.toggleRulePlugin(rule.id, true);
 
-    var state = container.read(animeControllerProvider).requireValue;
-    expect(state.rulePlugins.installedIds, contains(rule.id));
-    expect(state.rulePlugins.enabledIds, contains(rule.id));
-    expect(
-      state.rulePlugins.customRules.single.rawConfig['spider'],
-      'https://example.com/spider.jar',
-    );
+      var state = container.read(animeControllerProvider).requireValue;
+      expect(state.rulePlugins.installedIds, contains(rule.id));
+      expect(state.rulePlugins.enabledIds, isNot(contains(rule.id)));
+      expect(rule.executionStatus, RuleExecutionStatus.unsupportedEngine);
+      expect(
+        state.rulePlugins.customRules.single.rawConfig['spider'],
+        'https://example.com/spider.jar',
+      );
 
-    await controller.setAllInstalledRulePluginsEnabled(false);
-    state = container.read(animeControllerProvider).requireValue;
-    expect(state.rulePlugins.enabledIds, isEmpty);
+      await controller.setAllInstalledRulePluginsEnabled(false);
+      state = container.read(animeControllerProvider).requireValue;
+      expect(state.rulePlugins.enabledIds, isEmpty);
 
-    await controller.setAllInstalledRulePluginsEnabled(true);
-    state = container.read(animeControllerProvider).requireValue;
-    expect(state.rulePlugins.enabledIds, state.rulePlugins.installedIds);
-  });
+      await controller.setAllInstalledRulePluginsEnabled(true);
+      state = container.read(animeControllerProvider).requireValue;
+      final repository = RulePluginRepository(
+        extraRules: state.rulePlugins.customRules,
+      );
+      final executableInstalledIds = state.rulePlugins.installedIds
+          .where((id) => repository.byId(id)?.canResolveNatively ?? false)
+          .toSet();
+      expect(state.rulePlugins.enabledIds, executableInstalledIds);
+      expect(state.rulePlugins.enabledIds, isNot(contains(rule.id)));
+    },
+  );
 
   test(
     'bulk playback switch also controls bridged external source rules',
@@ -492,6 +641,127 @@ void main() {
       state = container.read(animeControllerProvider).requireValue;
       expect(state.sourceCatalog.activePlaybackRuleCount, 3);
       expect(state.sourceCatalog.sources.single.enabled, isTrue);
+    },
+  );
+
+  test(
+    'background XBPQ hydration respects source switches and joins playback',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-xbpq-hydration-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
+
+      final requestStarted = Completer<void>();
+      final response = Completer<http.Response>();
+      var requestCount = 0;
+      final hydrator = TvBoxXbpqHydrator(
+        client: MockClient((request) {
+          requestCount++;
+          expect(request.url, Uri.parse('https://rules.example/xbpq.json'));
+          if (!requestStarted.isCompleted) requestStarted.complete();
+          return response.future;
+        }),
+      );
+      final resolver = _RecordingRulePlaybackResolver();
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _FakeBangumiMetadataRepository(),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _XbpqSourceCatalogRepository(),
+          ),
+          sourceRuleBridgeProvider.overrideWithValue(
+            SourceRuleBridge(xbpqHydrator: hydrator),
+          ),
+          rulePlaybackResolverProvider.overrideWithValue(resolver),
+        ],
+      );
+      addTearDown(() async {
+        if (!response.isCompleted) {
+          response.complete(http.Response('cancelled', 503));
+        }
+        container.dispose();
+        hydrator.close();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      final initial = await container
+          .read(animeControllerProvider.future)
+          .timeout(const Duration(milliseconds: 500));
+      expect(initial.sourceCatalog.activePlaybackRuleCount, 0);
+      await requestStarted.future.timeout(const Duration(milliseconds: 500));
+
+      final controller = container.read(animeControllerProvider.notifier);
+      final disabling = controller.setAllInstalledRulePluginsEnabled(false);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        container
+            .read(animeControllerProvider)
+            .requireValue
+            .sourceCatalog
+            .sources
+            .single
+            .enabled,
+        isFalse,
+      );
+
+      response.complete(
+        http.Response(
+          jsonEncode(_completeControllerXbpqConfig),
+          200,
+          headers: {'content-type': 'application/json'},
+        ),
+      );
+      await disabling.timeout(const Duration(seconds: 1));
+      var state = container.read(animeControllerProvider).requireValue;
+      expect(requestCount, 1);
+      expect(state.sourceCatalog.availablePlaybackRuleCount, 1);
+      expect(state.sourceCatalog.activePlaybackRuleCount, 0);
+      expect(state.sourceCatalog.playbackRuleCountFor('source:xbpq'), 1);
+
+      await controller.setAllInstalledRulePluginsEnabled(true);
+      state = container.read(animeControllerProvider).requireValue;
+      expect(
+        requestCount,
+        1,
+        reason: 'source switch should reuse hydration cache',
+      );
+      expect(state.sourceCatalog.sources.single.enabled, isTrue);
+      expect(state.sourceCatalog.activePlaybackRuleCount, 1);
+
+      const episode = AnimeEpisode(
+        id: 101,
+        subjectId: 1,
+        number: 1,
+        title: '第一集',
+        airdate: '2026-01-01',
+        duration: '24:00',
+        description: '',
+      );
+      final lines = await controller.linesForEpisodeMode(
+        _homeSubject,
+        episode,
+        expandAll: true,
+      );
+
+      expect(lines, isNotEmpty);
+      final xbpqRules = resolver.rules
+          .where((rule) => rule.engine.toLowerCase() == 'xbpq')
+          .toList(growable: false);
+      expect(xbpqRules, hasLength(1));
+      expect(xbpqRules.single.id, startsWith('catalog:source:xbpq:'));
+      expect(
+        xbpqRules.single.id,
+        isNot(startsWith('catalog:source:xbpq:catalog:')),
+      );
     },
   );
 }
@@ -603,6 +873,34 @@ class _BlockingRulePlaybackResolver extends RulePlaybackResolver {
   }
 }
 
+class _RecordingRulePlaybackResolver extends RulePlaybackResolver {
+  final rules = <RulePlugin>[];
+
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+  }) async {
+    rules.add(rule);
+    return [
+      PlaybackLine(
+        id: 'line:${rule.id}',
+        episodeId: episode.id,
+        providerId: rule.id,
+        providerName: rule.name,
+        title: episode.displayTitle,
+        quality: '自动',
+        format: 'HLS',
+        url: 'https://media.example/episode.m3u8',
+        headers: rule.requestHeaders,
+        available: true,
+      ),
+    ];
+  }
+}
+
 class _ControlledBangumiMetadataRepository extends BangumiMetadataRepository {
   _ControlledBangumiMetadataRepository({this.immediateHomeFeed = false})
     : super(client: MockClient((_) async => http.Response('not found', 404)));
@@ -639,6 +937,39 @@ class _EmptySourceCatalogRepository extends SourceCatalogRepository {
   }) async => const SourceCatalogState();
 }
 
+class _ExternalSourceCatalogRepository extends SourceCatalogRepository {
+  const _ExternalSourceCatalogRepository();
+
+  @override
+  Future<SourceCatalogState> loadCatalog({
+    Map<String, bool> enabledOverrides = const {},
+  }) async {
+    return const SourceCatalogState(
+      totalSources: 2,
+      sources: [
+        VideoSource(
+          id: 'm3u:fixture',
+          name: '测试直播',
+          kind: VideoSourceKind.liveM3u,
+          importUrl: 'https://feeds.example/live.m3u',
+          baseUrl: 'https://feeds.example/live.m3u',
+          enabled: true,
+        ),
+        VideoSource(
+          id: 'torrent:fixture',
+          name: '测试 BT',
+          kind: VideoSourceKind.torrent,
+          importUrl: 'https://dmhy.org/',
+          baseUrl: 'https://dmhy.org/',
+          rawConfig: {'site': 'dmhy'},
+          supportsSearch: true,
+          enabled: true,
+        ),
+      ],
+    ).applyEnabledOverrides(enabledOverrides);
+  }
+}
+
 class _TvBoxSourceCatalogRepository extends SourceCatalogRepository {
   const _TvBoxSourceCatalogRepository();
 
@@ -670,6 +1001,54 @@ class _TvBoxSourceCatalogRepository extends SourceCatalogRepository {
     ).applyEnabledOverrides(enabledOverrides);
   }
 }
+
+class _XbpqSourceCatalogRepository extends SourceCatalogRepository {
+  const _XbpqSourceCatalogRepository();
+
+  @override
+  Future<SourceCatalogState> loadCatalog({
+    Map<String, bool> enabledOverrides = const {},
+  }) async {
+    return const SourceCatalogState(
+      totalSources: 1,
+      sources: [
+        VideoSource(
+          id: 'source:xbpq',
+          name: '测试 XBPQ',
+          kind: VideoSourceKind.tvBox,
+          importUrl: 'https://rules.example/catalog.json',
+          baseUrl: 'https://rules.example/catalog.json',
+          headers: {'Referer': 'https://rules.example/'},
+          rawConfig: {
+            'sites': [
+              {
+                'key': 'xbpq-controller',
+                'name': 'XBPQ 动漫',
+                'type': 3,
+                'api': 'csp_XBPQ',
+                'searchable': 1,
+                'ext': './xbpq.json',
+              },
+            ],
+          },
+        ),
+      ],
+    ).applyEnabledOverrides(enabledOverrides);
+  }
+}
+
+const _completeControllerXbpqConfig = <String, dynamic>{
+  '请求头': {'User-Agent': 'XBPQ Rule UA'},
+  '主页url': 'https://media.example/',
+  '搜索url': 'https://media.example/search?wd={wd}',
+  '搜索数组': '<div&&</div>',
+  '搜索标题': 'title="&&"',
+  '搜索链接': 'href="&&"',
+  '播放数组': '<section&&</section>',
+  '播放列表': '<a&&/a>',
+  '播放标题': '>&&<',
+  '播放链接': 'href="&&"',
+};
 
 const _homeSubject = AnimeSubject(
   id: 1,

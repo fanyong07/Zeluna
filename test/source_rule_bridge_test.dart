@@ -1,7 +1,12 @@
+import 'dart:convert';
+
 import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/tvbox_xbpq_hydrator.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:anime/src/sources/source_rule_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
   test(
@@ -52,6 +57,38 @@ void main() {
       expect(catalog.playbackConnectedCount, 1);
     },
   );
+
+  test('TVBox XML source contributes native playback rules', () {
+    const source = VideoSource(
+      id: 'source:xml',
+      name: 'XML 采集',
+      kind: VideoSourceKind.tvBox,
+      importUrl: 'https://example.com/tvbox.json',
+      baseUrl: 'https://example.com/tvbox.json',
+      rawConfig: {
+        'sites': [
+          {
+            'key': 'xml-api',
+            'name': 'XML 资源',
+            'type': 0,
+            'api': 'https://api.example.com/api.php/provide/vod/at/xml/',
+          },
+        ],
+      },
+    );
+
+    final result = const SourceRuleBridge().build(
+      const SourceCatalogState(totalSources: 1, sources: [source]),
+    );
+
+    expect(result.rules, hasLength(3));
+    expect(
+      result.rules.every((rule) => rule.engine == 'tvbox-xml-api'),
+      isTrue,
+    );
+    expect(result.rules.every((rule) => rule.canResolveNatively), isTrue);
+    expect(result.ruleCountsBySource[source.id], 3);
+  });
 
   test(
     'disabled external source keeps its rule count but leaves playback chain',
@@ -148,4 +185,215 @@ void main() {
       isTrue,
     );
   });
+
+  test(
+    'hydrated XBPQ joins counts and playback without a second catalog prefix',
+    () async {
+      var requestCount = 0;
+      final hydrator = TvBoxXbpqHydrator(
+        client: MockClient((request) async {
+          requestCount++;
+          expect(request.url, Uri.parse('https://rules.example/xbpq.json'));
+          return http.Response(
+            jsonEncode(_completeXbpqConfig),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(hydrator.close);
+      final bridge = SourceRuleBridge(xbpqHydrator: hydrator);
+      const source = VideoSource(
+        id: 'source:xbpq',
+        name: 'XBPQ 源',
+        kind: VideoSourceKind.tvBox,
+        importUrl: 'https://rules.example/catalog.json',
+        baseUrl: 'https://rules.example/catalog.json',
+        headers: {'Referer': 'https://rules.example/'},
+        rawConfig: {
+          'sites': [
+            {
+              'key': 'xbpq-site',
+              'name': 'XBPQ 动漫',
+              'type': 3,
+              'api': 'csp_XBPQ',
+              'searchable': 1,
+              'ext': './xbpq.json',
+            },
+          ],
+        },
+      );
+      const catalog = SourceCatalogState(totalSources: 1, sources: [source]);
+
+      final result = await bridge.buildHydrated(catalog);
+      final attached = result.attachTo(catalog);
+
+      expect(requestCount, 1);
+      expect(result.rules, hasLength(1));
+      final rule = result.rules.single;
+      expect(rule.engine.toLowerCase(), 'xbpq');
+      expect(rule.id, startsWith('catalog:source:xbpq:'));
+      expect(rule.id, isNot(startsWith('catalog:source:xbpq:catalog:')));
+      expect(rule.groupId, 'catalog:source:xbpq');
+      expect(rule.requestHeaders['Referer'], 'https://rules.example/');
+      expect(rule.requestHeaders['User-Agent'], 'XBPQ Rule UA');
+      expect(attached.playbackRuleCountFor(source.id), 1);
+      expect(attached.availablePlaybackRuleCount, 1);
+      expect(attached.activePlaybackRuleCount, 1);
+
+      final disabledCatalog = catalog.copyWith(
+        sources: [source.copyWith(enabled: false)],
+      );
+      final disabled = await bridge.buildHydrated(disabledCatalog);
+      expect(
+        requestCount,
+        1,
+        reason: 'hydrator success cache should be reused',
+      );
+      expect(disabled.rules, isEmpty);
+      expect(disabled.ruleCountsBySource[source.id], 1);
+      expect(disabled.availableRuleCount, 1);
+    },
+  );
+
+  test('inline XBPQ never bypasses hydrator safety checks', () async {
+    var requestCount = 0;
+    final hydrator = TvBoxXbpqHydrator(
+      client: MockClient((_) async {
+        requestCount++;
+        return http.Response('unexpected', 500);
+      }),
+    );
+    addTearDown(hydrator.close);
+    final bridge = SourceRuleBridge(xbpqHydrator: hydrator);
+    const safeSource = VideoSource(
+      id: 'source:xbpq-inline-safe',
+      name: '安全内联 XBPQ',
+      kind: VideoSourceKind.tvBox,
+      importUrl: 'https://rules.example/catalog.json',
+      baseUrl: 'https://rules.example/catalog.json',
+      rawConfig: {
+        'sites': [
+          {
+            'key': 'xbpq-inline-safe',
+            'name': '安全内联 XBPQ',
+            'type': 3,
+            'api': 'csp_XBPQ',
+            'ext': _completeXbpqConfig,
+          },
+        ],
+      },
+    );
+    const safeCatalog = SourceCatalogState(
+      totalSources: 1,
+      sources: [safeSource],
+    );
+
+    final immediate = bridge.build(safeCatalog);
+    expect(immediate.rules, isEmpty);
+    expect(immediate.ruleCountsBySource[safeSource.id], 0);
+
+    final hydrated = await bridge.buildHydrated(safeCatalog);
+    expect(requestCount, 0);
+    expect(hydrated.rules, hasLength(1));
+    expect(hydrated.rules.single.canResolveNatively, isTrue);
+
+    final unsafeSource = VideoSource(
+      id: 'source:xbpq-inline-unsafe',
+      name: '危险内联 XBPQ',
+      kind: VideoSourceKind.tvBox,
+      importUrl: safeSource.importUrl,
+      baseUrl: safeSource.baseUrl,
+      rawConfig: {
+        'sites': [
+          {
+            'key': 'xbpq-inline-unsafe',
+            'name': '危险内联 XBPQ',
+            'type': 3,
+            'api': 'csp_XBPQ',
+            'ext': {..._completeXbpqConfig, 'script': './evil.js'},
+          },
+        ],
+      },
+    );
+    final unsafe = await bridge.buildHydrated(
+      SourceCatalogState(totalSources: 1, sources: [unsafeSource]),
+    );
+
+    expect(requestCount, 0);
+    expect(unsafe.rules, isEmpty);
+    expect(unsafe.ruleCountsBySource[unsafeSource.id], 0);
+  });
+
+  test('XBPQ failure is isolated from executable JSON API sources', () async {
+    final hydrator = TvBoxXbpqHydrator(
+      client: MockClient((_) async => http.Response('offline', 503)),
+    );
+    addTearDown(hydrator.close);
+    final bridge = SourceRuleBridge(xbpqHydrator: hydrator);
+    const xbpqSource = VideoSource(
+      id: 'source:xbpq-failed',
+      name: '失败 XBPQ',
+      kind: VideoSourceKind.tvBox,
+      importUrl: 'https://rules.example/catalog.json',
+      baseUrl: 'https://rules.example/catalog.json',
+      rawConfig: {
+        'sites': [
+          {
+            'key': 'xbpq-failed',
+            'name': '失败 XBPQ',
+            'type': 3,
+            'api': 'csp_XBPQ',
+            'ext': './offline.json',
+          },
+        ],
+      },
+    );
+    const jsonSource = VideoSource(
+      id: 'source:json',
+      name: 'JSON API',
+      kind: VideoSourceKind.tvBox,
+      importUrl: 'https://rules.example/json.json',
+      baseUrl: 'https://rules.example/json.json',
+      rawConfig: {
+        'sites': [
+          {
+            'key': 'json',
+            'name': 'JSON API',
+            'type': 1,
+            'api': 'https://api.example.com/provide/vod',
+          },
+        ],
+      },
+    );
+
+    final result = await bridge.buildHydrated(
+      const SourceCatalogState(
+        totalSources: 2,
+        sources: [xbpqSource, jsonSource],
+      ),
+    );
+
+    expect(result.ruleCountsBySource[xbpqSource.id], 0);
+    expect(result.ruleCountsBySource[jsonSource.id], 3);
+    expect(result.rules, hasLength(3));
+    expect(
+      result.rules.every((rule) => rule.engine == 'tvbox-json-api'),
+      isTrue,
+    );
+    expect(bridge.mayContributePlaybackRules(xbpqSource), isTrue);
+  });
 }
+
+const _completeXbpqConfig = <String, dynamic>{
+  '请求头': {'User-Agent': 'XBPQ Rule UA'},
+  '主页url': 'https://media.example/',
+  '搜索url': 'https://media.example/search?wd={wd}',
+  '搜索数组': '<div&&</div>',
+  '搜索标题': 'title="&&"',
+  '搜索链接': 'href="&&"',
+  '播放数组': '<section&&</section>',
+  '播放列表': '<a&&/a>',
+  '播放标题': '>&&<',
+  '播放链接': 'href="&&"',
+};

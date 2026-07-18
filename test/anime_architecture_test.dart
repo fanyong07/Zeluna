@@ -267,7 +267,12 @@ void main() {
       );
       expect(
         animeLines.map((line) => line.providerId),
-        contains('kazumi:omofun03'),
+        contains('kazumi:enlie'),
+      );
+      expect(state.enabledIds, isNot(contains('kazumi:omofun03')));
+      expect(
+        repository.byId('kazumi:omofun03')?.executionStatus,
+        RuleExecutionStatus.needsWebView,
       );
       expect(
         animeLines.map((line) => line.providerName),
@@ -514,7 +519,7 @@ void main() {
         delays: {
           for (var index = 0; index < rules.length; index++)
             rules[index].id: index < 4
-                ? const Duration(milliseconds: 30)
+                ? Duration.zero
                 : const Duration(milliseconds: 500),
         },
       );

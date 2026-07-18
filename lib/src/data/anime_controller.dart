@@ -11,6 +11,8 @@ import '../rules/rule_importer.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
+import '../rules/tvbox_xbpq_hydrator.dart';
+import '../sources/external_source_adapters.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
 import '../sources/source_rule_bridge.dart';
@@ -18,7 +20,10 @@ import 'bangumi_metadata_repository.dart';
 import 'chinese_metadata_repository.dart';
 import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
+import 'media_download_line_selector.dart';
+import 'media_download_result.dart';
 import 'media_download_service.dart';
+import 'media_download_task.dart';
 import 'peertube_repository.dart';
 import 'playback_source_repository.dart';
 import 'wikimedia_commons_repository.dart';
@@ -70,9 +75,29 @@ final sourceCatalogRepositoryProvider = Provider<SourceCatalogRepository>(
   (ref) => const SourceCatalogRepository(),
 );
 
-final mediaDownloadServiceProvider = Provider<MediaDownloadService>(
-  (ref) => const MediaDownloadService(),
-);
+final m3uSourceAdapterProvider = Provider<M3uSourceAdapter>((ref) {
+  final adapter = M3uSourceAdapter();
+  ref.onDispose(adapter.close);
+  return adapter;
+});
+
+final torrentSourceAdapterProvider = Provider<DmhySourceAdapter>((ref) {
+  final adapter = DmhySourceAdapter();
+  ref.onDispose(adapter.close);
+  return adapter;
+});
+
+final sourceRuleBridgeProvider = Provider<SourceRuleBridge>((ref) {
+  final hydrator = TvBoxXbpqHydrator();
+  ref.onDispose(hydrator.close);
+  return SourceRuleBridge(xbpqHydrator: hydrator);
+});
+
+final mediaDownloadServiceProvider = Provider<MediaDownloadService>((ref) {
+  final service = MediaDownloadService();
+  ref.onDispose(service.dispose);
+  return service;
+});
 
 final animeControllerProvider =
     AsyncNotifierProvider<AnimeController, AnimeState>(AnimeController.new);
@@ -104,7 +129,7 @@ class AnimeState {
   final List<LibraryEntry> favorites;
   final List<LibraryEntry> history;
   final List<LibraryEntry> following;
-  final List<LibraryEntry> offlineTasks;
+  final List<MediaDownloadTask> offlineTasks;
   final List<LibraryEntry> imageFavorites;
   final List<LocalFeedback> feedbacks;
   final UserProfileSettings profile;
@@ -123,7 +148,7 @@ class AnimeState {
     List<LibraryEntry>? favorites,
     List<LibraryEntry>? history,
     List<LibraryEntry>? following,
-    List<LibraryEntry>? offlineTasks,
+    List<MediaDownloadTask>? offlineTasks,
     List<LibraryEntry>? imageFavorites,
     List<LocalFeedback>? feedbacks,
     UserProfileSettings? profile,
@@ -173,8 +198,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   late Box<dynamic> _library;
   List<RulePlugin> _sourceCatalogRules = const [];
   int _homeRefreshVersion = 0;
+  int _sourceCatalogRefreshVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _playbackPrefetches = <String, Future<void>>{};
+  final _downloadRuns = <String, Future<void>>{};
+  final _downloadPersistedAt = <String, DateTime>{};
+  Future<void> _downloadWriteQueue = Future<void>.value();
+  Timer? _downloadPersistTimer;
 
   @override
   Future<AnimeState> build() async {
@@ -216,7 +246,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final loadedSourceCatalog = await _loadSourceCatalog(
       _enabledOverridesFromJson(sourceEnabledJson),
     );
-    final sourceBridge = const SourceRuleBridge().build(loadedSourceCatalog);
+    final sourceBridge = ref
+        .read(sourceRuleBridgeProvider)
+        .build(loadedSourceCatalog);
     _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(loadedSourceCatalog);
     final misc = miscJson is Map
@@ -225,13 +257,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     unawaited(
       WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {}),
     );
+    final offlineTasks = await _readDownloadTasks();
     final initialState = AnimeState(
       homeFeed: feed,
       settings: settings,
       favorites: _readEntries('favorites'),
       history: _readEntries('history'),
       following: _readEntries('following'),
-      offlineTasks: _readEntries('offlineTasks'),
+      offlineTasks: offlineTasks,
       imageFavorites: _readEntries('imageFavorites'),
       feedbacks: _readFeedbacks(),
       profile: profileJson is Map
@@ -257,6 +290,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         () => _refreshHomeFeed(services),
       ).onError((_, _) {}),
     );
+    _scheduleSourceCatalogHydration(loadedSourceCatalog);
+    ref.onDispose(() {
+      _downloadPersistTimer?.cancel();
+    });
     return initialState;
   }
 
@@ -264,7 +301,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (keyword.trim().isEmpty) return Future.value(const []);
     final query = keyword.trim();
     final services = state.value?.services ?? const ExternalServiceSettings();
+    final sourceCatalog =
+        state.value?.sourceCatalog ?? const SourceCatalogState();
     final external = ref.read(externalServiceRepositoryProvider);
+    final liveSearch = ref
+        .read(m3uSourceAdapterProvider)
+        .search(sources: sourceCatalog.sources, query: query, limit: 60)
+        .onError((_, _) => const SourceAdapterBatch<M3uChannel>());
     final groups = await Future.wait([
       if (services.bangumiEnabled)
         ref
@@ -309,7 +352,30 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             .onError((_, _) => const <AnimeSubject>[]),
     ]);
     final merged = _uniqueSubjects(groups.expand((items) => items));
-    return _enrichSubjects(merged, services, animeLookupLimit: 24);
+    final enriched = await _enrichSubjects(
+      merged,
+      services,
+      animeLookupLimit: 24,
+    );
+    final liveChannels = (await liveSearch).items;
+    return List<AnimeSubject>.unmodifiable([
+      ...enriched,
+      ...liveChannels.map((channel) => channel.toSubject()),
+    ]);
+  }
+
+  Future<SourceAdapterBatch<TorrentResource>> searchTorrentResources(
+    String keyword,
+  ) {
+    final query = keyword.trim();
+    if (query.isEmpty) {
+      return Future.value(const SourceAdapterBatch<TorrentResource>());
+    }
+    final sourceCatalog =
+        state.value?.sourceCatalog ?? const SourceCatalogState();
+    return ref
+        .read(torrentSourceAdapterProvider)
+        .search(sources: sourceCatalog.sources, query: query, limit: 36);
   }
 
   Future<List<AnimeSubject>> categorySubjects(String name) {
@@ -515,6 +581,33 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _prefetchDetailPlayback(cached);
       return cached;
     }
+    if (subject.source.startsWith('m3u-channel:')) {
+      final channel = await ref
+          .read(m3uSourceAdapterProvider)
+          .resolveSubject(
+            sources:
+                state.value?.sourceCatalog.sources ?? const <VideoSource>[],
+            subject: subject,
+          );
+      final detail =
+          channel?.toDetailBundle() ??
+          AnimeDetailBundle(
+            subject: subject,
+            episodes: const [],
+            characters: const [],
+            staff: const [],
+            recommendations: const [],
+          );
+      final previous = state.value;
+      if (previous != null) {
+        state = AsyncData(
+          previous.copyWith(
+            selectedSubjects: {...previous.selectedSubjects, cacheKey: detail},
+          ),
+        );
+      }
+      return detail;
+    }
     final services = state.value?.services ?? const ExternalServiceSettings();
     final rawDetail = subject.source == 'bangumi'
         ? await ref.read(bangumiMetadataRepositoryProvider).detail(subject.id)
@@ -557,7 +650,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   void _prefetchDetailPlayback(AnimeDetailBundle detail) {
     if (detail.episodes.isEmpty || !_usesRulePlayback(detail.subject)) return;
     final historyEpisode = state.value?.history
-        .where((item) => item.subject.id == detail.subject.id)
+        .where((item) => sameSubjectIdentity(item.subject, detail.subject))
         .map((item) => item.episode)
         .whereType<AnimeEpisode>()
         .firstOrNull;
@@ -585,6 +678,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   bool _usesRulePlayback(AnimeSubject subject) {
     final source = subject.source.toLowerCase();
     return source != 'direct' &&
+        !source.startsWith('m3u-channel:') &&
         !source.startsWith('peertube:') &&
         !source.startsWith('archive:') &&
         !source.startsWith('commons:');
@@ -602,6 +696,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode, {
     bool expandAll = false,
   }) {
+    if (subject.source.startsWith('m3u-channel:')) {
+      return _m3uLinesForEpisode(subject, episode);
+    }
     if (subject.source.startsWith('peertube:')) {
       final services = state.value?.services ?? const ExternalServiceSettings();
       if (!services.peerTubeEnabled) {
@@ -643,6 +740,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ruleState: effectiveRuleState,
       resolver: ref.read(rulePlaybackResolverProvider),
     ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
+  }
+
+  Future<List<PlaybackLine>> _m3uLinesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) async {
+    final channel = await ref
+        .read(m3uSourceAdapterProvider)
+        .resolveSubject(
+          sources: state.value?.sourceCatalog.sources ?? const <VideoSource>[],
+          subject: subject,
+        );
+    if (channel == null) return const <PlaybackLine>[];
+    return <PlaybackLine>[channel.toPlaybackLine(episodeId: episode.id)];
   }
 
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
@@ -795,6 +906,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> setAllInstalledRulePluginsEnabled(bool enabled) async {
     final current = state.value;
     if (current == null) return;
+    final bridge = ref.read(sourceRuleBridgeProvider);
     final rulePlugins = _normalizeRulePlugins(
       current.rulePlugins.copyWith(
         enabledIds: enabled
@@ -805,13 +917,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final toggledCatalog = current.sourceCatalog.copyWith(
       sources: [
         for (final source in current.sourceCatalog.sources)
-          current.sourceCatalog.playbackRuleCountFor(source.id) > 0
+          current.sourceCatalog.playbackRuleCountFor(source.id) > 0 ||
+                  bridge.mayContributePlaybackRules(source)
               ? source.copyWith(enabled: enabled)
               : source,
       ],
       loadError: current.sourceCatalog.loadError,
     );
-    final sourceBridge = const SourceRuleBridge().build(toggledCatalog);
+    final refreshVersion = ++_sourceCatalogRefreshVersion;
+    final sourceBridge = bridge.build(toggledCatalog);
     _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(
@@ -821,6 +935,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _settings.put('rulePlugins', rulePlugins.toJson()),
       _settings.put('sourceEnabled', sourceCatalog.enabledById),
     ]);
+    await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
   }
 
   Future<void> resetRulePlugins() async {
@@ -887,11 +1002,41 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ],
       loadError: current.sourceCatalog.loadError,
     );
-    final sourceBridge = const SourceRuleBridge().build(toggledCatalog);
+    final refreshVersion = ++_sourceCatalogRefreshVersion;
+    final sourceBridge = ref
+        .read(sourceRuleBridgeProvider)
+        .build(toggledCatalog);
     _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
     await _settings.put('sourceEnabled', sourceCatalog.enabledById);
+    await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
+  }
+
+  void _scheduleSourceCatalogHydration(SourceCatalogState catalog) {
+    final refreshVersion = ++_sourceCatalogRefreshVersion;
+    unawaited(
+      Future<void>.delayed(
+        Duration.zero,
+        () => _hydrateAndApplySourceCatalog(catalog, refreshVersion),
+      ).onError((_, _) {}),
+    );
+  }
+
+  Future<void> _hydrateAndApplySourceCatalog(
+    SourceCatalogState catalog,
+    int refreshVersion,
+  ) async {
+    final hydrated = await ref
+        .read(sourceRuleBridgeProvider)
+        .buildHydrated(catalog);
+    if (refreshVersion != _sourceCatalogRefreshVersion) return;
+    final current = state.value;
+    if (current == null) return;
+    _sourceCatalogRules = hydrated.rules;
+    state = AsyncData(
+      current.copyWith(sourceCatalog: hydrated.attachTo(current.sourceCatalog)),
+    );
   }
 
   Future<void> _updateRulePlugins(RulePluginState rulePlugins) async {
@@ -1010,7 +1155,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final next = _toggleSubject(current.favorites, subject);
     state = AsyncData(current.copyWith(favorites: next));
     await _writeEntries('favorites', next);
-    return next.any((item) => item.subject.id == subject.id);
+    return next.any((item) => sameSubjectIdentity(item.subject, subject));
   }
 
   Future<bool> toggleFollowing(AnimeSubject subject) async {
@@ -1019,7 +1164,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final next = _toggleSubject(current.following, subject);
     state = AsyncData(current.copyWith(following: next));
     await _writeEntries('following', next);
-    return next.any((item) => item.subject.id == subject.id);
+    return next.any((item) => sameSubjectIdentity(item.subject, subject));
   }
 
   Future<void> addHistory(AnimeSubject subject, AnimeEpisode? episode) async {
@@ -1032,7 +1177,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         updatedAt: DateTime.now(),
         note: episode == null ? '打开详情' : '播放到 ${episode.displayTitle}',
       ),
-      ...current.history.where((item) => item.subject.id != subject.id),
+      ...current.history.where(
+        (item) => !sameSubjectIdentity(item.subject, subject),
+      ),
     ].take(80).toList();
     state = AsyncData(current.copyWith(history: next));
     await _writeEntries('history', next);
@@ -1048,73 +1195,451 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final current = state.value;
     if (current == null) return '应用状态尚未准备好';
     if (episode == null) return '当前条目没有可下载的集数';
-    final keyEpisodeId = episode.id;
-    final next = [
-      LibraryEntry(
-        subject: subject,
-        episode: episode,
-        updatedAt: DateTime.now(),
-        note: '正在查找可下载线路',
-      ),
-      ...current.offlineTasks.where(
-        (item) =>
-            item.subject.id != subject.id || item.episode?.id != keyEpisodeId,
-      ),
-    ].take(80).toList();
-    state = AsyncData(current.copyWith(offlineTasks: next));
-    await _writeEntries('offlineTasks', next);
-    final lines = await linesForEpisodeMode(
-      subject,
-      episode,
-      expandAll: true,
-    ).onError((_, _) => const <PlaybackLine>[]);
-    final line = lines
-        .where((item) => item.available && item.url != null)
-        .firstOrNull;
-    if (line == null) {
-      await _updateOfflineNote(subject, episode, '没有找到可直接下载的线路');
-      return '没有找到可直接下载的线路';
+    if (!supportsOfflineDownloads) {
+      return '网页版暂不支持离线下载，请使用桌面或移动客户端';
     }
-    final result = await ref
-        .read(mediaDownloadServiceProvider)
-        .download(
-          url: line.url!,
-          title: '${subject.title}_EP${episode.number}',
-          headers: line.headers,
-        );
-    final size = result.bytes <= 0
-        ? ''
-        : ' · ${(result.bytes / 1024 / 1024).toStringAsFixed(1)} MB';
-    await _updateOfflineNote(
-      subject,
-      episode,
-      result.success ? '已下载$size\n${result.path ?? ''}' : result.message,
+    final existing = current.offlineTasks
+        .where(
+          (item) =>
+              sameSubjectIdentity(item.subject, subject) &&
+              item.episode.id == episode.id,
+        )
+        .firstOrNull;
+    if (existing != null) {
+      if (existing.isActive) return '该集已经在下载队列中';
+      if (existing.isPlayable &&
+          await ref
+              .read(mediaDownloadServiceProvider)
+              .fileExists(existing.localPath)) {
+        return '该集已经下载完成';
+      }
+      await resumeDownload(existing.id);
+      return '已重新开始下载';
+    }
+    final now = DateTime.now();
+    final task = MediaDownloadTask(
+      id: now.microsecondsSinceEpoch.toString(),
+      subject: subject,
+      episode: episode,
+      createdAt: now,
+      updatedAt: now,
+      status: MediaDownloadTaskStatus.resolving,
+      message: '正在查找可下载线路',
     );
-    return result.success ? '下载完成$size' : result.message;
+    final next = [task, ...current.offlineTasks];
+    state = AsyncData(current.copyWith(offlineTasks: next));
+    await _persistDownloadTasksNow();
+    unawaited(_launchDownload(task.id));
+    return '已加入下载队列';
   }
 
-  Future<void> _updateOfflineNote(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-    String note,
-  ) async {
+  bool get supportsOfflineDownloads =>
+      ref.read(mediaDownloadServiceProvider).supportsDownloads;
+
+  Future<void> pauseDownload(String taskId) async {
+    final task = _downloadTask(taskId);
+    if (task == null || !task.isActive) return;
+    ref.read(mediaDownloadServiceProvider).pause(taskId);
+    _replaceDownloadTask(
+      task.copyWith(
+        status: MediaDownloadTaskStatus.paused,
+        updatedAt: DateTime.now(),
+        message: '下载已暂停',
+      ),
+    );
+    await _persistDownloadTasksNow();
+  }
+
+  Future<void> resumeDownload(String taskId) async {
+    if (!supportsOfflineDownloads) return;
+    var task = _downloadTask(taskId);
+    if (task == null || task.isActive) return;
+    final finishingRun = _downloadRuns[taskId];
+    if (finishingRun != null) {
+      await finishingRun;
+      task = _downloadTask(taskId);
+      if (task == null || task.isActive) return;
+    }
+    final service = ref.read(mediaDownloadServiceProvider);
+    if (task.isPlayable && await service.fileExists(task.localPath)) return;
+    if (task.status == MediaDownloadTaskStatus.cancelled ||
+        (task.status == MediaDownloadTaskStatus.completed &&
+            !await service.fileExists(task.localPath))) {
+      await service.deleteFiles([task.temporaryPath, task.localPath]);
+      task = task.copyWith(
+        downloadedBytes: 0,
+        totalBytes: 0,
+        completedUnits: 0,
+        totalUnits: 0,
+        temporaryPath: null,
+        localPath: null,
+        etag: null,
+        lastModified: null,
+        url: null,
+        lineId: null,
+        providerName: null,
+        format: null,
+        headers: const {},
+      );
+    }
+    task = task.copyWith(
+      status: MediaDownloadTaskStatus.queued,
+      updatedAt: DateTime.now(),
+      message: task.downloadedBytes > 0 ? '等待继续下载' : '等待下载',
+    );
+    _replaceDownloadTask(task);
+    await _persistDownloadTasksNow();
+    unawaited(_launchDownload(taskId, preferStoredLine: task.url != null));
+  }
+
+  Future<void> cancelDownload(String taskId) async {
+    final task = _downloadTask(taskId);
+    if (task == null || task.status == MediaDownloadTaskStatus.completed) {
+      return;
+    }
+    final service = ref.read(mediaDownloadServiceProvider);
+    final stoppedActiveDownload = service.cancel(taskId);
+    if (!stoppedActiveDownload) {
+      await service.deleteFiles([task.temporaryPath]);
+    }
+    _replaceDownloadTask(
+      task.copyWith(
+        status: MediaDownloadTaskStatus.cancelled,
+        updatedAt: DateTime.now(),
+        downloadedBytes: 0,
+        totalBytes: 0,
+        completedUnits: 0,
+        totalUnits: 0,
+        temporaryPath: null,
+        localPath: null,
+        etag: null,
+        lastModified: null,
+        message: '下载已取消',
+      ),
+    );
+    await _persistDownloadTasksNow();
+  }
+
+  Future<void> removeDownload(String taskId) async {
+    var task = _downloadTask(taskId);
+    if (task == null) return;
+    final service = ref.read(mediaDownloadServiceProvider);
+    final paths = <String?>[task.temporaryPath, task.localPath];
+    if (task.status != MediaDownloadTaskStatus.completed) {
+      await cancelDownload(taskId);
+      task = _downloadTask(taskId) ?? task;
+      paths.addAll([task.temporaryPath, task.localPath]);
+    }
+    final run = _downloadRuns[taskId];
     final current = state.value;
     if (current == null) return;
-    final next = current.offlineTasks
-        .map(
-          (item) =>
-              item.subject.id == subject.id && item.episode?.id == episode.id
-              ? LibraryEntry(
-                  subject: item.subject,
-                  episode: item.episode,
-                  updatedAt: DateTime.now(),
-                  note: note,
-                )
-              : item,
-        )
-        .toList(growable: false);
-    state = AsyncData(current.copyWith(offlineTasks: next));
-    await _writeEntries('offlineTasks', next);
+    state = AsyncData(
+      current.copyWith(
+        offlineTasks: current.offlineTasks
+            .where((item) => item.id != taskId)
+            .toList(growable: false),
+      ),
+    );
+    await _persistDownloadTasksNow();
+    Future<void> cleanup() async {
+      if (run != null) await run;
+      await service.deleteFiles(paths);
+    }
+
+    if (run == null) {
+      await cleanup();
+    } else {
+      unawaited(cleanup().onError((_, _) {}));
+    }
+  }
+
+  Future<void> _launchDownload(String taskId, {bool preferStoredLine = false}) {
+    final active = _downloadRuns[taskId];
+    if (active != null) return active;
+    final run = () async {
+      try {
+        await _performDownload(taskId, preferStoredLine: preferStoredLine);
+      } catch (error) {
+        final task = _downloadTask(taskId);
+        if (task != null &&
+            task.status != MediaDownloadTaskStatus.cancelled &&
+            task.status != MediaDownloadTaskStatus.paused) {
+          _replaceDownloadTask(
+            task.copyWith(
+              status: MediaDownloadTaskStatus.failed,
+              updatedAt: DateTime.now(),
+              message: '下载失败：$error',
+            ),
+          );
+          await _persistDownloadTasksNow();
+        }
+      } finally {
+        _downloadRuns.remove(taskId);
+      }
+    }();
+    _downloadRuns[taskId] = run;
+    return run;
+  }
+
+  Future<void> _performDownload(
+    String taskId, {
+    required bool preferStoredLine,
+  }) async {
+    var task = _downloadTask(taskId);
+    if (task == null ||
+        task.status == MediaDownloadTaskStatus.paused ||
+        task.status == MediaDownloadTaskStatus.cancelled) {
+      return;
+    }
+
+    MediaDownloadResult? lastResult;
+    if (preferStoredLine && task.url?.trim().isNotEmpty == true) {
+      final storedLine = PlaybackLine(
+        id: task.lineId ?? 'download:${task.id}',
+        episodeId: task.episode.id,
+        providerId: task.lineId ?? 'download',
+        providerName: task.providerName ?? '已保存线路',
+        title: task.providerName ?? '已保存线路',
+        quality: '离线下载',
+        format: task.format ?? 'MP4',
+        url: task.url,
+        headers: task.headers,
+        available: true,
+      );
+      lastResult = await _downloadLine(taskId, storedLine);
+      if (lastResult.success || lastResult.paused || lastResult.cancelled) {
+        return;
+      }
+    }
+
+    task = _downloadTask(taskId);
+    if (task == null ||
+        task.status == MediaDownloadTaskStatus.paused ||
+        task.status == MediaDownloadTaskStatus.cancelled) {
+      return;
+    }
+    _replaceDownloadTask(
+      task.copyWith(
+        status: MediaDownloadTaskStatus.resolving,
+        updatedAt: DateTime.now(),
+        message: lastResult == null ? '正在查找可下载线路' : '当前线路失败，正在换线',
+      ),
+    );
+    await _persistDownloadTasksNow();
+
+    List<PlaybackLine> lines;
+    try {
+      lines = await linesForEpisodeMode(
+        task.subject,
+        task.episode,
+        expandAll: true,
+      );
+    } catch (error) {
+      final latest = _downloadTask(taskId);
+      if (latest == null ||
+          latest.status == MediaDownloadTaskStatus.paused ||
+          latest.status == MediaDownloadTaskStatus.cancelled) {
+        return;
+      }
+      _replaceDownloadTask(
+        latest.copyWith(
+          status: MediaDownloadTaskStatus.failed,
+          updatedAt: DateTime.now(),
+          message: '查找下载线路失败：$error',
+        ),
+      );
+      await _persistDownloadTasksNow();
+      return;
+    }
+
+    final candidates = [
+      ...singleFileDownloadCandidates(lines),
+      ...hlsDownloadCandidates(lines),
+    ].where((line) => line.url != task!.url).toList(growable: false);
+    if (candidates.isEmpty) {
+      final latest = _downloadTask(taskId);
+      if (latest == null ||
+          latest.status == MediaDownloadTaskStatus.paused ||
+          latest.status == MediaDownloadTaskStatus.cancelled) {
+        return;
+      }
+      final onlySegmented = lines.any(
+        (line) => line.available && isSegmentedDownloadLine(line),
+      );
+      _replaceDownloadTask(
+        latest.copyWith(
+          status: MediaDownloadTaskStatus.failed,
+          updatedAt: DateTime.now(),
+          message: onlySegmented
+              ? '当前只找到 DASH 或不受支持的分片线路'
+              : (lastResult?.message ?? '没有找到可直接下载的单文件线路'),
+        ),
+      );
+      await _persistDownloadTasksNow();
+      return;
+    }
+
+    for (var index = 0; index < candidates.length; index++) {
+      final latest = _downloadTask(taskId);
+      if (latest == null ||
+          latest.status == MediaDownloadTaskStatus.paused ||
+          latest.status == MediaDownloadTaskStatus.cancelled) {
+        return;
+      }
+      if (lastResult != null ||
+          (latest.url != null && latest.url != candidates[index].url)) {
+        await _discardPartialDownload(latest);
+      }
+      lastResult = await _downloadLine(taskId, candidates[index]);
+      if (lastResult.success || lastResult.paused || lastResult.cancelled) {
+        return;
+      }
+      if (index + 1 < candidates.length) {
+        final failed = _downloadTask(taskId);
+        if (failed != null) {
+          _replaceDownloadTask(
+            failed.copyWith(
+              status: MediaDownloadTaskStatus.resolving,
+              updatedAt: DateTime.now(),
+              message: '${failed.providerName ?? '当前线路'}失败，正在尝试下一条',
+            ),
+          );
+          await _persistDownloadTasksNow();
+        }
+      }
+    }
+
+    final failed = _downloadTask(taskId);
+    if (failed != null &&
+        failed.status != MediaDownloadTaskStatus.paused &&
+        failed.status != MediaDownloadTaskStatus.cancelled) {
+      _replaceDownloadTask(
+        failed.copyWith(
+          status: MediaDownloadTaskStatus.failed,
+          updatedAt: DateTime.now(),
+          message: lastResult?.message ?? '所有单文件线路都下载失败',
+        ),
+      );
+      await _persistDownloadTasksNow();
+    }
+  }
+
+  Future<MediaDownloadResult> _downloadLine(
+    String taskId,
+    PlaybackLine line,
+  ) async {
+    var task = _downloadTask(taskId)!;
+    task = task.copyWith(
+      status: MediaDownloadTaskStatus.downloading,
+      updatedAt: DateTime.now(),
+      lineId: line.id,
+      providerName: line.providerName,
+      format: line.format,
+      url: line.url,
+      headers: line.headers,
+      message: '正在通过 ${line.providerName} 下载',
+    );
+    _replaceDownloadTask(task);
+    await _persistDownloadTasksNow();
+
+    final service = ref.read(mediaDownloadServiceProvider);
+    final producedPaths = <String?>{task.temporaryPath, task.localPath};
+    final result = await service.download(
+      taskId: taskId,
+      url: line.url!,
+      title: '${task.subject.title}_EP${task.episode.number}',
+      headers: line.headers,
+      format: line.format,
+      temporaryPath: task.temporaryPath,
+      targetPath: task.localPath,
+      etag: task.etag,
+      lastModified: task.lastModified,
+      onProgress: (progress) {
+        producedPaths
+          ..add(progress.temporaryPath)
+          ..add(progress.targetPath);
+        _updateDownloadProgress(taskId, progress);
+      },
+    );
+    final latest = _downloadTask(taskId);
+    if (latest == null || latest.status == MediaDownloadTaskStatus.cancelled) {
+      await service.deleteFiles({
+        ...producedPaths,
+        result.temporaryPath,
+        result.path,
+      });
+      return result;
+    }
+    if (latest.status == MediaDownloadTaskStatus.paused) return result;
+    final nextStatus = switch (result.outcome) {
+      MediaDownloadOutcome.completed => MediaDownloadTaskStatus.completed,
+      MediaDownloadOutcome.paused => MediaDownloadTaskStatus.paused,
+      MediaDownloadOutcome.cancelled => MediaDownloadTaskStatus.cancelled,
+      MediaDownloadOutcome.failed ||
+      MediaDownloadOutcome.unsupported => MediaDownloadTaskStatus.failed,
+    };
+    _replaceDownloadTask(
+      latest.copyWith(
+        status: nextStatus,
+        updatedAt: DateTime.now(),
+        downloadedBytes: result.cancelled ? 0 : result.bytes,
+        totalBytes: result.cancelled ? 0 : result.totalBytes,
+        completedUnits: result.cancelled ? 0 : result.completedUnits,
+        totalUnits: result.cancelled ? 0 : result.totalUnits,
+        temporaryPath: result.cancelled ? null : result.temporaryPath,
+        localPath: result.success ? result.path : latest.localPath,
+        etag: result.cancelled ? null : result.etag,
+        lastModified: result.cancelled ? null : result.lastModified,
+        message: result.message,
+      ),
+    );
+    await _persistDownloadTasksNow();
+    return result;
+  }
+
+  void _updateDownloadProgress(String taskId, MediaDownloadProgress progress) {
+    final task = _downloadTask(taskId);
+    if (task == null || task.status != MediaDownloadTaskStatus.downloading) {
+      return;
+    }
+    _replaceDownloadTask(
+      task.copyWith(
+        updatedAt: DateTime.now(),
+        downloadedBytes: progress.downloadedBytes,
+        totalBytes: progress.totalBytes,
+        completedUnits: progress.completedUnits,
+        totalUnits: progress.totalUnits,
+        temporaryPath: progress.temporaryPath,
+        localPath: progress.targetPath.trim().isEmpty
+            ? task.localPath
+            : progress.targetPath,
+        etag: progress.etag,
+        lastModified: progress.lastModified,
+      ),
+    );
+    _scheduleDownloadPersist(taskId);
+  }
+
+  Future<void> _discardPartialDownload(MediaDownloadTask task) async {
+    await ref.read(mediaDownloadServiceProvider).deleteFiles([
+      task.temporaryPath,
+      task.localPath,
+    ]);
+    final latest = _downloadTask(task.id);
+    if (latest == null) return;
+    _replaceDownloadTask(
+      latest.copyWith(
+        downloadedBytes: 0,
+        totalBytes: 0,
+        completedUnits: 0,
+        totalUnits: 0,
+        temporaryPath: null,
+        localPath: null,
+        etag: null,
+        lastModified: null,
+      ),
+    );
+    await _persistDownloadTasksNow();
   }
 
   Future<void> addImageFavorite(AnimeSubject subject) async {
@@ -1122,7 +1647,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (current == null) return;
     final next = [
       LibraryEntry(subject: subject, updatedAt: DateTime.now(), note: '收藏封面图'),
-      ...current.imageFavorites.where((item) => item.subject.id != subject.id),
+      ...current.imageFavorites.where(
+        (item) => !sameSubjectIdentity(item.subject, subject),
+      ),
     ].take(80).toList();
     state = AsyncData(current.copyWith(imageFavorites: next));
     await _writeEntries('imageFavorites', next);
@@ -1515,9 +2042,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     List<LibraryEntry> entries,
     AnimeSubject subject,
   ) {
-    final exists = entries.any((item) => item.subject.id == subject.id);
+    final exists = entries.any(
+      (item) => sameSubjectIdentity(item.subject, subject),
+    );
     if (exists) {
-      return entries.where((item) => item.subject.id != subject.id).toList();
+      return entries
+          .where((item) => !sameSubjectIdentity(item.subject, subject))
+          .toList();
     }
     return [
       LibraryEntry(subject: subject, updatedAt: DateTime.now()),
@@ -1533,6 +2064,124 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .map((item) => LibraryEntry.fromJson(item.cast<String, dynamic>()))
         .where((item) => item.subject.title.trim().isNotEmpty)
         .toList();
+  }
+
+  Future<List<MediaDownloadTask>> _readDownloadTasks() async {
+    final value = _library.get('offlineTasks');
+    if (value is! List) return const [];
+    final tasks = <MediaDownloadTask>[];
+    var migrated = false;
+    for (final raw in value.whereType<Map>()) {
+      final json = raw.cast<String, dynamic>();
+      MediaDownloadTask task;
+      if (json.containsKey('status') && json.containsKey('id')) {
+        task = MediaDownloadTask.fromJson(json);
+      } else {
+        task = MediaDownloadTask.fromLegacy(LibraryEntry.fromJson(json));
+        migrated = true;
+      }
+      if (task.id.trim().isEmpty ||
+          task.subject.title.trim().isEmpty ||
+          task.episode.id == 0) {
+        migrated = true;
+        continue;
+      }
+      if (task.isActive) {
+        task = task.copyWith(
+          status: MediaDownloadTaskStatus.paused,
+          updatedAt: DateTime.now(),
+          message: '上次下载已中断，可以继续下载',
+        );
+        migrated = true;
+      }
+      if (task.status == MediaDownloadTaskStatus.completed &&
+          !await ref
+              .read(mediaDownloadServiceProvider)
+              .fileExists(task.localPath)) {
+        task = task.copyWith(
+          status: MediaDownloadTaskStatus.failed,
+          updatedAt: DateTime.now(),
+          localPath: null,
+          message: '本地文件已不存在，请重新下载',
+        );
+        migrated = true;
+      }
+      if (task.downloadedBytes > 0 &&
+          task.status != MediaDownloadTaskStatus.completed &&
+          !await ref
+              .read(mediaDownloadServiceProvider)
+              .fileExists(task.temporaryPath)) {
+        task = task.copyWith(
+          downloadedBytes: 0,
+          totalBytes: 0,
+          completedUnits: 0,
+          totalUnits: 0,
+          temporaryPath: null,
+          etag: null,
+          lastModified: null,
+          message: task.status == MediaDownloadTaskStatus.paused
+              ? '临时文件已不存在，将重新下载'
+              : task.message,
+        );
+        migrated = true;
+      }
+      tasks.add(task);
+    }
+    if (migrated) {
+      await _library.put(
+        'offlineTasks',
+        tasks.map((item) => item.toJson()).toList(),
+      );
+    }
+    return tasks;
+  }
+
+  MediaDownloadTask? _downloadTask(String taskId) {
+    return state.value?.offlineTasks
+        .where((item) => item.id == taskId)
+        .firstOrNull;
+  }
+
+  void _replaceDownloadTask(MediaDownloadTask task) {
+    final current = state.value;
+    if (current == null) return;
+    final next = current.offlineTasks
+        .map((item) => item.id == task.id ? task : item)
+        .toList(growable: false);
+    state = AsyncData(current.copyWith(offlineTasks: next));
+  }
+
+  void _scheduleDownloadPersist(String taskId) {
+    final now = DateTime.now();
+    final last = _downloadPersistedAt[taskId];
+    if (last == null || now.difference(last) >= const Duration(seconds: 1)) {
+      _downloadPersistedAt[taskId] = now;
+      unawaited(_persistDownloadTasks());
+      return;
+    }
+    if (_downloadPersistTimer?.isActive ?? false) return;
+    _downloadPersistTimer = Timer(const Duration(seconds: 1), () {
+      _downloadPersistTimer = null;
+      unawaited(_persistDownloadTasks());
+    });
+  }
+
+  Future<void> _persistDownloadTasksNow() {
+    _downloadPersistTimer?.cancel();
+    _downloadPersistTimer = null;
+    return _persistDownloadTasks();
+  }
+
+  Future<void> _persistDownloadTasks() {
+    final snapshot = state.value?.offlineTasks
+        .map((item) => item.toJson())
+        .toList(growable: false);
+    if (snapshot == null) return Future<void>.value();
+    final operation = _downloadWriteQueue.then(
+      (_) => _library.put('offlineTasks', snapshot),
+    );
+    _downloadWriteQueue = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
   }
 
   _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {

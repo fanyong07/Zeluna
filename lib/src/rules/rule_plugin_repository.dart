@@ -79,7 +79,11 @@ class RulePluginRepository {
     final installed = collection.canonicalizeIds(state.installedIds);
     final enabled = collection
         .canonicalizeIds(state.enabledIds)
-        .where(installed.contains)
+        .where(
+          (id) =>
+              installed.contains(id) &&
+              (collection.byCanonicalId[id]?.canResolveNatively ?? false),
+        )
         .toSet();
     final customIds = extraRules.map((rule) => rule.id).toSet();
     final customRules = collection.rules

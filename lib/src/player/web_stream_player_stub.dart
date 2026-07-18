@@ -19,6 +19,8 @@ class WebStreamPlayer extends StatelessWidget {
     required this.playing,
     required this.volume,
     required this.position,
+    this.rate = 1,
+    this.headers = const {},
     this.controller,
     this.forceHls = false,
     this.onReady,
@@ -32,6 +34,8 @@ class WebStreamPlayer extends StatelessWidget {
   final bool playing;
   final double volume;
   final Duration position;
+  final double rate;
+  final Map<String, String> headers;
   final WebStreamPlayerController? controller;
   final bool forceHls;
   final VoidCallback? onReady;

@@ -11,6 +11,7 @@ import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
+import '../sources/source_management_page.dart';
 import 'app_theme.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -41,13 +42,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     GoRoute(path: '/profile/history', redirect: (context, state) => '/history'),
     GoRoute(
       path: '/profile/offline',
-      builder: (context, state) => LibraryPage(
-        title: '离线缓存',
-        emptyTitle: '还没有缓存任务',
-        emptyMessage: '在详情页点下载后会加入队列，找到可下载播放线路后即可缓存。',
-        entriesOf: (state) => state.offlineTasks,
-        clearKey: 'offlineTasks',
-      ),
+      builder: (context, state) => const DownloadManagementPage(),
     ),
     GoRoute(
       path: '/profile/following',
@@ -106,7 +101,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     ),
     GoRoute(
       path: '/profile/sources',
-      redirect: (context, state) => '/profile/rules',
+      builder: (context, state) => const SourceManagementPage(),
     ),
     GoRoute(
       path: '/profile/rules/repository',

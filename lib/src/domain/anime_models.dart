@@ -136,6 +136,11 @@ class AnimeSubject {
   }
 }
 
+bool sameSubjectIdentity(AnimeSubject first, AnimeSubject second) {
+  return first.id == second.id &&
+      first.source.trim().toLowerCase() == second.source.trim().toLowerCase();
+}
+
 class AnimeEpisode {
   const AnimeEpisode({
     required this.id,
@@ -465,12 +470,14 @@ class PlaySessionRequest {
     required this.episodes,
     required this.episode,
     this.initialLine,
+    this.offlineOnly = false,
   });
 
   final AnimeSubject subject;
   final List<AnimeEpisode> episodes;
   final AnimeEpisode episode;
   final PlaybackLine? initialLine;
+  final bool offlineOnly;
 }
 
 class LibraryEntry {

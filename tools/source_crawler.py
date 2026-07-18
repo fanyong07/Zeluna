@@ -291,8 +291,10 @@ def parse_m3u(text: str, import_url: str | None = None) -> VideoSource | None:
         import_url=import_url,
         base_url=import_url,
         tags=tags,
-        supports_search=False,
+        supports_search=True,
         supports_categories=False,
+        enabled=channels > 0,
+        health="offline" if channels == 0 else "unknown",
         message=f"M3U 直播源，{channels} 个频道，{len(groups)} 个分组",
         raw_config={
             "format": "m3u",
@@ -430,11 +432,15 @@ def _is_static_tvbox_site(api: str) -> bool:
     api_l = api.lower()
     return (
         api_l.startswith("http")
-        and not api_l.endswith(".xml")
-        and "/at/xml" not in api_l
         and any(
             kw in api_l
-            for kw in ("api.php", "provide/vod", "ac=list", "ac=detail")
+            for kw in (
+                "api.php",
+                "provide/vod",
+                "ac=list",
+                "ac=detail",
+                "/at/xml",
+            )
         )
     )
 

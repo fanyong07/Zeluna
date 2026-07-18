@@ -42,6 +42,9 @@ class RuleManagementPage extends ConsumerWidget {
           extraRules: state.rulePlugins.customRules,
         );
         final installed = repository.installedRules(state.rulePlugins);
+        final executableInstalled = installed
+            .where((rule) => rule.canResolveNatively)
+            .toList(growable: false);
         final installedEnabledCount = installed
             .where((rule) => state.rulePlugins.isEnabled(rule.id))
             .length;
@@ -67,7 +70,10 @@ class RuleManagementPage extends ConsumerWidget {
           catalogPlaybackSources,
         );
         final allInstalledEnabled =
-            installed.isEmpty || installedEnabledCount == installed.length;
+            executableInstalled.isEmpty ||
+            executableInstalled.every(
+              (rule) => state.rulePlugins.isEnabled(rule.id),
+            );
         final allCatalogEnabled =
             catalogPlaybackSources.isEmpty ||
             catalogPlaybackSources.every((source) => source.enabled);
@@ -110,7 +116,7 @@ class RuleManagementPage extends ConsumerWidget {
                             .read(animeControllerProvider.notifier)
                             .setAllInstalledRulePluginsEnabled(true);
                         if (context.mounted) {
-                          _showSnack(context, '已启用全部播放规则');
+                          _showSnack(context, '已启用全部可执行播放规则');
                         }
                       },
                 onDisableAll: installedEnabledCount == 0 && noCatalogEnabled
@@ -709,7 +715,10 @@ class _InstalledRuleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final canExecute = rule.canResolveNatively;
+    final effectiveEnabled = enabled && canExecute;
     return Padding(
+      key: ValueKey('installedRule:${rule.id}'),
       padding: const EdgeInsets.only(bottom: 10),
       child: DecoratedBox(
         decoration: BoxDecoration(
@@ -722,14 +731,22 @@ class _InstalledRuleRow extends StatelessWidget {
           child: Row(
             children: [
               Icon(
-                enabled ? Icons.power_settings_new : Icons.power_off_outlined,
-                color: enabled ? _accent(context) : _surfaceMuted(context),
+                effectiveEnabled
+                    ? Icons.power_settings_new
+                    : Icons.power_off_outlined,
+                color: effectiveEnabled
+                    ? _accent(context)
+                    : _surfaceMuted(context),
               ),
               const SizedBox(width: 12),
               Expanded(child: _RuleCardText(rule: rule)),
               Tooltip(
-                message: '切换规则启用状态',
-                child: Switch(value: enabled, onChanged: onToggle),
+                message: canExecute ? '切换规则启用状态' : rule.executionStatus.label,
+                child: Switch(
+                  key: ValueKey('ruleToggle:${rule.id}'),
+                  value: effectiveEnabled,
+                  onChanged: canExecute ? onToggle : null,
+                ),
               ),
               IconButton(
                 tooltip: '更多操作',
@@ -1097,6 +1114,7 @@ class _RuleCardText extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      key: ValueKey('ruleCard:${rule.id}'),
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1125,7 +1143,10 @@ class _RuleCardText extends StatelessWidget {
             SmallBadge(label: rule.engine),
             SmallBadge(label: rule.sourceLabel),
             if (rule.requiresCaptcha) const SmallBadge(label: 'captcha'),
-            SmallBadge(label: _ruleStatusLabel(rule), active: true),
+            SmallBadge(
+              label: _ruleStatusLabel(rule),
+              active: rule.canResolveNatively,
+            ),
           ],
         ),
         const SizedBox(height: 8),
@@ -1152,11 +1173,22 @@ class _RuleCardText extends StatelessWidget {
 }
 
 String _ruleStatusLabel(RulePlugin rule) {
-  return '可启用';
+  return rule.executionStatus.label;
 }
 
 String _ruleDisplayNote(RulePlugin rule) {
-  return rule.note;
+  final reason = rule.unsupportedReason?.trim() ?? '';
+  if (!rule.canResolveNatively && reason.isNotEmpty) return reason;
+  if (rule.canResolveNatively) {
+    return rule.note.trim().isEmpty ? '规则字段完整，可参与播放查源。' : rule.note;
+  }
+  return switch (rule.executionStatus) {
+    RuleExecutionStatus.needsWebView => '需要在 WebView 中完成人机验证或页面交互。',
+    RuleExecutionStatus.needsPrivateAuth => '需要登录、Cookie 或其他私密授权后才能使用。',
+    RuleExecutionStatus.missingConfig => '规则缺少当前解析器必需的搜索或播放字段。',
+    RuleExecutionStatus.unsupportedEngine => '当前版本还没有接入 ${rule.engine} 执行器。',
+    RuleExecutionStatus.executable => rule.note,
+  };
 }
 
 Future<void> _openRuleSite(BuildContext context, RulePlugin rule) async {
@@ -1949,7 +1981,8 @@ Future<void> _showRuleSelectionDialog(
                           },
                           title: Text(rule.name),
                           subtitle: Text(
-                            '${rule.contentLabel} · ${rule.engine}',
+                            '${rule.contentLabel} · ${rule.engine} · '
+                            '${rule.executionStatus.label}',
                           ),
                           secondary: Icon(
                             Icons.rule_folder_outlined,

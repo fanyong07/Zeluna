@@ -14,6 +14,8 @@ const _maxRulesPerQuickLookup = 12;
 const _maxRulesPerGroupPerLookup = 6;
 const _quickLookupConcurrency = 4;
 const _expandedLookupConcurrency = 6;
+const _expandedRuleTimeout = Duration(seconds: 14);
+const _expandedLookupTotalBudget = Duration(seconds: 24);
 const _deferredRulesAfterFirstHit = 2;
 const _quickRuleTimeout = Duration(milliseconds: 4500);
 const _quickLookupTotalBudget = Duration(milliseconds: 4800);
@@ -332,19 +334,27 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
       while (true) {
         final index = nextRuleIndex++;
         if (index >= rules.length) return;
-        resolved[index] = await _resolveRuleCached(
-          rules[index],
-          subject,
-          episode,
-          verifyPlayable: true,
-        );
+        try {
+          resolved[index] = await _resolveRuleCached(
+            rules[index],
+            subject,
+            episode,
+            verifyPlayable: true,
+          ).timeout(_expandedRuleTimeout);
+        } on TimeoutException {
+          resolved[index] = const <PlaybackLine>[];
+        }
       }
     }
 
     final workerCount = rules.length < _expandedLookupConcurrency
         ? rules.length
         : _expandedLookupConcurrency;
-    await Future.wait(List.generate(workerCount, (_) => worker()));
+    final workers = Future.wait(List.generate(workerCount, (_) => worker()));
+    await Future.any<void>([
+      workers,
+      Future<void>.delayed(_expandedLookupTotalBudget),
+    ]);
     return [for (final lines in resolved) ...?lines];
   }
 

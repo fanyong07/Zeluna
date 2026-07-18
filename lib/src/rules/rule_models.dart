@@ -41,6 +41,20 @@ enum RuleSourceKind {
   }
 }
 
+enum RuleExecutionStatus {
+  executable('可执行'),
+  needsWebView('需 WebView'),
+  needsPrivateAuth('需授权'),
+  missingConfig('缺配置'),
+  unsupportedEngine('缺执行器');
+
+  const RuleExecutionStatus(this.label);
+
+  final String label;
+
+  bool get isExecutable => this == RuleExecutionStatus.executable;
+}
+
 class RulePlugin {
   const RulePlugin({
     required this.id,
@@ -104,27 +118,45 @@ class RulePlugin {
 
   String get contentLabel => contentType.label;
 
-  bool get canResolveNatively {
-    if (requiresCaptcha || unsupportedReason != null) {
-      return false;
+  RuleExecutionStatus get executionStatus {
+    if (requiresPrivateAuth || _reasonNeedsPrivateAuth(unsupportedReason)) {
+      return RuleExecutionStatus.needsPrivateAuth;
     }
+    if (requiresWebView ||
+        requiresCaptcha ||
+        kazumi?.useWebView == true ||
+        (kazumi?.antiCrawlerConfig.isNotEmpty ?? false) ||
+        _reasonNeedsWebView(unsupportedReason)) {
+      return RuleExecutionStatus.needsWebView;
+    }
+
     final normalizedEngine = engine.toLowerCase();
-    final endpoint = Uri.tryParse(baseUrl);
-    final xbpqConfig = xbpq;
-    return (normalizedEngine == 'native' && kazumi != null) ||
-        (normalizedEngine == 'xbpq' &&
-            xbpqConfig != null &&
-            xbpqConfig.searchArray.trim().isNotEmpty &&
-            xbpqConfig.searchTitle.trim().isNotEmpty &&
-            xbpqConfig.searchLink.trim().isNotEmpty &&
-            xbpqConfig.playList.trim().isNotEmpty &&
-            xbpqConfig.playLink.trim().isNotEmpty) ||
-        (normalizedEngine == 'animeko-web-selector' && animeko != null) ||
-        (normalizedEngine == 'tvbox-json-api' &&
-            endpoint != null &&
-            endpoint.hasScheme &&
-            endpoint.host.isNotEmpty);
+    final knownEngine = switch (normalizedEngine) {
+      'native' ||
+      'xbpq' ||
+      'animeko-web-selector' ||
+      'tvbox-json-api' ||
+      'tvbox-xml-api' => true,
+      _ => false,
+    };
+    if (!knownEngine) return RuleExecutionStatus.unsupportedEngine;
+    if (unsupportedReason != null || !searchable) {
+      return RuleExecutionStatus.missingConfig;
+    }
+
+    final complete = switch (normalizedEngine) {
+      'native' => _hasCompleteKazumiConfig(this),
+      'xbpq' => _hasCompleteXbpqConfig(this),
+      'animeko-web-selector' => _hasCompleteAnimekoConfig(this),
+      'tvbox-json-api' || 'tvbox-xml-api' => _hasHttpEndpoint(baseUrl),
+      _ => false,
+    };
+    return complete
+        ? RuleExecutionStatus.executable
+        : RuleExecutionStatus.missingConfig;
   }
+
+  bool get canResolveNatively => executionStatus.isExecutable;
 
   String get updateLabel {
     final month = '${updatedAt.month}'.padLeft(2, '0');
@@ -288,6 +320,89 @@ class RulePlugin {
       note: json['note']?.toString() ?? json['description']?.toString() ?? '',
     );
   }
+}
+
+bool _hasCompleteKazumiConfig(RulePlugin rule) {
+  final config = rule.kazumi;
+  if (config == null ||
+      !_hasHttpEndpoint(rule.baseUrl) ||
+      !_hasHttpEndpoint(rule.searchUrl)) {
+    return false;
+  }
+  return _allPresent([
+    config.searchList,
+    config.searchName,
+    config.searchResult,
+    config.chapterRoads,
+    config.chapterResult,
+  ]);
+}
+
+bool _hasCompleteXbpqConfig(RulePlugin rule) {
+  final config = rule.xbpq;
+  if (config == null ||
+      !_hasHttpEndpoint(rule.baseUrl) ||
+      !_hasHttpEndpoint(rule.searchUrl)) {
+    return false;
+  }
+  return _allPresent([
+    config.searchArray,
+    config.searchTitle,
+    config.searchLink,
+    config.playList,
+    config.playLink,
+  ]);
+}
+
+bool _hasCompleteAnimekoConfig(RulePlugin rule) {
+  final config = rule.animeko;
+  if (config == null ||
+      !_hasHttpEndpoint(rule.baseUrl) ||
+      !_hasHttpEndpoint(config.searchUrl)) {
+    return false;
+  }
+
+  final hasSubjectSelector = switch (config.subjectFormatId.toLowerCase()) {
+    'indexed' => _allPresent([
+      config.subjectIndexed.selectNames,
+      config.subjectIndexed.selectLinks,
+    ]),
+    _ => config.subjectA.selectLists.trim().isNotEmpty,
+  };
+  final hasEpisodeSelector = switch (config.channelFormatId.toLowerCase()) {
+    'no-channel' => config.channelNoChannel.selectEpisodes.trim().isNotEmpty,
+    _ => _allPresent([
+      config.channelFlattened.selectEpisodeLists,
+      config.channelFlattened.selectEpisodesFromList,
+    ]),
+  };
+  return hasSubjectSelector && hasEpisodeSelector;
+}
+
+bool _allPresent(Iterable<String> values) =>
+    values.every((value) => value.trim().isNotEmpty);
+
+bool _hasHttpEndpoint(String value) {
+  final uri = Uri.tryParse(value.trim());
+  return uri != null &&
+      const {'http', 'https'}.contains(uri.scheme.toLowerCase()) &&
+      uri.host.isNotEmpty;
+}
+
+bool _reasonNeedsWebView(String? reason) {
+  final text = reason?.toLowerCase() ?? '';
+  return text.contains('webview') ||
+      text.contains('验证码') ||
+      text.contains('反爬') ||
+      text.contains('人机验证');
+}
+
+bool _reasonNeedsPrivateAuth(String? reason) {
+  final text = reason?.toLowerCase() ?? '';
+  return text.contains('私密授权') ||
+      text.contains('需要授权') ||
+      text.contains('需要登录') ||
+      text.contains('private auth');
 }
 
 class AnimekoWebSelectorConfig {
