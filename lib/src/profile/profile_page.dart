@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../app/anime_app.dart';
 import '../catalog/catalog_page.dart';
@@ -439,16 +440,11 @@ class _ProfileShortcutSection extends StatelessWidget {
                 ),
                 _ShortcutTile(
                   icon: Icons.extension_outlined,
-                  title: '规则管理',
-                  value: '资源',
-                  onTap: () => context.push('/profile/rules'),
-                ),
-                _ShortcutTile(
-                  icon: Icons.hub_outlined,
-                  title: '视频源',
+                  title: '播放规则',
                   value:
-                      '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
-                  onTap: () => context.push('/profile/sources'),
+                      '${state.rulePlugins.enabledIds.length + state.sourceCatalog.activePlaybackRuleCount}/'
+                      '${state.rulePlugins.installedIds.length + state.sourceCatalog.availablePlaybackRuleCount}',
+                  onTap: () => context.push('/profile/rules'),
                 ),
                 _ShortcutTile(
                   icon: Icons.subtitles,
@@ -892,7 +888,7 @@ class _ProfileRightRail extends StatelessWidget {
               ),
               _RailAction(
                 icon: Icons.extension_outlined,
-                title: '规则管理',
+                title: '播放规则',
                 value: '${state.rulePlugins.installedIds.length}',
                 onTap: () => context.push('/profile/rules'),
               ),
@@ -906,27 +902,17 @@ class _ProfileRightRail extends StatelessWidget {
             children: [
               const SectionTitle(title: '设备同步'),
               const SizedBox(height: 12),
-              _DeviceRow(
-                icon: Icons.desktop_windows,
-                title: 'Windows 桌面端',
-                status: '本机',
-              ),
-              _DeviceRow(
-                icon: Icons.phone_iphone,
-                title: 'iPhone 14 Pro',
-                status: '在线',
-              ),
-              _DeviceRow(
-                icon: Icons.tablet_mac,
-                title: 'iPad Air 5',
-                status: '离线',
+              const _DeviceRow(
+                icon: Icons.devices_rounded,
+                title: '当前设备',
+                status: '本地保存',
               ),
               const SizedBox(height: 8),
               Text(
-                '云端同步已开启',
+                '尚未登录云端账号，历史、收藏和设置不会跨设备同步。',
                 style: Theme.of(
                   context,
-                ).textTheme.bodySmall?.copyWith(color: Colors.greenAccent),
+                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
               ),
             ],
           ),
@@ -1562,34 +1548,16 @@ class MiscSettingsPage extends ConsumerWidget {
               _SettingsCard(
                 children: [
                   _SwitchRow(
-                    title: '自动检查更新',
-                    value: settings.autoCheckUpdates,
-                    onChanged: (value) => controller.updateMisc(
-                      settings.copyWith(autoCheckUpdates: value),
-                    ),
-                  ),
-                  _SwitchRow(
-                    title: '仅 Wi-Fi 缓存',
-                    value: settings.wifiOnlyCache,
-                    onChanged: (value) => controller.updateMisc(
-                      settings.copyWith(wifiOnlyCache: value),
-                    ),
-                  ),
-                  _SwitchRow(
                     title: '播放时保持屏幕常亮',
+                    subtitle: '已连接系统唤醒锁，播放和长视频观看时生效',
                     value: settings.keepScreenOn,
                     onChanged: (value) => controller.updateMisc(
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
-                  _SwitchRow(
-                    title: '保存崩溃日志',
-                    subtitle: '仅本地记录，便于后续排查',
-                    value: settings.saveCrashLog,
-                    onChanged: (value) => controller.updateMisc(
-                      settings.copyWith(saveCrashLog: value),
-                    ),
-                  ),
+                  const _ReadonlyRow(title: '离线下载', value: '支持 MP4/WebM 等单文件'),
+                  const _ReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
+                  const _ReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
               ),
             ],
@@ -1607,19 +1575,39 @@ class VersionInfoPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return _ProfileScaffold(
       title: '版本信息',
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
-        children: const [
-          _SettingsCard(
+      child: FutureBuilder<PackageInfo>(
+        future: PackageInfo.fromPlatform(),
+        builder: (context, snapshot) {
+          final info = snapshot.data;
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              _ReadonlyRow(title: '应用', value: 'anime'),
-              _ReadonlyRow(title: '版本', value: '1.0.0+1'),
-              _ReadonlyRow(title: '元数据', value: 'Bangumi API'),
-              _ReadonlyRow(title: '视频源', value: '待接入'),
-              _ReadonlyRow(title: '播放结构', value: '按当前集单独返回线路'),
+              _SettingsCard(
+                children: [
+                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'anime'),
+                  _ReadonlyRow(
+                    title: '版本',
+                    value: info == null
+                        ? '读取中…'
+                        : '${info.version}+${info.buildNumber}',
+                  ),
+                  const _ReadonlyRow(
+                    title: '内容资料',
+                    value: '番剧 / 剧集 / 电影 / 中文资料增强',
+                  ),
+                  const _ReadonlyRow(
+                    title: '播放能力',
+                    value: '播放规则 / 网络直链 / 本地文件',
+                  ),
+                  const _ReadonlyRow(
+                    title: '播放器',
+                    value: 'media_kit · YouTube/B站式控制层',
+                  ),
+                ],
+              ),
             ],
-          ),
-        ],
+          );
+        },
       ),
     );
   }

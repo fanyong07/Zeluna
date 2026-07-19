@@ -7,9 +7,100 @@ import 'package:go_router/go_router.dart';
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
+import 'subject_playability.dart';
+
+const _internalMetadataProviderNames = <String>[
+  'Internet Archive',
+  'Archive.org',
+  'Wikimedia Commons',
+  'MyAnimeList',
+  'Bangumi',
+  'AniList',
+  'Jikan',
+  'Kitsu',
+  'Cinemeta',
+  'TVMaze',
+  'Wikidata',
+  'Wikimedia',
+  'PeerTube',
+  'Archive',
+];
+
+final _internalMetadataProviderPattern = RegExp(
+  _internalMetadataProviderNames.map(RegExp.escape).join('|'),
+  caseSensitive: false,
+);
+
+bool _isInternalMetadataLabel(String value) {
+  return _internalMetadataProviderPattern.hasMatch(value.trim());
+}
+
+String _publicMetadataValue(String value, {String fallback = ''}) {
+  final normalized = value.trim();
+  if (normalized.isEmpty || _isInternalMetadataLabel(normalized)) {
+    return fallback;
+  }
+  return normalized;
+}
+
+String _publicSummary(String value) {
+  var normalized = value.trim();
+  if (normalized.isEmpty) return '内容资料正在完善。';
+
+  normalized = normalized
+      .replaceAll(
+        RegExp(
+          '来自\\s*(?:${_internalMetadataProviderNames.map(RegExp.escape).join('|')})\\s*的',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceAll(_internalMetadataProviderPattern, '')
+      .replaceAll(RegExp(r'\s*[/+|]\s*'), ' ')
+      .replaceAll(RegExp(r'\s{2,}'), ' ')
+      .replaceFirst(RegExp(r'^[\s、，。:：;；·-]+'), '')
+      .trim();
+  return normalized.isEmpty ? '内容资料正在完善。' : normalized;
+}
+
+AnimeSubject _publicSubjectMetadata(AnimeSubject subject) {
+  final platformFallback = switch (subjectContentTypeOf(subject)) {
+    SubjectContentType.anime => '番剧',
+    SubjectContentType.series => '剧集',
+    SubjectContentType.movie => '电影',
+  };
+  return AnimeSubject(
+    id: subject.id,
+    title: subject.title,
+    originalTitle: subject.originalTitle,
+    summary: _publicSummary(subject.summary),
+    coverUrl: subject.coverUrl,
+    bannerUrl: subject.bannerUrl,
+    date: subject.date,
+    platform: _publicMetadataValue(
+      subject.platform,
+      fallback: platformFallback,
+    ),
+    language: subject.language,
+    region: _publicMetadataValue(subject.region),
+    status: _publicMetadataValue(subject.status),
+    categories: subject.categories
+        .where((item) => !_isInternalMetadataLabel(item.name))
+        .toList(growable: false),
+    tags: subject.tags
+        .where((item) => !_isInternalMetadataLabel(item.name))
+        .toList(growable: false),
+    totalEpisodes: subject.totalEpisodes,
+    ratingScore: subject.ratingScore,
+    ratingRank: subject.ratingRank,
+    ratingTotal: subject.ratingTotal,
+    source: subject.source,
+  );
+}
 
 class CatalogPage extends ConsumerStatefulWidget {
   const CatalogPage({super.key});
@@ -103,7 +194,9 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
         onOpen: _openDetail,
       ),
       AnimeHomeTab.category => _TileCloud<AnimeCategory>(
-        items: feed.categories,
+        items: feed.categories
+            .where((item) => !_isInternalMetadataLabel(item.name))
+            .toList(growable: false),
         labelOf: (item) => '${item.name}(${item.count})',
         imageOf: (item) => item.imageUrl,
         onTap: (item) => Navigator.of(context).push(
@@ -119,7 +212,9 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
         ),
       ),
       AnimeHomeTab.tag => _TileCloud<AnimeTag>(
-        items: feed.tags,
+        items: feed.tags
+            .where((item) => !_isInternalMetadataLabel(item.name))
+            .toList(growable: false),
         labelOf: (item) => '${item.name}(${item.count})',
         imageOf: (item) => item.imageUrl,
         onTap: (item) => Navigator.of(context).push(
@@ -203,6 +298,16 @@ class SubjectListPage extends ConsumerWidget {
 
 enum MetadataHubKind { anime, series, movie }
 
+enum _PlaybackFilter {
+  all('全部'),
+  playable('直连播放'),
+  metadataOnly('规则查源');
+
+  const _PlaybackFilter(this.label);
+
+  final String label;
+}
+
 class MetadataHubPage extends ConsumerStatefulWidget {
   const MetadataHubPage({super.key, required this.kind});
 
@@ -216,8 +321,29 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   String _type = '全部';
   String _language = '全部';
   String _year = '全部';
+  _PlaybackFilter _playbackFilter = _PlaybackFilter.all;
   Future<List<AnimeSubject>>? _subjectsFuture;
+  int _subjectsRequestVersion = 0;
   final _searchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshSubjectsInBackground();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant MetadataHubPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.kind == widget.kind) return;
+    _subjectsRequestVersion++;
+    _subjectsFuture = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshSubjectsInBackground();
+    });
+  }
 
   @override
   void dispose() {
@@ -237,6 +363,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
             selected: _type,
             values: _typeValues,
             onChanged: (value) => setState(() => _type = value),
+            onRefresh: _reloadSubjects,
           ),
           rightRail: _MetadataRightRail(
             state: state,
@@ -286,12 +413,15 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         type: _type,
                         language: _language,
                         year: _year,
+                        playbackFilter: _playbackFilter,
                         typeValues: _typeValues,
                         languageValues: _languageValues,
                         onTypeChanged: (value) => setState(() => _type = value),
                         onLanguageChanged: (value) =>
                             setState(() => _language = value),
                         onYearChanged: (value) => setState(() => _year = value),
+                        onPlaybackFilterChanged: (value) =>
+                            setState(() => _playbackFilter = value),
                       ),
                     ),
                     SliverToBoxAdapter(
@@ -311,6 +441,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         subjects: subjects,
                         onOpen: _openDetail,
                         landscape: widget.kind == MetadataHubKind.series,
+                        showPlaybackAvailability: true,
                       ),
                     const SliverToBoxAdapter(child: SizedBox(height: 120)),
                   ],
@@ -391,40 +522,87 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     };
   }
 
-  String _subtitle(int count) {
-    return switch (widget.kind) {
-      MetadataHubKind.anime => '来自 Bangumi / AniList 的番剧元数据，共 $count 部',
-      MetadataHubKind.series => '接入 TVMaze 影视剧元数据，共 $count 部',
-      MetadataHubKind.movie => '接入 Wikidata 电影元数据，共 $count 部',
-    };
-  }
+  String _subtitle(int _) => '';
 
   String get _emptyMessage {
+    if (_playbackFilter == _PlaybackFilter.playable) {
+      return '当前筛选条件下没有直连内容，可切回“全部”或选择“规则查源”。';
+    }
+    if (_playbackFilter == _PlaybackFilter.metadataOnly) {
+      return '当前筛选条件下没有需要规则查源的内容，可切回“全部”或选择“直连播放”。';
+    }
     return switch (widget.kind) {
       MetadataHubKind.anime => '当前番剧元数据里没有匹配条目，换个筛选条件或稍后刷新试试。',
-      MetadataHubKind.series => '当前 TVMaze 剧集数据里没有匹配条目，换个分类或年份试试。',
-      MetadataHubKind.movie => '当前 Wikidata 电影数据里没有匹配条目，换个分类或年份试试。',
+      MetadataHubKind.series => '当前剧集资料里没有匹配条目，换个分类或年份试试。',
+      MetadataHubKind.movie => '当前电影资料里没有匹配条目，换个分类或年份试试。',
     };
   }
 
-  Future<List<AnimeSubject>> _loadSubjects(WidgetRef ref) {
+  Future<List<AnimeSubject>> _loadSubjects(
+    WidgetRef ref, {
+    bool waitForRefresh = false,
+  }) {
     final controller = ref.read(animeControllerProvider.notifier);
     return switch (widget.kind) {
-      MetadataHubKind.anime => controller.discoverSubjects(),
-      MetadataHubKind.series => controller.seriesSubjects(),
-      MetadataHubKind.movie => controller.movieSubjects(),
+      MetadataHubKind.anime => controller.discoverSubjects(
+        waitForRefresh: waitForRefresh,
+      ),
+      MetadataHubKind.series => controller.seriesSubjects(
+        waitForRefresh: waitForRefresh,
+      ),
+      MetadataHubKind.movie => controller.movieSubjects(
+        waitForRefresh: waitForRefresh,
+      ),
     };
+  }
+
+  Future<void> _refreshSubjectsInBackground() async {
+    final requestVersion = ++_subjectsRequestVersion;
+    try {
+      final subjects = await _loadSubjects(ref, waitForRefresh: true);
+      if (!mounted || requestVersion != _subjectsRequestVersion) return;
+      setState(() => _subjectsFuture = Future.value(subjects));
+    } catch (_) {
+      // Keep the already visible cache or fallback list on refresh failures.
+    }
+  }
+
+  Future<void> _reloadSubjects() async {
+    final kind = switch (widget.kind) {
+      MetadataHubKind.anime => 'anime',
+      MetadataHubKind.series => 'series',
+      MetadataHubKind.movie => 'movie',
+    };
+    await ref
+        .read(animeControllerProvider.notifier)
+        .invalidateMetadataCache(kind);
+    if (!mounted) return;
+    _subjectsRequestVersion++;
+    setState(() => _subjectsFuture = _loadSubjects(ref, waitForRefresh: true));
   }
 
   List<AnimeSubject> _filterSubjects(List<AnimeSubject> subjects) {
-    return subjects.where((subject) {
-      final text = _metadataText(subject);
-      final typeOk = _type == '全部' || _matchesType(subject, _type, text);
-      final languageOk =
-          _language == '全部' || _matchesLanguage(subject, _language);
-      final yearOk = _year == '全部' || subject.year == _year.replaceAll('年', '');
-      return typeOk && languageOk && yearOk;
-    }).toList();
+    return subjects
+        .where((subject) {
+          final kindOk = subjectMatchesContentType(
+            subject,
+            _subjectContentTypeFor(widget.kind),
+          );
+          final text = _metadataText(subject);
+          final typeOk = _type == '全部' || _matchesType(subject, _type, text);
+          final languageOk =
+              _language == '全部' || _matchesLanguage(subject, _language);
+          final yearOk =
+              _year == '全部' || subject.year == _year.replaceAll('年', '');
+          final directlyPlayable = hasKnownDirectPlayback(subject);
+          final playbackOk = switch (_playbackFilter) {
+            _PlaybackFilter.all => true,
+            _PlaybackFilter.playable => directlyPlayable,
+            _PlaybackFilter.metadataOnly => !directlyPlayable,
+          };
+          return kindOk && typeOk && languageOk && yearOk && playbackOk;
+        })
+        .toList(growable: false);
   }
 
   bool _matchesType(AnimeSubject subject, String type, String text) {
@@ -561,20 +739,28 @@ class _MetadataTopFilters extends StatelessWidget {
     required this.selected,
     required this.values,
     required this.onChanged,
+    required this.onRefresh,
   });
 
   final String selected;
   final List<String> values;
   final ValueChanged<String> onChanged;
+  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 900;
-    if (compact) return const SizedBox.shrink();
+    if (compact) {
+      return IconButton(
+        tooltip: '刷新当前频道',
+        onPressed: onRefresh,
+        icon: const Icon(Icons.refresh_rounded),
+      );
+    }
     return AppPanel(
       padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
       radius: 10,
-      color: const Color(0xFF0F1421),
+      color: AppColors.bg2,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -587,6 +773,11 @@ class _MetadataTopFilters extends StatelessWidget {
                 child: SmallBadge(label: value, active: value == selected),
               ),
             ),
+          IconButton(
+            tooltip: '刷新当前频道',
+            onPressed: onRefresh,
+            icon: const Icon(Icons.refresh_rounded, size: 19),
+          ),
         ],
       ),
     );
@@ -606,9 +797,9 @@ class _MetadataLoading extends StatelessWidget {
       MetadataHubKind.movie => '正在加载电影元数据',
     };
     final message = switch (kind) {
-      MetadataHubKind.anime => '会合并多页 Bangumi 数据，通常几秒内完成。',
-      MetadataHubKind.series => 'TVMaze 慢的时候会自动使用本地兜底列表。',
-      MetadataHubKind.movie => 'Wikidata 慢的时候会自动使用本地热门电影兜底。',
+      MetadataHubKind.anime => '正在汇总近期热门番剧并补充中文资料。',
+      MetadataHubKind.series => '正在汇总热门剧集、分集信息与中文资料。',
+      MetadataHubKind.movie => '正在汇总热门电影与开放可播放影片。',
     };
     return Center(
       child: AppPanel(
@@ -666,19 +857,29 @@ class _MetadataHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 760;
-    final lead = subjects.firstOrNull;
+    final bannerSubjects = subjects
+        .where((item) => (item.bannerUrl ?? '').isNotEmpty)
+        .toList(growable: false);
+    final imageSubjects = subjects
+        .where((item) => (item.coverUrl ?? '').isNotEmpty)
+        .toList(growable: false);
+    final leadPool = bannerSubjects.isNotEmpty
+        ? bannerSubjects
+        : imageSubjects.isNotEmpty
+        ? imageSubjects
+        : subjects;
+    final lead = leadPool.isEmpty
+        ? null
+        : leadPool[(DateTime.now().day + kind.index * 7) % leadPool.length];
     final following = state.following.isNotEmpty
         ? state.following
         : state.history;
     final continueEntry = following.firstOrNull;
-    final activeSources = state.sourceCatalog.enabledCount;
     final danmakuReady =
         state.services.dandanplayDanmakuEnabled ||
         state.services.bilibiliDanmakuEnabled ||
         state.services.customDanmakuEnabled;
-    final height = compact
-        ? (kind == MetadataHubKind.anime ? 178.0 : 138.0)
-        : (kind == MetadataHubKind.anime ? 236.0 : 176.0);
+    final height = compact ? 220.0 : 280.0;
     return SizedBox(
       height: height,
       child: AppPanel(
@@ -690,8 +891,9 @@ class _MetadataHeader extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               if (lead != null)
-                PosterArt(
-                  coverUrl: lead.bannerUrl ?? lead.coverUrl,
+                BackdropArt(
+                  bannerUrl: lead.bannerUrl,
+                  posterUrl: lead.coverUrl,
                   title: lead.title,
                 )
               else
@@ -741,16 +943,18 @@ class _MetadataHeader extends StatelessWidget {
                                 fontWeight: FontWeight.w900,
                               ),
                     ),
-                    SizedBox(height: compact ? 4 : 6),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.muted,
-                        fontWeight: FontWeight.w600,
+                    if (subtitle.isNotEmpty) ...[
+                      SizedBox(height: compact ? 4 : 6),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppColors.muted,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
+                    ],
                     if (kind == MetadataHubKind.anime) ...[
                       SizedBox(height: compact ? 10 : 14),
                       LayoutBuilder(
@@ -775,11 +979,6 @@ class _MetadataHeader extends StatelessWidget {
                           ];
                           if (!compact) {
                             chips.addAll([
-                              _AnimekoStatusChip(
-                                icon: Icons.hub_outlined,
-                                label: '源 $activeSources 个',
-                                active: activeSources > 0,
-                              ),
                               _AnimekoStatusChip(
                                 icon: Icons.subtitles_outlined,
                                 label: danmakuReady ? '弹幕已接入' : '弹幕未开启',
@@ -859,7 +1058,8 @@ class _AnimekoStatusChip extends StatelessWidget {
                 color: active ? AppColors.text : AppColors.muted,
               ),
               const SizedBox(width: 7),
-              Expanded(
+              Flexible(
+                fit: FlexFit.loose,
                 child: Text(
                   label,
                   maxLines: 1,
@@ -883,21 +1083,25 @@ class _InlineFilterPanel extends StatelessWidget {
     required this.type,
     required this.language,
     required this.year,
+    required this.playbackFilter,
     required this.typeValues,
     required this.languageValues,
     required this.onTypeChanged,
     required this.onLanguageChanged,
     required this.onYearChanged,
+    required this.onPlaybackFilterChanged,
   });
 
   final String type;
   final String language;
   final String year;
+  final _PlaybackFilter playbackFilter;
   final List<String> typeValues;
   final List<String> languageValues;
   final ValueChanged<String> onTypeChanged;
   final ValueChanged<String> onLanguageChanged;
   final ValueChanged<String> onYearChanged;
+  final ValueChanged<_PlaybackFilter> onPlaybackFilterChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -932,6 +1136,16 @@ class _InlineFilterPanel extends StatelessWidget {
             values: years,
             selected: year,
             onChanged: onYearChanged,
+          ),
+          _FilterRow(
+            label: '播放',
+            values: _PlaybackFilter.values
+                .map((value) => value.label)
+                .toList(growable: false),
+            selected: playbackFilter.label,
+            onChanged: (value) => onPlaybackFilterChanged(
+              _PlaybackFilter.values.firstWhere((item) => item.label == value),
+            ),
           ),
         ],
       ),
@@ -979,7 +1193,7 @@ class _MetadataRightRail extends StatelessWidget {
               else
                 for (final subject in subjects.take(5))
                   CompactSubjectRow(
-                    subject: subject,
+                    subject: _publicSubjectMetadata(subject),
                     onTap: () => _openSubject(context, subject),
                   ),
             ],
@@ -1013,7 +1227,7 @@ class _MetadataRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SectionTitle(title: kind == MetadataHubKind.anime ? '标签' : '来源'),
+              SectionTitle(title: kind == MetadataHubKind.anime ? '标签' : '特色'),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
@@ -1039,15 +1253,19 @@ class _MetadataRightRail extends StatelessWidget {
 
   String get _sourceMessage {
     return switch (kind) {
-      MetadataHubKind.anime => 'Bangumi / AniList 番剧元数据',
-      MetadataHubKind.series => '从 TVMaze 公开接口加载电视剧、连续剧和网剧资料。',
-      MetadataHubKind.movie => '从 Wikidata 公开电影条目加载影片资料。',
+      MetadataHubKind.anime => '正在整理近期热门番剧与中文资料。',
+      MetadataHubKind.series => '正在整理电视剧、连续剧和网剧资料。',
+      MetadataHubKind.movie => '正在整理热门电影与开放影片资料。',
     };
   }
 
   List<AnimeCategory> _categories(AnimeHomeFeed feed) {
     return switch (kind) {
-      MetadataHubKind.anime => feed.categories.take(12).toList(),
+      MetadataHubKind.anime =>
+        feed.categories
+            .where((item) => !_isInternalMetadataLabel(item.name))
+            .take(12)
+            .toList(),
       MetadataHubKind.series => const [
         AnimeCategory(name: '美剧'),
         AnimeCategory(name: '韩剧'),
@@ -1072,18 +1290,22 @@ class _MetadataRightRail extends StatelessWidget {
 
   List<AnimeTag> _tags(AnimeHomeFeed feed) {
     return switch (kind) {
-      MetadataHubKind.anime => feed.tags.take(16).toList(),
+      MetadataHubKind.anime =>
+        feed.tags
+            .where((item) => !_isInternalMetadataLabel(item.name))
+            .take(16)
+            .toList(),
       MetadataHubKind.series => const [
-        AnimeTag(name: 'TVMaze'),
-        AnimeTag(name: '公开剧集库'),
+        AnimeTag(name: '热门剧集'),
         AnimeTag(name: '最近播出'),
-        AnimeTag(name: '免 Key'),
+        AnimeTag(name: '中文资料'),
+        AnimeTag(name: '免登录'),
       ],
       MetadataHubKind.movie => const [
-        AnimeTag(name: 'Wikidata'),
-        AnimeTag(name: '电影实体'),
-        AnimeTag(name: 'IMDb 标识'),
-        AnimeTag(name: '免 Key'),
+        AnimeTag(name: '热门电影'),
+        AnimeTag(name: '开放影片'),
+        AnimeTag(name: '中文资料'),
+        AnimeTag(name: '免登录'),
       ],
     };
   }
@@ -1106,7 +1328,13 @@ class _MetadataRightRail extends StatelessWidget {
 
   List<AnimeSubject> _railSubjects(AnimeHomeFeed feed) {
     return switch (kind) {
-      MetadataHubKind.anime => feed.recommended,
+      MetadataHubKind.anime =>
+        feed.recommended
+            .where(
+              (subject) =>
+                  subjectMatchesContentType(subject, SubjectContentType.anime),
+            )
+            .toList(growable: false),
       MetadataHubKind.series => const [],
       MetadataHubKind.movie => const [],
     };
@@ -1232,7 +1460,7 @@ class _SubjectResultView extends StatelessWidget {
       return _EmptyState(
         icon: Icons.movie_filter_outlined,
         title: '$title 暂无结果',
-        message: 'Bangumi 暂时没有返回可展示条目，稍后刷新或换个分类试试。',
+        message: '暂时没有可展示条目，稍后刷新或换个分类试试。',
       );
     }
     return _SubjectGrid(
@@ -1360,63 +1588,69 @@ class DetailPage extends ConsumerWidget {
                 _BlurredBackdrop(subject: bundle.subject),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _DetailHero(
-                        subject: bundle.subject,
-                        favorite: favorite,
-                        onPlay: continueEpisode() == null
-                            ? null
-                            : () => play(continueEpisode()!),
-                        onFavorite: () async {
-                          final selected = await ref
-                              .read(animeControllerProvider.notifier)
-                              .toggleFollowing(bundle.subject);
-                          if (context.mounted) {
-                            _showToast(context, selected ? '已加入追番列表' : '已取消追番');
-                          }
-                        },
-                        onDownload: () {
-                          final episode = continueEpisode();
-                          if (episode == null) {
-                            _showToast(context, '当前条目还没有可下载的集数');
-                            return;
-                          }
-                          ref
-                              .read(animeControllerProvider.notifier)
-                              .queueOffline(bundle.subject, episode);
-                          _showToast(context, '已加入下载管理');
-                        },
+                  child: NestedScrollView(
+                    key: const ValueKey('detailUnifiedScroll'),
+                    headerSliverBuilder: (context, innerBoxIsScrolled) => [
+                      SliverToBoxAdapter(
+                        child: _DetailHero(
+                          key: const ValueKey('detailHero'),
+                          subject: bundle.subject,
+                          favorite: favorite,
+                          onPlay: continueEpisode() == null
+                              ? null
+                              : () => play(continueEpisode()!),
+                          onFavorite: () async {
+                            final selected = await ref
+                                .read(animeControllerProvider.notifier)
+                                .toggleFollowing(bundle.subject);
+                            if (context.mounted) {
+                              _showToast(
+                                context,
+                                selected ? '已加入追番列表' : '已取消追番',
+                              );
+                            }
+                          },
+                          onDownload: () async {
+                            final episode = continueEpisode();
+                            if (episode == null) {
+                              _showToast(context, '当前条目还没有可下载的集数');
+                              return;
+                            }
+                            _showToast(context, '正在解析线路并开始下载…');
+                            final message = await ref
+                                .read(animeControllerProvider.notifier)
+                                .queueOffline(bundle.subject, episode);
+                            if (context.mounted) _showToast(context, message);
+                          },
+                        ),
                       ),
-                      const SizedBox(height: 14),
-                      const _DetailTabs(),
-                      const SizedBox(height: 12),
-                      Expanded(
-                        child:
-                            snapshot.connectionState == ConnectionState.waiting
-                            ? const Center(child: CircularProgressIndicator())
-                            : TabBarView(
-                                children: [
-                                  _DetailInfo(subject: bundle.subject),
-                                  _EpisodeGrid(bundle: bundle, onPlay: play),
-                                  _CharacterGrid(items: bundle.characters),
-                                  _StaffGrid(items: bundle.staff),
-                                  _RecommendationGrid(
-                                    items: bundle.recommendations,
-                                    onOpen: (item) {
-                                      Navigator.of(context).pushReplacement(
-                                        MaterialPageRoute(
-                                          builder: (context) =>
-                                              DetailPage(subject: item.subject),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ],
-                              ),
+                      const SliverToBoxAdapter(child: SizedBox(height: 14)),
+                      const SliverPersistentHeader(
+                        pinned: true,
+                        delegate: _DetailTabsHeaderDelegate(),
                       ),
                     ],
+                    body: snapshot.connectionState == ConnectionState.waiting
+                        ? const Center(child: CircularProgressIndicator())
+                        : TabBarView(
+                            children: [
+                              _DetailInfo(bundle: bundle),
+                              _EpisodeGrid(bundle: bundle, onPlay: play),
+                              _CharacterGrid(items: bundle.characters),
+                              _StaffGrid(items: bundle.staff),
+                              _RecommendationGrid(
+                                items: bundle.recommendations,
+                                onOpen: (item) {
+                                  Navigator.of(context).pushReplacement(
+                                    MaterialPageRoute(
+                                      builder: (context) =>
+                                          DetailPage(subject: item.subject),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
                   ),
                 ),
               ],
@@ -1429,13 +1663,11 @@ class DetailPage extends ConsumerWidget {
 }
 
 ChromeDestination _activeForSubject(AnimeSubject subject) {
-  final source = subject.source.toLowerCase();
-  final platform = subject.platform.toLowerCase();
-  if (source == 'wikidata' || platform.contains('movie')) {
-    return ChromeDestination.movie;
-  }
-  if (source == 'tvmaze') return ChromeDestination.series;
-  return ChromeDestination.home;
+  return switch (subjectContentTypeOf(subject)) {
+    SubjectContentType.anime => ChromeDestination.home,
+    SubjectContentType.series => ChromeDestination.series,
+    SubjectContentType.movie => ChromeDestination.movie,
+  };
 }
 
 class _HomeToolbar extends StatelessWidget {
@@ -1461,7 +1693,7 @@ class _HomeToolbar extends StatelessWidget {
           AppPanel(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
             radius: 10,
-            color: const Color(0xFF0F1421),
+            color: AppColors.bg2,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1606,7 +1838,7 @@ class _HomeRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               for (final subject in feed.recent.take(5))
                 CompactSubjectRow(
-                  subject: subject,
+                  subject: _publicSubjectMetadata(subject),
                   trailing: '刚刚',
                   onTap: () => onOpen(subject),
                 ),
@@ -1853,10 +2085,7 @@ class _RecommendTabState extends State<_RecommendTab> {
     final heroIndex = heroSubjects.isEmpty
         ? 0
         : _heroIndex.clamp(0, heroSubjects.length - 1).toInt();
-    final shortcutSubjects = _uniqueSubjectList(widget.feed.recommended);
-    final shortcutCount = shortcutSubjects.length > 6
-        ? 6
-        : shortcutSubjects.length;
+    final shortcuts = _shortcuts(widget.feed);
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
@@ -1887,17 +2116,17 @@ class _RecommendTabState extends State<_RecommendTab> {
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemBuilder: (context, index) {
-                  final subject = shortcutSubjects[index];
-                  final labels = ['番剧', '剧集', '电影', '动漫电影', '纪录片', '综艺'];
+                  final item = shortcuts[index];
                   return _CategoryShortcut(
-                    label: labels[index % labels.length],
-                    subtitle: index == 0 ? '追番进行时' : subject.status,
-                    imageUrl: subject.bannerUrl ?? subject.coverUrl,
-                    onTap: () => widget.onOpen(subject),
+                    label: item.label,
+                    subtitle: item.subtitle,
+                    bannerUrl: item.subject?.bannerUrl,
+                    posterUrl: item.subject?.coverUrl,
+                    onTap: () => context.push(item.route),
                   );
                 },
                 separatorBuilder: (context, index) => const SizedBox(width: 10),
-                itemCount: shortcutCount,
+                itemCount: shortcuts.length,
               ),
             ),
           ),
@@ -1926,11 +2155,107 @@ class _RecommendTabState extends State<_RecommendTab> {
   }
 
   List<AnimeSubject> _heroSubjects(AnimeHomeFeed feed) {
-    return _uniqueSubjectList([
+    final candidates = _uniqueSubjectList([
       feed.hero,
       ...feed.recommended,
       ...feed.recent,
-    ]).take(7).toList(growable: false);
+    ]);
+    final withBanners = candidates
+        .where((item) => (item.bannerUrl ?? '').isNotEmpty)
+        .toList(growable: false);
+    return [
+      ...withBanners,
+      ...candidates.where((item) => !withBanners.contains(item)),
+    ].take(7).toList(growable: false);
+  }
+
+  List<_HomeShortcutData> _shortcuts(AnimeHomeFeed feed) {
+    final anime = _uniqueSubjectList([
+      feed.hero,
+      ...feed.recent,
+      ...feed.recommended,
+    ]);
+    final series = _uniqueSubjectList(feed.seriesHighlights);
+    final movies = _uniqueSubjectList(feed.movieHighlights);
+    final used = <String>{};
+    AnimeSubject? pick(
+      List<AnimeSubject> candidates, {
+      bool Function(AnimeSubject subject)? where,
+    }) {
+      if (candidates.isEmpty) return null;
+      final offset = (DateTime.now().day + used.length * 5) % candidates.length;
+      final rotated = [...candidates.skip(offset), ...candidates.take(offset)];
+      for (final item in rotated) {
+        final key = '${item.source}:${item.id}';
+        if (used.contains(key) || (where != null && !where(item))) continue;
+        used.add(key);
+        return item;
+      }
+      for (final item in rotated) {
+        final key = '${item.source}:${item.id}';
+        if (used.add(key)) return item;
+      }
+      return null;
+    }
+
+    bool hasCategory(AnimeSubject item, Iterable<String> values) {
+      final text = [
+        item.title,
+        item.status,
+        ...item.categories.map((category) => category.name),
+      ].join(' ').toLowerCase();
+      return values.any((value) => text.contains(value.toLowerCase()));
+    }
+
+    return [
+      _HomeShortcutData(
+        label: '番剧',
+        subtitle: '本季热门与近期更新',
+        route: '/anime',
+        subject: pick(anime),
+      ),
+      _HomeShortcutData(
+        label: '剧集',
+        subtitle: '全球热门电视剧',
+        route: '/series',
+        subject: pick(series),
+      ),
+      _HomeShortcutData(
+        label: '电影',
+        subtitle: '热门电影与公开原片',
+        route: '/movies',
+        subject: pick(movies),
+      ),
+      _HomeShortcutData(
+        label: '动漫电影',
+        subtitle: '动画长片与剧场版',
+        route: '/movies',
+        subject: pick(
+          movies,
+          where: (item) => hasCategory(item, const ['animation', '动画']),
+        ),
+      ),
+      _HomeShortcutData(
+        label: '纪录片',
+        subtitle: '纪录影像与公开馆藏',
+        route: '/movies',
+        subject: pick(
+          movies,
+          where: (item) =>
+              hasCategory(item, const ['documentary', '纪录', 'archive']),
+        ),
+      ),
+      _HomeShortcutData(
+        label: '综艺',
+        subtitle: '真人秀与娱乐节目',
+        route: '/series',
+        subject: pick(
+          series,
+          where: (item) =>
+              hasCategory(item, const ['reality', 'talk', 'game show', '综艺']),
+        ),
+      ),
+    ];
   }
 
   void _animateToHero(int index) {
@@ -1947,13 +2272,15 @@ class _CategoryShortcut extends StatelessWidget {
   const _CategoryShortcut({
     required this.label,
     required this.subtitle,
-    required this.imageUrl,
+    required this.bannerUrl,
+    required this.posterUrl,
     required this.onTap,
   });
 
   final String label;
   final String subtitle;
-  final String? imageUrl;
+  final String? bannerUrl;
+  final String? posterUrl;
   final VoidCallback onTap;
 
   @override
@@ -1970,7 +2297,11 @@ class _CategoryShortcut extends StatelessWidget {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                PosterArt(coverUrl: imageUrl, title: label),
+                BackdropArt(
+                  bannerUrl: bannerUrl,
+                  posterUrl: posterUrl,
+                  title: label,
+                ),
                 const DecoratedBox(
                   decoration: BoxDecoration(color: Color(0xAA090D18)),
                 ),
@@ -2012,6 +2343,20 @@ class _CategoryShortcut extends StatelessWidget {
   }
 }
 
+class _HomeShortcutData {
+  const _HomeShortcutData({
+    required this.label,
+    required this.subtitle,
+    required this.route,
+    required this.subject,
+  });
+
+  final String label;
+  final String subtitle;
+  final String route;
+  final AnimeSubject? subject;
+}
+
 class _MobileQuickActions extends StatelessWidget {
   const _MobileQuickActions();
 
@@ -2035,13 +2380,8 @@ class _MobileQuickActions extends StatelessWidget {
       ),
       _MobileQuickAction(
         icon: Icons.rule_folder_outlined,
-        label: '规则',
+        label: '播放规则',
         onTap: () => context.push('/profile/rules'),
-      ),
-      _MobileQuickAction(
-        icon: Icons.source_outlined,
-        label: '视频源',
-        onTap: () => context.push('/profile/sources'),
       ),
     ];
     return SizedBox(
@@ -2069,6 +2409,7 @@ class _MobileQuickAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -2080,14 +2421,14 @@ class _MobileQuickAction extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(icon, color: AppColors.primary, size: 24),
+              Icon(icon, color: colors.onSurface, size: 24),
               const SizedBox(height: 6),
               Text(
                 label,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: AppColors.text,
+                  color: colors.onSurface,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -2126,6 +2467,7 @@ class _IndexTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final filtered = subjects.where((subject) {
       final typeOk =
           type == '全部' || subject.categories.any((item) => item.name == type);
@@ -2145,25 +2487,23 @@ class _IndexTab extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                   child: Row(
                     children: [
-                      const Icon(
-                        Icons.tune,
-                        color: AppColors.primary,
-                        size: 18,
-                      ),
+                      Icon(Icons.tune, color: scheme.onSurface, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           '类型 · 语言 · 年份',
                           style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(
-                                color: AppColors.text,
+                                color: scheme.onSurface,
                                 fontWeight: FontWeight.w800,
                               ),
                         ),
                       ),
-                      const Icon(
-                        Icons.keyboard_arrow_down,
-                        color: AppColors.muted,
+                      Icon(
+                        showFilters
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
+                        color: scheme.onSurfaceVariant,
                       ),
                     ],
                   ),
@@ -2209,9 +2549,9 @@ class _SubjectGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final subject = subjects[index];
         return PosterCard(
-          subject: subject,
+          subject: _publicSubjectMetadata(subject),
           landscape: landscape,
-          badge: landscape ? '有资源' : subject.status,
+          badge: landscape ? '有资源' : _publicMetadataValue(subject.status),
           onTap: () => onOpen(subject),
         );
       },
@@ -2224,11 +2564,13 @@ class _SubjectGridSliver extends StatelessWidget {
     required this.subjects,
     required this.onOpen,
     this.landscape = false,
+    this.showPlaybackAvailability = false,
   });
 
   final List<AnimeSubject> subjects;
   final ValueChanged<AnimeSubject> onOpen;
   final bool landscape;
+  final bool showPlaybackAvailability;
 
   @override
   Widget build(BuildContext context) {
@@ -2240,8 +2582,11 @@ class _SubjectGridSliver extends StatelessWidget {
         delegate: SliverChildBuilderDelegate((context, index) {
           final subject = subjects[index];
           return PosterCard(
-            subject: subject,
+            subject: _publicSubjectMetadata(subject),
             landscape: !compact && landscape,
+            badge: showPlaybackAvailability
+                ? subjectPlaybackLabel(subject)
+                : null,
             onTap: () => onOpen(subject),
           );
         }, childCount: subjects.length),
@@ -2340,7 +2685,7 @@ class _HeroCarousel extends StatelessWidget {
     final safeSubjects = subjects.isEmpty ? [_fallbackHeroSubject] : subjects;
     final compact = MediaQuery.sizeOf(context).width < 760;
     return SizedBox(
-      height: compact ? 214 : 264,
+      height: compact ? 232 : 296,
       child: AppPanel(
         padding: EdgeInsets.zero,
         borderColor: AppColors.borderBright,
@@ -2393,7 +2738,8 @@ class _HeroCarousel extends StatelessWidget {
               if (safeSubjects.length > 1)
                 Positioned(
                   right: compact ? 12 : 18,
-                  bottom: compact ? 82 : 16,
+                  top: compact ? 14 : null,
+                  bottom: compact ? null : 16,
                   child: Row(
                     children: [
                       _HeroArrowButton(
@@ -2465,6 +2811,26 @@ class _HeroBannerSlide extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final displaySubject = _publicSubjectMetadata(subject);
+    final categoryText = displaySubject.categories
+        .map((item) => item.name)
+        .where((item) => item.trim().isNotEmpty)
+        .take(2)
+        .join('/');
+    final isMovie = subject.platform.toLowerCase().contains('movie');
+    final metadata = [
+      if (subject.year != '未知') subject.year,
+      if (displaySubject.region.isNotEmpty) displaySubject.region,
+      if (categoryText.isNotEmpty) categoryText,
+      if (isMovie)
+        '电影'
+      else if (subject.totalEpisodes > 0)
+        '全${subject.totalEpisodes}集',
+    ].join(' · ');
+    final hasOriginalTitle =
+        subject.originalTitle.trim().isNotEmpty &&
+        subject.originalTitle.trim() != subject.title.trim();
+    final directPlayable = hasKnownDirectPlayback(subject);
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 520;
@@ -2476,8 +2842,9 @@ class _HeroBannerSlide extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              PosterArt(
-                coverUrl: subject.bannerUrl ?? subject.coverUrl,
+              BackdropArt(
+                bannerUrl: subject.bannerUrl,
+                posterUrl: subject.coverUrl,
                 title: subject.title,
               ),
               const DecoratedBox(
@@ -2510,12 +2877,18 @@ class _HeroBannerSlide extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
                       children: [
-                        SmallBadge(label: subject.platform, active: true),
-                        const SizedBox(width: 8),
-                        SmallBadge(label: subject.status),
+                        SmallBadge(
+                          label: displaySubject.platform,
+                          active: true,
+                        ),
+                        if (displaySubject.status.isNotEmpty)
+                          SmallBadge(label: displaySubject.status),
+                        if (directPlayable)
+                          const SmallBadge(label: '可播放', active: true),
                       ],
                     ),
                     const Spacer(),
@@ -2532,9 +2905,21 @@ class _HeroBannerSlide extends StatelessWidget {
                                 fontWeight: FontWeight.w900,
                               ),
                     ),
+                    if (!compact && hasOriginalTitle) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        subject.originalTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppColors.muted,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     Text(
-                      '${subject.year} · ${subject.region} · ${subject.subtitle} · 全${subject.totalEpisodes}集',
+                      metadata,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -2544,8 +2929,8 @@ class _HeroBannerSlide extends StatelessWidget {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      subject.summary,
-                      maxLines: compact ? 1 : 2,
+                      displaySubject.summary,
+                      maxLines: compact ? 2 : 2,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                         color: AppColors.text,
@@ -2614,22 +2999,6 @@ class _FilterPanel extends StatelessWidget {
             selected: year,
             onChanged: onYearChanged,
           ),
-          Container(
-            height: 30,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: AppColors.panelHigh,
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: AppColors.border),
-            ),
-            child: Text(
-              '筛选',
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: AppColors.primary,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -2651,68 +3020,69 @@ class _FilterRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    return SizedBox(
-      height: compact ? 40 : 48,
-      child: Row(
-        children: [
-          Container(
-            width: compact ? 44 : 52,
-            height: compact ? 30 : 36,
+    final scheme = Theme.of(context).colorScheme;
+    final options = Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final value in values)
+          FilterChip(
+            label: Text(value),
+            selected: selected == value,
+            onSelected: (_) => onChanged(value),
+            showCheckmark: false,
+            backgroundColor: scheme.surfaceContainerHigh,
+            selectedColor: scheme.primary,
+            side: BorderSide(
+              color: selected == value ? scheme.primary : scheme.outlineVariant,
+              width: selected == value ? 1.4 : 1,
+            ),
+            labelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+              color: selected == value ? scheme.onPrimary : scheme.onSurface,
+              fontWeight: selected == value ? FontWeight.w900 : FontWeight.w700,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+      ],
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final labelChip = Container(
+            constraints: const BoxConstraints(minWidth: 52, minHeight: 34),
             alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
             decoration: BoxDecoration(
-              color: AppColors.panelHigh,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppColors.border),
+              color: scheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: scheme.outline),
             ),
             child: Text(
               label,
-              style: TextStyle(
-                fontSize: compact ? 13 : null,
-                fontWeight: FontWeight.w800,
-                color: AppColors.text,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: scheme.onSurface,
+                fontWeight: FontWeight.w900,
               ),
             ),
-          ),
-          SizedBox(width: compact ? 8 : 12),
-          Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemBuilder: (context, index) {
-                final value = values[index];
-                final active = selected == value;
-                return InkWell(
-                  onTap: () => onChanged(value),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: compact ? 6 : 8,
-                      vertical: compact ? 8 : 10,
-                    ),
-                    child: Text(
-                      value,
-                      style:
-                          (compact
-                                  ? Theme.of(context).textTheme.bodyMedium
-                                  : Theme.of(context).textTheme.titleMedium)
-                              ?.copyWith(
-                                color: active
-                                    ? AppColors.primary
-                                    : AppColors.text,
-                                fontWeight: active
-                                    ? FontWeight.w800
-                                    : FontWeight.w500,
-                              ),
-                    ),
-                  ),
-                );
-              },
-              separatorBuilder: (context, index) =>
-                  SizedBox(width: compact ? 8 : 12),
-              itemCount: values.length,
-            ),
-          ),
-        ],
+          );
+          if (constraints.maxWidth < 620) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [labelChip, const SizedBox(height: 9), options],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              labelChip,
+              const SizedBox(width: 12),
+              Expanded(child: options),
+            ],
+          );
+        },
       ),
     );
   }
@@ -2720,6 +3090,7 @@ class _FilterRow extends StatelessWidget {
 
 class _DetailHero extends StatelessWidget {
   const _DetailHero({
+    super.key,
     required this.subject,
     required this.favorite,
     required this.onPlay,
@@ -2735,137 +3106,171 @@ class _DetailHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 292,
-      child: AppPanel(
-        padding: EdgeInsets.zero,
-        borderColor: AppColors.borderBright,
-        color: AppColors.panel.withValues(alpha: 0.72),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned.fill(
-                child: PosterArt(
-                  coverUrl: subject.bannerUrl ?? subject.coverUrl,
-                  title: subject.title,
-                ),
-              ),
-              const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      Color(0xF2060912),
-                      Color(0xAA060912),
-                      Color(0x44060912),
-                    ],
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
+    final directlyPlayable = hasKnownDirectPlayback(subject);
+    final displaySubject = _publicSubjectMetadata(subject);
+    final metadata = [
+      subject.year,
+      if (displaySubject.region.isNotEmpty) displaySubject.region,
+      if (subject.totalEpisodes > 0) '${subject.totalEpisodes}集全',
+    ].join('  |  ');
+    Widget badges() => Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        SmallBadge(
+          label: subjectPlaybackLabel(subject),
+          active: directlyPlayable,
+        ),
+        SmallBadge(
+          label: subject.ratingScore == null
+              ? '暂无评分'
+              : '★ ${subject.ratingScore!.toStringAsFixed(1)}',
+          active: true,
+        ),
+        SmallBadge(label: displaySubject.platform),
+        if (displaySubject.status.isNotEmpty)
+          SmallBadge(label: displaySubject.status),
+      ],
+    );
+
+    Widget actions({required bool compact}) => Wrap(
+      spacing: 10,
+      runSpacing: 8,
+      children: [
+        AccentButton(
+          icon: Icons.play_arrow_rounded,
+          label: directlyPlayable ? '立即播放' : '查找自定义线路',
+          onTap: onPlay,
+          compact: compact,
+        ),
+        AccentButton(
+          icon: favorite ? Icons.check_rounded : Icons.add_rounded,
+          label: favorite ? '已追番' : '追番',
+          filled: false,
+          onTap: onFavorite,
+          compact: compact,
+        ),
+        AccentButton(
+          icon: Icons.download_outlined,
+          label: '下载',
+          filled: false,
+          onTap: onDownload,
+          compact: compact,
+        ),
+      ],
+    );
+
+    Widget information({required bool compact}) => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        badges(),
+        const SizedBox(height: 12),
+        Text(
+          subject.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style:
+              (compact
+                      ? Theme.of(context).textTheme.headlineMedium
+                      : Theme.of(context).textTheme.displaySmall)
+                  ?.copyWith(
+                    color: AppColors.text,
+                    fontWeight: FontWeight.w900,
                   ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(22),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: 154,
-                      height: 220,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: PosterArt(
-                          coverUrl: subject.coverUrl,
-                          title: subject.title,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 22),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              SmallBadge(
-                                label: subject.ratingScore == null
-                                    ? '暂无评分'
-                                    : '★ ${subject.ratingScore!.toStringAsFixed(1)}',
-                                active: true,
-                              ),
-                              SmallBadge(label: subject.platform),
-                              SmallBadge(label: subject.status),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            subject.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.displaySmall
-                                ?.copyWith(
-                                  color: AppColors.text,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            '${subject.year}  |  ${subject.region}  |  ${subject.totalEpisodes}集全',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.titleSmall
-                                ?.copyWith(
-                                  color: AppColors.muted,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            subject.summary,
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodyMedium
-                                ?.copyWith(color: AppColors.text, height: 1.45),
-                          ),
-                          const Spacer(),
-                          Row(
-                            children: [
-                              AccentButton(
-                                icon: Icons.play_arrow_rounded,
-                                label: '立即观看',
-                                onTap: onPlay,
-                              ),
-                              const SizedBox(width: 12),
-                              AccentButton(
-                                icon: favorite
-                                    ? Icons.check_rounded
-                                    : Icons.add_rounded,
-                                label: favorite ? '已追番' : '追番',
-                                filled: false,
-                                onTap: onFavorite,
-                              ),
-                              const SizedBox(width: 12),
-                              AccentButton(
-                                icon: Icons.download_outlined,
-                                label: '下载',
-                                filled: false,
-                                onTap: onDownload,
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          metadata,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+            color: AppColors.muted,
+            fontWeight: FontWeight.w700,
           ),
         ),
-      ),
+        const SizedBox(height: 10),
+        Text(
+          displaySubject.summary,
+          maxLines: compact ? 2 : 3,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: AppColors.text, height: 1.45),
+        ),
+        const Spacer(),
+        actions(compact: compact),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 720;
+        return SizedBox(
+          height: compact ? 360 : 292,
+          child: AppPanel(
+            padding: EdgeInsets.zero,
+            borderColor: AppColors.borderBright,
+            color: AppColors.panel.withValues(alpha: 0.72),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: BackdropArt(
+                      bannerUrl: subject.bannerUrl,
+                      posterUrl: subject.coverUrl,
+                      title: subject.title,
+                    ),
+                  ),
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: compact
+                            ? const [Color(0xE6060912), Color(0xB8060912)]
+                            : const [
+                                Color(0xF2060912),
+                                Color(0xAA060912),
+                                Color(0x44060912),
+                              ],
+                        begin: compact
+                            ? Alignment.bottomCenter
+                            : Alignment.centerLeft,
+                        end: compact
+                            ? Alignment.topCenter
+                            : Alignment.centerRight,
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: EdgeInsets.all(compact ? 16 : 22),
+                    child: compact
+                        ? information(compact: true)
+                        : Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                width: 154,
+                                height: 220,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: PosterArt(
+                                    coverUrl: subject.coverUrl,
+                                    title: subject.title,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 22),
+                              Expanded(child: information(compact: false)),
+                            ],
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2944,7 +3349,7 @@ class _DetailRightRail extends StatelessWidget {
               const SectionTitle(title: '追番进度'),
               const SizedBox(height: 10),
               Text(
-                '已连到第 ${bundle.episodes.isEmpty ? 0 : bundle.episodes.first.number} 集\n每周更新信息来自 Bangumi/AniList。',
+                '已连到第 ${bundle.episodes.isEmpty ? 0 : bundle.episodes.first.number} 集\n每周更新信息已自动整理。',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: AppColors.muted,
                   height: 1.45,
@@ -2961,7 +3366,7 @@ class _DetailRightRail extends StatelessWidget {
               const SectionTitle(title: '简介'),
               const SizedBox(height: 10),
               Text(
-                bundle.subject.summary,
+                _publicSummary(bundle.subject.summary),
                 maxLines: 7,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -2980,7 +3385,7 @@ class _DetailRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               for (final item in bundle.recommendations.take(5))
                 CompactSubjectRow(
-                  subject: item.subject,
+                  subject: _publicSubjectMetadata(item.subject),
                   trailing:
                       item.subject.ratingScore?.toStringAsFixed(1) ??
                       item.relation,
@@ -3018,13 +3423,44 @@ class _DetailTabs extends StatelessWidget {
   }
 }
 
-class _DetailInfo extends StatelessWidget {
-  const _DetailInfo({required this.subject});
+class _DetailTabsHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _DetailTabsHeaderDelegate();
 
-  final AnimeSubject subject;
+  static const _extent = 84.0;
+
+  @override
+  double get minExtent => _extent;
+
+  @override
+  double get maxExtent => _extent;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    return ColoredBox(
+      color: Theme.of(context).scaffoldBackgroundColor.withValues(alpha: 0.96),
+      child: const Padding(
+        padding: EdgeInsets.only(bottom: 12),
+        child: _DetailTabs(),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _DetailTabsHeaderDelegate oldDelegate) => false;
+}
+
+class _DetailInfo extends StatelessWidget {
+  const _DetailInfo({required this.bundle});
+
+  final AnimeDetailBundle bundle;
 
   @override
   Widget build(BuildContext context) {
+    final subject = _publicSubjectMetadata(bundle.subject);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 0, 8, 120),
       children: [
@@ -3073,6 +3509,7 @@ class _EpisodeGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GridView.builder(
+      key: const ValueKey('detailEpisodeGrid'),
       padding: const EdgeInsets.fromLTRB(0, 0, 8, 120),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: (MediaQuery.sizeOf(context).width / 252).floor().clamp(
@@ -3091,14 +3528,20 @@ class _EpisodeGrid extends StatelessWidget {
           onTap: () => onPlay(episode),
           child: AppPanel(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: index == 0 ? const Color(0xFF171A3A) : AppColors.panel,
-            borderColor: index == 0 ? AppColors.primary : AppColors.border,
+            color: index == 0
+                ? Theme.of(context).colorScheme.primaryContainer
+                : AppColors.panel,
+            borderColor: index == 0
+                ? Theme.of(context).colorScheme.primary
+                : AppColors.border,
             child: Row(
               children: [
                 Text(
                   '${episode.number}',
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: index == 0 ? AppColors.primary : AppColors.muted,
+                    color: index == 0
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -3111,12 +3554,15 @@ class _EpisodeGrid extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: AppColors.text,
+                      color: Theme.of(context).colorScheme.onSurface,
                       fontWeight: FontWeight.w800,
                     ),
                   ),
                 ),
-                const Icon(Icons.play_arrow_rounded, color: AppColors.primary),
+                Icon(
+                  Icons.play_arrow_rounded,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
               ],
             ),
           ),
@@ -3189,8 +3635,8 @@ class _RecommendationGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final item = items[index];
         return PosterCard(
-          subject: item.subject,
-          badge: item.relation,
+          subject: _publicSubjectMetadata(item.subject),
+          badge: _publicMetadataValue(item.relation),
           onTap: () => onOpen(item),
         );
       },
@@ -3264,11 +3710,11 @@ class _BlurredBackdrop extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (subject.bannerUrl != null)
+          if (subject.bannerUrl != null || subject.coverUrl != null)
             ImageFiltered(
               imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
               child: Image.network(
-                subject.bannerUrl!,
+                subject.bannerUrl ?? subject.coverUrl!,
                 fit: BoxFit.cover,
                 errorBuilder: (context, error, stackTrace) =>
                     const ColoredBox(color: Colors.black),
@@ -3321,7 +3767,9 @@ class _Chip extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: selected ? const Color(0xFF202020) : const Color(0xFF151515),
+        color: selected
+            ? Theme.of(context).colorScheme.primaryContainer
+            : Theme.of(context).colorScheme.surfaceContainer,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Padding(
@@ -3329,7 +3777,9 @@ class _Chip extends StatelessWidget {
         child: Text(
           label,
           style: Theme.of(context).textTheme.labelLarge?.copyWith(
-            color: selected ? Colors.white : AppColors.text,
+            color: selected
+                ? Theme.of(context).colorScheme.onPrimaryContainer
+                : Theme.of(context).colorScheme.onSurface,
             fontWeight: FontWeight.w800,
           ),
         ),
@@ -3397,13 +3847,28 @@ void _showToast(BuildContext context, String message) {
 }
 
 List<AnimeSubject> _uniqueSubjectList(Iterable<AnimeSubject> subjects) {
-  final seen = <Object>{};
+  final seen = <String>{};
   final result = <AnimeSubject>[];
   for (final subject in subjects) {
-    final key = Object.hash(subject.source, subject.platform, subject.id);
+    final kind = subjectContentTypeOf(subject).name;
+    final normalized =
+        (subject.originalTitle.trim().isNotEmpty
+                ? subject.originalTitle
+                : subject.title)
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^\p{L}\p{N}]', unicode: true), '');
+    final key = '$kind:${subject.year}:$normalized';
     if (seen.add(key)) result.add(subject);
   }
   return result;
+}
+
+SubjectContentType _subjectContentTypeFor(MetadataHubKind kind) {
+  return switch (kind) {
+    MetadataHubKind.anime => SubjectContentType.anime,
+    MetadataHubKind.series => SubjectContentType.series,
+    MetadataHubKind.movie => SubjectContentType.movie,
+  };
 }
 
 const _fallbackHeroSubject = AnimeSubject(
@@ -3593,8 +4058,12 @@ class _DayCard extends StatelessWidget {
     final subject = subjects.firstOrNull;
     return AppPanel(
       padding: const EdgeInsets.all(12),
-      borderColor: active ? AppColors.primary : AppColors.border,
-      color: active ? const Color(0xFF171A3A) : AppColors.panel,
+      borderColor: active
+          ? Theme.of(context).colorScheme.primary
+          : AppColors.border,
+      color: active
+          ? Theme.of(context).colorScheme.primaryContainer
+          : AppColors.panel,
       child: Row(
         children: [
           if (subject != null) ...[
@@ -3625,7 +4094,7 @@ class _DayCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.titleMedium
                             ?.copyWith(
-                              color: AppColors.text,
+                              color: Theme.of(context).colorScheme.onSurface,
                               fontWeight: FontWeight.w900,
                             ),
                       ),
@@ -3682,7 +4151,10 @@ class _ScheduleRightRail extends StatelessWidget {
                 )
               else
                 for (final item in state.following.take(5))
-                  CompactSubjectRow(subject: item.subject, trailing: '提醒'),
+                  CompactSubjectRow(
+                    subject: _publicSubjectMetadata(item.subject),
+                    trailing: '提醒',
+                  ),
             ],
           ),
         ),

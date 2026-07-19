@@ -10,10 +10,26 @@ import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
+import '../sources/source_catalog_models.dart';
+import 'github_rule_repository_scanner.dart';
+import 'kazumi_rule_repository.dart';
+import 'rule_importer.dart';
 import 'rule_models.dart';
 import 'rule_plugin_repository.dart';
 
-const _creamycakeCssRepositoryUrl = 'https://sub.creamycake.org/v1/css1.json';
+Color _surfaceText(BuildContext context) =>
+    Theme.of(context).colorScheme.onSurface;
+
+Color _surfaceMuted(BuildContext context) =>
+    Theme.of(context).colorScheme.onSurfaceVariant;
+
+Color _surfaceHigh(BuildContext context) =>
+    Theme.of(context).colorScheme.surfaceContainerHigh;
+
+Color _surfaceBorder(BuildContext context) =>
+    Theme.of(context).colorScheme.outlineVariant;
+
+Color _accent(BuildContext context) => Theme.of(context).colorScheme.primary;
 
 class RuleManagementPage extends ConsumerWidget {
   const RuleManagementPage({super.key});
@@ -26,10 +42,42 @@ class RuleManagementPage extends ConsumerWidget {
           extraRules: state.rulePlugins.customRules,
         );
         final installed = repository.installedRules(state.rulePlugins);
+        final installedEnabledCount = installed
+            .where((rule) => state.rulePlugins.isEnabled(rule.id))
+            .length;
+        final installedPlaybackCount = installed
+            .where(
+              (rule) =>
+                  state.rulePlugins.isEnabled(rule.id) &&
+                  rule.searchable &&
+                  rule.canResolveNatively,
+            )
+            .length;
+        final playbackCount =
+            installedPlaybackCount +
+            state.sourceCatalog.activePlaybackRuleCount;
+        final catalogPlaybackSources = state.sourceCatalog.sources
+            .where(
+              (source) =>
+                  state.sourceCatalog.playbackRuleCountFor(source.id) > 0,
+            )
+            .toList(growable: false);
+        final catalogPlaybackGroups = _groupAutomaticRulePackages(
+          state.sourceCatalog,
+          catalogPlaybackSources,
+        );
+        final allInstalledEnabled =
+            installed.isEmpty || installedEnabledCount == installed.length;
+        final allCatalogEnabled =
+            catalogPlaybackSources.isEmpty ||
+            catalogPlaybackSources.every((source) => source.enabled);
+        final noCatalogEnabled = catalogPlaybackSources.every(
+          (source) => !source.enabled,
+        );
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
-          title: '规则管理',
+          title: '播放规则',
           onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
           trailing: _RuleTopActions(
             onRefresh: () => _showSnack(context, '已刷新本地规则索引'),
@@ -43,16 +91,65 @@ class RuleManagementPage extends ConsumerWidget {
             padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
             children: [
               _RuleHero(
-                installedCount: installed.length,
-                enabledCount: state.rulePlugins.enabledIds.length,
+                installedCount:
+                    installed.length +
+                    state.sourceCatalog.availablePlaybackRuleCount,
+                enabledCount:
+                    installedEnabledCount +
+                    state.sourceCatalog.activePlaybackRuleCount,
+                playbackCount: playbackCount,
+                catalogPlaybackCount:
+                    state.sourceCatalog.activePlaybackRuleCount,
                 repositoryCount: state.rulePlugins.repositories.length + 1,
                 onOpenRepository: () =>
                     context.push('/profile/rules/repository'),
+                onEnableAll: allInstalledEnabled && allCatalogEnabled
+                    ? null
+                    : () async {
+                        await ref
+                            .read(animeControllerProvider.notifier)
+                            .setAllInstalledRulePluginsEnabled(true);
+                        if (context.mounted) {
+                          _showSnack(context, '已启用全部播放规则');
+                        }
+                      },
+                onDisableAll: installedEnabledCount == 0 && noCatalogEnabled
+                    ? null
+                    : () async {
+                        await ref
+                            .read(animeControllerProvider.notifier)
+                            .setAllInstalledRulePluginsEnabled(false);
+                        if (context.mounted) {
+                          _showSnack(context, '已关闭全部播放规则');
+                        }
+                      },
                 onReset: () => ref
                     .read(animeControllerProvider.notifier)
                     .resetRulePlugins(),
               ),
               const SizedBox(height: 16),
+              if (catalogPlaybackSources.isNotEmpty) ...[
+                _AutomaticRulePackages(
+                  groups: catalogPlaybackGroups,
+                  onToggle: (group, enabled) async {
+                    final controller = ref.read(
+                      animeControllerProvider.notifier,
+                    );
+                    if (group.sources.length == 1) {
+                      await controller.toggleVideoSource(
+                        group.sources.single.id,
+                        enabled,
+                      );
+                    } else {
+                      await controller.setVideoSourcesEnabled(
+                        group.sources.map((source) => source.id),
+                        enabled,
+                      );
+                    }
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
               if (installed.isEmpty)
                 _RuleEmpty(
                   onOpenRepository: () =>
@@ -92,6 +189,10 @@ class RuleRepositoryPage extends ConsumerStatefulWidget {
 
 class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
   RuleContentType _type = RuleContentType.anime;
+  final KazumiRuleRepository _kazumiRepository = const KazumiRuleRepository();
+  KazumiRuleCatalog _kazumiCatalog = KazumiRuleRepository.bundledCatalog;
+  final Set<String> _loadingKazumiIds = <String>{};
+  bool _refreshingKazumi = false;
 
   @override
   Widget build(BuildContext context) {
@@ -100,7 +201,21 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
         final repository = RulePluginRepository(
           extraRules: state.rulePlugins.customRules,
         );
-        final rules = repository.rulesFor(_type);
+        final storedRules = repository.rulesFor(_type);
+        final entriesById = <String, KazumiRuleCatalogEntry>{
+          if (_type == RuleContentType.anime)
+            for (final entry in _kazumiCatalog.entries) entry.id: entry,
+        };
+        final rules = <RulePlugin>[];
+        final seenRuleIds = <String>{};
+        for (final rule in storedRules) {
+          if (seenRuleIds.add(rule.id)) rules.add(rule);
+        }
+        if (_type == RuleContentType.anime) {
+          for (final entry in _kazumiCatalog.entries) {
+            if (seenRuleIds.add(entry.id)) rules.add(entry.toPreviewRule());
+          }
+        }
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
@@ -109,7 +224,9 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
               safeNavigateBack(context, fallbackRoute: '/profile/rules'),
           trailing: _RuleTopActions(
             onHistory: () => _showSnack(context, '仓库更新时间已同步到本地索引'),
-            onRefresh: () => _showSnack(context, '已重新扫描内置仓库'),
+            onRefresh: _refreshingKazumi
+                ? null
+                : () => _refreshKazumiCatalog(state.rulePlugins),
             onAdd: () => _showImportSheet(context, ref),
           ),
           rightRail: _RepositoryRail(
@@ -120,25 +237,42 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
             children: [
+              if (_type == RuleContentType.anime) ...[
+                _KazumiRepositoryHeader(
+                  catalog: _kazumiCatalog,
+                  installedCount: _kazumiCatalog.entries
+                      .where((entry) => state.rulePlugins.isInstalled(entry.id))
+                      .length,
+                  refreshing: _refreshingKazumi,
+                  onRefresh: _refreshingKazumi
+                      ? null
+                      : () => _refreshKazumiCatalog(state.rulePlugins),
+                  onBatchInstall: () => _showKazumiSelectionDialog(
+                    context,
+                    entries: _kazumiCatalog.entries,
+                    installedIds: state.rulePlugins.installedIds,
+                    onInstall: _installKazumiEntries,
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               _RepositoryHeader(
                 selected: _type,
                 repositories: state.rulePlugins.repositories,
                 onSelected: (value) => setState(() => _type = value),
-                onImport: () => _showImportSheet(context, ref),
-                onImportCreamycakeCss: () => _importRepositoryUrl(
-                  context,
-                  ref,
-                  _creamycakeCssRepositoryUrl,
-                ),
+                onImport: () => _showRepositoryUrlDialog(context, ref),
               ),
               const SizedBox(height: 16),
               for (final rule in rules) ...[
                 _RepositoryRuleCard(
                   rule: rule,
                   installed: state.rulePlugins.isInstalled(rule.id),
-                  onInstall: () => ref
-                      .read(animeControllerProvider.notifier)
-                      .installRulePlugin(rule.id),
+                  busy: _loadingKazumiIds.contains(rule.id),
+                  onInstall: entriesById.containsKey(rule.id)
+                      ? () => _installKazumiEntries([entriesById[rule.id]!])
+                      : () => ref
+                            .read(animeControllerProvider.notifier)
+                            .installRulePlugin(rule.id),
                 ),
                 const SizedBox(height: 12),
               ],
@@ -147,6 +281,83 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
         );
       },
     );
+  }
+
+  Future<bool> _installKazumiEntries(
+    List<KazumiRuleCatalogEntry> entries,
+  ) async {
+    if (entries.isEmpty) return false;
+    setState(() {
+      _loadingKazumiIds.addAll(entries.map((entry) => entry.id));
+    });
+    try {
+      final loaded = await _kazumiRepository.loadRules(entries);
+      final result = await ref
+          .read(animeControllerProvider.notifier)
+          .importSelectedRulePlugins(
+            repositoryName: loaded.bundle.name,
+            rules: loaded.bundle.rules,
+            sourceUrl: loaded.bundle.sourceUrl,
+          );
+      if (mounted) {
+        final failed = loaded.failedNames.length;
+        _showSnack(
+          context,
+          failed == 0
+              ? '已安装 ${result.installedCount} 条番剧规则，默认未启用'
+              : '已安装 ${result.installedCount} 条，另有 $failed 条暂时无法读取',
+        );
+      }
+      return true;
+    } catch (error) {
+      if (mounted) _showSnack(context, _friendlyImportError(error));
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loadingKazumiIds.removeAll(entries.map((entry) => entry.id));
+        });
+      }
+    }
+  }
+
+  Future<void> _refreshKazumiCatalog(RulePluginState pluginState) async {
+    if (_refreshingKazumi) return;
+    setState(() => _refreshingKazumi = true);
+    try {
+      final catalog = await _kazumiRepository.refreshCatalog();
+      final installedEntries = catalog.entries
+          .where((entry) => pluginState.isInstalled(entry.id))
+          .toList(growable: false);
+      var refreshedCount = 0;
+      var failedCount = 0;
+      if (installedEntries.isNotEmpty) {
+        final loaded = await _kazumiRepository.loadRules(installedEntries);
+        final result = await ref
+            .read(animeControllerProvider.notifier)
+            .importSelectedRulePlugins(
+              repositoryName: loaded.bundle.name,
+              rules: loaded.bundle.rules,
+              sourceUrl: loaded.bundle.sourceUrl,
+            );
+        refreshedCount = result.installedCount;
+        failedCount = loaded.failedNames.length;
+      }
+      if (!mounted) return;
+      setState(() => _kazumiCatalog = catalog);
+      _showSnack(
+        context,
+        installedEntries.isEmpty
+            ? '已刷新内置规则目录，共 ${catalog.entries.length} 条'
+            : failedCount == 0
+            ? '已刷新目录，并更新 $refreshedCount 条已安装规则'
+            : '已更新 $refreshedCount 条规则，$failedCount 条暂时读取失败',
+      );
+    } catch (error) {
+      if (mounted) _showSnack(context, _friendlyImportError(error));
+    } finally {
+      if (mounted) setState(() => _refreshingKazumi = false);
+    }
   }
 }
 
@@ -192,15 +403,23 @@ class _RuleHero extends StatelessWidget {
   const _RuleHero({
     required this.installedCount,
     required this.enabledCount,
+    required this.playbackCount,
+    required this.catalogPlaybackCount,
     required this.repositoryCount,
     required this.onOpenRepository,
+    required this.onEnableAll,
+    required this.onDisableAll,
     required this.onReset,
   });
 
   final int installedCount;
   final int enabledCount;
+  final int playbackCount;
+  final int catalogPlaybackCount;
   final int repositoryCount;
   final VoidCallback onOpenRepository;
+  final VoidCallback? onEnableAll;
+  final VoidCallback? onDisableAll;
   final VoidCallback onReset;
 
   @override
@@ -212,10 +431,15 @@ class _RuleHero extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.extension_outlined, color: AppColors.primary),
+              Icon(Icons.extension_outlined, color: _accent(context)),
               const SizedBox(width: 10),
               Expanded(
-                child: SectionTitle(title: '播放规则插件', subtitle: '番剧、电视剧、电影分开管理'),
+                child: SectionTitle(
+                  title: '播放规则插件',
+                  subtitle:
+                      '番剧、电视剧、电影分开管理 · $repositoryCount 个仓库'
+                      '${catalogPlaybackCount > 0 ? ' · 自动接入 $catalogPlaybackCount 条' : ''}',
+                ),
               ),
             ],
           ),
@@ -226,7 +450,7 @@ class _RuleHero extends StatelessWidget {
               const SizedBox(width: 10),
               _RuleMetric(label: '已启用', value: '$enabledCount'),
               const SizedBox(width: 10),
-              _RuleMetric(label: '来源', value: '$repositoryCount'),
+              _RuleMetric(label: '参与查源', value: '$playbackCount'),
             ],
           ),
           const SizedBox(height: 18),
@@ -240,9 +464,19 @@ class _RuleHero extends StatelessWidget {
                 label: const Text('打开规则仓库'),
               ),
               OutlinedButton.icon(
+                onPressed: onEnableAll,
+                icon: const Icon(Icons.toggle_on_outlined),
+                label: const Text('全部启用'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onDisableAll,
+                icon: const Icon(Icons.toggle_off_outlined),
+                label: const Text('全部关闭'),
+              ),
+              OutlinedButton.icon(
                 onPressed: onReset,
                 icon: const Icon(Icons.restore_rounded),
-                label: const Text('恢复推荐安装'),
+                label: const Text('恢复推荐规则'),
               ),
             ],
           ),
@@ -262,10 +496,11 @@ class _RuleMetric extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: DecoratedBox(
+        key: ValueKey('ruleMetric:$label'),
         decoration: BoxDecoration(
-          color: AppColors.panelHigh,
+          color: _surfaceHigh(context),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppColors.border),
+          border: Border.all(color: _surfaceBorder(context)),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 14),
@@ -274,7 +509,7 @@ class _RuleMetric extends StatelessWidget {
               Text(
                 value,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  color: AppColors.text,
+                  color: _surfaceText(context),
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -283,7 +518,7 @@ class _RuleMetric extends StatelessWidget {
                 label,
                 style: Theme.of(
                   context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                ).textTheme.bodySmall?.copyWith(color: _surfaceMuted(context)),
               ),
             ],
           ),
@@ -291,6 +526,128 @@ class _RuleMetric extends StatelessWidget {
       ),
     );
   }
+}
+
+class _AutomaticRulePackages extends StatelessWidget {
+  const _AutomaticRulePackages({required this.groups, required this.onToggle});
+
+  final List<_AutomaticRulePackageGroup> groups;
+  final void Function(_AutomaticRulePackageGroup group, bool enabled) onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const SectionTitle(title: '自动规则包', subtitle: '已直接并入播放规则，不再单独管理视频源'),
+          const SizedBox(height: 10),
+          for (var index = 0; index < groups.length; index++) ...[
+            _AutomaticRulePackageRow(
+              group: groups[index],
+              onChanged: (enabled) => onToggle(groups[index], enabled),
+            ),
+            if (index != groups.length - 1)
+              Divider(height: 1, color: _surfaceBorder(context)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AutomaticRulePackageRow extends StatelessWidget {
+  const _AutomaticRulePackageRow({
+    required this.group,
+    required this.onChanged,
+  });
+
+  final _AutomaticRulePackageGroup group;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Icon(Icons.account_tree_outlined, color: _accent(context), size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  group.displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: _surfaceText(context),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  group.sources.length == 1
+                      ? '提供 ${group.candidateRuleCount} 条可执行播放规则'
+                      : '合并 ${group.sources.length} 个同名规则包 · '
+                            '${group.candidateRuleCount} 条候选规则，查源时自动去重',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: _surfaceMuted(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Switch(
+            key: ValueKey('automaticRulePackage:${group.key}'),
+            value: group.enabled,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AutomaticRulePackageGroup {
+  const _AutomaticRulePackageGroup({
+    required this.key,
+    required this.displayName,
+    required this.sources,
+    required this.candidateRuleCount,
+  });
+
+  final String key;
+  final String displayName;
+  final List<VideoSource> sources;
+  final int candidateRuleCount;
+
+  bool get enabled => sources.every((source) => source.enabled);
+}
+
+List<_AutomaticRulePackageGroup> _groupAutomaticRulePackages(
+  SourceCatalogState catalog,
+  List<VideoSource> sources,
+) {
+  final grouped = <String, List<VideoSource>>{};
+  for (final source in sources) {
+    final key = source.displayName.trim().toLowerCase();
+    grouped.putIfAbsent(key, () => <VideoSource>[]).add(source);
+  }
+  return [
+    for (final entry in grouped.entries)
+      _AutomaticRulePackageGroup(
+        key: entry.value.map((source) => source.id).join('|'),
+        displayName: entry.value.first.displayName,
+        sources: List.unmodifiable(entry.value),
+        candidateRuleCount: entry.value.fold(
+          0,
+          (total, source) => total + catalog.playbackRuleCountFor(source.id),
+        ),
+      ),
+  ];
 }
 
 class _InstalledRuleGroup extends StatelessWidget {
@@ -321,7 +678,7 @@ class _InstalledRuleGroup extends StatelessWidget {
               '还没有安装这一类规则。',
               style: Theme.of(
                 context,
-              ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+              ).textTheme.bodyMedium?.copyWith(color: _surfaceMuted(context)),
             )
           else
             for (final rule in rules)
@@ -352,15 +709,13 @@ class _InstalledRuleRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final canSwitch = rule.canResolveNatively || enabled;
-    final unavailableMessage = _ruleUnavailableMessage(rule);
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: AppColors.panelHigh,
+          color: _surfaceHigh(context),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppColors.border),
+          border: Border.all(color: _surfaceBorder(context)),
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
@@ -368,22 +723,13 @@ class _InstalledRuleRow extends StatelessWidget {
             children: [
               Icon(
                 enabled ? Icons.power_settings_new : Icons.power_off_outlined,
-                color: enabled ? AppColors.primary : AppColors.muted,
+                color: enabled ? _accent(context) : _surfaceMuted(context),
               ),
               const SizedBox(width: 12),
               Expanded(child: _RuleCardText(rule: rule)),
               Tooltip(
-                message: canSwitch ? '切换规则启用状态' : unavailableMessage,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: canSwitch
-                      ? null
-                      : () => _showRuleUnavailableDialog(context, rule),
-                  child: Switch(
-                    value: enabled,
-                    onChanged: canSwitch ? onToggle : null,
-                  ),
-                ),
+                message: '切换规则启用状态',
+                child: Switch(value: enabled, onChanged: onToggle),
               ),
               IconButton(
                 tooltip: '更多操作',
@@ -405,7 +751,7 @@ void _showRuleActionSheet(
 ) {
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: AppColors.panelHigh,
+    backgroundColor: _surfaceHigh(context),
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),
@@ -422,22 +768,11 @@ void _showRuleActionSheet(
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: AppColors.text,
+                  color: _surfaceText(context),
                   fontWeight: FontWeight.w900,
                 ),
               ),
               const SizedBox(height: 10),
-              if (!rule.canResolveNatively) ...[
-                _RuleAction(
-                  icon: Icons.info_outline_rounded,
-                  title: '为什么不能启用',
-                  subtitle: _ruleUnavailableMessage(rule),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    _showRuleUnavailableDialog(context, rule);
-                  },
-                ),
-              ],
               if (rule.baseUrl.trim().isNotEmpty) ...[
                 _RuleAction(
                   icon: Icons.open_in_browser_rounded,
@@ -494,7 +829,9 @@ class _RuleAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = destructive ? const Color(0xFFFF7A90) : AppColors.text;
+    final color = destructive
+        ? Theme.of(context).colorScheme.error
+        : _surfaceText(context);
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
@@ -521,9 +858,9 @@ class _RuleAction extends StatelessWidget {
                     subtitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: _surfaceMuted(context),
+                    ),
                   ),
                 ],
               ),
@@ -535,20 +872,109 @@ class _RuleAction extends StatelessWidget {
   }
 }
 
+class _KazumiRepositoryHeader extends StatelessWidget {
+  const _KazumiRepositoryHeader({
+    required this.catalog,
+    required this.installedCount,
+    required this.refreshing,
+    required this.onRefresh,
+    required this.onBatchInstall,
+  });
+
+  final KazumiRuleCatalog catalog;
+  final int installedCount;
+  final bool refreshing;
+  final VoidCallback? onRefresh;
+  final VoidCallback onBatchInstall;
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = catalog.entries.isEmpty
+        ? null
+        : catalog.entries.reduce(
+            (current, entry) =>
+                entry.lastUpdateMilliseconds > current.lastUpdateMilliseconds
+                ? entry
+                : current,
+          );
+    final latestDate = latest == null
+        ? ''
+        : '${latest.updatedAt.year}-${latest.updatedAt.month.toString().padLeft(2, '0')}-${latest.updatedAt.day.toString().padLeft(2, '0')}';
+    return AppPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final title = SectionTitle(
+                title: '内置番剧规则',
+                subtitle: '已内置 ${catalog.entries.length} 条规则目录，可直接浏览和批量安装',
+              );
+              final actions = Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onRefresh,
+                    icon: refreshing
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh_rounded),
+                    label: Text(refreshing ? '刷新中' : '刷新目录'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: onBatchInstall,
+                    icon: const Icon(Icons.library_add_check_rounded),
+                    label: const Text('批量安装'),
+                  ),
+                ],
+              );
+              if (constraints.maxWidth < 660) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [title, const SizedBox(height: 12), actions],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(child: title),
+                  const SizedBox(width: 12),
+                  actions,
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              SmallBadge(label: '已安装 $installedCount 条', active: true),
+              if (latestDate.isNotEmpty) SmallBadge(label: '最近更新 $latestDate'),
+              SmallBadge(label: catalog.remote ? '在线目录' : '内置目录'),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _RepositoryHeader extends StatelessWidget {
   const _RepositoryHeader({
     required this.selected,
     required this.repositories,
     required this.onSelected,
     required this.onImport,
-    required this.onImportCreamycakeCss,
   });
 
   final RuleContentType selected;
   final List<RuleRepositoryRecord> repositories;
   final ValueChanged<RuleContentType> onSelected;
   final VoidCallback onImport;
-  final VoidCallback onImportCreamycakeCss;
 
   @override
   Widget build(BuildContext context) {
@@ -560,25 +986,36 @@ class _RepositoryHeader extends StatelessWidget {
             children: [
               const Expanded(
                 child: SectionTitle(
-                  title: '规则仓库',
-                  subtitle: '内置推荐源 + 你导入的规则仓库',
+                  title: '自定义仓库',
+                  subtitle: '粘贴仓库地址，扫描候选文件，再逐条选择规则',
                 ),
               ),
               OutlinedButton.icon(
                 onPressed: onImport,
                 icon: const Icon(Icons.add_link_rounded),
-                label: const Text('导入仓库'),
+                label: const Text('粘贴仓库地址'),
               ),
             ],
           ),
           const SizedBox(height: 14),
-          _RecommendedRepositoryCard(
-            title: 'CreamyCake CSS 播放规则',
-            subtitle: 'Animeko web-selector 规则包，导入后默认只启用前 6 条优先线路',
-            imported: repositories.any(
-              (repository) => repository.url == _creamycakeCssRepositoryUrl,
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
             ),
-            onImport: onImportCreamycakeCss,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+              child: Text(
+                '使用方法：① 粘贴 GitHub 仓库首页或 raw JSON；② 从扫描结果中选择一个配置文件；③ 勾选需要的规则。导入后默认关闭，由你自己逐条启用。',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  height: 1.5,
+                ),
+              ),
+            ),
           ),
           const SizedBox(height: 14),
           SegmentedButton<RuleContentType>(
@@ -586,7 +1023,10 @@ class _RepositoryHeader extends StatelessWidget {
               for (final type in RuleContentType.values)
                 ButtonSegment(
                   value: type,
-                  label: Text(type.label),
+                  label: Text(
+                    type.label,
+                    key: ValueKey('ruleRepositorySegment:${type.name}'),
+                  ),
                   icon: Icon(_iconForType(type)),
                 ),
             ],
@@ -613,102 +1053,34 @@ class _RepositoryHeader extends StatelessWidget {
   }
 }
 
-class _RecommendedRepositoryCard extends StatelessWidget {
-  const _RecommendedRepositoryCard({
-    required this.title,
-    required this.subtitle,
-    required this.imported,
-    required this.onImport,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool imported;
-  final VoidCallback onImport;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.panelHigh,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-        child: Row(
-          children: [
-            const Icon(Icons.hub_outlined, color: AppColors.primary),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.text,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            FilledButton.icon(
-              onPressed: onImport,
-              icon: Icon(
-                imported
-                    ? Icons.refresh_rounded
-                    : Icons.cloud_download_outlined,
-              ),
-              label: Text(imported ? '重新导入' : '导入'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _RepositoryRuleCard extends StatelessWidget {
   const _RepositoryRuleCard({
     required this.rule,
     required this.installed,
     required this.onInstall,
+    this.busy = false,
   });
 
   final RulePlugin rule;
   final bool installed;
   final VoidCallback onInstall;
+  final bool busy;
 
   @override
   Widget build(BuildContext context) {
     return AppPanel(
-      color: const Color(0xFF111922),
       child: Row(
         children: [
           Expanded(child: _RuleCardText(rule: rule)),
           const SizedBox(width: 12),
           TextButton(
-            onPressed: installed ? null : onInstall,
+            onPressed: installed || busy ? null : onInstall,
             child: Text(
               installed
                   ? '已安装'
-                  : rule.canResolveNatively
-                  ? '安装'
-                  : '安装备用',
+                  : busy
+                  ? '读取中'
+                  : '安装',
             ),
           ),
         ],
@@ -736,7 +1108,7 @@ class _RuleCardText extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: AppColors.text,
+                  color: _surfaceText(context),
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -753,10 +1125,7 @@ class _RuleCardText extends StatelessWidget {
             SmallBadge(label: rule.engine),
             SmallBadge(label: rule.sourceLabel),
             if (rule.requiresCaptcha) const SmallBadge(label: 'captcha'),
-            SmallBadge(
-              label: _ruleStatusLabel(rule),
-              active: rule.canResolveNatively,
-            ),
+            SmallBadge(label: _ruleStatusLabel(rule), active: true),
           ],
         ),
         const SizedBox(height: 8),
@@ -766,7 +1135,7 @@ class _RuleCardText extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,
-          ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          ).textTheme.bodyMedium?.copyWith(color: _surfaceMuted(context)),
         ),
         const SizedBox(height: 4),
         Text(
@@ -775,7 +1144,7 @@ class _RuleCardText extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,
-          ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+          ).textTheme.bodySmall?.copyWith(color: _surfaceMuted(context)),
         ),
       ],
     );
@@ -783,62 +1152,11 @@ class _RuleCardText extends StatelessWidget {
 }
 
 String _ruleStatusLabel(RulePlugin rule) {
-  if (rule.canResolveNatively) return '可自动播放';
-  if (rule.requiresCaptcha) return '需手动验证';
-  if (rule.requiresPrivateAuth) return '需私有授权';
-  if (rule.requiresWebView) return '需 WebView';
-  return '暂不能自动播放';
+  return '可启用';
 }
 
 String _ruleDisplayNote(RulePlugin rule) {
-  final reason = rule.unsupportedReason?.trim();
-  if (reason != null && reason.isNotEmpty) return reason;
   return rule.note;
-}
-
-String _ruleUnavailableMessage(RulePlugin rule) {
-  final reason = rule.unsupportedReason?.trim();
-  if (reason != null && reason.isNotEmpty) return reason;
-  if (rule.requiresCaptcha) {
-    return '这个规则需要先在网页里完成验证码验证，当前自动解析器不能直接启用。';
-  }
-  if (rule.requiresPrivateAuth) {
-    return '这个规则需要私有授权信息，当前不能作为自动播放线路启用。';
-  }
-  if (rule.requiresWebView) {
-    return '这个规则需要 WebView 手动处理页面，当前不能作为自动播放线路启用。';
-  }
-  return '这个规则当前没有可用的本地解析器，暂时只能作为备用规则保存。';
-}
-
-void _showRuleUnavailableDialog(BuildContext context, RulePlugin rule) {
-  showDialog<void>(
-    context: context,
-    builder: (dialogContext) {
-      return AlertDialog(
-        backgroundColor: AppColors.panelHigh,
-        title: Text('${rule.name} 暂不能启用'),
-        content: Text(
-          '${_ruleUnavailableMessage(rule)}\n\n'
-          '所以应用不会把它加入自动播放线路，避免出现“开关打开了但还是不能播放”的情况。',
-        ),
-        actions: [
-          if (rule.baseUrl.trim().isNotEmpty)
-            TextButton(
-              onPressed: () async {
-                Navigator.of(dialogContext).pop();
-                await _openRuleSite(context, rule);
-              },
-              child: const Text('打开原站'),
-            ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('知道了'),
-          ),
-        ],
-      );
-    },
-  );
 }
 
 Future<void> _openRuleSite(BuildContext context, RulePlugin rule) async {
@@ -863,12 +1181,12 @@ class _RuleEmpty extends StatelessWidget {
     return AppPanel(
       child: Column(
         children: [
-          const Icon(Icons.extension_off_outlined, color: AppColors.primary),
+          Icon(Icons.extension_off_outlined, color: _accent(context)),
           const SizedBox(height: 12),
           Text(
             '还没有安装规则',
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.text,
+              color: _surfaceText(context),
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -878,7 +1196,7 @@ class _RuleEmpty extends StatelessWidget {
             textAlign: TextAlign.center,
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+            ).textTheme.bodyMedium?.copyWith(color: _surfaceMuted(context)),
           ),
           const SizedBox(height: 14),
           FilledButton(onPressed: onOpenRepository, child: const Text('去规则仓库')),
@@ -994,13 +1312,13 @@ class _RailRuleTypeLine extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: [
-          Icon(_iconForType(type), color: AppColors.primary, size: 18),
+          Icon(_iconForType(type), color: _accent(context), size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               type.label,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: _surfaceText(context),
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -1039,7 +1357,9 @@ class _RailSelectLine extends StatelessWidget {
               child: Text(
                 label,
                 style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                  color: active ? AppColors.text : AppColors.muted,
+                  color: active
+                      ? _surfaceText(context)
+                      : _surfaceMuted(context),
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -1064,18 +1384,14 @@ class _RailNote extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(
-            Icons.check_circle_outline,
-            size: 16,
-            color: AppColors.primary,
-          ),
+          Icon(Icons.check_circle_outline, size: 16, color: _accent(context)),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               text,
               style: Theme.of(
                 context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ).textTheme.bodySmall?.copyWith(color: _surfaceMuted(context)),
             ),
           ),
         ],
@@ -1104,14 +1420,14 @@ class _RoundToolButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: AppColors.panelHigh,
+            color: _surfaceHigh(context),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: AppColors.border),
+            border: Border.all(color: _surfaceBorder(context)),
           ),
           child: SizedBox(
             width: 40,
             height: 38,
-            child: Icon(icon, color: AppColors.text),
+            child: Icon(icon, color: _surfaceText(context)),
           ),
         ),
       ),
@@ -1130,7 +1446,7 @@ IconData _iconForType(RuleContentType type) {
 void _showImportSheet(BuildContext context, WidgetRef ref) {
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: AppColors.panel,
+    backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
     isScrollControlled: true,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
@@ -1145,16 +1461,13 @@ void _showImportSheet(BuildContext context, WidgetRef ref) {
             children: [
               Row(
                 children: [
-                  const Icon(
-                    Icons.add_circle_outline,
-                    color: AppColors.primary,
-                  ),
+                  Icon(Icons.add_circle_outline, color: _accent(context)),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       '添加规则',
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: AppColors.text,
+                        color: _surfaceText(context),
                         fontWeight: FontWeight.w900,
                       ),
                     ),
@@ -1198,8 +1511,8 @@ void _showImportSheet(BuildContext context, WidgetRef ref) {
               const SizedBox(height: 10),
               _ImportAction(
                 icon: Icons.add_link_rounded,
-                title: '导入仓库 URL',
-                subtitle: '粘贴 raw JSON 地址，自动下载并保存仓库规则',
+                title: '粘贴 GitHub 仓库或 raw JSON',
+                subtitle: '先扫描并预览候选文件，只导入你明确勾选的规则',
                 onTap: () {
                   Navigator.of(sheetContext).pop();
                   _showRepositoryUrlDialog(context, ref);
@@ -1233,9 +1546,9 @@ class _ImportAction extends StatelessWidget {
       borderRadius: BorderRadius.circular(8),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: AppColors.panelHigh,
+          color: _surfaceHigh(context),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppColors.border),
+          border: Border.all(color: _surfaceBorder(context)),
         ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 13, 12, 13),
@@ -1243,13 +1556,13 @@ class _ImportAction extends StatelessWidget {
             children: [
               DecoratedBox(
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withValues(alpha: 0.16),
+                  color: _accent(context).withValues(alpha: 0.16),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: SizedBox(
                   width: 44,
                   height: 44,
-                  child: Icon(icon, color: AppColors.primary),
+                  child: Icon(icon, color: _accent(context)),
                 ),
               ),
               const SizedBox(width: 14),
@@ -1260,7 +1573,7 @@ class _ImportAction extends StatelessWidget {
                     Text(
                       title,
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: AppColors.text,
+                        color: _surfaceText(context),
                         fontWeight: FontWeight.w900,
                       ),
                     ),
@@ -1269,14 +1582,14 @@ class _ImportAction extends StatelessWidget {
                       subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: _surfaceMuted(context),
+                      ),
                     ),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded, color: AppColors.muted),
+              Icon(Icons.chevron_right_rounded, color: _surfaceMuted(context)),
             ],
           ),
         ),
@@ -1294,40 +1607,416 @@ Future<void> _importFromClipboard(BuildContext context, WidgetRef ref) async {
     return;
   }
   try {
-    final result = await ref
-        .read(animeControllerProvider.notifier)
-        .importRuleRepositoryText(text);
-    if (context.mounted) {
-      _showSnack(
-        context,
-        '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
-      );
-    }
+    final bundle = const RuleImporter().importFromText(text);
+    if (context.mounted) await _showRuleSelectionDialog(context, ref, bundle);
   } catch (error) {
     if (context.mounted) _showSnack(context, _friendlyImportError(error));
   }
 }
 
-Future<bool> _importRepositoryUrl(
+Future<bool> _handleRepositoryAddress(
   BuildContext context,
   WidgetRef ref,
   String url,
 ) async {
+  final trimmed = url.trim();
+  if (trimmed.isEmpty) {
+    _showSnack(context, '请输入 GitHub 仓库或 raw JSON 地址');
+    return false;
+  }
   try {
-    final result = await ref
-        .read(animeControllerProvider.notifier)
-        .importRuleRepositoryUrl(url);
-    if (context.mounted) {
-      _showSnack(
-        context,
-        '已导入 ${result.repositoryName}：${result.ruleCount} 条规则',
-      );
+    if (GitHubRuleRepositoryScanner.isRepositoryUrl(trimmed)) {
+      final scan = await const GitHubRuleRepositoryScanner().scan(trimmed);
+      if (!context.mounted) return false;
+      await _showGitHubCandidateDialog(context, ref, scan);
+      return true;
     }
+    final bundle = await const RuleImporter().importFromUrl(trimmed);
+    if (!context.mounted) return false;
+    await _showRuleSelectionDialog(context, ref, bundle);
     return true;
   } catch (error) {
     if (context.mounted) _showSnack(context, _friendlyImportError(error));
     return false;
   }
+}
+
+Future<void> _showGitHubCandidateDialog(
+  BuildContext context,
+  WidgetRef ref,
+  GitHubRepositoryScan scan,
+) async {
+  String? selectedUrl;
+  var loading = false;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          final colors = Theme.of(context).colorScheme;
+          return AlertDialog(
+            title: Text('扫描结果 · ${scan.name}'),
+            content: SizedBox(
+              width: 680,
+              height: 480,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '默认分支：${scan.defaultBranch}。请选择一个候选文件预览，系统不会自动导入整仓。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                  if (scan.truncated) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'GitHub 返回的文件树已截断，当前仅展示可见候选。',
+                      style: TextStyle(color: colors.tertiary),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: scan.candidates.isEmpty
+                        ? const Center(child: Text('没有找到 JSON/TXT 候选文件'))
+                        : ListView.separated(
+                            itemCount: scan.candidates.length,
+                            separatorBuilder: (_, _) =>
+                                const Divider(height: 1),
+                            itemBuilder: (context, index) {
+                              final candidate = scan.candidates[index];
+                              return CheckboxListTile(
+                                value: selectedUrl == candidate.rawUrl,
+                                onChanged: candidate.canImport
+                                    ? (selected) {
+                                        setDialogState(() {
+                                          selectedUrl = selected == true
+                                              ? candidate.rawUrl
+                                              : null;
+                                        });
+                                      }
+                                    : null,
+                                title: Text(candidate.path),
+                                subtitle: Text(
+                                  candidate.blockedReason ??
+                                      '${candidate.sizeLabel} · 只读预览后再选择规则',
+                                ),
+                                secondary: Icon(
+                                  candidate.canImport
+                                      ? Icons.description_outlined
+                                      : Icons.error_outline_rounded,
+                                  color: candidate.canImport
+                                      ? colors.primary
+                                      : colors.error,
+                                ),
+                                controlAffinity:
+                                    ListTileControlAffinity.trailing,
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: loading
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: loading || selectedUrl == null
+                    ? null
+                    : () async {
+                        setDialogState(() => loading = true);
+                        try {
+                          final bundle = await const RuleImporter()
+                              .importFromUrl(selectedUrl!);
+                          if (!dialogContext.mounted) return;
+                          Navigator.of(dialogContext).pop();
+                          if (context.mounted) {
+                            await _showRuleSelectionDialog(
+                              context,
+                              ref,
+                              bundle,
+                            );
+                          }
+                        } catch (error) {
+                          if (context.mounted) {
+                            _showSnack(context, _friendlyImportError(error));
+                          }
+                          if (dialogContext.mounted) {
+                            setDialogState(() => loading = false);
+                          }
+                        }
+                      },
+                icon: loading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.preview_outlined),
+                label: Text(loading ? '读取中' : '预览规则'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+Future<void> _showKazumiSelectionDialog(
+  BuildContext context, {
+  required List<KazumiRuleCatalogEntry> entries,
+  required Set<String> installedIds,
+  required Future<bool> Function(List<KazumiRuleCatalogEntry> entries)
+  onInstall,
+}) async {
+  final selectedIds = <String>{
+    for (final entry in entries)
+      if (!installedIds.contains(entry.id)) entry.id,
+  };
+  var importing = false;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          final colors = Theme.of(context).colorScheme;
+          return AlertDialog(
+            title: const Text('批量安装番剧规则'),
+            content: SizedBox(
+              width: 680,
+              height: 500,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '已默认选中尚未安装的规则，也可以自行增减。',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colors.onSurfaceVariant),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: importing
+                            ? null
+                            : () => setDialogState(() {
+                                selectedIds
+                                  ..clear()
+                                  ..addAll(entries.map((entry) => entry.id));
+                              }),
+                        child: const Text('全选'),
+                      ),
+                      TextButton(
+                        onPressed: importing
+                            ? null
+                            : () => setDialogState(selectedIds.clear),
+                        child: const Text('清空'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: entries.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final entry = entries[index];
+                        final installed = installedIds.contains(entry.id);
+                        final updatedAt = entry.updatedAt;
+                        final date =
+                            '${updatedAt.year}-${updatedAt.month.toString().padLeft(2, '0')}-${updatedAt.day.toString().padLeft(2, '0')}';
+                        return CheckboxListTile(
+                          value: selectedIds.contains(entry.id),
+                          onChanged: importing
+                              ? null
+                              : (selected) {
+                                  setDialogState(() {
+                                    if (selected == true) {
+                                      selectedIds.add(entry.id);
+                                    } else {
+                                      selectedIds.remove(entry.id);
+                                    }
+                                  });
+                                },
+                          title: Text(entry.name),
+                          subtitle: Text(
+                            'v${entry.version} · $date${installed ? ' · 已安装，可重新获取更新' : ''}',
+                          ),
+                          secondary: Icon(
+                            installed
+                                ? Icons.check_circle_outline_rounded
+                                : Icons.rule_folder_outlined,
+                            color: colors.primary,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: importing
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: importing || selectedIds.isEmpty
+                    ? null
+                    : () async {
+                        setDialogState(() => importing = true);
+                        final selected = entries
+                            .where((entry) => selectedIds.contains(entry.id))
+                            .toList(growable: false);
+                        final installed = await onInstall(selected);
+                        if (!dialogContext.mounted) return;
+                        if (installed) {
+                          Navigator.of(dialogContext).pop();
+                        } else {
+                          setDialogState(() => importing = false);
+                        }
+                      },
+                icon: importing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_done_rounded),
+                label: Text(importing ? '安装中' : '安装所选 ${selectedIds.length} 条'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+}
+
+Future<void> _showRuleSelectionDialog(
+  BuildContext context,
+  WidgetRef ref,
+  RuleImportBundle bundle,
+) async {
+  final selectedIds = <String>{};
+  var importing = false;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          final colors = Theme.of(context).colorScheme;
+          return AlertDialog(
+            title: Text('选择规则 · ${bundle.name}'),
+            content: SizedBox(
+              width: 680,
+              height: 460,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '默认不勾选。导入后可在播放规则中自行启用执行。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: bundle.rules.length,
+                      separatorBuilder: (_, _) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final rule = bundle.rules[index];
+                        return CheckboxListTile(
+                          value: selectedIds.contains(rule.id),
+                          onChanged: (selected) {
+                            setDialogState(() {
+                              if (selected == true) {
+                                selectedIds.add(rule.id);
+                              } else {
+                                selectedIds.remove(rule.id);
+                              }
+                            });
+                          },
+                          title: Text(rule.name),
+                          subtitle: Text(
+                            '${rule.contentLabel} · ${rule.engine}',
+                          ),
+                          secondary: Icon(
+                            Icons.rule_folder_outlined,
+                            color: colors.primary,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: importing
+                    ? null
+                    : () => Navigator.of(dialogContext).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton.icon(
+                onPressed: importing || selectedIds.isEmpty
+                    ? null
+                    : () async {
+                        setDialogState(() => importing = true);
+                        final selected = bundle.rules
+                            .where((rule) => selectedIds.contains(rule.id))
+                            .toList(growable: false);
+                        try {
+                          final result = await ref
+                              .read(animeControllerProvider.notifier)
+                              .importSelectedRulePlugins(
+                                repositoryName: bundle.name,
+                                rules: selected,
+                                sourceUrl: bundle.sourceUrl,
+                              );
+                          if (!dialogContext.mounted) return;
+                          Navigator.of(dialogContext).pop();
+                          if (context.mounted) {
+                            _showSnack(
+                              context,
+                              '已安装 ${result.installedCount} 条规则，默认未启用',
+                            );
+                          }
+                        } catch (error) {
+                          if (context.mounted) {
+                            _showSnack(context, _friendlyImportError(error));
+                          }
+                          if (dialogContext.mounted) {
+                            setDialogState(() => importing = false);
+                          }
+                        }
+                      },
+                icon: importing
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_done_rounded),
+                label: Text(importing ? '安装中' : '安装所选'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
 }
 
 void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
@@ -1339,18 +2028,39 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
           return AlertDialog(
-            backgroundColor: AppColors.panel,
-            title: const Text('导入规则仓库'),
+            backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
+            title: const Text('添加自定义仓库'),
             content: SizedBox(
               width: 520,
-              child: TextField(
-                controller: controller,
-                autofocus: true,
-                keyboardType: TextInputType.url,
-                decoration: const InputDecoration(
-                  labelText: '仓库 JSON 地址',
-                  hintText: 'https://example.com/rules.json',
-                ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '粘贴 GitHub 仓库首页时，会列出 JSON/TXT 文件；粘贴 raw JSON 时，会直接进入规则预览。',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: _surfaceMuted(context),
+                      height: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    keyboardType: TextInputType.url,
+                    decoration: const InputDecoration(
+                      labelText: 'GitHub 仓库或 raw JSON 地址',
+                      hintText: 'https://github.com/owner/repo',
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '配置字段会按原样保留，导入后可在播放规则中自行启用。',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: _surfaceMuted(context),
+                    ),
+                  ),
+                ],
               ),
             ),
             actions: [
@@ -1366,7 +2076,7 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                     : () async {
                         final url = controller.text.trim();
                         setDialogState(() => importing = true);
-                        final imported = await _importRepositoryUrl(
+                        final imported = await _handleRepositoryAddress(
                           context,
                           ref,
                           url,
@@ -1383,8 +2093,8 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Icon(Icons.cloud_download_outlined),
-                label: Text(importing ? '导入中' : '导入'),
+                    : const Icon(Icons.manage_search_rounded),
+                label: Text(importing ? '读取中' : '扫描 / 预览'),
               ),
             ],
           );
@@ -1405,7 +2115,7 @@ void _showManualRuleDialog(BuildContext context, WidgetRef ref) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
           return AlertDialog(
-            backgroundColor: AppColors.panel,
+            backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
             title: const Text('新建规则'),
             content: SizedBox(
               width: 540,

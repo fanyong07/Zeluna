@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
@@ -10,9 +11,14 @@ import '../domain/anime_models.dart';
 import 'rule_models.dart';
 
 const _playableProbeTimeout = Duration(seconds: 6);
+const _responseCacheTtl = Duration(minutes: 5);
+const _availableProbeCacheTtl = Duration(minutes: 2);
+const _failedProbeCacheTtl = Duration(seconds: 20);
+const _maxResponseCacheEntries = 128;
+const _maxProbeCacheEntries = 256;
 
 class RulePlaybackResolver {
-  const RulePlaybackResolver({
+  RulePlaybackResolver({
     http.Client? client,
     this.timeout = const Duration(seconds: 10),
   }) : _client = client;
@@ -23,11 +29,16 @@ class RulePlaybackResolver {
 
   final http.Client? _client;
   final Duration timeout;
+  final Map<String, _TimedCacheEntry<String>> _responseCache = {};
+  final Map<String, Future<String>> _responseRequests = {};
+  final Map<String, _TimedCacheEntry<_PlayableProbeResult>> _probeCache = {};
+  final Map<String, Future<_PlayableProbeResult>> _probeRequests = {};
 
   Future<List<PlaybackLine>> resolveRule({
     required RulePlugin rule,
     required AnimeSubject subject,
     required AnimeEpisode episode,
+    bool verifyPlayable = true,
   }) async {
     if (rule.requiresCaptcha || rule.unsupportedReason != null) {
       return [
@@ -51,14 +62,31 @@ class RulePlaybackResolver {
           subject,
           episode,
           started,
+          verifyPlayable: verifyPlayable,
         ),
-        'xbpq' => await _resolveXbpq(client, rule, subject, episode, started),
+        'xbpq' => await _resolveXbpq(
+          client,
+          rule,
+          subject,
+          episode,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+        'tvbox-json-api' => await _resolveTvBoxJsonApi(
+          client,
+          rule,
+          subject,
+          episode,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
         'animeko-web-selector' => await _resolveAnimekoWebSelector(
           client,
           rule,
           subject,
           episode,
           started,
+          verifyPlayable: verifyPlayable,
         ),
         _ => [
           _unavailableLine(
@@ -82,8 +110,9 @@ class RulePlaybackResolver {
     RulePlugin rule,
     AnimeSubject subject,
     AnimeEpisode episode,
-    Stopwatch started,
-  ) async {
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
     final config = rule.animeko;
     if (config == null) {
       return [
@@ -117,9 +146,41 @@ class RulePlaybackResolver {
       return [_unavailableLine(rule, subject, episode, '详情页没有解析到当前集的播放入口。')];
     }
 
-    final lines = <PlaybackLine>[];
-    for (var index = 0; index < episodeLinks.length; index++) {
-      final link = episodeLinks[index];
+    final lines = (await Future.wait([
+      for (var index = 0; index < episodeLinks.length; index++)
+        _resolveAnimekoLine(
+          client,
+          rule,
+          config,
+          episode,
+          detailUrl,
+          episodeLinks[index],
+          index,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+    ])).whereType<PlaybackLine>().toList(growable: false);
+
+    if (lines.isEmpty) {
+      return [
+        _unavailableLine(rule, subject, episode, '找到了播放页，但没有解析到 mp4/m3u8 直链。'),
+      ];
+    }
+    return lines;
+  }
+
+  Future<PlaybackLine?> _resolveAnimekoLine(
+    http.Client client,
+    RulePlugin rule,
+    AnimekoWebSelectorConfig config,
+    AnimeEpisode episode,
+    Uri detailUrl,
+    _AnimekoEpisodeLink link,
+    int index,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    try {
       final playHtml = await _get(
         client,
         Uri.parse(link.url),
@@ -131,46 +192,45 @@ class RulePlaybackResolver {
         config,
         playHtml,
         link.url,
+        get: (url, headers) => _get(client, url, headers),
       );
-      if (playableUrl == null || !_looksPlayable(playableUrl)) continue;
+      if (playableUrl == null || !_looksPlayable(playableUrl)) return null;
 
       final referer = _animekoVideoReferer(config, link.url);
       final headers = _animekoVideoHeaders(rule, config, referer);
-      final probe = await _probePlayableUrl(client, playableUrl, headers);
-      lines.add(
-        probe.available
-            ? _availableLine(
-                rule,
-                episode,
-                url: playableUrl,
-                title:
-                    '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}',
-                latency: started.elapsed,
-                referer: referer,
-                quality: config.defaultResolution.trim().isEmpty
-                    ? null
-                    : config.defaultResolution.trim(),
-                headers: headers,
-              )
-            : _deadLine(
-                rule,
-                episode,
-                url: playableUrl,
-                title:
-                    '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}',
-                latency: started.elapsed,
-                message: probe.message,
-                headers: headers,
-              ),
+      final probe = await _playableCandidateStatus(
+        client,
+        playableUrl,
+        headers,
+        verifyPlayable: verifyPlayable,
       );
+      final title =
+          '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}';
+      return probe.available
+          ? _availableLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              latency: started.elapsed,
+              referer: referer,
+              quality: config.defaultResolution.trim().isEmpty
+                  ? null
+                  : config.defaultResolution.trim(),
+              headers: headers,
+            )
+          : _deadLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              latency: started.elapsed,
+              message: probe.message,
+              headers: headers,
+            );
+    } catch (_) {
+      return null;
     }
-
-    if (lines.isEmpty) {
-      return [
-        _unavailableLine(rule, subject, episode, '找到了播放页，但没有解析到 mp4/m3u8 直链。'),
-      ];
-    }
-    return lines;
   }
 
   Future<Uri?> _findAnimekoDetailUrl(
@@ -179,19 +239,38 @@ class RulePlaybackResolver {
     AnimekoWebSelectorConfig config,
     AnimeSubject subject,
   ) async {
-    for (final keyword in _animekoSearchKeywords(subject, config)) {
-      final searchUri = Uri.parse(_animekoSearchUrl(config.searchUrl, keyword));
-      final searchHtml = await _get(
-        client,
-        searchUri,
-        _headers(rule: rule, referer: rule.baseUrl),
-      );
-      final root = _documentRoot(searchHtml);
-      final hits = _animekoSearchHits(root, searchUri.toString(), config);
-      final best = _bestHit(hits, subject);
-      if (best != null) return Uri.parse(best.url);
-    }
-    return null;
+    final keywords = _animekoSearchKeywords(subject, config);
+    final best = await _firstConfidentResult([
+      for (var index = 0; index < keywords.length; index++)
+        _searchAnimekoKeyword(
+          client,
+          rule,
+          config,
+          subject,
+          keywords[index],
+          index,
+        ),
+    ]);
+    return best == null ? null : Uri.tryParse(best.url);
+  }
+
+  Future<_RankedResult<_SearchHit>?> _searchAnimekoKeyword(
+    http.Client client,
+    RulePlugin rule,
+    AnimekoWebSelectorConfig config,
+    AnimeSubject subject,
+    String keyword,
+    int preference,
+  ) async {
+    final searchUri = Uri.parse(_animekoSearchUrl(config.searchUrl, keyword));
+    final searchHtml = await _get(
+      client,
+      searchUri,
+      _headers(rule: rule, referer: rule.baseUrl),
+    );
+    final root = _documentRoot(searchHtml);
+    final hits = _animekoSearchHits(root, searchUri.toString(), config);
+    return _rankBestHit(hits, subject, preference);
   }
 
   Future<List<PlaybackLine>> _resolveKazumi(
@@ -199,8 +278,9 @@ class RulePlaybackResolver {
     RulePlugin rule,
     AnimeSubject subject,
     AnimeEpisode episode,
-    Stopwatch started,
-  ) async {
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
     final config = rule.kazumi;
     if (config == null) {
       return [
@@ -224,15 +304,45 @@ class RulePlaybackResolver {
       return [_unavailableLine(rule, subject, episode, '详情页没有解析到播放线路。')];
     }
 
-    final lines = <PlaybackLine>[];
-    for (var roadIndex = 0; roadIndex < roadNodes.length; roadIndex++) {
-      final road = roadNodes[roadIndex];
+    final lines = (await Future.wait([
+      for (var roadIndex = 0; roadIndex < roadNodes.length; roadIndex++)
+        _resolveKazumiLine(
+          client,
+          rule,
+          config,
+          episode,
+          detailUrl,
+          roadNodes[roadIndex],
+          roadIndex,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+    ])).whereType<PlaybackLine>().toList(growable: false);
+
+    if (lines.isEmpty) {
+      return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
+    }
+    return lines;
+  }
+
+  Future<PlaybackLine?> _resolveKazumiLine(
+    http.Client client,
+    RulePlugin rule,
+    KazumiParserConfig config,
+    AnimeEpisode episode,
+    Uri detailUrl,
+    dom.Node road,
+    int roadIndex,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    try {
       final episodeNodes = _xpathNodes(road, config.chapterResult);
       final episodeNode = _pickEpisodeNode(episodeNodes, episode);
-      if (episodeNode == null) continue;
+      if (episodeNode == null) return null;
 
       final playHref = _nodeHref(episodeNode);
-      if (playHref.isEmpty) continue;
+      if (playHref.isEmpty) return null;
 
       final playPageUrl = _absoluteUrl(playHref, detailUrl.toString());
       final playHtml = await _get(
@@ -241,37 +351,37 @@ class RulePlaybackResolver {
         _headers(rule: rule, referer: detailUrl.toString()),
       );
       final playableUrl = _extractPlayableUrl(playHtml, playPageUrl);
-      if (playableUrl == null) continue;
+      if (playableUrl == null || !_looksPlayable(playableUrl)) return null;
       final headers = _headers(rule: rule, referer: playPageUrl);
-      final probe = await _probePlayableUrl(client, playableUrl, headers);
-
-      lines.add(
-        probe.available
-            ? _availableLine(
-                rule,
-                episode,
-                url: playableUrl,
-                title: '${episode.displayTitle} · 线路${roadIndex + 1}',
-                latency: started.elapsed,
-                referer: playPageUrl,
-                headers: headers,
-              )
-            : _deadLine(
-                rule,
-                episode,
-                url: playableUrl,
-                title: '${episode.displayTitle} · 线路${roadIndex + 1}',
-                latency: started.elapsed,
-                message: probe.message,
-                headers: headers,
-              ),
+      final probe = await _playableCandidateStatus(
+        client,
+        playableUrl,
+        headers,
+        verifyPlayable: verifyPlayable,
       );
+      final title = '${episode.displayTitle} · 线路${roadIndex + 1}';
+      return probe.available
+          ? _availableLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              latency: started.elapsed,
+              referer: playPageUrl,
+              headers: headers,
+            )
+          : _deadLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              latency: started.elapsed,
+              message: probe.message,
+              headers: headers,
+            );
+    } catch (_) {
+      return null;
     }
-
-    if (lines.isEmpty) {
-      return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
-    }
-    return lines;
   }
 
   Future<Uri?> _findKazumiDetailUrl(
@@ -280,32 +390,47 @@ class RulePlaybackResolver {
     KazumiParserConfig config,
     AnimeSubject subject,
   ) async {
-    for (final keyword in _searchKeywords(subject)) {
-      final searchUrl = _searchUrl(rule.searchUrl, keyword);
-      final searchHtml = await _get(
-        client,
-        Uri.parse(searchUrl),
-        _headers(
-          rule: rule,
-          referer: rule.baseUrl,
-          userAgent: config.userAgent,
+    final keywords = _searchKeywords(subject);
+    final best = await _firstConfidentResult([
+      for (var index = 0; index < keywords.length; index++)
+        _searchKazumiKeyword(
+          client,
+          rule,
+          config,
+          subject,
+          keywords[index],
+          index,
         ),
-      );
-      final root = _documentRoot(searchHtml);
-      final hits = [
-        for (final item in _xpathNodes(root, config.searchList))
-          _SearchHit(
-            title: _xpathText(item, config.searchName),
-            url: _absoluteUrl(
-              _xpathHref(item, config.searchResult),
-              rule.baseUrl,
-            ),
+    ]);
+    return best == null ? null : Uri.tryParse(best.url);
+  }
+
+  Future<_RankedResult<_SearchHit>?> _searchKazumiKeyword(
+    http.Client client,
+    RulePlugin rule,
+    KazumiParserConfig config,
+    AnimeSubject subject,
+    String keyword,
+    int preference,
+  ) async {
+    final searchUrl = _searchUrl(rule.searchUrl, keyword);
+    final searchHtml = await _get(
+      client,
+      Uri.parse(searchUrl),
+      _headers(rule: rule, referer: rule.baseUrl, userAgent: config.userAgent),
+    );
+    final root = _documentRoot(searchHtml);
+    final hits = [
+      for (final item in _xpathNodes(root, config.searchList))
+        _SearchHit(
+          title: _xpathText(item, config.searchName),
+          url: _absoluteUrl(
+            _xpathHref(item, config.searchResult),
+            rule.baseUrl,
           ),
-      ].where((item) => item.title.isNotEmpty && item.url.isNotEmpty).toList();
-      final best = _bestHit(hits, subject);
-      if (best != null) return Uri.parse(best.url);
-    }
-    return null;
+        ),
+    ].where((item) => item.title.isNotEmpty && item.url.isNotEmpty).toList();
+    return _rankBestHit(hits, subject, preference);
   }
 
   Future<List<PlaybackLine>> _resolveXbpq(
@@ -313,8 +438,9 @@ class RulePlaybackResolver {
     RulePlugin rule,
     AnimeSubject subject,
     AnimeEpisode episode,
-    Stopwatch started,
-  ) async {
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
     final config = rule.xbpq;
     if (config == null) {
       return [_unavailableLine(rule, subject, episode, '该 XBPQ 规则缺少解析配置。')];
@@ -333,20 +459,48 @@ class RulePlaybackResolver {
     var playGroups = _segmentsByRule(detailHtml, config.playArray);
     if (playGroups.isEmpty) playGroups = [detailHtml];
 
-    final lines = <PlaybackLine>[];
-    for (var groupIndex = 0; groupIndex < playGroups.length; groupIndex++) {
-      var episodeSegments = _segmentsByRule(
-        playGroups[groupIndex],
-        config.playList,
-      );
+    final lines = (await Future.wait([
+      for (var groupIndex = 0; groupIndex < playGroups.length; groupIndex++)
+        _resolveXbpqLine(
+          client,
+          rule,
+          config,
+          episode,
+          detailUrl,
+          playGroups[groupIndex],
+          groupIndex,
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+    ])).whereType<PlaybackLine>().toList(growable: false);
+
+    if (lines.isEmpty) {
+      return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
+    }
+    return lines;
+  }
+
+  Future<PlaybackLine?> _resolveXbpqLine(
+    http.Client client,
+    RulePlugin rule,
+    XbpqParserConfig config,
+    AnimeEpisode episode,
+    Uri detailUrl,
+    String playGroup,
+    int groupIndex,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    try {
+      var episodeSegments = _segmentsByRule(playGroup, config.playList);
       if (config.reverseEpisodes) {
         episodeSegments = episodeSegments.reversed.toList(growable: false);
       }
       final episodeSegment = _pickEpisodeSegment(episodeSegments, episode);
-      if (episodeSegment == null) continue;
+      if (episodeSegment == null) return null;
 
       final playHref = _cutByRule(episodeSegment, config.playLink);
-      if (playHref.isEmpty) continue;
+      if (playHref.isEmpty) return null;
 
       final playPageUrl = _absoluteUrl(playHref, detailUrl.toString());
       final playHtml = await _get(
@@ -357,48 +511,46 @@ class RulePlaybackResolver {
       final playableUrl =
           _extractByWildcardRule(playHtml, config.jumpPlayLink) ??
           _extractPlayableUrl(playHtml, playPageUrl);
-      if (playableUrl == null || !_looksPlayable(playableUrl)) continue;
+      if (playableUrl == null || !_looksPlayable(playableUrl)) return null;
 
-      final title = _cleanText(_cutByRule(episodeSegment, config.playTitle));
+      final lineTitle = _cleanText(
+        _cutByRule(episodeSegment, config.playTitle),
+      );
       final normalizedPlayableUrl = _normalizePlayableUrl(
         playableUrl,
         playPageUrl,
       );
       final headers = _headers(rule: rule, referer: playPageUrl);
-      final probe = await _probePlayableUrl(
+      final probe = await _playableCandidateStatus(
         client,
         normalizedPlayableUrl,
         headers,
+        verifyPlayable: verifyPlayable,
       );
-      lines.add(
-        probe.available
-            ? _availableLine(
-                rule,
-                episode,
-                url: normalizedPlayableUrl,
-                title:
-                    '${title.isEmpty ? episode.displayTitle : title} · 线路${groupIndex + 1}',
-                latency: started.elapsed,
-                referer: playPageUrl,
-                headers: headers,
-              )
-            : _deadLine(
-                rule,
-                episode,
-                url: normalizedPlayableUrl,
-                title:
-                    '${title.isEmpty ? episode.displayTitle : title} · 线路${groupIndex + 1}',
-                latency: started.elapsed,
-                message: probe.message,
-                headers: headers,
-              ),
-      );
+      final title =
+          '${lineTitle.isEmpty ? episode.displayTitle : lineTitle} · 线路${groupIndex + 1}';
+      return probe.available
+          ? _availableLine(
+              rule,
+              episode,
+              url: normalizedPlayableUrl,
+              title: title,
+              latency: started.elapsed,
+              referer: playPageUrl,
+              headers: headers,
+            )
+          : _deadLine(
+              rule,
+              episode,
+              url: normalizedPlayableUrl,
+              title: title,
+              latency: started.elapsed,
+              message: probe.message,
+              headers: headers,
+            );
+    } catch (_) {
+      return null;
     }
-
-    if (lines.isEmpty) {
-      return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
-    }
-    return lines;
   }
 
   Future<Uri?> _findXbpqDetailUrl(
@@ -407,34 +559,199 @@ class RulePlaybackResolver {
     XbpqParserConfig config,
     AnimeSubject subject,
   ) async {
-    for (final keyword in _searchKeywords(subject)) {
-      final searchUri = Uri.parse(_searchUrl(rule.searchUrl, keyword));
-      final searchHtml = config.searchPostBody.trim().isEmpty
-          ? await _get(
-              client,
-              searchUri,
-              _headers(rule: rule, referer: rule.baseUrl),
-            )
-          : await _post(
-              client,
-              searchUri,
-              _searchBody(config.searchPostBody, keyword),
-              _headers(rule: rule, referer: rule.baseUrl),
-            );
-      final hits = [
-        for (final segment in _segmentsByRule(searchHtml, config.searchArray))
-          _SearchHit(
-            title: _cleanText(_cutByRule(segment, config.searchTitle)),
-            url: _absoluteUrl(
-              _cutByRule(segment, config.searchLink),
-              rule.baseUrl,
-            ),
+    final keywords = _searchKeywords(subject);
+    final best = await _firstConfidentResult([
+      for (var index = 0; index < keywords.length; index++)
+        _searchXbpqKeyword(
+          client,
+          rule,
+          config,
+          subject,
+          keywords[index],
+          index,
+        ),
+    ]);
+    return best == null ? null : Uri.tryParse(best.url);
+  }
+
+  Future<_RankedResult<_SearchHit>?> _searchXbpqKeyword(
+    http.Client client,
+    RulePlugin rule,
+    XbpqParserConfig config,
+    AnimeSubject subject,
+    String keyword,
+    int preference,
+  ) async {
+    final searchUri = Uri.parse(_searchUrl(rule.searchUrl, keyword));
+    final searchHtml = config.searchPostBody.trim().isEmpty
+        ? await _get(
+            client,
+            searchUri,
+            _headers(rule: rule, referer: rule.baseUrl),
+          )
+        : await _post(
+            client,
+            searchUri,
+            _searchBody(config.searchPostBody, keyword),
+            _headers(rule: rule, referer: rule.baseUrl),
+          );
+    final hits = [
+      for (final segment in _segmentsByRule(searchHtml, config.searchArray))
+        _SearchHit(
+          title: _cleanText(_cutByRule(segment, config.searchTitle)),
+          url: _absoluteUrl(
+            _cutByRule(segment, config.searchLink),
+            rule.baseUrl,
           ),
-      ].where((item) => item.title.isNotEmpty && item.url.isNotEmpty).toList();
-      final best = _bestHit(hits, subject);
-      if (best != null) return Uri.parse(best.url);
+        ),
+    ].where((item) => item.title.isNotEmpty && item.url.isNotEmpty).toList();
+    return _rankBestHit(hits, subject, preference);
+  }
+
+  Future<List<PlaybackLine>> _resolveTvBoxJsonApi(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    final endpoint = Uri.tryParse(rule.baseUrl.trim());
+    if (endpoint == null || !endpoint.hasScheme || endpoint.host.isEmpty) {
+      return [
+        _unavailableLine(rule, subject, episode, '该 TVBox JSON 源缺少有效接口地址。'),
+      ];
     }
-    return null;
+
+    final searches = <Future<_RankedResult<Map<String, dynamic>>?>>[];
+    var preference = 0;
+    for (final keyword in _searchKeywords(subject)) {
+      for (final searchUri in _tvBoxSearchUris(endpoint, keyword)) {
+        searches.add(
+          _searchTvBoxItem(
+            client,
+            rule,
+            subject,
+            endpoint,
+            searchUri,
+            preference++,
+          ),
+        );
+      }
+    }
+    var item = await _firstConfidentResult(searches);
+    if (item == null) {
+      return [_unavailableLine(rule, subject, episode, '接口没有匹配到当前条目。')];
+    }
+
+    if (_tvBoxPlayUrl(item).isEmpty) {
+      final vodId = item['vod_id']?.toString().trim() ?? '';
+      if (vodId.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(
+            await _get(
+              client,
+              _tvBoxDetailUri(endpoint, vodId),
+              _headers(rule: rule, referer: endpoint.toString()),
+            ),
+          );
+          final details = _tvBoxItems(decoded);
+          if (details.isNotEmpty) item = details.first;
+        } catch (_) {
+          // 搜索响应本身可能已经包含播放地址，详情补查失败时继续使用原数据。
+        }
+      }
+    }
+
+    final groups = _tvBoxPlayGroups(item);
+    final lines = (await Future.wait([
+      for (var index = 0; index < groups.length && index < 8; index++)
+        _resolveTvBoxLine(
+          client,
+          rule,
+          episode,
+          endpoint,
+          groups[index],
+          started,
+          verifyPlayable: verifyPlayable,
+        ),
+    ])).whereType<PlaybackLine>().toList(growable: false);
+    if (lines.isEmpty) {
+      return [
+        _unavailableLine(rule, subject, episode, '已找到条目，但当前集没有可直接播放的地址。'),
+      ];
+    }
+    return lines;
+  }
+
+  Future<_RankedResult<Map<String, dynamic>>?> _searchTvBoxItem(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    Uri endpoint,
+    Uri searchUri,
+    int preference,
+  ) async {
+    try {
+      final decoded = jsonDecode(
+        await _get(
+          client,
+          searchUri,
+          _headers(rule: rule, referer: endpoint.toString()),
+        ),
+      );
+      return _rankBestTvBoxItem(_tvBoxItems(decoded), subject, preference);
+    } catch (_) {
+      // TVBox 聚合接口格式并不完全一致，单个查询失败时让其他查询继续。
+      return null;
+    }
+  }
+
+  Future<PlaybackLine?> _resolveTvBoxLine(
+    http.Client client,
+    RulePlugin rule,
+    AnimeEpisode episode,
+    Uri endpoint,
+    _TvBoxPlayGroup group,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    final selected = _pickTvBoxEpisode(group.episodes, episode);
+    if (selected == null) return null;
+    final playableUrl = _normalizePlayableUrl(
+      selected.url,
+      endpoint.toString(),
+    );
+    if (!_looksPlayable(playableUrl)) return null;
+    final headers = _headers(rule: rule, referer: endpoint.toString());
+    final probe = await _playableCandidateStatus(
+      client,
+      playableUrl,
+      headers,
+      verifyPlayable: verifyPlayable,
+    );
+    final title = group.name.trim().isEmpty
+        ? selected.title
+        : '${selected.title} · ${group.name}';
+    return probe.available
+        ? _availableLine(
+            rule,
+            episode,
+            url: playableUrl,
+            title: title,
+            latency: started.elapsed,
+            referer: endpoint.toString(),
+            headers: headers,
+          )
+        : _deadLine(
+            rule,
+            episode,
+            url: playableUrl,
+            title: title,
+            latency: started.elapsed,
+            message: probe.message,
+            headers: headers,
+          );
   }
 
   Future<String> _get(
@@ -442,8 +759,35 @@ class RulePlaybackResolver {
     Uri url,
     Map<String, String> headers,
   ) async {
-    final response = await client.get(url, headers: headers).timeout(timeout);
-    return _responseText(response);
+    final requestUri = _ruleRequestUri(url);
+    final requestHeaders = _ruleRequestHeaders(url, headers);
+    final key = _requestCacheKey('GET', requestUri, requestHeaders);
+    final cached = _freshCacheValue(_responseCache, key);
+    if (cached != null) return cached;
+
+    final existing = _responseRequests[key];
+    if (existing != null) return existing;
+
+    final request = client
+        .get(requestUri, headers: requestHeaders)
+        .timeout(timeout)
+        .then(_responseText);
+    _responseRequests[key] = request;
+    try {
+      final result = await request;
+      _storeCacheValue(
+        _responseCache,
+        key,
+        result,
+        _responseCacheTtl,
+        _maxResponseCacheEntries,
+      );
+      return result;
+    } finally {
+      if (identical(_responseRequests[key], request)) {
+        _responseRequests.remove(key);
+      }
+    }
   }
 
   Future<String> _post(
@@ -452,10 +796,40 @@ class RulePlaybackResolver {
     String body,
     Map<String, String> headers,
   ) async {
-    final response = await client
-        .post(url, headers: headers, body: body)
-        .timeout(timeout);
-    return _responseText(response);
+    final requestUri = _ruleRequestUri(url);
+    final requestHeaders = _ruleRequestHeaders(url, headers);
+    final key = _requestCacheKey(
+      'POST',
+      requestUri,
+      requestHeaders,
+      body: body,
+    );
+    final cached = _freshCacheValue(_responseCache, key);
+    if (cached != null) return cached;
+
+    final existing = _responseRequests[key];
+    if (existing != null) return existing;
+
+    final request = client
+        .post(requestUri, headers: requestHeaders, body: body)
+        .timeout(timeout)
+        .then(_responseText);
+    _responseRequests[key] = request;
+    try {
+      final result = await request;
+      _storeCacheValue(
+        _responseCache,
+        key,
+        result,
+        _responseCacheTtl,
+        _maxResponseCacheEntries,
+      );
+      return result;
+    } finally {
+      if (identical(_responseRequests[key], request)) {
+        _responseRequests.remove(key);
+      }
+    }
   }
 
   String _responseText(http.Response response) {
@@ -547,15 +921,22 @@ class RulePlaybackResolver {
     String userAgent = '',
   }) {
     final headers = <String, String>{
-      'User-Agent': userAgent.trim().isEmpty ? _desktopUserAgent : userAgent,
+      'User-Agent': _desktopUserAgent,
       'Accept':
           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     };
+    for (final entry in rule.requestHeaders.entries) {
+      final name = entry.key.trim();
+      final value = entry.value.trim();
+      if (name.isNotEmpty && value.isNotEmpty) headers[name] = value;
+    }
+    if (userAgent.trim().isNotEmpty) headers['User-Agent'] = userAgent.trim();
     final refererValue = referer?.trim();
     if (refererValue != null && refererValue.isNotEmpty) {
       headers['Referer'] = refererValue;
-    } else if (rule.baseUrl.trim().isNotEmpty) {
+    } else if (!headers.containsKey('Referer') &&
+        rule.baseUrl.trim().isNotEmpty) {
       headers['Referer'] = rule.baseUrl;
     }
     return headers;
@@ -585,10 +966,60 @@ class RulePlaybackResolver {
     if (target == null || !target.hasScheme) {
       return const _PlayableProbeResult(false, '视频地址格式不正确。');
     }
+    final requestUri = _ruleRequestUri(target);
+    final requestHeaders = _ruleRequestHeaders(
+      target,
+      _videoProbeHeaders(headers),
+    );
+    final key = _requestCacheKey('PROBE', requestUri, requestHeaders);
+    final cached = _freshCacheValue(_probeCache, key);
+    if (cached != null) return cached;
+
+    final existing = _probeRequests[key];
+    if (existing != null) return existing;
+
+    final request = _performPlayableProbe(client, requestUri, requestHeaders);
+    _probeRequests[key] = request;
     try {
-      final response = await client
-          .get(target, headers: _videoProbeHeaders(headers))
-          .timeout(_playableProbeTimeout);
+      final result = await request;
+      _storeCacheValue(
+        _probeCache,
+        key,
+        result,
+        result.available ? _availableProbeCacheTtl : _failedProbeCacheTtl,
+        _maxProbeCacheEntries,
+      );
+      return result;
+    } finally {
+      if (identical(_probeRequests[key], request)) {
+        _probeRequests.remove(key);
+      }
+    }
+  }
+
+  Future<_PlayableProbeResult> _playableCandidateStatus(
+    http.Client client,
+    String url,
+    Map<String, String> headers, {
+    required bool verifyPlayable,
+  }) {
+    if (!verifyPlayable && _isExplicitPlayableUrl(url)) {
+      return Future.value(const _PlayableProbeResult(true, ''));
+    }
+    return _probePlayableUrl(client, url, headers);
+  }
+
+  Future<_PlayableProbeResult> _performPlayableProbe(
+    http.Client client,
+    Uri requestUri,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final response = await _sendPlayableProbe(
+        client,
+        requestUri,
+        headers,
+      ).timeout(_playableProbeTimeout);
       if (response.statusCode >= 200 && response.statusCode < 400) {
         return const _PlayableProbeResult(true, '');
       }
@@ -608,6 +1039,109 @@ class RulePlaybackResolver {
       return _PlayableProbeResult(false, '视频 CDN 无法访问：${_shortError(error)}');
     }
   }
+
+  Future<http.StreamedResponse> _sendPlayableProbe(
+    http.Client client,
+    Uri requestUri,
+    Map<String, String> headers,
+  ) async {
+    final request = http.Request('GET', requestUri)..headers.addAll(headers);
+    final response = await client.send(request);
+    if (response.statusCode < 200 || response.statusCode >= 400) {
+      final subscription = response.stream.listen(null);
+      await subscription.cancel();
+      return response;
+    }
+    final stream = StreamIterator<List<int>>(response.stream);
+    try {
+      // 只确认首个响应块可读；Range 被忽略时也不会把整段视频缓冲进内存。
+      await stream.moveNext();
+    } finally {
+      await stream.cancel();
+    }
+    return response;
+  }
+}
+
+class _TimedCacheEntry<T> {
+  const _TimedCacheEntry(this.value, this.expiresAt);
+
+  final T value;
+  final DateTime expiresAt;
+}
+
+T? _freshCacheValue<T>(Map<String, _TimedCacheEntry<T>> cache, String key) {
+  final entry = cache[key];
+  if (entry == null) return null;
+  if (DateTime.now().isBefore(entry.expiresAt)) return entry.value;
+  cache.remove(key);
+  return null;
+}
+
+void _storeCacheValue<T>(
+  Map<String, _TimedCacheEntry<T>> cache,
+  String key,
+  T value,
+  Duration ttl,
+  int maxEntries,
+) {
+  cache.remove(key);
+  cache[key] = _TimedCacheEntry(value, DateTime.now().add(ttl));
+  while (cache.length > maxEntries) {
+    cache.remove(cache.keys.first);
+  }
+}
+
+String _requestCacheKey(
+  String method,
+  Uri uri,
+  Map<String, String> headers, {
+  String body = '',
+}) {
+  final normalizedHeaders = headers.entries.toList(growable: false)
+    ..sort(
+      (left, right) =>
+          left.key.toLowerCase().compareTo(right.key.toLowerCase()),
+    );
+  final headerKey = normalizedHeaders
+      .map((entry) => '${entry.key.toLowerCase()}:${entry.value}')
+      .join('\n');
+  return '$method\n$uri\n$headerKey\n$body';
+}
+
+Uri _ruleRequestUri(Uri target) {
+  if (!kIsWeb) return target;
+  final base = Uri.base;
+  if (!const {'http', 'https'}.contains(base.scheme.toLowerCase())) {
+    return target;
+  }
+  final host = target.host.toLowerCase();
+  if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
+    return target;
+  }
+  return base.resolve(
+    '/media-proxy?url=${Uri.encodeQueryComponent(target.toString())}',
+  );
+}
+
+Map<String, String> _ruleRequestHeaders(
+  Uri target,
+  Map<String, String> headers,
+) {
+  if (!kIsWeb || identical(_ruleRequestUri(target), target)) return headers;
+  final result = <String, String>{...headers};
+  for (final entry in const {
+    'User-Agent': 'X-Upstream-User-Agent',
+    'Referer': 'X-Upstream-Referer',
+    'Authorization': 'X-Upstream-Authorization',
+    'Cookie': 'X-Upstream-Cookie',
+  }.entries) {
+    final value = result.remove(entry.key);
+    if (value != null && value.trim().isNotEmpty) {
+      result[entry.value] = value;
+    }
+  }
+  return result;
 }
 
 class _PlayableProbeResult {
@@ -626,11 +1160,212 @@ class HttpException implements Exception {
   String toString() => message;
 }
 
+List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword) {
+  final result = <String, Uri>{};
+  for (final action in const ['detail', 'videolist']) {
+    final query = <String, String>{...endpoint.queryParameters}
+      ..remove('ids')
+      ..['ac'] = action
+      ..['wd'] = keyword;
+    final uri = endpoint.replace(queryParameters: query);
+    result[uri.toString()] = uri;
+  }
+  return result.values.toList(growable: false);
+}
+
+Uri _tvBoxDetailUri(Uri endpoint, String vodId) {
+  final query = <String, String>{...endpoint.queryParameters}
+    ..remove('wd')
+    ..['ac'] = 'detail'
+    ..['ids'] = vodId;
+  return endpoint.replace(queryParameters: query);
+}
+
+List<Map<String, dynamic>> _tvBoxItems(Object? decoded) {
+  Object? value = decoded;
+  if (value is Map) {
+    value = value['list'] ?? value['data'] ?? value['items'];
+    if (value is Map) value = value['list'] ?? value['items'];
+  }
+  if (value is! List) return const [];
+  return value
+      .whereType<Map>()
+      .map((item) => item.cast<String, dynamic>())
+      .toList(growable: false);
+}
+
+_RankedResult<Map<String, dynamic>>? _rankBestTvBoxItem(
+  List<Map<String, dynamic>> items,
+  AnimeSubject subject,
+  int preference,
+) {
+  if (items.isEmpty) return null;
+  var best = items.first;
+  var bestScore = -1;
+  for (final item in items) {
+    final title =
+        item['vod_name']?.toString() ??
+        item['name']?.toString() ??
+        item['title']?.toString() ??
+        '';
+    final score = _matchScore(title, subject);
+    if (score > bestScore) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return bestScore <= 0
+      ? null
+      : _RankedResult(value: best, score: bestScore, preference: preference);
+}
+
+String _tvBoxPlayUrl(Map<String, dynamic>? item) {
+  if (item == null) return '';
+  return item['vod_play_url']?.toString() ??
+      item['play_url']?.toString() ??
+      item['url']?.toString() ??
+      '';
+}
+
+List<_TvBoxPlayGroup> _tvBoxPlayGroups(Map<String, dynamic>? item) {
+  final playText = _tvBoxPlayUrl(item).trim();
+  if (playText.isEmpty) return const [];
+  final sourceNames = (item?['vod_play_from']?.toString() ?? '').split(r'$$$');
+  final groups = playText.split(r'$$$');
+  final result = <_TvBoxPlayGroup>[];
+  for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+    final episodes = <_TvBoxEpisode>[];
+    final rawEpisodes = groups[groupIndex].split('#');
+    for (
+      var episodeIndex = 0;
+      episodeIndex < rawEpisodes.length;
+      episodeIndex++
+    ) {
+      final raw = rawEpisodes[episodeIndex].trim();
+      if (raw.isEmpty) continue;
+      final separator = raw.indexOf(r'$');
+      final title = separator < 0
+          ? '第${episodeIndex + 1}集'
+          : raw.substring(0, separator).trim();
+      final url = separator < 0 ? raw : raw.substring(separator + 1).trim();
+      if (url.isEmpty) continue;
+      episodes.add(
+        _TvBoxEpisode(
+          title: title.isEmpty ? '第${episodeIndex + 1}集' : title,
+          url: url,
+        ),
+      );
+    }
+    if (episodes.isEmpty) continue;
+    result.add(
+      _TvBoxPlayGroup(
+        name: groupIndex < sourceNames.length
+            ? sourceNames[groupIndex].trim()
+            : '线路${groupIndex + 1}',
+        episodes: episodes,
+      ),
+    );
+  }
+  return result;
+}
+
+_TvBoxEpisode? _pickTvBoxEpisode(
+  List<_TvBoxEpisode> candidates,
+  AnimeEpisode episode,
+) {
+  if (candidates.isEmpty) return null;
+  final number = episode.number.toString();
+  for (final candidate in candidates) {
+    final title = _cleanText(candidate.title).toLowerCase();
+    if (title == number ||
+        title.contains('第$number') ||
+        title.contains('ep$number') ||
+        title.contains('e$number')) {
+      return candidate;
+    }
+  }
+  final index = episode.number - 1;
+  if (index >= 0 && index < candidates.length) return candidates[index];
+  return candidates.first;
+}
+
+class _TvBoxPlayGroup {
+  const _TvBoxPlayGroup({required this.name, required this.episodes});
+
+  final String name;
+  final List<_TvBoxEpisode> episodes;
+}
+
+class _TvBoxEpisode {
+  const _TvBoxEpisode({required this.title, required this.url});
+
+  final String title;
+  final String url;
+}
+
 class _SearchHit {
   const _SearchHit({required this.title, required this.url});
 
   final String title;
   final String url;
+}
+
+class _RankedResult<T> {
+  const _RankedResult({
+    required this.value,
+    required this.score,
+    required this.preference,
+  });
+
+  final T value;
+  final int score;
+  final int preference;
+}
+
+Future<T?> _firstConfidentResult<T>(List<Future<_RankedResult<T>?>> requests) {
+  if (requests.isEmpty) return Future<T?>.value();
+
+  final completer = Completer<T?>();
+  _RankedResult<T>? best;
+  Object? firstError;
+  StackTrace? firstStackTrace;
+  var remaining = requests.length;
+
+  for (final request in requests) {
+    unawaited(() async {
+      try {
+        final result = await request;
+        if (result != null) {
+          final current = best;
+          if (current == null ||
+              result.score > current.score ||
+              (result.score == current.score &&
+                  result.preference < current.preference)) {
+            best = result;
+          }
+          if (result.score >= 80 && !completer.isCompleted) {
+            completer.complete(result.value);
+          }
+        }
+      } catch (error, stackTrace) {
+        firstError ??= error;
+        firstStackTrace ??= stackTrace;
+      } finally {
+        remaining--;
+        if (remaining == 0 && !completer.isCompleted) {
+          final result = best;
+          if (result != null) {
+            completer.complete(result.value);
+          } else if (firstError != null) {
+            completer.completeError(firstError!, firstStackTrace);
+          } else {
+            completer.complete(null);
+          }
+        }
+      }
+    }());
+  }
+  return completer.future;
 }
 
 class _AnimekoEpisodeLink {
@@ -831,8 +1566,9 @@ Future<String?> _extractAnimekoPlayableUrl(
   RulePlugin rule,
   AnimekoWebSelectorConfig config,
   String html,
-  String playPageUrl,
-) async {
+  String playPageUrl, {
+  Future<String> Function(Uri url, Map<String, String> headers)? get,
+}) async {
   final direct = _extractByRegex(
     html,
     config.matchVideoUrl,
@@ -856,18 +1592,19 @@ Future<String?> _extractAnimekoPlayableUrl(
   );
   if (nestedUrl == null) return null;
 
-  final nestedHtml = await client
-      .get(
-        Uri.parse(nestedUrl),
-        headers: _animekoNestedHeaders(rule, config, playPageUrl),
-      )
-      .timeout(const Duration(seconds: 10))
-      .then((response) {
-        if (response.statusCode < 200 || response.statusCode >= 400) {
-          throw HttpException('HTTP ${response.statusCode}');
-        }
-        return response.body;
-      });
+  final nestedUri = Uri.parse(nestedUrl);
+  final nestedHeaders = _animekoNestedHeaders(rule, config, playPageUrl);
+  final nestedHtml = get != null
+      ? await get(nestedUri, nestedHeaders)
+      : await client
+            .get(nestedUri, headers: nestedHeaders)
+            .timeout(const Duration(seconds: 10))
+            .then((response) {
+              if (response.statusCode < 200 || response.statusCode >= 400) {
+                throw HttpException('HTTP ${response.statusCode}');
+              }
+              return response.body;
+            });
   return _extractByRegex(
         nestedHtml,
         config.matchVideoUrl,
@@ -1251,15 +1988,18 @@ bool _looksPlayable(String url) {
   if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
     return false;
   }
-  if (lower.contains('.m3u8') ||
-      lower.contains('.mp4') ||
-      lower.contains('.flv') ||
-      lower.contains('.m4v') ||
-      lower.contains('/m3u8') ||
-      lower.contains('type=m3u8')) {
-    return true;
-  }
+  if (_isExplicitPlayableUrl(lower)) return true;
   return !lower.endsWith('.html') && !lower.contains('/vodplay/');
+}
+
+bool _isExplicitPlayableUrl(String url) {
+  final lower = url.toLowerCase();
+  return RegExp(
+        r'\.(?:m3u8|mp4|flv|m4v)(?:$|[?#])',
+        caseSensitive: false,
+      ).hasMatch(lower) ||
+      lower.contains('/m3u8') ||
+      lower.contains('type=m3u8');
 }
 
 String _absoluteUrl(String value, String baseUrl) {
@@ -1295,10 +2035,13 @@ String _searchBody(String template, String keyword) {
 
 List<String> _searchKeywords(AnimeSubject subject) {
   final values = <String>[subject.title, subject.originalTitle];
+  final seen = <String>{};
   return values
+      .where((item) {
+        final normalized = _normalizeTitle(item);
+        return normalized.isNotEmpty && seen.add(normalized);
+      })
       .map((item) => item.trim())
-      .where((item) => item.isNotEmpty)
-      .toSet()
       .toList(growable: false);
 }
 
@@ -1306,6 +2049,7 @@ List<String> _animekoSearchKeywords(
   AnimeSubject subject,
   AnimekoWebSelectorConfig config,
 ) {
+  final seen = <String>{};
   return _searchKeywords(subject)
       .map(
         (item) => config.searchRemoveSpecial
@@ -1318,8 +2062,10 @@ List<String> _animekoSearchKeywords(
             : item,
       )
       .map((item) => item.trim())
-      .where((item) => item.isNotEmpty)
-      .toSet()
+      .where((item) {
+        final normalized = _normalizeTitle(item);
+        return normalized.isNotEmpty && seen.add(normalized);
+      })
       .toList(growable: false);
 }
 
@@ -1328,7 +2074,11 @@ String _animekoVideoReferer(AnimekoWebSelectorConfig config, String fallback) {
   return referer.isEmpty ? fallback : referer;
 }
 
-_SearchHit? _bestHit(List<_SearchHit> hits, AnimeSubject subject) {
+_RankedResult<_SearchHit>? _rankBestHit(
+  List<_SearchHit> hits,
+  AnimeSubject subject,
+  int preference,
+) {
   if (hits.isEmpty) return null;
   var best = hits.first;
   var bestScore = -1;
@@ -1339,7 +2089,9 @@ _SearchHit? _bestHit(List<_SearchHit> hits, AnimeSubject subject) {
       bestScore = score;
     }
   }
-  return bestScore <= 0 ? hits.first : best;
+  return bestScore <= 0
+      ? null
+      : _RankedResult(value: best, score: bestScore, preference: preference);
 }
 
 int _matchScore(String title, AnimeSubject subject) {

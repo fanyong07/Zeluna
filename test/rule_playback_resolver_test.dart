@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
@@ -8,9 +11,15 @@ import 'package:http/testing.dart';
 
 void main() {
   test('Kazumi resolver extracts current episode playable url', () async {
+    var playPageRequests = 0;
+    var probeRequests = 0;
     final client = MockClient((request) async {
+      expect(request.headers['Cookie'], 'session=user-value');
+      expect(request.headers['Authorization'], 'Bearer user-value');
       switch (request.url.path) {
         case '/test/01.m3u8':
+          expect(request.headers['Range'], 'bytes=0-2048');
+          probeRequests++;
           return http.Response('#EXTM3U', 200);
         case '/vod/search.html':
           return _html('''
@@ -22,10 +31,10 @@ void main() {
         case '/detail/test.html':
           return _html('''
             <ul class="line"><li><a href="/play/1.html">第1集</a></li></ul>
-            <ul class="line"><li><a href="/play/1b.html">备用1</a></li></ul>
+            <ul class="line"><li><a href="/play/1.html">备用1</a></li></ul>
           ''');
         case '/play/1.html':
-        case '/play/1b.html':
+          playPageRequests++;
           return _html('''
             <script>
               var player_aaaa={"flag":"play","encrypt":0,"url":"https://cdn.example.com/test/01.m3u8"};
@@ -36,16 +45,148 @@ void main() {
     });
 
     final resolver = RulePlaybackResolver(client: client);
+    final quickLines = await resolver.resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+      verifyPlayable: false,
+    );
+
+    expect(quickLines, hasLength(2));
+    expect(quickLines.every((line) => line.available), isTrue);
+    expect(playPageRequests, 1);
+    expect(probeRequests, 0);
+
     final lines = await resolver.resolveRule(
       rule: _kazumiRule,
       subject: _animeSubject,
       episode: _episode,
     );
 
-    expect(lines, isNotEmpty);
+    expect(lines, hasLength(2));
     expect(lines.first.available, isTrue);
     expect(lines.first.url, 'https://cdn.example.com/test/01.m3u8');
     expect(lines.first.format, 'HLS');
+    expect(playPageRequests, 1);
+    expect(probeRequests, 1);
+
+    final cachedLines = await resolver.resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+    );
+
+    expect(cachedLines, hasLength(2));
+    expect(playPageRequests, 1);
+    expect(probeRequests, 1);
+  });
+
+  test('Kazumi probes independent playback lines concurrently', () async {
+    final bothProbesStarted = Completer<void>();
+    var probeRequests = 0;
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/vod/search.html':
+          return _html('''
+            <div class="item">
+              <strong>测试番剧</strong>
+              <a class="detail" href="/detail/parallel.html">详情</a>
+            </div>
+          ''');
+        case '/detail/parallel.html':
+          return _html('''
+            <ul class="line"><li><a href="/play/a.html">第1集</a></li></ul>
+            <ul class="line"><li><a href="/play/b.html">第1集</a></li></ul>
+          ''');
+        case '/play/a.html':
+          return _html('''
+            <script>var player={"url":"https://cdn.example.com/a.m3u8"};</script>
+          ''');
+        case '/play/b.html':
+          return _html('''
+            <script>var player={"url":"https://cdn.example.com/b.m3u8"};</script>
+          ''');
+        case '/a.m3u8':
+        case '/b.m3u8':
+          probeRequests++;
+          if (probeRequests == 2) bothProbesStarted.complete();
+          await bothProbesStarted.future.timeout(const Duration(seconds: 1));
+          return http.Response('#EXTM3U', 200);
+      }
+      return http.Response('not found', 404);
+    });
+
+    final lines = await RulePlaybackResolver(
+      client: client,
+    ).resolveRule(rule: _kazumiRule, subject: _animeSubject, episode: _episode);
+
+    expect(lines, hasLength(2));
+    expect(lines.every((line) => line.available), isTrue);
+    expect(probeRequests, 2);
+  });
+
+  test('playable probe reads only the first ranged response chunk', () async {
+    final client = _StreamingProbeClient();
+
+    final lines = await RulePlaybackResolver(
+      client: client,
+    ).resolveRule(rule: _kazumiRule, subject: _animeSubject, episode: _episode);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isTrue);
+    expect(client.probeRange, 'bytes=0-2048');
+    expect(client.probeStreamCancelled, isTrue);
+  });
+
+  test(
+    'equivalent keywords are de-duplicated and unrelated hits exit early',
+    () async {
+      var searchRequests = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/vod/search.html') {
+          searchRequests++;
+          return _html('''
+            <div class="item">
+              <strong>ZZZZ</strong>
+              <a class="detail" href="/detail/unrelated.html">详情</a>
+            </div>
+          ''');
+        }
+        fail('Unrelated search result should not request ${request.url.path}');
+      });
+
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isFalse);
+      expect(searchRequests, 1);
+    },
+  );
+
+  test('distinct fallback keywords search concurrently on failure', () async {
+    final bothSearchesStarted = Completer<void>();
+    var searchRequests = 0;
+    final client = MockClient((request) async {
+      if (request.url.path == '/vod/search.html') {
+        searchRequests++;
+        if (searchRequests == 2) bothSearchesStarted.complete();
+        await bothSearchesStarted.future.timeout(const Duration(seconds: 1));
+        return _html('<div class="empty"></div>');
+      }
+      return http.Response('not found', 404);
+    });
+
+    final lines = await RulePlaybackResolver(
+      client: client,
+    ).resolveRule(rule: _kazumiRule, subject: _animeSubject, episode: _episode);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isFalse);
+    expect(searchRequests, 2);
   });
 
   test('XBPQ resolver extracts current episode playable url', () async {
@@ -167,8 +308,141 @@ void main() {
       expect(rss.groupId, isNotEmpty);
       expect(web.canResolveNatively, isTrue);
       expect(web.animeko?.matchVideoUrl, contains('url='));
+      expect(web.animeko?.cookies, 'quality=1080');
       expect(web.priority, 2);
       expect(web.groupId, isNotEmpty);
+    },
+  );
+
+  test(
+    'rule importer preserves credentials, scripts and repository configs',
+    () {
+      const importer = RuleImporter();
+
+      final credentialBundle = importer.importFromText('''
+        {
+          "name": "credential-rule",
+          "baseUrl": "https://example.com",
+          "searchUrl": "https://example.com/search?q=@keyword",
+          "chapterRoads": "//ul",
+          "chapterResult": "//a",
+          "cookies": "session=user-value",
+          "token": "user-token",
+          "headers": {
+            "Authorization": "Bearer user-value"
+          }
+        }
+      ''');
+      final credentialRule = credentialBundle.rules.single;
+      expect(credentialRule.requestHeaders['Cookie'], 'session=user-value');
+      expect(
+        credentialRule.requestHeaders['Authorization'],
+        'Bearer user-value',
+      );
+      expect(credentialRule.rawConfig['token'], 'user-token');
+      final restoredCredential = RulePlugin.fromJson(credentialRule.toJson());
+      expect(restoredCredential.rawConfig['token'], 'user-token');
+      expect(
+        restoredCredential.requestHeaders['Authorization'],
+        'Bearer user-value',
+      );
+
+      final tvBoxBundle = importer.importFromText('''
+        {
+          "sites": [
+            {
+              "key": "drpy-test",
+              "name": "DRPY Test",
+              "type": 3,
+              "api": "csp_DRPY",
+              "ext": "https://example.com/rule.js"
+            }
+          ],
+          "spider": "https://example.com/remote.jar",
+          "parses": [{"url": "https://parser.example/?url="}]
+        }
+      ''');
+      expect(tvBoxBundle.rules, hasLength(1));
+      expect(tvBoxBundle.rules.single.engine, 'csp_DRPY');
+      expect(
+        (tvBoxBundle.rules.single.rawConfig['site'] as Map)['ext'],
+        'https://example.com/rule.js',
+      );
+      expect(
+        tvBoxBundle.rules.single.rawConfig['spider'],
+        'https://example.com/remote.jar',
+      );
+
+      final xbpqBundle = importer.importFromText('''
+        {
+          "sites": [
+            {"type": 3, "api": "csp_XBPQ", "ext": {}}
+          ],
+          "parses": [{"url": "https://parser.example/?url="}]
+        }
+      ''');
+      expect(xbpqBundle.rules.single.engine, 'XBPQ');
+
+      final repositoryBundle = importer.importFromText('''
+        {
+          "urls": [
+            {"name": "多仓", "url": "https://example.com/store.json"}
+          ]
+        }
+      ''');
+      expect(repositoryBundle.rules.single.engine, 'repository-link');
+      expect(
+        repositoryBundle.rules.single.rawConfig['url'],
+        'https://example.com/store.json',
+      );
+    },
+  );
+
+  test('safe inline XBPQ data remains importable', () {
+    final bundle = const RuleImporter().importFromText('''
+      {
+        "name": "安全规则",
+        "sites": [
+          {
+            "key": "safe-xbpq",
+            "name": "安全 XBPQ",
+            "type": 1,
+            "api": "XBPQ",
+            "searchable": 1,
+            "ext": {
+              "主页url": "https://example.com/",
+              "搜索url": "https://example.com/search?wd={wd}",
+              "搜索数组": "<div&&</div>",
+              "搜索标题": "title=&&",
+              "搜索链接": "href=&&",
+              "播放数组": "<section&&</section>",
+              "播放列表": "<a&&/a>",
+              "播放标题": ">&&<",
+              "播放链接": "href=&&"
+            }
+          }
+        ]
+      }
+    ''');
+
+    expect(bundle.rules, hasLength(1));
+    expect(bundle.rules.single.engine, 'XBPQ');
+    expect(bundle.rules.single.canResolveNatively, isTrue);
+  });
+
+  test(
+    'rule importer requires raw JSON instead of a GitHub repository page',
+    () async {
+      await expectLater(
+        const RuleImporter().importFromUrl('https://github.com/example/rules'),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            contains('raw JSON'),
+          ),
+        ),
+      );
     },
   );
 
@@ -222,6 +496,53 @@ http.Response _html(String body) => http.Response(
   headers: {'content-type': 'text/html; charset=utf-8'},
 );
 
+class _StreamingProbeClient extends http.BaseClient {
+  String? probeRange;
+  bool probeStreamCancelled = false;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final path = request.url.path;
+    if (path == '/stream.m3u8') {
+      probeRange = request.headers['Range'];
+      late final StreamController<List<int>> controller;
+      controller = StreamController<List<int>>(
+        onListen: () => controller.add(utf8.encode('#EXTM3U')),
+        onCancel: () {
+          probeStreamCancelled = true;
+          return controller.close();
+        },
+      );
+      return http.StreamedResponse(controller.stream, 200);
+    }
+
+    final body = switch (path) {
+      '/vod/search.html' =>
+        '''
+        <div class="item">
+          <strong>测试番剧</strong>
+          <a class="detail" href="/detail/stream.html">详情</a>
+        </div>
+      ''',
+      '/detail/stream.html' =>
+        '''
+        <ul class="line"><li><a href="/play/stream.html">第1集</a></li></ul>
+      ''',
+      '/play/stream.html' =>
+        '''
+        <script>var player={"url":"https://cdn.example.com/stream.m3u8"};</script>
+      ''',
+      _ => 'not found',
+    };
+    final statusCode = body == 'not found' ? 404 : 200;
+    return http.StreamedResponse(
+      Stream.value(utf8.encode(body)),
+      statusCode,
+      headers: {'content-type': 'text/html; charset=utf-8'},
+    );
+  }
+}
+
 final _kazumiRule = RulePlugin(
   id: 'kazumi:test',
   name: 'KazumiTest',
@@ -237,6 +558,10 @@ final _kazumiRule = RulePlugin(
   searchable: true,
   quickSearch: true,
   filterable: true,
+  requestHeaders: const {
+    'Cookie': 'session=user-value',
+    'Authorization': 'Bearer user-value',
+  },
   kazumi: KazumiParserConfig(
     searchList: "//div[@class='item']",
     searchName: '//strong',
@@ -337,6 +662,23 @@ const _animeSubject = AnimeSubject(
   status: '全12集',
   categories: [AnimeCategory(name: '动画')],
   tags: [AnimeTag(name: '番剧')],
+  totalEpisodes: 12,
+);
+
+const _equivalentTitleSubject = AnimeSubject(
+  id: 3,
+  title: 'Test Anime',
+  originalTitle: 'test-anime',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-01-01',
+  platform: 'TV',
+  language: 'English',
+  region: 'US',
+  status: '12 episodes',
+  categories: [AnimeCategory(name: 'Animation')],
+  tags: [AnimeTag(name: 'Anime')],
   totalEpisodes: 12,
 );
 

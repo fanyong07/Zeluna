@@ -2,6 +2,7 @@ enum VideoSourceKind {
   tvBox('TVBox 配置'),
   liveM3u('M3U 直播'),
   torrent('BT/磁力'),
+  publicMedia('公开媒体'),
   unknown('未知类型');
 
   const VideoSourceKind(this.label);
@@ -12,6 +13,7 @@ enum VideoSourceKind {
     return switch (value?.toString()) {
       'tvBox' => VideoSourceKind.tvBox,
       'liveM3u' => VideoSourceKind.liveM3u,
+      'publicMedia' => VideoSourceKind.publicMedia,
       'torrent' || 'magnet' || 'bt' => VideoSourceKind.torrent,
       _ => VideoSourceKind.unknown,
     };
@@ -24,6 +26,9 @@ class SourceCatalogState {
     this.generatedAt,
     this.totalSources = 0,
     this.sources = const [],
+    this.playbackRuleCounts = const {},
+    this.availablePlaybackRuleCount = 0,
+    this.activePlaybackRuleCount = 0,
     this.loadError,
   });
 
@@ -31,6 +36,9 @@ class SourceCatalogState {
   final DateTime? generatedAt;
   final int totalSources;
   final List<VideoSource> sources;
+  final Map<String, int> playbackRuleCounts;
+  final int availablePlaybackRuleCount;
+  final int activePlaybackRuleCount;
   final String? loadError;
 
   int get importedCount => sources.length;
@@ -48,6 +56,15 @@ class SourceCatalogState {
   int get torrentCount =>
       sources.where((source) => source.kind == VideoSourceKind.torrent).length;
 
+  int get playbackConnectedCount => sources
+      .where(
+        (source) => source.enabled && (playbackRuleCounts[source.id] ?? 0) > 0,
+      )
+      .length;
+
+  int playbackRuleCountFor(String sourceId) =>
+      playbackRuleCounts[sourceId] ?? 0;
+
   bool get hasError => loadError != null;
 
   Map<String, bool> get enabledById => {
@@ -59,6 +76,9 @@ class SourceCatalogState {
     DateTime? generatedAt,
     int? totalSources,
     List<VideoSource>? sources,
+    Map<String, int>? playbackRuleCounts,
+    int? availablePlaybackRuleCount,
+    int? activePlaybackRuleCount,
     String? loadError,
   }) {
     return SourceCatalogState(
@@ -66,6 +86,11 @@ class SourceCatalogState {
       generatedAt: generatedAt ?? this.generatedAt,
       totalSources: totalSources ?? this.totalSources,
       sources: sources ?? this.sources,
+      playbackRuleCounts: playbackRuleCounts ?? this.playbackRuleCounts,
+      availablePlaybackRuleCount:
+          availablePlaybackRuleCount ?? this.availablePlaybackRuleCount,
+      activePlaybackRuleCount:
+          activePlaybackRuleCount ?? this.activePlaybackRuleCount,
       loadError: loadError,
     );
   }
@@ -134,6 +159,9 @@ class VideoSource {
     required this.importUrl,
     required this.baseUrl,
     this.tags = const [],
+    this.endpoints = const {},
+    this.headers = const {},
+    this.rawConfig = const {},
     this.version,
     this.license,
     this.author,
@@ -154,6 +182,9 @@ class VideoSource {
   final String importUrl;
   final String baseUrl;
   final List<String> tags;
+  final Map<String, String> endpoints;
+  final Map<String, String> headers;
+  final Map<String, dynamic> rawConfig;
   final String? version;
   final String? license;
   final String? author;
@@ -193,6 +224,9 @@ class VideoSource {
       importUrl: importUrl,
       baseUrl: baseUrl,
       tags: tags,
+      endpoints: endpoints,
+      headers: headers,
+      rawConfig: rawConfig,
       version: version,
       license: license,
       author: author,
@@ -216,6 +250,9 @@ class VideoSource {
       importUrl: json['importUrl']?.toString() ?? '',
       baseUrl: json['baseUrl']?.toString() ?? '',
       tags: _stringListFromJson(json['tags']),
+      endpoints: _stringMapFromJson(json['endpoints']),
+      headers: _stringMapFromJson(json['headers']),
+      rawConfig: _dynamicMapFromJson(json['rawConfig']),
       version: _blankToNull(json['version']?.toString()),
       license: _blankToNull(json['license']?.toString()),
       author: _blankToNull(json['author']?.toString()),
@@ -265,4 +302,18 @@ List<String> _stringListFromJson(Object? value) {
       .map((item) => item.toString().trim())
       .where((item) => item.isNotEmpty)
       .toList(growable: false);
+}
+
+Map<String, String> _stringMapFromJson(Object? value) {
+  if (value is! Map) return const {};
+  return {
+    for (final entry in value.entries)
+      if (entry.key.toString().trim().isNotEmpty)
+        entry.key.toString(): entry.value?.toString() ?? '',
+  };
+}
+
+Map<String, dynamic> _dynamicMapFromJson(Object? value) {
+  if (value is! Map) return const {};
+  return value.cast<String, dynamic>();
 }

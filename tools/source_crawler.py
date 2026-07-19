@@ -143,6 +143,43 @@ def _stable_id(raw: str) -> str:
     )
 
 
+_SENSITIVE_CONFIG_KEYS = {
+    "authorization",
+    "cookie",
+    "cookies",
+    "password",
+    "passwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "secret",
+    "client_secret",
+}
+
+
+def _sanitize_raw_config(value):
+    """递归清理抓取配置中的账号凭据，避免写入仓库。"""
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _SENSITIVE_CONFIG_KEYS:
+                text = item.strip() if isinstance(item, str) else ""
+                sanitized[key] = (
+                    text
+                    if text.startswith(("http://127.0.0.1", "http://localhost"))
+                    else ""
+                )
+            else:
+                sanitized[key] = _sanitize_raw_config(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_raw_config(item) for item in value]
+    return value
+
+
 # ---------------------------------------------------------------------------
 # 仓库发现
 # ---------------------------------------------------------------------------
@@ -301,7 +338,7 @@ def parse_kazumi_rule(raw: dict, import_url: str | None = None) -> VideoSource |
         message=(
             "带验证码/反爬标记" if anti else "Kazumi XPath 规则"
         ),
-        raw_config=raw,
+        raw_config=_sanitize_raw_config(raw),
         updated_at=int(time.time()),
     )
 
@@ -330,7 +367,7 @@ def parse_tvbox_config(raw: dict, import_url: str | None = None) -> VideoSource 
         supports_search=static_count > 0,
         supports_categories=False,
         message=f"TVBox 配置，{static_count} 个可解析静态站点",
-        raw_config=raw,
+        raw_config=_sanitize_raw_config(raw),
         updated_at=int(time.time()),
     )
 
@@ -359,7 +396,7 @@ def parse_apple_cms(raw: dict, import_url: str | None = None) -> VideoSource | N
         endpoints={"api": api},
         tags=["影视", "AppleCMS"],
         message="AppleCMS JSON API",
-        raw_config=raw,
+        raw_config=_sanitize_raw_config(raw),
         updated_at=int(time.time()),
     )
 
@@ -384,7 +421,7 @@ def parse_anich(raw: dict, import_url: str | None = None) -> VideoSource | None:
         tags=["动漫", "弹幕", "API"],
         supports_danmaku=True,
         message="AniCh 风格 API",
-        raw_config=raw,
+        raw_config=_sanitize_raw_config(raw),
         updated_at=int(time.time()),
     )
 
@@ -478,7 +515,7 @@ def smart_parse(raw: dict | list | str, import_url: str | None = None) -> list[V
                 base_url=raw.get("baseUrl") or raw.get("url"),
                 tags=["自定义"],
                 message="通用 JSON 源，需扩展适配",
-                raw_config=raw,
+                raw_config=_sanitize_raw_config(raw),
                 updated_at=int(time.time()),
             )
         ]
@@ -617,7 +654,11 @@ def main():
 
     parser = argparse.ArgumentParser(description="Anime 视频源爬虫")
     parser.add_argument("--quick", action="store_true", help="仅爬取，跳过健康检查")
-    parser.add_argument("--output", default="output/sources_catalog.json", help="输出 JSON 路径")
+    parser.add_argument(
+        "--output",
+        default="assets/data/sources_catalog.json",
+        help="输出 JSON 路径",
+    )
     parser.add_argument("--token", default="", help="GitHub token (可选，解决限流)")
     args = parser.parse_args()
 

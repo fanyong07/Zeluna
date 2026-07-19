@@ -1,11 +1,18 @@
-# Anime4K GLSL Shader
+# Anime4K GLSL shaders
 
-This folder contains Anime4K GLSL shaders used by the in-app player through mpv's `glsl-shaders` property.
+These shaders are used by the native `media_kit`/libmpv player through mpv's
+`glsl-shaders` property. Web playback does not load them.
 
-Source: https://github.com/bloc97/Anime4K
-License: MIT
+Source: https://github.com/bloc97/Anime4K (v4 shader set, commit
+`7684e9586f8dcc738af08a1cdceb024cc184f426`)
 
-Bundled shader:
-- `Anime4K_Upscale_Denoise_CNN_x2_VL.glsl`
+License: MIT. Each shader contains the upstream license header.
 
-The VL variant is intentionally used as the default profile because it provides real-time anime upscaling while staying light enough for mobile GPUs.
+Profiles:
+
+- Performance: a reduced Mode C pipeline intended as the mobile fallback.
+- Balanced: the official v4 low-end Mode A pipeline.
+- Quality: the official v4 high-end Mode A pipeline.
+
+The older monolithic v3.2 shader remains packaged only for upgrade
+compatibility and is no longer selected by the player.

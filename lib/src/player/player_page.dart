@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +17,8 @@ import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
+import 'danmaku_overlay.dart';
+import 'web_stream_player.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key, required this.request});
@@ -29,8 +33,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   late AnimeEpisode _episode;
   late final Player _player;
   late final VideoController _controller;
+  late final WebStreamPlayerController _webPlayerController;
   late final FocusNode _shortcutFocusNode;
-  final _anime4kShaders = const Anime4KShaderManager();
+  final _anime4kShaders = Anime4KShaderManager();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   final _failedLineIds = <String>{};
   PlaybackLine? _line;
@@ -45,8 +50,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
   double? _appliedVolume;
-  bool? _appliedSuperResolution;
-  bool _superResolutionAvailable = true;
+  String? _appliedSuperResolutionKey;
+  Anime4KMpvRuntime? _anime4kRuntime;
+  Anime4KProfile? _activeSuperResolutionProfile;
+  String? _superResolutionStatusMessage;
+  String? _lastSuperResolutionNotice;
+  DateTime? _superResolutionAppliedAt;
+  Future<void> _superResolutionQueue = Future<void>.value();
+  bool _handlingSuperResolutionFailure = false;
   bool _controlsVisible = true;
   bool _pointerInChromeHotZone = false;
   var _playing = false;
@@ -68,22 +79,35 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   bool _subtitlePanel = false;
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
+  bool _theaterMode = false;
+  SubtitleCandidate? _selectedSubtitle;
+  final _danmakuInput = TextEditingController();
+  final List<_LocalDanmakuEntry> _localDanmaku = [];
+  List<DanmakuComment> _remoteDanmaku = const [];
+  var _danmakuLoadSerial = 0;
 
   @override
   void initState() {
     super.initState();
     _player = Player();
     _controller = VideoController(_player);
+    _webPlayerController = WebStreamPlayerController();
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
     _line = widget.request.initialLine;
+    _lines = widget.request.initialLine == null
+        ? const []
+        : [widget.request.initialLine!];
     _bindPlayer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestPlayerFocus();
       _applyPlaybackSettings(_currentSettings);
+      unawaited(_loadDanmakuForCurrentEpisode());
       if (_isPlayableLine(_line)) {
         unawaited(_openLine(_line!, force: true));
-        unawaited(_resolveLinesForCurrentEpisode(autoplay: false));
+        if (widget.request.subject.source != 'direct') {
+          unawaited(_resolveLinesForCurrentEpisode(autoplay: false));
+        }
       } else {
         unawaited(_resolveLinesForCurrentEpisode());
       }
@@ -98,6 +122,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _controlsHideTimer?.cancel();
     unawaited(_restoreSystemUi());
     unawaited(_player.dispose());
+    _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     super.dispose();
   }
@@ -128,12 +153,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                   children: [
                     _PlayerCanvas(
                       controller: _controller,
+                      webPlayerController: _webPlayerController,
                       subject: widget.request.subject,
+                      episodes: widget.request.episodes,
                       episode: _episode,
                       line: _line,
                       settings: state.settings,
+                      superResolutionProfile: _activeSuperResolutionProfile,
                       services: state.services,
                       danmaku: state.danmaku,
+                      remoteDanmaku: _remoteDanmaku,
+                      localDanmaku: _localDanmaku,
+                      theaterMode: _theaterMode,
                       position: _position,
                       duration: _duration,
                       buffer: _buffer,
@@ -152,6 +183,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       onChromeHotZoneChanged: _handlePlayerChromeHotZoneChanged,
                       onBack: _handleBack,
                       onReload: _reloadCurrentLine,
+                      onScreenshot: _captureScreenshot,
+                      onTheaterMode: _toggleTheaterMode,
+                      onCast: _showExternalPlayback,
                       onPlayPause: _togglePlayPause,
                       onRewind: () => _seekBy(
                         Duration(seconds: -state.settings.rewindSeconds),
@@ -163,9 +197,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       onMute: _toggleMute,
                       onFullscreen: () => _setFullscreen(!_fullscreen),
                       onEpisodePanel: _toggleEpisodePanel,
+                      onEpisodeSelected: _selectEpisode,
                       onLinePanel: _toggleLinePanel,
                       onSubtitlePanel: _toggleSubtitlePanel,
                       onDanmakuPanel: _toggleDanmakuPanel,
+                      danmakuInput: _danmakuInput,
+                      onSendDanmaku: (text) =>
+                          _sendLocalDanmaku(text, settings: state.danmaku),
+                      onWebReady: _handleWebReady,
+                      onWebError: _handleWebError,
+                      onWebPosition: _handleWebPosition,
+                      onWebDuration: _handleWebDuration,
+                      onWebPlaying: _handleWebPlaying,
                       onSettingsPanel: _toggleSettingsPanel,
                     ),
                     if (panelOpen)
@@ -211,6 +254,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                         child: _SubtitlePanel(
                           subject: widget.request.subject,
                           episode: _episode,
+                          selected: _selectedSubtitle,
+                          onSelected: _selectSubtitle,
+                          onDisabled: _disableSubtitle,
                         ),
                       ),
                     if (_danmakuPanel)
@@ -257,7 +303,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       return _lineLookupMessage ?? '当前集还没有选中可播放线路。';
     }
     if (_buffering) return '缓冲中...';
-    return _playerMessage;
+    return _playerMessage ?? _superResolutionStatusMessage;
+  }
+
+  bool get _usesWebPlayer {
+    final url = _line?.url?.trim() ?? '';
+    return supportsWebStreamPlayer && shouldUseWebStreamPlayer(url);
   }
 
   bool get _shouldAutoHidePlayerControls {
@@ -325,7 +376,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     }
     if (_hasOpenPanel) return KeyEventResult.ignored;
     _revealPlayerControls();
-    if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK) {
+    if (settings.shortcutPlayPause &&
+        (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK)) {
       unawaited(_togglePlayPause());
       return KeyEventResult.handled;
     }
@@ -418,7 +470,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _player.stream.error.listen((error) {
           _handlePlayerError(error);
         }),
-      );
+      )
+      ..add(_player.stream.log.listen(_handleSuperResolutionLog));
   }
 
   void _applyPlaybackSettings(PlaybackSettings settings) {
@@ -445,51 +498,149 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     PlaybackSettings settings, {
     bool force = false,
   }) {
-    if (!force && _appliedSuperResolution == settings.superResolution) {
+    final profile = Anime4KProfile.fromSetting(settings.superResolutionProfile);
+    final key = '${settings.superResolution}:${profile.settingValue}';
+    if (!force && _appliedSuperResolutionKey == key) {
       return;
     }
-    _appliedSuperResolution = settings.superResolution;
+    _appliedSuperResolutionKey = key;
     final serial = ++_superResolutionApplySerial;
-    unawaited(_setSuperResolutionShader(settings.superResolution, serial));
+    _superResolutionQueue = _superResolutionQueue
+        .then(
+          (_) => _setSuperResolutionShader(
+            enabled: settings.superResolution,
+            requestedProfile: profile,
+            serial: serial,
+          ),
+        )
+        .catchError((Object _) {});
   }
 
-  Future<void> _setSuperResolutionShader(bool enabled, int serial) async {
-    if (!_superResolutionAvailable && enabled) return;
+  Future<void> _setSuperResolutionShader({
+    required bool enabled,
+    required Anime4KProfile requestedProfile,
+    required int serial,
+    Anime4KProfile? skipProfile,
+  }) async {
+    if (serial != _superResolutionApplySerial) return;
     try {
       if (!enabled) {
-        if (serial != _superResolutionApplySerial) return;
-        await _setMpvProperty('glsl-shaders', '');
-        await _setMpvProperty('scale', 'bilinear');
-        await _setMpvProperty('cscale', 'bilinear');
-        await _setMpvProperty('dscale', 'mitchell');
+        await _anime4kRuntime?.disable();
+        if (!mounted || serial != _superResolutionApplySerial) return;
+        setState(() {
+          _activeSuperResolutionProfile = null;
+          _superResolutionStatusMessage = null;
+          _lastSuperResolutionNotice = null;
+        });
         return;
       }
 
-      final shaderPaths = await _anime4kShaders.ensureInstalled();
-      if (serial != _superResolutionApplySerial) return;
-      await _setMpvProperty('scale', 'ewa_lanczossharp');
-      await _setMpvProperty('cscale', 'ewa_lanczossharp');
-      await _setMpvProperty('dscale', 'mitchell');
-      await _setMpvProperty('linear-downscaling', 'no');
-      await _setMpvProperty('sigmoid-upscaling', 'yes');
-      await _setMpvProperty('glsl-shaders', shaderPaths.join(';'));
-    } catch (error) {
-      _superResolutionAvailable = false;
-      if (!mounted || !enabled) return;
+      final support = Anime4KShaderManager.currentPlatformSupport;
+      if (!support.supported) {
+        if (!mounted || serial != _superResolutionApplySerial) return;
+        _showSuperResolutionUnavailable(
+          support.reason ?? '当前平台不支持实时超分，已使用普通画质。',
+        );
+        return;
+      }
+
+      final runtime = _anime4kRuntime ??= _createAnime4KRuntime();
+      final result = await runtime.enable(
+        requestedProfile,
+        skipProfile: skipProfile,
+      );
+      if (!mounted || serial != _superResolutionApplySerial) return;
+      if (!result.enabled) {
+        _showSuperResolutionUnavailable('当前设备无法运行 Anime4K 超分，已自动恢复普通画质。');
+        return;
+      }
+
       setState(() {
-        _playerMessage = '当前设备未能启用 Anime4K 超分，已继续使用普通播放。';
+        _activeSuperResolutionProfile = result.activeProfile;
+        _superResolutionStatusMessage = null;
       });
+      _superResolutionAppliedAt = DateTime.now();
+      if (result.usedFallback) {
+        _showPlayerToast(
+          '${requestedProfile.label}档负载过高，已切换为'
+          '${result.activeProfile!.label}超分。',
+        );
+      }
+    } catch (error) {
+      if (!mounted || !enabled || serial != _superResolutionApplySerial) {
+        return;
+      }
+      _showSuperResolutionUnavailable('当前播放器无法启用实时超分，已自动恢复普通画质。');
     }
   }
 
-  Future<void> _setMpvProperty(String property, String value) async {
+  Anime4KMpvRuntime _createAnime4KRuntime() {
     final platform = _player.platform;
-    if (platform is! NativePlayer) return;
-    await (platform as dynamic).setProperty(property, value);
+    if (platform is! NativePlayer) {
+      throw UnsupportedError('The current player is not backed by libmpv.');
+    }
+    final nativePlayer = platform as dynamic;
+    return Anime4KMpvRuntime(
+      platform: defaultTargetPlatform,
+      installPipeline: _anime4kShaders.ensureInstalled,
+      getProperty: (property) async {
+        final value = await nativePlayer.getProperty(property);
+        return value?.toString() ?? '';
+      },
+      setProperty: (property, value) async {
+        await nativePlayer.setProperty(property, value);
+      },
+    );
+  }
+
+  void _handleSuperResolutionLog(PlayerLog log) {
+    final activeProfile = _activeSuperResolutionProfile;
+    final appliedAt = _superResolutionAppliedAt;
+    if (activeProfile == null ||
+        appliedAt == null ||
+        DateTime.now().difference(appliedAt) > const Duration(seconds: 4) ||
+        _handlingSuperResolutionFailure ||
+        !_currentSettings.superResolution) {
+      return;
+    }
+    final message = '${log.prefix} ${log.text}'.toLowerCase();
+    final isShaderFailure =
+        message.contains('shader') &&
+        (message.contains('error') ||
+            message.contains('failed') ||
+            message.contains('compile') ||
+            message.contains('could not'));
+    if (!isShaderFailure) return;
+
+    _handlingSuperResolutionFailure = true;
+    final requestedProfile = Anime4KProfile.fromSetting(
+      _currentSettings.superResolutionProfile,
+    );
+    final serial = ++_superResolutionApplySerial;
+    _superResolutionQueue = _superResolutionQueue
+        .then(
+          (_) => _setSuperResolutionShader(
+            enabled: true,
+            requestedProfile: requestedProfile,
+            serial: serial,
+            skipProfile: activeProfile,
+          ),
+        )
+        .catchError((Object _) {})
+        .whenComplete(() => _handlingSuperResolutionFailure = false);
+  }
+
+  void _showSuperResolutionUnavailable(String message) {
+    final shouldNotify = _lastSuperResolutionNotice != message;
+    setState(() {
+      _activeSuperResolutionProfile = null;
+      _superResolutionStatusMessage = message;
+      _lastSuperResolutionNotice = message;
+    });
+    if (shouldNotify) _showPlayerToast(message);
   }
 
   void _refreshSuperResolutionShader() {
-    _superResolutionAvailable = true;
     _applyVideoRenderSettings(_currentSettings, force: true);
   }
 
@@ -520,9 +671,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _line = nextLine;
         _lineLookupInProgress = false;
         _lineLookupMessage = available.isEmpty
-            ? _emptyLineMessage(lines)
+            ? '快速查找暂未发现可用线路，正在后台继续扫描…'
             : null;
       });
+      unawaited(
+        _continueExpandedLineLookup(
+          serial: serial,
+          autoplay: autoplay,
+          initialLines: lines,
+          delay: available.isEmpty
+              ? Duration.zero
+              : const Duration(milliseconds: 700),
+        ),
+      );
       if (autoplay && _isPlayableLine(nextLine)) {
         await _openLine(nextLine!, force: true);
       } else if (available.isEmpty) {
@@ -535,6 +696,68 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _lineLookupInProgress = false;
         _lineLookupMessage = '线路解析失败：${_friendlyPlaybackError(error)}';
         _playbackFailed = true;
+      });
+    }
+  }
+
+  Future<void> _continueExpandedLineLookup({
+    required int serial,
+    required bool autoplay,
+    required List<PlaybackLine> initialLines,
+    Duration delay = Duration.zero,
+  }) async {
+    try {
+      if (delay > Duration.zero) await Future<void>.delayed(delay);
+      if (!mounted || serial != _lineLookupSerial) return;
+      final expandedLines = await ref
+          .read(animeControllerProvider.notifier)
+          .linesForEpisodeMode(
+            widget.request.subject,
+            _episode,
+            expandAll: true,
+          );
+      if (!mounted || serial != _lineLookupSerial) return;
+      final lines = _mergeLineLists(initialLines, expandedLines);
+      final available = _availableLines(lines);
+      final currentLine = _line;
+      final currentFailed =
+          _playbackFailed ||
+          (currentLine != null && _failedLineIds.contains(currentLine.id));
+      PlaybackLine? nextLine = currentLine;
+      if (!currentFailed && currentLine != null) {
+        for (final candidate in available) {
+          if (candidate.id == currentLine.id) {
+            nextLine = candidate;
+            break;
+          }
+        }
+      }
+      if (currentFailed || !_isPlayableLine(nextLine)) {
+        nextLine = null;
+        for (final candidate in available) {
+          if (_failedLineIds.contains(candidate.id)) continue;
+          nextLine = candidate;
+          break;
+        }
+      }
+      final shouldOpen =
+          autoplay &&
+          _isPlayableLine(nextLine) &&
+          (currentFailed || !_isPlayableLine(currentLine));
+      setState(() {
+        _lines = lines;
+        _line = nextLine;
+        _lineLookupMessage = available.isEmpty
+            ? _emptyLineMessage(lines, subject: widget.request.subject)
+            : null;
+      });
+      if (shouldOpen) {
+        await _openLine(nextLine!, force: true);
+      }
+    } catch (error) {
+      if (!mounted || serial != _lineLookupSerial) return;
+      setState(() {
+        _lineLookupMessage = '线路解析失败：${_friendlyPlaybackError(error)}';
       });
     }
   }
@@ -565,6 +788,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _duration = Duration.zero;
       _buffer = Duration.zero;
     });
+    if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
+      if (!mounted || serial != _openLineSerial) return;
+      setState(() {
+        _loadingLine = false;
+        _playbackFailed = false;
+        _playing = true;
+        _playerMessage = null;
+      });
+      return;
+    }
     try {
       await _player.stop();
       await _player.setRate(
@@ -573,7 +806,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       await _player.setVolume(
         _muted ? 0 : _volumeFromSettings(_currentSettings),
       );
-      await _player.open(Media(url, httpHeaders: line.headers), play: true);
+      final media = line.headers.isEmpty
+          ? Media(url)
+          : Media(url, httpHeaders: line.headers);
+      await _player.open(media, play: true);
       _refreshSuperResolutionShader();
       if (!mounted || serial != _openLineSerial) return;
       setState(() {
@@ -594,6 +830,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   void _handlePlayerError(Object error) {
+    if (!_isPlayableLine(_line)) {
+      if (!mounted) return;
+      setState(() {
+        _loadingLine = false;
+        _playbackFailed = false;
+        _playerMessage = null;
+      });
+      return;
+    }
     final current = _line;
     if (current != null) _failedLineIds.add(current.id);
     if (!mounted) return;
@@ -645,6 +890,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       await _openLine(_line!, force: true);
       return;
     }
+    if (_usesWebPlayer) {
+      if (_playing) {
+        _webPlayerController.pause();
+      } else {
+        _webPlayerController.play();
+      }
+      return;
+    }
     await _player.playOrPause();
   }
 
@@ -658,7 +911,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (_duration <= Duration.zero) return;
     final max = _duration.inMilliseconds;
     final clamped = target.inMilliseconds.clamp(0, max);
-    await _player.seek(Duration(milliseconds: clamped));
+    final position = Duration(milliseconds: clamped);
+    if (_usesWebPlayer) {
+      _webPlayerController.seek(position);
+      setState(() => _position = position);
+      return;
+    }
+    await _player.seek(position);
   }
 
   Future<void> _adjustVolume(double delta) async {
@@ -671,7 +930,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _volume = 0;
       });
       _appliedVolume = 0;
-      await _player.setVolume(0);
+      if (!_usesWebPlayer) await _player.setVolume(0);
       return;
     }
     setState(() {
@@ -681,7 +940,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
     final targetVolume = clamped;
     _appliedVolume = targetVolume;
-    await _player.setVolume(targetVolume);
+    if (!_usesWebPlayer) await _player.setVolume(targetVolume);
   }
 
   Future<void> _toggleMute() async {
@@ -698,7 +957,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       if (!next && volume > 0) _lastNonZeroVolume = volume;
     });
     _appliedVolume = volume;
-    await _player.setVolume(volume);
+    if (!_usesWebPlayer) await _player.setVolume(volume);
   }
 
   Future<void> _reloadCurrentLine() async {
@@ -721,9 +980,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _playerMessage = null;
       _lineLookupMessage = null;
       _playbackFailed = false;
+      _remoteDanmaku = const [];
       _episodePanel = false;
     });
     unawaited(_player.stop());
+    unawaited(_loadDanmakuForCurrentEpisode());
     unawaited(_resolveLinesForCurrentEpisode());
   }
 
@@ -880,6 +1141,297 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _danmakuPanel = false;
     });
   }
+
+  Future<void> _captureScreenshot() async {
+    _revealPlayerControls();
+    try {
+      final bytes = await _player.screenshot(format: 'image/png');
+      if (bytes == null || bytes.isEmpty) {
+        _showPlayerToast('当前平台或视频线路不支持截图');
+        return;
+      }
+      final safeTitle = widget.request.subject.title.replaceAll(
+        RegExp(r'[\\/:*?"<>|]'),
+        '_',
+      );
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '保存视频截图',
+        fileName:
+            '${safeTitle}_EP${_episode.number}_${DateTime.now().millisecondsSinceEpoch}.png',
+        bytes: bytes,
+      );
+      if (path != null || kIsWeb) _showPlayerToast('截图已保存');
+    } catch (error) {
+      _showPlayerToast('截图失败：${_friendlyPlaybackError(error)}');
+    }
+  }
+
+  void _toggleTheaterMode() {
+    _revealPlayerControls();
+    setState(() => _theaterMode = !_theaterMode);
+  }
+
+  Future<void> _showExternalPlayback() async {
+    final url = _line?.url?.trim() ?? '';
+    if (url.isEmpty) {
+      _showPlayerToast('当前没有可分享的播放地址');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('投屏与外部播放'),
+        content: const Text(
+          '已复制当前播放地址。可以粘贴到支持 DLNA、AirPlay 或 Chromecast 的播放器中。应用内原生投屏仍取决于设备平台能力。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _selectSubtitle(SubtitleCandidate candidate) async {
+    final url = candidate.downloadUrl?.trim() ?? '';
+    if (!candidate.available || url.isEmpty) {
+      _showPlayerToast(candidate.message ?? '该字幕暂不可用');
+      return;
+    }
+    try {
+      await _player.setSubtitleTrack(
+        SubtitleTrack.uri(
+          url,
+          title: candidate.title,
+          language: candidate.language,
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _selectedSubtitle = candidate;
+        _subtitlePanel = false;
+      });
+      _showPlayerToast('已加载字幕：${candidate.title}');
+    } catch (error) {
+      _showPlayerToast('字幕加载失败：${_friendlyPlaybackError(error)}');
+    }
+  }
+
+  Future<void> _disableSubtitle() async {
+    await _player.setSubtitleTrack(SubtitleTrack.no());
+    if (!mounted) return;
+    setState(() {
+      _selectedSubtitle = null;
+      _subtitlePanel = false;
+    });
+    _showPlayerToast('字幕已关闭');
+  }
+
+  Future<void> _loadDanmakuForCurrentEpisode() async {
+    final serial = ++_danmakuLoadSerial;
+    final episode = _episode;
+    try {
+      final timeline = await ref
+          .read(animeControllerProvider.notifier)
+          .danmakuTimelineForEpisode(widget.request.subject, episode);
+      if (!mounted ||
+          serial != _danmakuLoadSerial ||
+          episode.id != _episode.id) {
+        return;
+      }
+      setState(() => _remoteDanmaku = timeline.comments);
+    } catch (_) {
+      if (!mounted ||
+          serial != _danmakuLoadSerial ||
+          episode.id != _episode.id) {
+        return;
+      }
+      setState(() => _remoteDanmaku = const []);
+    }
+  }
+
+  void _sendLocalDanmaku(String text, {required DanmakuSettings settings}) {
+    final value = text.trim();
+    if (value.isEmpty) return;
+    if (!settings.enabled) {
+      _showPlayerToast('请先在弹幕设置中启用弹幕');
+      return;
+    }
+    if (settings.blockKeywords.any(value.contains)) {
+      _showPlayerToast('内容命中了本地屏蔽词');
+      return;
+    }
+    final entry = _LocalDanmakuEntry(
+      id: DateTime.now().microsecondsSinceEpoch,
+      text: value,
+    );
+    setState(() {
+      _localDanmaku.add(entry);
+      _danmakuInput.clear();
+    });
+    Timer(const Duration(seconds: 9), () {
+      if (!mounted) return;
+      setState(() => _localDanmaku.removeWhere((item) => item.id == entry.id));
+    });
+  }
+
+  void _handleWebReady() {
+    if (!mounted) return;
+    setState(() {
+      _loadingLine = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+  }
+
+  void _handleWebError() {
+    if (!mounted) return;
+    setState(() {
+      _loadingLine = false;
+      _playbackFailed = true;
+      _playing = false;
+      _playerMessage = '网页播放器无法打开当前地址，可能被源站跨域或防盗链限制。';
+    });
+  }
+
+  void _handleWebPosition(Duration value) {
+    if (!mounted) return;
+    setState(() => _position = value);
+  }
+
+  void _handleWebDuration(Duration value) {
+    if (!mounted || value.isNegative) return;
+    setState(() => _duration = value);
+  }
+
+  void _handleWebPlaying(bool value) {
+    if (!mounted || _playing == value) return;
+    setState(() => _playing = value);
+  }
+
+  void _showPlayerToast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+    );
+  }
+}
+
+class _LocalDanmakuEntry {
+  const _LocalDanmakuEntry({required this.id, required this.text});
+
+  final int id;
+  final String text;
+}
+
+class _LocalDanmakuOverlay extends StatelessWidget {
+  const _LocalDanmakuOverlay({required this.entries, required this.settings});
+
+  final List<_LocalDanmakuEntry> entries;
+  final DanmakuSettings settings;
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final visible = entries.reversed.take(12).toList().reversed.toList();
+          return ClipRect(
+            child: Stack(
+              children: [
+                for (final entry in visible)
+                  _LocalDanmakuBullet(
+                    key: ValueKey(entry.id),
+                    entry: entry,
+                    lane: entry.id.remainder(6),
+                    width: constraints.maxWidth,
+                    settings: settings,
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _LocalDanmakuBullet extends StatefulWidget {
+  const _LocalDanmakuBullet({
+    super.key,
+    required this.entry,
+    required this.lane,
+    required this.width,
+    required this.settings,
+  });
+
+  final _LocalDanmakuEntry entry;
+  final int lane;
+  final double width;
+  final DanmakuSettings settings;
+
+  @override
+  State<_LocalDanmakuBullet> createState() => _LocalDanmakuBulletState();
+}
+
+class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: Duration(seconds: 7 + widget.entry.text.length.clamp(0, 4)),
+    )..forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fontSize = widget.settings.fontSize.clamp(12, 30).toDouble();
+    final estimatedWidth = math.max(120.0, widget.entry.text.length * fontSize);
+    return Positioned(
+      top: 68 + widget.lane * (fontSize + 12),
+      left: 0,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          final x =
+              widget.width -
+              (widget.width + estimatedWidth) * _controller.value;
+          return Transform.translate(offset: Offset(x, 0), child: child);
+        },
+        child: Text(
+          widget.entry.text,
+          maxLines: 1,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: widget.settings.opacity),
+            fontSize: fontSize,
+            fontWeight: FontWeight.w700,
+            shadows: const [
+              Shadow(color: Colors.black, blurRadius: 2, offset: Offset(1, 1)),
+              Shadow(
+                color: Colors.black,
+                blurRadius: 2,
+                offset: Offset(-1, -1),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class MissingPlayerPage extends StatelessWidget {
@@ -897,12 +1449,18 @@ class MissingPlayerPage extends StatelessWidget {
 class _PlayerCanvas extends StatelessWidget {
   const _PlayerCanvas({
     required this.controller,
+    required this.webPlayerController,
     required this.subject,
+    required this.episodes,
     required this.episode,
     required this.line,
     required this.settings,
+    required this.superResolutionProfile,
     required this.services,
     required this.danmaku,
+    required this.remoteDanmaku,
+    required this.localDanmaku,
+    required this.theaterMode,
     required this.position,
     required this.duration,
     required this.buffer,
@@ -917,6 +1475,9 @@ class _PlayerCanvas extends StatelessWidget {
     required this.playerMessage,
     required this.onBack,
     required this.onReload,
+    required this.onScreenshot,
+    required this.onTheaterMode,
+    required this.onCast,
     required this.onPlayPause,
     required this.onRewind,
     required this.onForward,
@@ -924,9 +1485,17 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onMute,
     required this.onFullscreen,
     required this.onEpisodePanel,
+    required this.onEpisodeSelected,
     required this.onLinePanel,
     required this.onSubtitlePanel,
     required this.onDanmakuPanel,
+    required this.danmakuInput,
+    required this.onSendDanmaku,
+    required this.onWebReady,
+    required this.onWebError,
+    required this.onWebPosition,
+    required this.onWebDuration,
+    required this.onWebPlaying,
     required this.onSettingsPanel,
     required this.controlsVisible,
     required this.autoHideChrome,
@@ -935,12 +1504,18 @@ class _PlayerCanvas extends StatelessWidget {
   });
 
   final VideoController controller;
+  final WebStreamPlayerController webPlayerController;
   final AnimeSubject subject;
+  final List<AnimeEpisode> episodes;
   final AnimeEpisode episode;
   final PlaybackLine? line;
   final PlaybackSettings settings;
+  final Anime4KProfile? superResolutionProfile;
   final ExternalServiceSettings services;
   final DanmakuSettings danmaku;
+  final List<DanmakuComment> remoteDanmaku;
+  final List<_LocalDanmakuEntry> localDanmaku;
+  final bool theaterMode;
   final Duration position;
   final Duration duration;
   final Duration buffer;
@@ -957,6 +1532,9 @@ class _PlayerCanvas extends StatelessWidget {
   final bool autoHideChrome;
   final Future<void> Function() onBack;
   final Future<void> Function() onReload;
+  final Future<void> Function() onScreenshot;
+  final VoidCallback onTheaterMode;
+  final Future<void> Function() onCast;
   final Future<void> Function() onPlayPause;
   final Future<void> Function() onRewind;
   final Future<void> Function() onForward;
@@ -964,16 +1542,25 @@ class _PlayerCanvas extends StatelessWidget {
   final Future<void> Function() onMute;
   final Future<void> Function() onFullscreen;
   final VoidCallback onEpisodePanel;
+  final ValueChanged<AnimeEpisode> onEpisodeSelected;
   final VoidCallback onLinePanel;
   final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
+  final TextEditingController danmakuInput;
+  final ValueChanged<String> onSendDanmaku;
+  final VoidCallback onWebReady;
+  final VoidCallback onWebError;
+  final ValueChanged<Duration> onWebPosition;
+  final ValueChanged<Duration> onWebDuration;
+  final ValueChanged<bool> onWebPlaying;
   final VoidCallback onSettingsPanel;
   final VoidCallback onUserInteraction;
   final ValueChanged<bool> onChromeHotZoneChanged;
 
   @override
   Widget build(BuildContext context) {
-    final showSideList = MediaQuery.sizeOf(context).width >= 1120;
+    final showSideList =
+        MediaQuery.sizeOf(context).width >= 1120 && !theaterMode;
     final chromeVisible = controlsVisible || !autoHideChrome;
     final compact = MediaQuery.sizeOf(context).width < 640;
     final horizontalInset = compact ? 14.0 : (fullscreen ? 28.0 : 18.0);
@@ -1046,17 +1633,39 @@ class _PlayerCanvas extends StatelessWidget {
                               children: [
                                 _StreamVideoSurface(
                                   controller: controller,
+                                  webPlayerController: webPlayerController,
                                   line: line,
                                   settings: settings,
+                                  superResolutionActive:
+                                      superResolutionProfile != null,
+                                  playing: playing,
+                                  volume: muted ? 0 : volume / 100,
+                                  position: position,
                                   loading: loadingLine || lineLookupInProgress,
                                   failed: playbackFailed,
                                   message: playerMessage,
+                                  onWebReady: onWebReady,
+                                  onWebError: onWebError,
+                                  onWebPosition: onWebPosition,
+                                  onWebDuration: onWebDuration,
+                                  onWebPlaying: onWebPlaying,
                                   poster: PosterArt(
                                     coverUrl:
                                         subject.bannerUrl ?? subject.coverUrl,
                                     title: subject.title,
                                   ),
                                 ),
+                                if (danmaku.enabled && remoteDanmaku.isNotEmpty)
+                                  RemoteDanmakuOverlay(
+                                    comments: remoteDanmaku,
+                                    position: position,
+                                    settings: danmaku,
+                                  ),
+                                if (danmaku.enabled && localDanmaku.isNotEmpty)
+                                  _LocalDanmakuOverlay(
+                                    entries: localDanmaku,
+                                    settings: danmaku,
+                                  ),
                                 AnimatedOpacity(
                                   opacity: chromeVisible ? 1 : 0,
                                   duration: const Duration(milliseconds: 180),
@@ -1076,6 +1685,10 @@ class _PlayerCanvas extends StatelessWidget {
                                               line: line,
                                               onBack: onBack,
                                               onReload: onReload,
+                                              onScreenshot: onScreenshot,
+                                              onTheaterMode: onTheaterMode,
+                                              theaterMode: theaterMode,
+                                              onCast: onCast,
                                               onSettings: onSettingsPanel,
                                             ),
                                           ),
@@ -1086,9 +1699,11 @@ class _PlayerCanvas extends StatelessWidget {
                                           child: Wrap(
                                             spacing: 8,
                                             children: [
-                                              if (settings.superResolution)
-                                                const SmallBadge(
-                                                  label: 'SR',
+                                              if (superResolutionProfile !=
+                                                  null)
+                                                SmallBadge(
+                                                  label:
+                                                      'SR · ${superResolutionProfile!.label}',
                                                   active: true,
                                                 ),
                                               SmallBadge(
@@ -1121,6 +1736,8 @@ class _PlayerCanvas extends StatelessWidget {
                                           onFullscreen: onFullscreen,
                                           onSubtitlePanel: onSubtitlePanel,
                                           onDanmakuPanel: onDanmakuPanel,
+                                          danmakuInput: danmakuInput,
+                                          onSendDanmaku: onSendDanmaku,
                                           onEpisodePanel: onEpisodePanel,
                                           onLinePanel: onLinePanel,
                                         ),
@@ -1143,8 +1760,10 @@ class _PlayerCanvas extends StatelessWidget {
                   width: 340,
                   child: _PlayerEpisodeRail(
                     subject: subject,
+                    episodes: episodes,
                     selected: episode,
                     onEpisodePanel: onEpisodePanel,
+                    onEpisodeSelected: onEpisodeSelected,
                     onLinePanel: onLinePanel,
                   ),
                 ),
@@ -1160,20 +1779,40 @@ class _PlayerCanvas extends StatelessWidget {
 class _StreamVideoSurface extends StatelessWidget {
   const _StreamVideoSurface({
     required this.controller,
+    required this.webPlayerController,
     required this.line,
     required this.settings,
+    required this.superResolutionActive,
+    required this.playing,
+    required this.volume,
+    required this.position,
     required this.loading,
     required this.failed,
     required this.message,
+    required this.onWebReady,
+    required this.onWebError,
+    required this.onWebPosition,
+    required this.onWebDuration,
+    required this.onWebPlaying,
     required this.poster,
   });
 
   final VideoController controller;
+  final WebStreamPlayerController webPlayerController;
   final PlaybackLine? line;
   final PlaybackSettings settings;
+  final bool superResolutionActive;
+  final bool playing;
+  final double volume;
+  final Duration position;
   final bool loading;
   final bool failed;
   final String? message;
+  final VoidCallback onWebReady;
+  final VoidCallback onWebError;
+  final ValueChanged<Duration> onWebPosition;
+  final ValueChanged<Duration> onWebDuration;
+  final ValueChanged<bool> onWebPlaying;
   final Widget poster;
 
   @override
@@ -1181,14 +1820,35 @@ class _StreamVideoSurface extends StatelessWidget {
     final hasStream =
         line?.available == true && (line?.url?.trim().isNotEmpty ?? false);
     final shouldShowVideo = hasStream && !failed;
-    final video = Video(
-      controller: controller,
-      controls: null,
-      fit: _fitForVideoScale(settings.videoScale),
-      filterQuality: settings.superResolution
-          ? FilterQuality.high
-          : FilterQuality.low,
-    );
+    final url = line?.url?.trim() ?? '';
+    final useWebPlayer = shouldUseWebStreamPlayer(url);
+    final Widget video;
+    if (!shouldShowVideo) {
+      video = const SizedBox.shrink();
+    } else if (useWebPlayer) {
+      video = WebStreamPlayer(
+        url: url,
+        controller: webPlayerController,
+        playing: playing,
+        volume: volume.clamp(0.0, 1.0),
+        position: position,
+        forceHls: url.toLowerCase().contains('.m3u8'),
+        onReady: onWebReady,
+        onError: onWebError,
+        onPosition: onWebPosition,
+        onDuration: onWebDuration,
+        onPlaying: onWebPlaying,
+      );
+    } else {
+      video = Video(
+        controller: controller,
+        controls: null,
+        fit: _fitForVideoScale(settings.videoScale),
+        filterQuality: superResolutionActive
+            ? FilterQuality.high
+            : FilterQuality.low,
+      );
+    }
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -1304,6 +1964,10 @@ class _PlayerHeader extends StatelessWidget {
     required this.line,
     required this.onBack,
     required this.onReload,
+    required this.onScreenshot,
+    required this.onTheaterMode,
+    required this.theaterMode,
+    required this.onCast,
     required this.onSettings,
   });
 
@@ -1312,6 +1976,10 @@ class _PlayerHeader extends StatelessWidget {
   final PlaybackLine? line;
   final Future<void> Function() onBack;
   final Future<void> Function() onReload;
+  final Future<void> Function() onScreenshot;
+  final VoidCallback onTheaterMode;
+  final bool theaterMode;
+  final Future<void> Function() onCast;
   final VoidCallback onSettings;
 
   @override
@@ -1337,6 +2005,11 @@ class _PlayerHeader extends StatelessWidget {
               tooltip: '刷新线路',
               onPressed: onReload,
               icon: const Icon(Icons.refresh_rounded),
+            ),
+            IconButton(
+              tooltip: '截图',
+              onPressed: onScreenshot,
+              icon: const Icon(Icons.camera_alt_outlined),
             ),
             IconButton(
               tooltip: '播放设置',
@@ -1374,9 +2047,17 @@ class _PlayerHeader extends StatelessWidget {
             ),
           ),
           _HeaderIcon(Icons.refresh, tooltip: '刷新', onPressed: onReload),
-          const _HeaderIcon(Icons.camera_alt_outlined, tooltip: '截图'),
-          const _HeaderIcon(Icons.crop_landscape, tooltip: '缩小窗口'),
-          const _HeaderIcon(Icons.cast, tooltip: '投屏'),
+          _HeaderIcon(
+            Icons.camera_alt_outlined,
+            tooltip: '保存截图',
+            onPressed: onScreenshot,
+          ),
+          _HeaderIcon(
+            theaterMode ? Icons.close_fullscreen : Icons.crop_16_9_rounded,
+            tooltip: theaterMode ? '退出影院模式' : '影院模式',
+            onPressed: onTheaterMode,
+          ),
+          _HeaderIcon(Icons.cast, tooltip: '投屏 / 外部播放', onPressed: onCast),
           IconButton(
             tooltip: '播放设置',
             onPressed: onSettings,
@@ -1411,6 +2092,8 @@ class _PlayerBottomBar extends StatelessWidget {
     required this.onFullscreen,
     required this.onSubtitlePanel,
     required this.onDanmakuPanel,
+    required this.danmakuInput,
+    required this.onSendDanmaku,
     required this.onEpisodePanel,
     required this.onLinePanel,
   });
@@ -1436,6 +2119,8 @@ class _PlayerBottomBar extends StatelessWidget {
   final Future<void> Function() onFullscreen;
   final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
+  final TextEditingController danmakuInput;
+  final ValueChanged<String> onSendDanmaku;
   final VoidCallback onEpisodePanel;
   final VoidCallback onLinePanel;
 
@@ -1565,13 +2250,28 @@ class _PlayerBottomBar extends StatelessWidget {
                             borderRadius: BorderRadius.circular(20),
                             border: Border.all(color: Colors.white12),
                           ),
-                          child: Container(
+                          child: SizedBox(
                             height: 40,
-                            alignment: Alignment.centerLeft,
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: const Text(
-                              '发送弹幕',
-                              style: TextStyle(color: Colors.white54),
+                            child: TextField(
+                              controller: danmakuInput,
+                              enabled: danmaku.enabled,
+                              textInputAction: TextInputAction.send,
+                              onSubmitted: onSendDanmaku,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                filled: false,
+                                border: InputBorder.none,
+                                enabledBorder: InputBorder.none,
+                                focusedBorder: InputBorder.none,
+                                hintText: danmaku.enabled
+                                    ? '发送本地弹幕，按 Enter 发送'
+                                    : '弹幕已关闭',
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                  vertical: 11,
+                                ),
+                              ),
                             ),
                           ),
                         ),
@@ -1786,13 +2486,11 @@ class _BufferedSeekBar extends StatelessWidget {
                       width: enabled ? 12 : 0,
                       height: enabled ? 12 : 0,
                       decoration: BoxDecoration(
-                        color: const Color(0xFF8C74FF),
+                        color: AppColors.primary,
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(
-                              0xFF8C74FF,
-                            ).withValues(alpha: 0.42),
+                            color: AppColors.primary.withValues(alpha: 0.42),
                             blurRadius: 12,
                             spreadRadius: 1,
                           ),
@@ -1839,7 +2537,7 @@ class _BufferedSeekBarPainter extends CustomPainter {
       ..color = Colors.white.withValues(alpha: enabled ? 0.38 : 0.20);
     final active = Paint()
       ..shader = const LinearGradient(
-        colors: [Color(0xFF9B82FF), Color(0xFF6EA6FF)],
+        colors: [AppColors.primary, AppColors.primary2],
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
 
     canvas.drawRRect(trackRect, background);
@@ -1908,14 +2606,18 @@ class _ControlIconButton extends StatelessWidget {
 class _PlayerEpisodeRail extends StatelessWidget {
   const _PlayerEpisodeRail({
     required this.subject,
+    required this.episodes,
     required this.selected,
     required this.onEpisodePanel,
+    required this.onEpisodeSelected,
     required this.onLinePanel,
   });
 
   final AnimeSubject subject;
+  final List<AnimeEpisode> episodes;
   final AnimeEpisode selected;
   final VoidCallback onEpisodePanel;
+  final ValueChanged<AnimeEpisode> onEpisodeSelected;
   final VoidCallback onLinePanel;
 
   @override
@@ -1936,62 +2638,77 @@ class _PlayerEpisodeRail extends StatelessWidget {
           const SizedBox(height: 12),
           Expanded(
             child: ListView.separated(
-              itemCount: 8,
+              itemCount: episodes.length,
               separatorBuilder: (context, index) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
-                final number = (selected.number + index - 3).clamp(1, 999);
-                final active = number == selected.number;
-                return AppPanel(
-                  padding: const EdgeInsets.all(8),
-                  color: active ? const Color(0xFF171A3A) : AppColors.bg2,
-                  borderColor: active ? AppColors.primary : AppColors.border,
-                  child: Row(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: SizedBox(
-                          width: 76,
-                          height: 46,
-                          child: PosterArt(
-                            coverUrl: selected.thumbnailUrl ?? subject.coverUrl,
-                            title: subject.title,
+                final episode = episodes[index];
+                final active = episode.id == selected.id;
+                return InkWell(
+                  onTap: active ? null : () => onEpisodeSelected(episode),
+                  borderRadius: BorderRadius.circular(8),
+                  child: AppPanel(
+                    padding: const EdgeInsets.all(8),
+                    color: active
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : AppColors.bg2,
+                    borderColor: active
+                        ? Theme.of(context).colorScheme.primary
+                        : AppColors.border,
+                    child: Row(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            width: 76,
+                            height: 46,
+                            child: PosterArt(
+                              coverUrl:
+                                  selected.thumbnailUrl ?? subject.coverUrl,
+                              title: subject.title,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '第$number集',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.labelLarge
-                                  ?.copyWith(
-                                    color: AppColors.text,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                            ),
-                            Text(
-                              active ? '正在播放' : '23:40 · 待播放',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: AppColors.muted),
-                            ),
-                          ],
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                episode.displayTitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.labelLarge
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurface,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                              ),
+                              Text(
+                                active ? '正在播放' : '23:40 · 待播放',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.onSurfaceVariant,
+                                    ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                      IconButton(
-                        tooltip: '线路',
-                        onPressed: onLinePanel,
-                        icon: Icon(
-                          active ? Icons.graphic_eq : Icons.download_outlined,
-                          color: active ? AppColors.primary : AppColors.muted,
+                        IconButton(
+                          tooltip: '线路',
+                          onPressed: onLinePanel,
+                          icon: Icon(
+                            active ? Icons.graphic_eq : Icons.download_outlined,
+                            color: active ? AppColors.primary : AppColors.muted,
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 );
               },
@@ -2056,9 +2773,28 @@ List<PlaybackLine> _mergeLineLists(
   }.values.toList(growable: false);
 }
 
-String _emptyLineMessage(List<PlaybackLine> lines) {
+String _emptyLineMessage(
+  List<PlaybackLine> lines, {
+  required AnimeSubject subject,
+}) {
+  final source = subject.source.toLowerCase();
+  final isMetadataOnly =
+      source.startsWith('cinemeta:') ||
+      source.startsWith('tvmaze') ||
+      source == 'wikidata';
   if (lines.isEmpty) {
+    if (source.startsWith('archive:') ||
+        source.startsWith('peertube:') ||
+        source.startsWith('commons:')) {
+      return '这个开放媒体暂时没有返回可播放文件，可能正在转码、已下架或源站暂时不可用。';
+    }
+    if (isMetadataOnly) {
+      return '这部作品目前仅有影视资料，暂无可直接播放线路。可到播放规则页添加或启用规则。';
+    }
     return '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。';
+  }
+  if (isMetadataOnly) {
+    return '这部作品目前仅有影视资料；已尝试 ${lines.length} 条规则，但没有可直接播放的地址。可到播放规则页添加或启用规则。';
   }
   final unavailableCount = lines.where((line) => !line.available).length;
   return _unavailableLinesMessage(lines, count: unavailableCount);
@@ -2093,6 +2829,9 @@ String _friendlyPlaybackError(Object error) {
   if (text.contains('HTTP 404') || text.contains('404')) return '视频地址已失效';
   if (text.contains('FormatException')) return '视频地址格式不正确';
   if (text.contains('Failed to open')) return '播放器无法打开这个地址';
+  if (text.contains('Empty src') || text.contains('MEDIA_ELEMENT_ERROR')) {
+    return '当前没有可播放地址';
+  }
   return text.length > 90 ? '${text.substring(0, 90)}...' : text;
 }
 
@@ -2303,7 +3042,7 @@ class _LinePanelBody extends StatelessWidget {
         else
           DecoratedBox(
             decoration: BoxDecoration(
-              color: const Color(0xFF202020),
+              color: AppColors.panelHigh,
               borderRadius: BorderRadius.circular(8),
             ),
             child: Padding(
@@ -2342,10 +3081,19 @@ class _LinePanelBody extends StatelessWidget {
 }
 
 class _SubtitlePanel extends ConsumerWidget {
-  const _SubtitlePanel({required this.subject, required this.episode});
+  const _SubtitlePanel({
+    required this.subject,
+    required this.episode,
+    required this.selected,
+    required this.onSelected,
+    required this.onDisabled,
+  });
 
   final AnimeSubject subject;
   final AnimeEpisode episode;
+  final SubtitleCandidate? selected;
+  final ValueChanged<SubtitleCandidate> onSelected;
+  final VoidCallback onDisabled;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -2358,6 +3106,12 @@ class _SubtitlePanel extends ConsumerWidget {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
+        if (snapshot.hasError) {
+          return _PanelEmpty(
+            title: '字幕读取失败',
+            message: _friendlyPlaybackError(snapshot.error!),
+          );
+        }
         if (items.isEmpty) {
           return const _PanelEmpty(
             title: '没有匹配字幕',
@@ -2366,15 +3120,30 @@ class _SubtitlePanel extends ConsumerWidget {
         }
         return ListView.separated(
           padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-          itemCount: items.length,
+          itemCount: items.length + 1,
           separatorBuilder: (context, index) => const SizedBox(height: 10),
           itemBuilder: (context, index) {
-            final item = items[index];
+            if (index == 0) {
+              return _PanelRow(
+                title: '关闭字幕',
+                subtitle: '不显示外部字幕轨道',
+                trailing: selected == null ? '当前' : '',
+                selected: selected == null,
+                onTap: onDisabled,
+              );
+            }
+            final item = items[index - 1];
             return _PanelRow(
               title: item.title,
               subtitle:
                   '${item.provider} · ${item.language} · 下载 ${item.downloadCount}',
-              trailing: item.available ? '可用' : item.message ?? '待配置',
+              trailing: selected?.downloadUrl == item.downloadUrl
+                  ? '当前'
+                  : item.available
+                  ? '加载'
+                  : item.message ?? '待配置',
+              selected: selected?.downloadUrl == item.downloadUrl,
+              onTap: item.available ? () => onSelected(item) : null,
             );
           },
         );
@@ -2399,6 +3168,12 @@ class _DanmakuPanel extends ConsumerWidget {
         final items = snapshot.data ?? const <DanmakuMatch>[];
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return _PanelEmpty(
+            title: '弹幕源读取失败',
+            message: _friendlyPlaybackError(snapshot.error!),
+          );
         }
         if (items.isEmpty) {
           return const _PanelEmpty(
@@ -2432,56 +3207,64 @@ class _PanelRow extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.trailing,
+    this.selected = false,
+    this.onTap,
   });
 
   final String title;
   final String subtitle;
   final String trailing;
+  final bool selected;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF202020),
+    return Material(
+      color: selected
+          ? Theme.of(context).colorScheme.secondaryContainer
+          : Theme.of(context).colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(8),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurface,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Colors.white54),
-                  ),
-                ],
+                    const SizedBox(height: 4),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              trailing,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: Colors.orangeAccent),
-            ),
-          ],
+              const SizedBox(width: 8),
+              Text(
+                trailing,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: Colors.orangeAccent),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2539,7 +3322,7 @@ class _PanelInlineStatus extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFF202020),
+        color: AppColors.panelHigh,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF303030)),
       ),
@@ -2577,7 +3360,7 @@ class _LineModeBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFF202020),
+        color: AppColors.panelHigh,
         borderRadius: BorderRadius.circular(8),
       ),
       child: SizedBox(

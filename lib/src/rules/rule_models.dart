@@ -64,6 +64,8 @@ class RulePlugin {
     this.kazumi,
     this.xbpq,
     this.animeko,
+    this.requestHeaders = const {},
+    this.rawConfig = const {},
     this.groupId = '',
     this.priority = 100,
     this.unsupportedReason,
@@ -91,6 +93,8 @@ class RulePlugin {
   final KazumiParserConfig? kazumi;
   final XbpqParserConfig? xbpq;
   final AnimekoWebSelectorConfig? animeko;
+  final Map<String, String> requestHeaders;
+  final Map<String, dynamic> rawConfig;
   final String groupId;
   final int priority;
   final String? unsupportedReason;
@@ -101,13 +105,25 @@ class RulePlugin {
   String get contentLabel => contentType.label;
 
   bool get canResolveNatively {
-    if (requiresCaptcha || requiresPrivateAuth || unsupportedReason != null) {
+    if (requiresCaptcha || unsupportedReason != null) {
       return false;
     }
     final normalizedEngine = engine.toLowerCase();
+    final endpoint = Uri.tryParse(baseUrl);
+    final xbpqConfig = xbpq;
     return (normalizedEngine == 'native' && kazumi != null) ||
-        (normalizedEngine == 'xbpq' && xbpq != null) ||
-        (normalizedEngine == 'animeko-web-selector' && animeko != null);
+        (normalizedEngine == 'xbpq' &&
+            xbpqConfig != null &&
+            xbpqConfig.searchArray.trim().isNotEmpty &&
+            xbpqConfig.searchTitle.trim().isNotEmpty &&
+            xbpqConfig.searchLink.trim().isNotEmpty &&
+            xbpqConfig.playList.trim().isNotEmpty &&
+            xbpqConfig.playLink.trim().isNotEmpty) ||
+        (normalizedEngine == 'animeko-web-selector' && animeko != null) ||
+        (normalizedEngine == 'tvbox-json-api' &&
+            endpoint != null &&
+            endpoint.hasScheme &&
+            endpoint.host.isNotEmpty);
   }
 
   String get updateLabel {
@@ -141,6 +157,8 @@ class RulePlugin {
     KazumiParserConfig? kazumi,
     XbpqParserConfig? xbpq,
     AnimekoWebSelectorConfig? animeko,
+    Map<String, String>? requestHeaders,
+    Map<String, dynamic>? rawConfig,
     String? groupId,
     int? priority,
     String? unsupportedReason,
@@ -168,6 +186,8 @@ class RulePlugin {
       kazumi: kazumi ?? this.kazumi,
       xbpq: xbpq ?? this.xbpq,
       animeko: animeko ?? this.animeko,
+      requestHeaders: requestHeaders ?? this.requestHeaders,
+      rawConfig: rawConfig ?? this.rawConfig,
       groupId: groupId ?? this.groupId,
       priority: priority ?? this.priority,
       unsupportedReason: unsupportedReason ?? this.unsupportedReason,
@@ -197,6 +217,8 @@ class RulePlugin {
     'kazumi': kazumi?.toJson(),
     'xbpq': xbpq?.toJson(),
     'animeko': animeko?.toJson(),
+    'requestHeaders': requestHeaders,
+    'rawConfig': rawConfig,
     'groupId': groupId,
     'priority': priority,
     'unsupportedReason': unsupportedReason,
@@ -258,6 +280,8 @@ class RulePlugin {
               animekoJson.cast<String, dynamic>(),
             )
           : null,
+      requestHeaders: _stringMapFromJson(json['requestHeaders']),
+      rawConfig: _dynamicMapFromJson(json['rawConfig']),
       groupId: json['groupId']?.toString() ?? '',
       priority: _intFromJson(json['priority'], fallback: 100),
       unsupportedReason: _blankToNull(json['unsupportedReason']?.toString()),
@@ -494,6 +518,18 @@ class KazumiParserConfig {
     required this.chapterResult,
     this.referer = '',
     this.userAgent = '',
+    this.apiLevel = '',
+    this.multipleSources = false,
+    this.useWebView = false,
+    this.useNativePlayer = true,
+    this.usePost = false,
+    this.useLegacyParser = false,
+    this.adBlocker = false,
+    this.searchMode = '',
+    this.chapterMode = '',
+    this.searchApiConfig = const {},
+    this.chapterApiConfig = const {},
+    this.antiCrawlerConfig = const {},
   });
 
   final String searchList;
@@ -503,6 +539,18 @@ class KazumiParserConfig {
   final String chapterResult;
   final String referer;
   final String userAgent;
+  final String apiLevel;
+  final bool multipleSources;
+  final bool useWebView;
+  final bool useNativePlayer;
+  final bool usePost;
+  final bool useLegacyParser;
+  final bool adBlocker;
+  final String searchMode;
+  final String chapterMode;
+  final Map<String, dynamic> searchApiConfig;
+  final Map<String, dynamic> chapterApiConfig;
+  final Map<String, dynamic> antiCrawlerConfig;
 
   Map<String, dynamic> toJson() => {
     'searchList': searchList,
@@ -512,6 +560,18 @@ class KazumiParserConfig {
     'chapterResult': chapterResult,
     'referer': referer,
     'userAgent': userAgent,
+    'apiLevel': apiLevel,
+    'multipleSources': multipleSources,
+    'useWebView': useWebView,
+    'useNativePlayer': useNativePlayer,
+    'usePost': usePost,
+    'useLegacyParser': useLegacyParser,
+    'adBlocker': adBlocker,
+    'searchMode': searchMode,
+    'chapterMode': chapterMode,
+    'searchApiConfig': searchApiConfig,
+    'chapterApiConfig': chapterApiConfig,
+    'antiCrawlerConfig': antiCrawlerConfig,
   };
 
   factory KazumiParserConfig.fromJson(Map<String, dynamic> json) {
@@ -523,6 +583,20 @@ class KazumiParserConfig {
       chapterResult: json['chapterResult']?.toString() ?? '',
       referer: json['referer']?.toString() ?? '',
       userAgent: json['userAgent']?.toString() ?? '',
+      apiLevel: json['apiLevel']?.toString() ?? json['api']?.toString() ?? '',
+      multipleSources: _boolFromJson(
+        json['multipleSources'] ?? json['muliSources'],
+      ),
+      useWebView: _boolFromJson(json['useWebView'] ?? json['useWebview']),
+      useNativePlayer: _boolFromJson(json['useNativePlayer'], fallback: true),
+      usePost: _boolFromJson(json['usePost']),
+      useLegacyParser: _boolFromJson(json['useLegacyParser']),
+      adBlocker: _boolFromJson(json['adBlocker']),
+      searchMode: json['searchMode']?.toString() ?? '',
+      chapterMode: json['chapterMode']?.toString() ?? '',
+      searchApiConfig: _dynamicMapFromJson(json['searchApiConfig']),
+      chapterApiConfig: _dynamicMapFromJson(json['chapterApiConfig']),
+      antiCrawlerConfig: _dynamicMapFromJson(json['antiCrawlerConfig']),
     );
   }
 }
@@ -734,6 +808,20 @@ DateTime _dateTimeFromJson(Object? value) {
     return DateTime.fromMillisecondsSinceEpoch(number * 1000);
   }
   return DateTime.tryParse(value?.toString() ?? '') ?? DateTime.now();
+}
+
+Map<String, String> _stringMapFromJson(Object? value) {
+  if (value is! Map) return const {};
+  return {
+    for (final entry in value.entries)
+      if (entry.key.toString().trim().isNotEmpty && entry.value != null)
+        entry.key.toString(): entry.value.toString(),
+  };
+}
+
+Map<String, dynamic> _dynamicMapFromJson(Object? value) {
+  if (value is! Map) return const {};
+  return value.map((key, item) => MapEntry(key.toString(), item));
 }
 
 int _intFromJson(Object? value, {int fallback = 0}) {

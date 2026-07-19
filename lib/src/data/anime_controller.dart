@@ -2,16 +2,26 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
 import '../rules/rule_models.dart';
+import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
+import '../sources/source_rule_bridge.dart';
 import 'bangumi_metadata_repository.dart';
+import 'chinese_metadata_repository.dart';
+import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
+import 'media_download_service.dart';
+import 'peertube_repository.dart';
 import 'playback_source_repository.dart';
+import 'wikimedia_commons_repository.dart';
 
 final bangumiMetadataRepositoryProvider = Provider<BangumiMetadataRepository>(
   (ref) => BangumiMetadataRepository(),
@@ -21,18 +31,51 @@ final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
   (ref) => const EmptyPlaybackSourceRepository(),
 );
 
+final rulePlaybackResolverProvider = Provider<RulePlaybackResolver>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return RulePlaybackResolver(client: client);
+});
+
+final internetArchivePlaybackProvider =
+    Provider<InternetArchivePlaybackSourceRepository>(
+      (ref) => InternetArchivePlaybackSourceRepository(),
+    );
+
 final externalServiceRepositoryProvider = Provider<ExternalServiceRepository>(
   (ref) => ExternalServiceRepository(),
+);
+
+final danmakuRepositoryProvider = Provider<DanmakuRepository>((ref) {
+  final repository = DanmakuRepository();
+  ref.onDispose(repository.close);
+  return repository;
+});
+
+final peerTubeRepositoryProvider = Provider<PeerTubeRepository>(
+  (ref) => PeerTubeRepository(),
+);
+
+final wikimediaCommonsRepositoryProvider = Provider<WikimediaCommonsRepository>(
+  (ref) => WikimediaCommonsRepository(),
+);
+
+final chineseMetadataRepositoryProvider = Provider<ChineseMetadataRepository>(
+  (ref) => ChineseMetadataRepository(
+    bangumiRepository: ref.read(bangumiMetadataRepositoryProvider),
+  ),
 );
 
 final sourceCatalogRepositoryProvider = Provider<SourceCatalogRepository>(
   (ref) => const SourceCatalogRepository(),
 );
 
+final mediaDownloadServiceProvider = Provider<MediaDownloadService>(
+  (ref) => const MediaDownloadService(),
+);
+
 final animeControllerProvider =
     AsyncNotifierProvider<AnimeController, AnimeState>(AnimeController.new);
-
-const _autoEnableRulesPerImportedGroup = 6;
 
 class AnimeState {
   const AnimeState({
@@ -120,14 +163,27 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   static const _animeMetadataCacheKey = 'metadata.cache.anime';
   static const _seriesMetadataCacheKey = 'metadata.cache.series';
   static const _movieMetadataCacheKey = 'metadata.cache.movie';
+  static const _homeFeedCacheKey = 'metadata.cache.home';
+  static const _homeFeedCacheVersion = 1;
+  static const _metadataCacheVersion = 8;
+  static const _metadataCacheLimit = 1200;
+  static const _metadataCacheTtl = Duration(hours: 8);
+  static const _sparseMetadataCacheTtl = Duration(minutes: 30);
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
-  final _metadataRefreshes = <String>{};
+  List<RulePlugin> _sourceCatalogRules = const [];
+  int _homeRefreshVersion = 0;
+  final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
+  final _playbackPrefetches = <String, Future<void>>{};
 
   @override
   Future<AnimeState> build() async {
-    _settings = await Hive.openBox<dynamic>(_settingsBox);
-    _library = await Hive.openBox<dynamic>(_libraryBox);
+    final boxes = await Future.wait<Box<dynamic>>([
+      Hive.openBox<dynamic>(_settingsBox),
+      Hive.openBox<dynamic>(_libraryBox),
+    ]);
+    _settings = boxes[0];
+    _library = boxes[1];
     final settingsJson = _settings.get('playback');
     final settings = settingsJson is Map
         ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
@@ -140,7 +196,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final servicesJson = _settings.get('services');
     final rulePluginsJson = _settings.get('rulePlugins');
     final sourceEnabledJson = _settings.get('sourceEnabled');
-    final feed = await ref.read(bangumiMetadataRepositoryProvider).homeFeed();
+    final services = servicesJson is Map
+        ? ExternalServiceSettings.fromJson(servicesJson.cast<String, dynamic>())
+        : const ExternalServiceSettings();
+    final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
+    final feed = _readHomeFeedCache() ?? bangumiRepository.fallbackHomeFeed();
     final defaultRulePlugins = const RulePluginRepository().defaultState();
     final rulePlugins = rulePluginsJson is Map
         ? _mergeDefaultNativeRules(
@@ -153,10 +213,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (rulePluginsJson is Map) {
       await _settings.put('rulePlugins', rulePlugins.toJson());
     }
-    final sourceCatalog = await _loadSourceCatalog(
+    final loadedSourceCatalog = await _loadSourceCatalog(
       _enabledOverridesFromJson(sourceEnabledJson),
     );
-    return AnimeState(
+    final sourceBridge = const SourceRuleBridge().build(loadedSourceCatalog);
+    _sourceCatalogRules = sourceBridge.rules;
+    final sourceCatalog = sourceBridge.attachTo(loadedSourceCatalog);
+    final misc = miscJson is Map
+        ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
+        : const MiscSettings();
+    unawaited(
+      WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {}),
+    );
+    final initialState = AnimeState(
       homeFeed: feed,
       settings: settings,
       favorites: _readEntries('favorites'),
@@ -177,25 +246,26 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       danmaku: danmakuJson is Map
           ? DanmakuSettings.fromJson(danmakuJson.cast<String, dynamic>())
           : const DanmakuSettings(),
-      misc: miscJson is Map
-          ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
-          : const MiscSettings(),
-      services: servicesJson is Map
-          ? ExternalServiceSettings.fromJson(
-              servicesJson.cast<String, dynamic>(),
-            )
-          : const ExternalServiceSettings(),
+      misc: misc,
+      services: services,
       rulePlugins: rulePlugins,
       sourceCatalog: sourceCatalog,
     );
+    unawaited(
+      Future<void>.delayed(
+        Duration.zero,
+        () => _refreshHomeFeed(services),
+      ).onError((_, _) {}),
+    );
+    return initialState;
   }
 
-  Future<List<AnimeSubject>> search(String keyword) {
+  Future<List<AnimeSubject>> search(String keyword) async {
     if (keyword.trim().isEmpty) return Future.value(const []);
     final query = keyword.trim();
     final services = state.value?.services ?? const ExternalServiceSettings();
     final external = ref.read(externalServiceRepositoryProvider);
-    return Future.wait([
+    final groups = await Future.wait([
       if (services.bangumiEnabled)
         ref
             .read(bangumiMetadataRepositoryProvider)
@@ -205,9 +275,41 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         external
             .anilistSearch(query, perPage: 24)
             .onError((_, _) => const <AnimeSubject>[]),
+      if (services.jikanEnabled)
+        external
+            .jikanSearch(query, limit: 24)
+            .onError((_, _) => const <AnimeSubject>[]),
+      if (services.kitsuEnabled)
+        external
+            .kitsuSearch(query, limit: 20)
+            .onError((_, _) => const <AnimeSubject>[]),
+      if (services.mediaMetadataEnabled && services.cinemetaEnabled)
+        external
+            .cinemetaSearch(query)
+            .onError((_, _) => const <AnimeSubject>[]),
       if (services.mediaMetadataEnabled)
-        external.mediaSearch(query).onError((_, _) => const <AnimeSubject>[]),
-    ]).then((groups) => _uniqueSubjects(groups.expand((items) => items)));
+        external.tvMazeSearch(query).onError((_, _) => const <AnimeSubject>[]),
+      if (services.mediaMetadataEnabled)
+        external
+            .wikidataMovieSearch(query)
+            .onError((_, _) => const <AnimeSubject>[]),
+      if (services.publicCollectionSyncEnabled)
+        external
+            .internetArchiveSearch(query, limit: 24)
+            .onError((_, _) => const <AnimeSubject>[]),
+      if (services.peerTubeEnabled)
+        ref
+            .read(peerTubeRepositoryProvider)
+            .search(query, limit: 24)
+            .onError((_, _) => const <AnimeSubject>[]),
+      if (services.wikimediaCommonsEnabled)
+        ref
+            .read(wikimediaCommonsRepositoryProvider)
+            .search(query, limit: 24)
+            .onError((_, _) => const <AnimeSubject>[]),
+    ]);
+    final merged = _uniqueSubjects(groups.expand((items) => items));
+    return _enrichSubjects(merged, services, animeLookupLimit: 24);
   }
 
   Future<List<AnimeSubject>> categorySubjects(String name) {
@@ -218,56 +320,154 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return ref.read(bangumiMetadataRepositoryProvider).subjectsByTag(name);
   }
 
-  Future<List<AnimeSubject>> discoverSubjects() async {
-    final subjects = _homeSubjects;
-    final cached = _readSubjectCache(_animeMetadataCacheKey);
-    unawaited(
-      _refreshSubjectCache(_animeMetadataCacheKey, () async {
-        final extra = await ref
-            .read(bangumiMetadataRepositoryProvider)
-            .discoverySubjects()
-            .timeout(const Duration(seconds: 12), onTimeout: () => const [])
-            .onError((_, _) => const <AnimeSubject>[]);
-        return _uniqueSubjects([...subjects, ...extra]);
-      }),
+  Future<List<AnimeSubject>> discoverSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    final subjects = _homeSubjects
+        .where(
+          (subject) =>
+              subjectMatchesContentType(subject, SubjectContentType.anime),
+        )
+        .toList(growable: false);
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    return _metadataSubjects(
+      key: _animeMetadataCacheKey,
+      signature: _metadataSignature('anime', services),
+      contentType: SubjectContentType.anime,
+      fallback: subjects,
+      waitForRefresh: waitForRefresh,
+      load: () async {
+        final external = ref.read(externalServiceRepositoryProvider);
+        final groups = await Future.wait([
+          if (services.bangumiEnabled)
+            ref
+                .read(bangumiMetadataRepositoryProvider)
+                .discoverySubjects()
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.anilistEnabled)
+            external
+                .anilistTrendingFeed(pages: 3, perPage: 50)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.jikanEnabled)
+            external
+                .jikanDiscoveryFeed(pages: 2)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.kitsuEnabled)
+            external
+                .kitsuTrendingFeed(pages: 4)
+                .onError((_, _) => const <AnimeSubject>[]),
+        ]);
+        final merged =
+            _uniqueSubjects([
+                  ..._interleaveSubjectGroups(groups, limitPerRound: 12),
+                  ...groups.expand((items) => items),
+                  ...subjects,
+                ])
+                .where(
+                  (subject) => subjectMatchesContentType(
+                    subject,
+                    SubjectContentType.anime,
+                  ),
+                )
+                .toList(growable: false);
+        merged.sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
+        return _enrichSubjects(merged, services, animeLookupLimit: 36);
+      },
     );
-    return _uniqueSubjects([...subjects, ...cached]);
   }
 
-  Future<List<AnimeSubject>> seriesSubjects() async {
-    final cached = _readSubjectCache(_seriesMetadataCacheKey);
-    unawaited(
-      _refreshSubjectCache(_seriesMetadataCacheKey, () async {
+  Future<List<AnimeSubject>> seriesSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    if (!services.mediaMetadataEnabled) {
+      return _subjectsOfType(
+        _fallbackExternalSeries,
+        SubjectContentType.series,
+      );
+    }
+    return _metadataSubjects(
+      key: _seriesMetadataCacheKey,
+      signature: _metadataSignature('series', services),
+      contentType: SubjectContentType.series,
+      fallback: _fallbackExternalSeries,
+      waitForRefresh: waitForRefresh,
+      load: () async {
         final subjects = await ref
             .read(externalServiceRepositoryProvider)
-            .seriesMetadataFeed()
-            .timeout(
-              const Duration(seconds: 12),
-              onTimeout: () => const <AnimeSubject>[],
-            )
-            .onError((_, _) => const <AnimeSubject>[]);
-        return _uniqueSubjects([...subjects, ..._fallbackExternalSeries]);
-      }),
+            .seriesMetadataFeed(
+              includeCinemeta: services.cinemetaEnabled,
+              cinemetaPages: 6,
+              tvMazePages: 3,
+            );
+        return _enrichSubjects(
+          _subjectsOfType(subjects, SubjectContentType.series),
+          services,
+          animeLookupLimit: 0,
+        );
+      },
     );
-    return _uniqueSubjects([...cached, ..._fallbackExternalSeries]);
   }
 
-  Future<List<AnimeSubject>> movieSubjects() async {
-    final cached = _readSubjectCache(_movieMetadataCacheKey);
-    unawaited(
-      _refreshSubjectCache(_movieMetadataCacheKey, () async {
-        final subjects = await ref
-            .read(externalServiceRepositoryProvider)
-            .movieMetadataFeed()
-            .timeout(
-              const Duration(seconds: 8),
-              onTimeout: () => const <AnimeSubject>[],
-            )
-            .onError((_, _) => const <AnimeSubject>[]);
-        return _uniqueSubjects([...subjects, ..._fallbackExternalMovies]);
-      }),
+  Future<List<AnimeSubject>> movieSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    if (!services.mediaMetadataEnabled &&
+        !services.publicCollectionSyncEnabled &&
+        !services.peerTubeEnabled &&
+        !services.wikimediaCommonsEnabled) {
+      return _subjectsOfType(_fallbackExternalMovies, SubjectContentType.movie);
+    }
+    return _metadataSubjects(
+      key: _movieMetadataCacheKey,
+      signature: _metadataSignature('movie', services),
+      contentType: SubjectContentType.movie,
+      fallback: _fallbackExternalMovies,
+      waitForRefresh: waitForRefresh,
+      load: () async {
+        final groups = await Future.wait([
+          ref
+              .read(externalServiceRepositoryProvider)
+              .movieMetadataFeed(
+                includeCinemeta:
+                    services.mediaMetadataEnabled && services.cinemetaEnabled,
+                includeArchive: services.publicCollectionSyncEnabled,
+                cinemetaPages: 6,
+              ),
+          for (final keyword in const [
+            'animation',
+            'documentary',
+            'short film',
+          ])
+            for (final page in const [1, 2])
+              if (services.peerTubeEnabled)
+                ref
+                    .read(peerTubeRepositoryProvider)
+                    .search(keyword, page: page, limit: 36)
+                    .onError((_, _) => const <AnimeSubject>[]),
+          for (final page in const [1, 2])
+            if (services.wikimediaCommonsEnabled)
+              ref
+                  .read(wikimediaCommonsRepositoryProvider)
+                  .trending(page: page, limit: 48)
+                  .onError((_, _) => const <AnimeSubject>[]),
+        ]);
+        final subjects =
+            _uniqueSubjects([
+                  ..._interleaveSubjectGroups(groups, limitPerRound: 10),
+                  ...groups.expand((items) => items),
+                ])
+                .where(
+                  (subject) => subjectMatchesContentType(
+                    subject,
+                    SubjectContentType.movie,
+                  ),
+                )
+                .toList(growable: false);
+        return _enrichSubjects(subjects, services, animeLookupLimit: 0);
+      },
     );
-    return _uniqueSubjects([...cached, ..._fallbackExternalMovies]);
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() {
@@ -311,12 +511,37 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final current = state.value;
     final cacheKey = _subjectCacheKey(subject);
     final cached = current?.selectedSubjects[cacheKey];
-    if (cached != null) return cached;
-    final detail = subject.source == 'bangumi'
+    if (cached != null) {
+      _prefetchDetailPlayback(cached);
+      return cached;
+    }
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    final rawDetail = subject.source == 'bangumi'
         ? await ref.read(bangumiMetadataRepositoryProvider).detail(subject.id)
         : await ref
               .read(externalServiceRepositoryProvider)
               .externalDetail(subject);
+    final detailSubjects = await _enrichSubjects(
+      [
+        rawDetail.subject,
+        ...rawDetail.recommendations.map((item) => item.subject),
+      ],
+      services,
+      animeLookupLimit: 12,
+    );
+    final detail = AnimeDetailBundle(
+      subject: detailSubjects.first,
+      episodes: rawDetail.episodes,
+      characters: rawDetail.characters,
+      staff: rawDetail.staff,
+      recommendations: [
+        for (var i = 0; i < rawDetail.recommendations.length; i++)
+          AnimeRecommendation(
+            subject: detailSubjects[i + 1],
+            relation: rawDetail.recommendations[i].relation,
+          ),
+      ],
+    );
     final previous = state.value;
     if (previous != null) {
       state = AsyncData(
@@ -325,7 +550,44 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         ),
       );
     }
+    _prefetchDetailPlayback(detail);
     return detail;
+  }
+
+  void _prefetchDetailPlayback(AnimeDetailBundle detail) {
+    if (detail.episodes.isEmpty || !_usesRulePlayback(detail.subject)) return;
+    final historyEpisode = state.value?.history
+        .where((item) => item.subject.id == detail.subject.id)
+        .map((item) => item.episode)
+        .whereType<AnimeEpisode>()
+        .firstOrNull;
+    final episode =
+        historyEpisode != null &&
+            detail.episodes.any((item) => item.id == historyEpisode.id)
+        ? historyEpisode
+        : detail.episodes.first;
+    final key =
+        '${detail.subject.source}|${detail.subject.id}|'
+        '${detail.subject.title}|${episode.id}|${episode.number}';
+    if (_playbackPrefetches.containsKey(key)) return;
+
+    late final Future<void> prefetch;
+    prefetch = linesForEpisode(detail.subject, episode)
+        .then<void>((_) {}, onError: (_, _) {})
+        .whenComplete(() {
+          if (identical(_playbackPrefetches[key], prefetch)) {
+            _playbackPrefetches.remove(key);
+          }
+        });
+    _playbackPrefetches[key] = prefetch;
+  }
+
+  bool _usesRulePlayback(AnimeSubject subject) {
+    final source = subject.source.toLowerCase();
+    return source != 'direct' &&
+        !source.startsWith('peertube:') &&
+        !source.startsWith('archive:') &&
+        !source.startsWith('commons:');
   }
 
   Future<List<PlaybackLine>> linesForEpisode(
@@ -340,11 +602,46 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode, {
     bool expandAll = false,
   }) {
+    if (subject.source.startsWith('peertube:')) {
+      final services = state.value?.services ?? const ExternalServiceSettings();
+      if (!services.peerTubeEnabled) {
+        return Future.value(const <PlaybackLine>[]);
+      }
+      return ref
+          .read(peerTubeRepositoryProvider)
+          .linesForEpisode(subject, episode);
+    }
+    if (subject.source.startsWith('archive:')) {
+      final services = state.value?.services ?? const ExternalServiceSettings();
+      if (!services.publicCollectionSyncEnabled) {
+        return Future.value(const <PlaybackLine>[]);
+      }
+      return ref
+          .read(internetArchivePlaybackProvider)
+          .linesForEpisode(subject, episode);
+    }
+    if (subject.source.startsWith('commons:')) {
+      final services = state.value?.services ?? const ExternalServiceSettings();
+      if (!services.wikimediaCommonsEnabled) {
+        return Future.value(const <PlaybackLine>[]);
+      }
+      return ref
+          .read(wikimediaCommonsRepositoryProvider)
+          .linesForEpisode(subject, episode);
+    }
     final ruleState =
         state.value?.rulePlugins ?? const RulePluginRepository().defaultState();
+    final catalogRuleIds = _sourceCatalogRules.map((rule) => rule.id).toSet();
+    final effectiveRuleState = ruleState.copyWith(
+      installedIds: {...ruleState.installedIds, ...catalogRuleIds},
+      enabledIds: {...ruleState.enabledIds, ...catalogRuleIds},
+    );
     return RulePlaybackSourceRepository(
-      repository: RulePluginRepository(extraRules: ruleState.customRules),
-      ruleState: ruleState,
+      repository: RulePluginRepository(
+        extraRules: [..._sourceCatalogRules, ...ruleState.customRules],
+      ),
+      ruleState: effectiveRuleState,
+      resolver: ref.read(rulePlaybackResolverProvider),
     ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
   }
 
@@ -358,14 +655,22 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .searchSubtitles(subject, episode, services);
   }
 
-  Future<List<DanmakuMatch>> danmakuForEpisode(
+  Future<DanmakuTimeline> danmakuTimelineForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
   ) {
     final services = state.value?.services ?? const ExternalServiceSettings();
     return ref
-        .read(externalServiceRepositoryProvider)
-        .matchDanmaku(subject, episode, services);
+        .read(danmakuRepositoryProvider)
+        .timelineForEpisode(subject, episode, services);
+  }
+
+  Future<List<DanmakuMatch>> danmakuForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) async {
+    final timeline = await danmakuTimelineForEpisode(subject, episode);
+    return timeline.sources;
   }
 
   Future<void> updateSettings(PlaybackSettings settings) async {
@@ -408,14 +713,39 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final current = state.value;
     if (current != null) state = AsyncData(current.copyWith(misc: settings));
     await _settings.put('misc', settings.toJson());
+    await WakelockPlus.toggle(enable: settings.keepScreenOn).onError((_, _) {});
   }
 
   Future<void> updateServices(ExternalServiceSettings settings) async {
+    final normalized = settings.watchHubEnabled
+        ? settings.copyWith(watchHubEnabled: false)
+        : settings;
     final current = state.value;
+    final changed =
+        current != null &&
+        _servicesSignature(current.services) != _servicesSignature(normalized);
     if (current != null) {
-      state = AsyncData(current.copyWith(services: settings));
+      state = AsyncData(current.copyWith(services: normalized));
     }
-    await _settings.put('services', settings.toJson());
+    await _settings.put('services', normalized.toJson());
+    if (changed) {
+      await Future.wait([
+        _library.delete(_homeFeedCacheKey),
+        _library.delete(_animeMetadataCacheKey),
+        _library.delete(_seriesMetadataCacheKey),
+        _library.delete(_movieMetadataCacheKey),
+      ]);
+      unawaited(_refreshHomeFeed(normalized).onError((_, _) {}));
+    }
+  }
+
+  Future<void> invalidateMetadataCache(String kind) {
+    final key = switch (kind) {
+      'series' => _seriesMetadataCacheKey,
+      'movie' => _movieMetadataCacheKey,
+      _ => _animeMetadataCacheKey,
+    };
+    return _library.delete(key);
   }
 
   Future<void> installRulePlugin(String id) async {
@@ -451,8 +781,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (current == null || !current.rulePlugins.installedIds.contains(id)) {
       return;
     }
-    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
-    if (enabled && (rule?.canResolveNatively != true)) return;
     final enabledIds = {...current.rulePlugins.enabledIds};
     if (enabled) {
       enabledIds.add(id);
@@ -462,6 +790,37 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _updateRulePlugins(
       current.rulePlugins.copyWith(enabledIds: enabledIds),
     );
+  }
+
+  Future<void> setAllInstalledRulePluginsEnabled(bool enabled) async {
+    final current = state.value;
+    if (current == null) return;
+    final rulePlugins = _normalizeRulePlugins(
+      current.rulePlugins.copyWith(
+        enabledIds: enabled
+            ? {...current.rulePlugins.installedIds}
+            : <String>{},
+      ),
+    );
+    final toggledCatalog = current.sourceCatalog.copyWith(
+      sources: [
+        for (final source in current.sourceCatalog.sources)
+          current.sourceCatalog.playbackRuleCountFor(source.id) > 0
+              ? source.copyWith(enabled: enabled)
+              : source,
+      ],
+      loadError: current.sourceCatalog.loadError,
+    );
+    final sourceBridge = const SourceRuleBridge().build(toggledCatalog);
+    _sourceCatalogRules = sourceBridge.rules;
+    final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
+    state = AsyncData(
+      current.copyWith(rulePlugins: rulePlugins, sourceCatalog: sourceCatalog),
+    );
+    await Future.wait([
+      _settings.put('rulePlugins', rulePlugins.toJson()),
+      _settings.put('sourceEnabled', sourceCatalog.enabledById),
+    ]);
   }
 
   Future<void> resetRulePlugins() async {
@@ -488,12 +847,49 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return _importRuleBundle(bundle);
   }
 
+  Future<RuleImportResult> importSelectedRulePlugins({
+    required String repositoryName,
+    required List<RulePlugin> rules,
+    String sourceUrl = '',
+  }) {
+    return _importRuleBundle(
+      RuleImportBundle(
+        name: repositoryName,
+        rules: List<RulePlugin>.unmodifiable(rules),
+        sourceUrl: sourceUrl,
+      ),
+    );
+  }
+
   Future<void> toggleVideoSource(String id, bool enabled) async {
+    await setVideoSourcesEnabled({id}, enabled);
+  }
+
+  Future<void> setVideoSourcesEnabled(
+    Iterable<String> ids,
+    bool enabled,
+  ) async {
     final current = state.value;
-    if (current == null || current.sourceCatalog.sourceById(id) == null) {
+    if (current == null) return;
+    final sourceIds = ids.toSet();
+    if (sourceIds.isEmpty ||
+        !current.sourceCatalog.sources.any(
+          (source) => sourceIds.contains(source.id),
+        )) {
       return;
     }
-    final sourceCatalog = current.sourceCatalog.toggleSource(id, enabled);
+    final toggledCatalog = current.sourceCatalog.copyWith(
+      sources: [
+        for (final source in current.sourceCatalog.sources)
+          sourceIds.contains(source.id)
+              ? source.copyWith(enabled: enabled)
+              : source,
+      ],
+      loadError: current.sourceCatalog.loadError,
+    );
+    final sourceBridge = const SourceRuleBridge().build(toggledCatalog);
+    _sourceCatalogRules = sourceBridge.rules;
+    final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
     await _settings.put('sourceEnabled', sourceCatalog.enabledById);
   }
@@ -509,12 +905,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
     final repository = _ruleRepositoryFor(rulePlugins);
-    return rulePlugins.copyWith(
-      enabledIds: {
-        for (final id in rulePlugins.enabledIds)
-          if (repository.byId(id)?.canResolveNatively ?? false) id,
-      },
-    );
+    return repository.normalizeState(rulePlugins);
   }
 
   RulePluginState _mergeDefaultNativeRules(
@@ -529,6 +920,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<RuleImportResult> _importRuleBundle(RuleImportBundle bundle) async {
+    if (bundle.rules.isEmpty) {
+      return RuleImportResult(
+        repositoryName: bundle.name,
+        ruleCount: 0,
+        installedCount: 0,
+      );
+    }
     final current = state.value;
     if (current == null) {
       return RuleImportResult(
@@ -543,66 +941,50 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     for (final rule in bundle.rules) {
       existing[rule.id] = rule;
     }
+    final mergedCustomRules = existing.values.toList(growable: false);
+    final mergedRepository = RulePluginRepository(
+      extraRules: mergedCustomRules,
+    );
+    final effectiveRuleIds = <String>{};
+    for (final rule in bundle.rules) {
+      final effectiveRule = mergedRepository.byId(rule.id);
+      if (effectiveRule != null) effectiveRuleIds.add(effectiveRule.id);
+    }
     final installed = {
       ...current.rulePlugins.installedIds,
-      ...bundle.rules.map((rule) => rule.id),
+      ...effectiveRuleIds,
     };
     final enabled = {...current.rulePlugins.enabledIds};
-    final autoEnabledByGroup = <String, int>{};
-    for (final id in enabled) {
-      final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
-      final groupId = rule?.groupId ?? '';
-      if (groupId.isEmpty) continue;
-      autoEnabledByGroup[groupId] = (autoEnabledByGroup[groupId] ?? 0) + 1;
-    }
-    final sortedRules = [...bundle.rules]
-      ..sort((a, b) {
-        final priority = a.priority.compareTo(b.priority);
-        return priority == 0 ? a.name.compareTo(b.name) : priority;
-      });
-    for (final rule in sortedRules) {
-      if (!rule.canResolveNatively) {
-        enabled.remove(rule.id);
-        continue;
-      }
-      enabled.add(rule.id);
-      final groupId = rule.groupId;
-      if (groupId.isNotEmpty) {
-        final count = autoEnabledByGroup[groupId] ?? 0;
-        if (count >= _autoEnableRulesPerImportedGroup) {
-          enabled.remove(rule.id);
-        } else if (enabled.contains(rule.id)) {
-          autoEnabledByGroup[groupId] = count + 1;
-        }
-      }
-    }
     final repositoryRecord = RuleRepositoryRecord(
       id: bundle.sourceUrl.trim().isEmpty
           ? 'clipboard:${DateTime.now().microsecondsSinceEpoch}'
-          : 'url:${bundle.sourceUrl.hashCode}',
+          : 'url:${_stableRuleRepositoryId(bundle.sourceUrl)}',
       name: bundle.name,
       url: bundle.sourceUrl,
       importedAt: DateTime.now(),
-      ruleCount: bundle.rules.length,
+      ruleCount: effectiveRuleIds.length,
     );
     final repositories = [
       repositoryRecord,
       ...current.rulePlugins.repositories.where(
-        (record) => record.id != repositoryRecord.id,
+        (record) =>
+            record.id != repositoryRecord.id &&
+            (bundle.sourceUrl.trim().isEmpty ||
+                record.url.trim() != bundle.sourceUrl.trim()),
       ),
     ];
     await _updateRulePlugins(
       current.rulePlugins.copyWith(
         installedIds: installed,
         enabledIds: enabled,
-        customRules: existing.values.toList(growable: false),
+        customRules: mergedCustomRules,
         repositories: repositories,
       ),
     );
     return RuleImportResult(
       repositoryName: bundle.name,
       ruleCount: bundle.rules.length,
-      installedCount: bundle.rules.length,
+      installedCount: effectiveRuleIds.length,
     );
   }
 
@@ -659,22 +1041,78 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .syncLocalHistory(subject, episode, current.services);
   }
 
-  Future<void> queueOffline(AnimeSubject subject, AnimeEpisode? episode) async {
+  Future<String> queueOffline(
+    AnimeSubject subject,
+    AnimeEpisode? episode,
+  ) async {
     final current = state.value;
-    if (current == null) return;
-    final keyEpisodeId = episode?.id;
+    if (current == null) return '应用状态尚未准备好';
+    if (episode == null) return '当前条目没有可下载的集数';
+    final keyEpisodeId = episode.id;
     final next = [
       LibraryEntry(
         subject: subject,
         episode: episode,
         updatedAt: DateTime.now(),
-        note: '待接入视频源后开始缓存',
+        note: '正在查找可下载线路',
       ),
       ...current.offlineTasks.where(
         (item) =>
             item.subject.id != subject.id || item.episode?.id != keyEpisodeId,
       ),
     ].take(80).toList();
+    state = AsyncData(current.copyWith(offlineTasks: next));
+    await _writeEntries('offlineTasks', next);
+    final lines = await linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+    ).onError((_, _) => const <PlaybackLine>[]);
+    final line = lines
+        .where((item) => item.available && item.url != null)
+        .firstOrNull;
+    if (line == null) {
+      await _updateOfflineNote(subject, episode, '没有找到可直接下载的线路');
+      return '没有找到可直接下载的线路';
+    }
+    final result = await ref
+        .read(mediaDownloadServiceProvider)
+        .download(
+          url: line.url!,
+          title: '${subject.title}_EP${episode.number}',
+          headers: line.headers,
+        );
+    final size = result.bytes <= 0
+        ? ''
+        : ' · ${(result.bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    await _updateOfflineNote(
+      subject,
+      episode,
+      result.success ? '已下载$size\n${result.path ?? ''}' : result.message,
+    );
+    return result.success ? '下载完成$size' : result.message;
+  }
+
+  Future<void> _updateOfflineNote(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    String note,
+  ) async {
+    final current = state.value;
+    if (current == null) return;
+    final next = current.offlineTasks
+        .map(
+          (item) =>
+              item.subject.id == subject.id && item.episode?.id == episode.id
+              ? LibraryEntry(
+                  subject: item.subject,
+                  episode: item.episode,
+                  updatedAt: DateTime.now(),
+                  note: note,
+                )
+              : item,
+        )
+        .toList(growable: false);
     state = AsyncData(current.copyWith(offlineTasks: next));
     await _writeEntries('offlineTasks', next);
   }
@@ -732,6 +1170,347 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _library.put('feedbacks', next.map((item) => item.toJson()).toList());
   }
 
+  AnimeHomeFeed? _readHomeFeedCache() {
+    final value = _library.get(_homeFeedCacheKey);
+    if (value is! Map || value['version'] != _homeFeedCacheVersion) {
+      return null;
+    }
+    final feedJson = value['feed'];
+    if (feedJson is! Map) return null;
+    try {
+      return AnimeHomeFeed.fromJson(feedJson.cast<String, dynamic>());
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _refreshHomeFeed(ExternalServiceSettings services) async {
+    final refreshVersion = ++_homeRefreshVersion;
+    final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
+    final fallback = bangumiRepository.fallbackHomeFeed();
+    final groups = await Future.wait<Object>([
+      if (services.bangumiEnabled)
+        bangumiRepository
+            .homeFeed()
+            .timeout(const Duration(seconds: 12), onTimeout: () => fallback)
+            .onError((_, _) => fallback)
+      else
+        Future.value(fallback),
+      _loadHomeHighlights(services).onError((_, _) => const _HomeHighlights()),
+    ]);
+    final feed = _composeHomeFeed(
+      groups[0] as AnimeHomeFeed,
+      groups[1] as _HomeHighlights,
+    );
+    if (refreshVersion != _homeRefreshVersion) return;
+    await _library.put(_homeFeedCacheKey, {
+      'version': _homeFeedCacheVersion,
+      'fetchedAt': DateTime.now().toUtc().toIso8601String(),
+      'feed': feed.toJson(),
+    });
+    final current = state.value;
+    if (current != null) {
+      state = AsyncData(current.copyWith(homeFeed: feed));
+    }
+  }
+
+  Future<_HomeHighlights> _loadHomeHighlights(
+    ExternalServiceSettings services,
+  ) async {
+    final external = ref.read(externalServiceRepositoryProvider);
+    final animeFuture =
+        Future.wait([
+          if (services.anilistEnabled)
+            external
+                .anilistTrending(perPage: 36)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.jikanEnabled)
+            external
+                .jikanTop(limit: 25)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.kitsuEnabled)
+            external
+                .kitsuTrending(limit: 20)
+                .onError((_, _) => const <AnimeSubject>[]),
+        ]).then(
+          (groups) => _uniqueSubjects([
+            ..._interleaveSubjectGroups(groups, limitPerRound: 8),
+            ...groups.expand((items) => items),
+          ]),
+        );
+    final seriesFuture =
+        services.mediaMetadataEnabled && services.cinemetaEnabled
+        ? external
+              .cinemetaFeed(type: 'series', pages: 1)
+              .onError((_, _) => const <AnimeSubject>[])
+        : Future.value(const <AnimeSubject>[]);
+    final movieFuture =
+        Future.wait([
+          if (services.mediaMetadataEnabled && services.cinemetaEnabled)
+            external
+                .cinemetaFeed(type: 'movie', pages: 1)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.publicCollectionSyncEnabled)
+            external
+                .internetArchiveSearch('', limit: 18)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.peerTubeEnabled)
+            ref
+                .read(peerTubeRepositoryProvider)
+                .search('animation', limit: 18)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.wikimediaCommonsEnabled)
+            ref
+                .read(wikimediaCommonsRepositoryProvider)
+                .trending(limit: 18)
+                .onError((_, _) => const <AnimeSubject>[]),
+        ]).then(
+          (groups) => _uniqueSubjects([
+            ..._interleaveSubjectGroups(groups, limitPerRound: 6),
+            ...groups.expand((items) => items),
+          ]),
+        );
+    final groups = await Future.wait([animeFuture, seriesFuture, movieFuture])
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => const <List<AnimeSubject>>[[], [], []],
+        );
+    final enriched = await Future.wait([
+      _enrichSubjects(groups[0], services, animeLookupLimit: 12),
+      _enrichSubjects(groups[1], services, animeLookupLimit: 0),
+      _enrichSubjects(groups[2], services, animeLookupLimit: 0),
+    ]).timeout(const Duration(seconds: 8), onTimeout: () => groups);
+    return _HomeHighlights(
+      anime: enriched[0],
+      series: enriched[1],
+      movies: enriched[2],
+    );
+  }
+
+  Future<List<AnimeSubject>> _enrichSubjects(
+    Iterable<AnimeSubject> subjects,
+    ExternalServiceSettings services, {
+    required int animeLookupLimit,
+  }) async {
+    final items = subjects.toList(growable: false);
+    if (items.isEmpty) return const [];
+    var enriched = items;
+    try {
+      enriched = await ref
+          .read(chineseMetadataRepositoryProvider)
+          .enrichSubjects(
+            items,
+            useBangumiForAnime: services.preferBangumiChinese,
+            animeLookupLimit: animeLookupLimit,
+          )
+          .timeout(const Duration(seconds: 24), onTimeout: () => items);
+    } catch (_) {
+      enriched = items;
+    }
+    return enriched.map(_localizeSubjectLabels).toList(growable: false);
+  }
+
+  AnimeSubject _localizeSubjectLabels(AnimeSubject subject) {
+    final platform = _localizedLabel(subject.platform, const {
+      'movie': '电影',
+      'series': '剧集',
+      'scripted': '剧集',
+      'show': '剧集',
+      'reality': '真人秀',
+      'peertube': '开放视频',
+      'live': '直播',
+    });
+    final language = _localizedLabel(subject.language, const {
+      'english': '英语',
+      'japanese': '日语',
+      'korean': '韩语',
+      'chinese': '中文',
+      'mandarin': '国语',
+      'cantonese': '粤语',
+      'french': '法语',
+      'german': '德语',
+      'spanish': '西班牙语',
+      'italian': '意大利语',
+      'russian': '俄语',
+    });
+    final region = _localizedLabel(subject.region, const {
+      'united states': '美国',
+      'united kingdom': '英国',
+      'south korea': '韩国',
+      'korea, republic of': '韩国',
+      'japan': '日本',
+      'china': '中国',
+      'hong kong': '中国香港',
+      'taiwan': '中国台湾',
+      'canada': '加拿大',
+      'france': '法国',
+      'germany': '德国',
+      'italy': '意大利',
+      'spain': '西班牙',
+      'australia': '澳大利亚',
+    });
+    final status = _localizedLabel(subject.status, const {
+      'running': '连载中',
+      'ended': '已完结',
+      'in development': '制作中',
+      'to be determined': '待定',
+    });
+    final categories = subject.categories
+        .map(
+          (item) => AnimeCategory(
+            name: _localizedLabel(item.name, const {
+              'drama': '剧情',
+              'action': '动作',
+              'adventure': '冒险',
+              'fantasy': '奇幻',
+              'crime': '犯罪',
+              'thriller': '惊悚',
+              'horror': '恐怖',
+              'science fiction': '科幻',
+              'science-fiction': '科幻',
+              'sci-fi': '科幻',
+              'comedy': '喜剧',
+              'romance': '爱情',
+              'mystery': '悬疑',
+              'animation': '动画',
+              'documentary': '纪录片',
+              'family': '家庭',
+              'history': '历史',
+              'war': '战争',
+              'western': '西部',
+              'music': '音乐',
+              'supernatural': '超自然',
+              'reality': '真人秀',
+              'talk show': '脱口秀',
+            }),
+            count: item.count,
+            imageUrl: item.imageUrl,
+          ),
+        )
+        .toList(growable: false);
+    if (platform == subject.platform &&
+        language == subject.language &&
+        region == subject.region &&
+        status == subject.status &&
+        _sameCategoryLabels(categories, subject.categories)) {
+      return subject;
+    }
+    return AnimeSubject(
+      id: subject.id,
+      title: subject.title,
+      originalTitle: subject.originalTitle,
+      summary: subject.summary,
+      coverUrl: subject.coverUrl,
+      bannerUrl: subject.bannerUrl,
+      date: subject.date,
+      platform: platform,
+      language: language,
+      region: region,
+      status: status,
+      categories: categories,
+      tags: subject.tags,
+      totalEpisodes: subject.totalEpisodes,
+      ratingScore: subject.ratingScore,
+      ratingRank: subject.ratingRank,
+      ratingTotal: subject.ratingTotal,
+      source: subject.source,
+    );
+  }
+
+  String _localizedLabel(String value, Map<String, String> labels) {
+    final text = value.trim();
+    if (text.isEmpty) return text;
+    return labels[text.toLowerCase()] ?? text;
+  }
+
+  bool _sameCategoryLabels(
+    List<AnimeCategory> first,
+    List<AnimeCategory> second,
+  ) {
+    if (first.length != second.length) return false;
+    for (var i = 0; i < first.length; i++) {
+      if (first[i].name != second[i].name) return false;
+    }
+    return true;
+  }
+
+  AnimeHomeFeed _composeHomeFeed(
+    AnimeHomeFeed base,
+    _HomeHighlights highlights,
+  ) {
+    final all = _uniqueSubjects([
+      ..._interleaveSubjectGroups([
+        highlights.anime,
+        highlights.series,
+        highlights.movies,
+        base.recommended,
+        base.recent,
+      ], limitPerRound: 4),
+      ...base.index,
+    ]);
+    final rankedAll = [...all]
+      ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
+    final heroCandidates =
+        rankedAll.where((item) => (item.bannerUrl ?? '').isNotEmpty).toList()
+          ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
+    final hero = heroCandidates.firstOrNull ?? base.hero;
+    final recentCandidates =
+        _uniqueSubjects([
+          ...base.recent,
+          ...highlights.anime,
+          ...highlights.series,
+          ...highlights.movies,
+        ])..sort((a, b) {
+          final rankOrder = _homeRank(b).compareTo(_homeRank(a));
+          if (rankOrder != 0) return rankOrder;
+          return (b.date ?? '').compareTo(a.date ?? '');
+        });
+    final recent = <AnimeSubject>[];
+    for (final subject in recentCandidates) {
+      if (_sameSubject(subject, hero)) continue;
+      recent.add(subject);
+      if (recent.length >= 28) break;
+    }
+    final recommended = <AnimeSubject>[];
+    for (final subject in rankedAll) {
+      if (_sameSubject(subject, hero) ||
+          recent.any((item) => _sameSubject(item, subject))) {
+        continue;
+      }
+      recommended.add(subject);
+      if (recommended.length >= 36) break;
+    }
+    return AnimeHomeFeed(
+      hero: hero,
+      recent: recent.isEmpty ? base.recent : recent,
+      recommended: recommended.isEmpty ? base.recommended : recommended,
+      index: all.take(360).toList(growable: false),
+      categories: base.categories,
+      tags: base.tags,
+      seriesHighlights: highlights.series.take(12).toList(growable: false),
+      movieHighlights: highlights.movies.take(12).toList(growable: false),
+    );
+  }
+
+  int _homeRank(AnimeSubject subject) {
+    var score = ((subject.ratingScore ?? 0) * 10).round();
+    if ((subject.bannerUrl ?? '').isNotEmpty) score += 30;
+    if ((subject.coverUrl ?? '').isNotEmpty) score += 12;
+    if (_containsChinese(subject.title)) score += 20;
+    if (_containsChinese(subject.summary)) score += 6;
+    if (_isDirectPlayable(subject)) score += 4;
+    final date = DateTime.tryParse(subject.date ?? '');
+    if (date != null) {
+      final age = DateTime.now().difference(date).inDays;
+      if (age >= 0 && age <= 180) {
+        score += 24;
+      } else if (age >= 0 && age <= 730) {
+        score += 10;
+      }
+    }
+    return score;
+  }
+
   List<LibraryEntry> _toggleSubject(
     List<LibraryEntry> entries,
     AnimeSubject subject,
@@ -756,42 +1535,324 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .toList();
   }
 
-  List<AnimeSubject> _readSubjectCache(String key) {
+  _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {
     final value = _library.get(key);
-    if (value is! List) return const [];
-    return value
+    if (value is List) {
+      final legacy = value
+          .whereType<Map>()
+          .map((item) => AnimeSubject.fromJson(item.cast<String, dynamic>()))
+          .where((item) => item.title.trim().isNotEmpty)
+          .toList();
+      return _SubjectCacheSnapshot(subjects: legacy, fresh: false);
+    }
+    if (value is! Map) return const _SubjectCacheSnapshot();
+    final rawSubjects = value['subjects'];
+    final subjects = rawSubjects is List
+        ? rawSubjects
+              .whereType<Map>()
+              .map(
+                (item) => AnimeSubject.fromJson(item.cast<String, dynamic>()),
+              )
+              .where((item) => item.title.trim().isNotEmpty)
+              .toList()
+        : const <AnimeSubject>[];
+    final fetchedAt = DateTime.tryParse(value['fetchedAt']?.toString() ?? '');
+    final refreshCount = switch (value['refreshCount']) {
+      final num count => count.toInt(),
+      _ => subjects.length,
+    };
+    final cacheTtl = _isSparseMetadataResult(key, refreshCount)
+        ? _sparseMetadataCacheTtl
+        : _metadataCacheTtl;
+    final fresh =
+        value['version'] == _metadataCacheVersion &&
+        value['signature']?.toString() == signature &&
+        fetchedAt != null &&
+        DateTime.now().difference(fetchedAt) <= cacheTtl;
+    return _SubjectCacheSnapshot(subjects: subjects, fresh: fresh);
+  }
+
+  Future<List<AnimeSubject>> _metadataSubjects({
+    required String key,
+    required String signature,
+    required SubjectContentType contentType,
+    required List<AnimeSubject> fallback,
+    required bool waitForRefresh,
+    required Future<List<AnimeSubject>> Function() load,
+  }) async {
+    final cached = _readSubjectCache(key, signature);
+    final cachedSubjects = _subjectsOfType(cached.subjects, contentType);
+    final fallbackSubjects = _subjectsOfType(fallback, contentType);
+    final initialSubjects = _uniqueSubjects([
+      ...cachedSubjects,
+      ...fallbackSubjects,
+    ]);
+    if (cached.fresh) {
+      return initialSubjects;
+    }
+    final refresh = _refreshSubjectCache(
+      key,
+      signature,
+      load,
+    ).onError((_, _) => const <AnimeSubject>[]);
+    if (!waitForRefresh) {
+      unawaited(refresh);
+      return initialSubjects;
+    }
+    final refreshed = _subjectsOfType(await refresh, contentType);
+    if (refreshed.isNotEmpty) {
+      return _uniqueSubjects([
+        ...refreshed,
+        ...cachedSubjects,
+        ...fallbackSubjects,
+      ]);
+    }
+    return initialSubjects;
+  }
+
+  List<AnimeSubject> _subjectsOfType(
+    Iterable<AnimeSubject> subjects,
+    SubjectContentType contentType,
+  ) {
+    return _uniqueSubjects(
+      subjects.where(
+        (subject) => subjectMatchesContentType(subject, contentType),
+      ),
+    );
+  }
+
+  Future<List<AnimeSubject>> _refreshSubjectCache(
+    String key,
+    String signature,
+    Future<List<AnimeSubject>> Function() load,
+  ) {
+    final active = _metadataRefreshes[key];
+    if (active != null) return active;
+    late final Future<List<AnimeSubject>> task;
+    task = () async {
+      final refreshed = _uniqueSubjects(await load());
+      if (refreshed.isEmpty) return const <AnimeSubject>[];
+      final subjects = _uniqueSubjects([
+        ...refreshed,
+        ..._compatibleCachedSubjects(key, signature),
+      ]);
+      await _library.put(key, {
+        'version': _metadataCacheVersion,
+        'signature': signature,
+        'fetchedAt': DateTime.now().toUtc().toIso8601String(),
+        'refreshCount': refreshed.length,
+        'subjects': subjects
+            .take(_metadataCacheLimit)
+            .map((item) => item.toJson())
+            .toList(growable: false),
+      });
+      return subjects;
+    }();
+    _metadataRefreshes[key] = task;
+    return task.whenComplete(() {
+      if (identical(_metadataRefreshes[key], task)) {
+        _metadataRefreshes.remove(key);
+      }
+    });
+  }
+
+  List<AnimeSubject> _compatibleCachedSubjects(String key, String signature) {
+    final value = _library.get(key);
+    if (value is! Map || value['signature']?.toString() != signature) {
+      return const [];
+    }
+    final rawSubjects = value['subjects'];
+    if (rawSubjects is! List) return const [];
+    return rawSubjects
         .whereType<Map>()
         .map((item) => AnimeSubject.fromJson(item.cast<String, dynamic>()))
         .where((item) => item.title.trim().isNotEmpty)
-        .toList();
+        .toList(growable: false);
   }
 
-  Future<void> _refreshSubjectCache(
-    String key,
-    Future<List<AnimeSubject>> Function() load,
-  ) async {
-    if (!_metadataRefreshes.add(key)) return;
-    try {
-      final subjects = await load();
-      if (subjects.isEmpty) return;
-      await _library.put(
-        key,
-        subjects.take(160).map((item) => item.toJson()).toList(),
-      );
-    } finally {
-      _metadataRefreshes.remove(key);
+  bool _isSparseMetadataResult(String key, int count) {
+    final expected = switch (key) {
+      _animeMetadataCacheKey => 120,
+      _seriesMetadataCacheKey => 250,
+      _movieMetadataCacheKey => 250,
+      _ => 1,
+    };
+    return count < expected;
+  }
+
+  String _metadataSignature(String kind, ExternalServiceSettings services) {
+    return '$kind:${_servicesSignature(services)}';
+  }
+
+  String _servicesSignature(ExternalServiceSettings services) {
+    return [
+      services.mediaMetadataEnabled,
+      services.cinemetaEnabled,
+      services.anilistEnabled,
+      services.jikanEnabled,
+      services.kitsuEnabled,
+      services.bangumiEnabled,
+      services.publicCollectionSyncEnabled,
+      services.peerTubeEnabled,
+      services.wikimediaCommonsEnabled,
+      services.preferBangumiChinese,
+    ].join(':');
+  }
+
+  List<AnimeSubject> _interleaveSubjectGroups(
+    List<List<AnimeSubject>> groups, {
+    int limitPerRound = 8,
+  }) {
+    final result = <AnimeSubject>[];
+    final offsets = List<int>.filled(groups.length, 0);
+    var added = true;
+    while (added) {
+      added = false;
+      for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+        final group = groups[groupIndex];
+        final start = offsets[groupIndex];
+        if (start >= group.length) continue;
+        final end = (start + limitPerRound).clamp(0, group.length);
+        result.addAll(group.sublist(start, end));
+        offsets[groupIndex] = end;
+        added = true;
+      }
     }
+    return result;
   }
 
   List<AnimeSubject> _uniqueSubjects(Iterable<AnimeSubject> subjects) {
-    final seen = <String>{};
+    final keyToIndex = <String, int>{};
     final unique = <AnimeSubject>[];
     for (final subject in subjects) {
-      final key = '${subject.platform}:${subject.id}:${subject.title}';
-      if (subject.title.trim().isEmpty || !seen.add(key)) continue;
-      unique.add(subject);
+      if (subject.title.trim().isEmpty) continue;
+      final keys = _subjectIdentityKeys(subject);
+      int? existingIndex;
+      for (final key in keys) {
+        final index = keyToIndex[key];
+        if (index != null) {
+          existingIndex = index;
+          break;
+        }
+      }
+      if (existingIndex == null) {
+        final index = unique.length;
+        unique.add(subject);
+        for (final key in keys) {
+          keyToIndex[key] = index;
+        }
+        continue;
+      }
+      final merged = _mergeSubjects(unique[existingIndex], subject);
+      unique[existingIndex] = merged;
+      for (final key in _subjectIdentityKeys(merged)) {
+        keyToIndex[key] = existingIndex;
+      }
     }
     return unique;
+  }
+
+  bool _sameSubject(AnimeSubject a, AnimeSubject b) {
+    final bKeys = _subjectIdentityKeys(b);
+    return _subjectIdentityKeys(a).any(bKeys.contains);
+  }
+
+  Set<String> _subjectIdentityKeys(AnimeSubject subject) {
+    final kind = subjectContentTypeOf(subject).name;
+    final year = subject.year == '未知' ? '' : subject.year;
+    final titles = <String>{subject.title, subject.originalTitle}
+        .map(
+          (item) => item.toLowerCase().replaceAll(
+            RegExp(r'[^\p{L}\p{N}]', unicode: true),
+            '',
+          ),
+        )
+        .where((item) => item.isNotEmpty);
+    final keys = titles.map((title) => '$kind:$year:$title').toSet();
+    if (keys.isEmpty) keys.add('$kind:$year:${subject.id}');
+    return keys;
+  }
+
+  AnimeSubject _mergeSubjects(AnimeSubject first, AnimeSubject second) {
+    final firstDirect = _isDirectPlayable(first);
+    final secondDirect = _isDirectPlayable(second);
+    final primary = firstDirect != secondDirect
+        ? (firstDirect ? first : second)
+        : _subjectQuality(second) > _subjectQuality(first)
+        ? second
+        : first;
+    final secondary = identical(primary, first) ? second : first;
+    final title = _containsChinese(primary.title)
+        ? primary.title
+        : _containsChinese(secondary.title)
+        ? secondary.title
+        : primary.title;
+    final categories = <String, AnimeCategory>{
+      for (final item in primary.categories) item.name: item,
+      for (final item in secondary.categories) item.name: item,
+    }.values.take(8).toList(growable: false);
+    final tags = <String, AnimeTag>{
+      for (final item in primary.tags) item.name: item,
+      for (final item in secondary.tags) item.name: item,
+    }.values.take(20).toList(growable: false);
+    return AnimeSubject(
+      id: primary.id,
+      title: title,
+      originalTitle: primary.originalTitle.trim().isNotEmpty
+          ? primary.originalTitle
+          : secondary.originalTitle,
+      summary: primary.summary.length >= secondary.summary.length
+          ? primary.summary
+          : secondary.summary,
+      coverUrl:
+          _isDirectPlayable(primary) &&
+              secondary.source.startsWith('cinemeta:') &&
+              secondary.coverUrl != null
+          ? secondary.coverUrl
+          : primary.coverUrl ?? secondary.coverUrl,
+      bannerUrl: primary.bannerUrl ?? secondary.bannerUrl,
+      date: primary.date ?? secondary.date,
+      platform: primary.platform,
+      language: primary.language.trim().isNotEmpty
+          ? primary.language
+          : secondary.language,
+      region: primary.region.trim().isNotEmpty
+          ? primary.region
+          : secondary.region,
+      status: primary.status.trim().isNotEmpty
+          ? primary.status
+          : secondary.status,
+      categories: categories,
+      tags: tags,
+      totalEpisodes: primary.totalEpisodes > secondary.totalEpisodes
+          ? primary.totalEpisodes
+          : secondary.totalEpisodes,
+      ratingScore: primary.ratingScore ?? secondary.ratingScore,
+      ratingRank: primary.ratingRank ?? secondary.ratingRank,
+      ratingTotal: primary.ratingTotal ?? secondary.ratingTotal,
+      source: primary.source,
+    );
+  }
+
+  int _subjectQuality(AnimeSubject subject) {
+    var score = 0;
+    if ((subject.bannerUrl ?? '').isNotEmpty) score += 16;
+    if ((subject.coverUrl ?? '').isNotEmpty) score += 8;
+    if (_containsChinese(subject.title)) score += 4;
+    if (subject.summary.length >= 80) score += 3;
+    if (subject.ratingScore != null) score += 3;
+    if (subject.totalEpisodes > 0) score += 2;
+    return score;
+  }
+
+  bool _isDirectPlayable(AnimeSubject subject) {
+    return subject.source.startsWith('archive:') ||
+        subject.source.startsWith('peertube:') ||
+        subject.source.startsWith('commons:');
+  }
+
+  bool _containsChinese(String value) {
+    return RegExp(r'[\u3400-\u9fff]').hasMatch(value);
   }
 
   List<AnimeSubject> get _homeSubjects {
@@ -834,25 +1895,52 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 }
 
+String _stableRuleRepositoryId(String value) {
+  var hash = 0x811c9dc5;
+  for (final codeUnit in value.trim().codeUnits) {
+    hash ^= codeUnit;
+    hash = (hash * 0x01000193) & 0xffffffff;
+  }
+  return hash.toRadixString(16).padLeft(8, '0');
+}
+
+class _HomeHighlights {
+  const _HomeHighlights({
+    this.anime = const [],
+    this.series = const [],
+    this.movies = const [],
+  });
+
+  final List<AnimeSubject> anime;
+  final List<AnimeSubject> series;
+  final List<AnimeSubject> movies;
+}
+
+class _SubjectCacheSnapshot {
+  const _SubjectCacheSnapshot({this.subjects = const [], this.fresh = false});
+
+  final List<AnimeSubject> subjects;
+  final bool fresh;
+}
+
 const _fallbackExternalSeries = [
   AnimeSubject(
     id: 82,
-    title: 'Game of Thrones',
+    title: '权力的游戏',
     originalTitle: 'Game of Thrones',
     summary: '九大家族争夺维斯特洛大陆控制权的史诗剧集。',
     coverUrl:
         'https://static.tvmaze.com/uploads/images/original_untouched/190/476117.jpg',
-    bannerUrl:
-        'https://static.tvmaze.com/uploads/images/original_untouched/190/476117.jpg',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0944947/img',
     date: '2011-04-17',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United States',
-    status: 'Ended',
+    language: '英语',
+    region: '美国',
+    status: '已完结',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Adventure'),
-      AnimeCategory(name: 'Fantasy'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '冒险'),
+      AnimeCategory(name: '奇幻'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 73,
@@ -860,22 +1948,21 @@ const _fallbackExternalSeries = [
   ),
   AnimeSubject(
     id: 169,
-    title: 'Breaking Bad',
+    title: '绝命毒师',
     originalTitle: 'Breaking Bad',
     summary: '一位化学教师在绝境中走向犯罪世界。',
     coverUrl:
         'https://static.tvmaze.com/uploads/images/original_untouched/0/2400.jpg',
-    bannerUrl:
-        'https://static.tvmaze.com/uploads/images/original_untouched/0/2400.jpg',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0903747/img',
     date: '2008-01-20',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United States',
-    status: 'Ended',
+    language: '英语',
+    region: '美国',
+    status: '已完结',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Crime'),
-      AnimeCategory(name: 'Thriller'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '犯罪'),
+      AnimeCategory(name: '惊悚'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 62,
@@ -883,22 +1970,21 @@ const _fallbackExternalSeries = [
   ),
   AnimeSubject(
     id: 527,
-    title: 'The Walking Dead',
+    title: '行尸走肉',
     originalTitle: 'The Walking Dead',
     summary: '幸存者在末日世界中寻找栖身之处，也面对人与人之间更复杂的冲突。',
     coverUrl:
         'https://static.tvmaze.com/uploads/images/original_untouched/67/168817.jpg',
-    bannerUrl:
-        'https://static.tvmaze.com/uploads/images/original_untouched/67/168817.jpg',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt1520211/img',
     date: '2010-10-31',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United States',
-    status: 'Ended',
+    language: '英语',
+    region: '美国',
+    status: '已完结',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Action'),
-      AnimeCategory(name: 'Horror'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '动作'),
+      AnimeCategory(name: '恐怖'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 177,
@@ -906,19 +1992,19 @@ const _fallbackExternalSeries = [
   ),
   AnimeSubject(
     id: 57841,
-    title: 'The Glory',
+    title: '黑暗荣耀',
     originalTitle: '더 글로리',
     summary: '一名女性围绕校园暴力展开漫长复仇。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt21344706/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt21344706/img',
     date: '2022-12-30',
     platform: 'Scripted',
-    language: 'Korean',
-    region: 'South Korea',
-    status: 'Ended',
+    language: '韩语',
+    region: '韩国',
+    status: '已完结',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Thriller'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '惊悚'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 16,
@@ -926,37 +2012,37 @@ const _fallbackExternalSeries = [
   ),
   AnimeSubject(
     id: 41007,
-    title: 'The Queen\'s Gambit',
+    title: '后翼弃兵',
     originalTitle: 'The Queen\'s Gambit',
     summary: '天才棋手在成长、胜负和自我控制之间寻找平衡。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt10048342/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt10048342/img',
     date: '2020-10-23',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United States',
-    status: 'Ended',
-    categories: [AnimeCategory(name: 'Drama')],
+    language: '英语',
+    region: '美国',
+    status: '已完结',
+    categories: [AnimeCategory(name: '剧情')],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 7,
     source: 'tvmaze',
   ),
   AnimeSubject(
     id: 2993,
-    title: 'Stranger Things',
+    title: '怪奇物语',
     originalTitle: 'Stranger Things',
     summary: '小镇少年与超自然事件、秘密实验和异世界威胁相遇。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt4574334/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt4574334/img',
     date: '2016-07-15',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United States',
-    status: 'Running',
+    language: '英语',
+    region: '美国',
+    status: '连载中',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Science fiction'),
-      AnimeCategory(name: 'Horror'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '科幻'),
+      AnimeCategory(name: '恐怖'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 34,
@@ -964,20 +2050,20 @@ const _fallbackExternalSeries = [
   ),
   AnimeSubject(
     id: 335,
-    title: 'Sherlock',
+    title: '神探夏洛克',
     originalTitle: 'Sherlock',
     summary: '福尔摩斯与华生在现代伦敦破解高智商案件。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt1475582/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt1475582/img',
     date: '2010-07-25',
     platform: 'Scripted',
-    language: 'English',
-    region: 'United Kingdom',
-    status: 'Ended',
+    language: '英语',
+    region: '英国',
+    status: '已完结',
     categories: [
-      AnimeCategory(name: 'Drama'),
-      AnimeCategory(name: 'Crime'),
-      AnimeCategory(name: 'Mystery'),
+      AnimeCategory(name: '剧情'),
+      AnimeCategory(name: '犯罪'),
+      AnimeCategory(name: '悬疑'),
     ],
     tags: [AnimeTag(name: 'TVMaze')],
     totalEpisodes: 13,
@@ -988,11 +2074,11 @@ const _fallbackExternalSeries = [
 const _fallbackExternalMovies = [
   AnimeSubject(
     id: 25188,
-    title: 'The Lord of the Rings: The Fellowship of the Ring',
+    title: '指环王：护戒使者',
     originalTitle: 'The Lord of the Rings: The Fellowship of the Ring',
     summary: '一枚戒指引发跨越中土世界的远征。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0120737/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0120737/img',
     date: '2001-12-10',
     platform: 'Movie',
     language: '',
@@ -1000,22 +2086,22 @@ const _fallbackExternalMovies = [
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Fantasy'),
+      AnimeCategory(name: '奇幻'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0120737',
   ),
   AnimeSubject(
     id: 2875,
-    title: 'Inception',
+    title: '盗梦空间',
     originalTitle: 'Inception',
     summary: '一名盗梦者接受在他人潜意识中植入想法的任务。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt1375666/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt1375666/img',
     date: '2010-07-08',
     platform: 'Movie',
     language: '',
@@ -1023,181 +2109,181 @@ const _fallbackExternalMovies = [
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Science fiction'),
+      AnimeCategory(name: '科幻'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt1375666',
   ),
   AnimeSubject(
     id: 103474,
-    title: 'Interstellar',
+    title: '星际穿越',
     originalTitle: 'Interstellar',
     summary: '人类为寻找新的栖息星球，穿越虫洞展开星际航行。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0816692/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0816692/img',
     date: '2014-10-26',
     platform: 'Movie',
-    language: 'English',
-    region: 'United States',
+    language: '英语',
+    region: '美国',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Science fiction'),
-      AnimeCategory(name: 'Adventure'),
+      AnimeCategory(name: '科幻'),
+      AnimeCategory(name: '冒险'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0816692',
   ),
   AnimeSubject(
     id: 83495,
-    title: 'The Matrix',
+    title: '黑客帝国',
     originalTitle: 'The Matrix',
     summary: '程序员发现现实背后的真相，并卷入人类与机器的战争。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0133093/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0133093/img',
     date: '1999-03-31',
     platform: 'Movie',
-    language: 'English',
-    region: 'United States',
+    language: '英语',
+    region: '美国',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Science fiction'),
-      AnimeCategory(name: 'Action'),
+      AnimeCategory(name: '科幻'),
+      AnimeCategory(name: '动作'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0133093',
   ),
   AnimeSubject(
     id: 163872,
-    title: 'The Dark Knight',
+    title: '蝙蝠侠：黑暗骑士',
     originalTitle: 'The Dark Knight',
     summary: '蝙蝠侠面对小丑制造的混乱和道德困境。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0468569/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0468569/img',
     date: '2008-07-14',
     platform: 'Movie',
-    language: 'English',
-    region: 'United States',
+    language: '英语',
+    region: '美国',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Action'),
-      AnimeCategory(name: 'Crime'),
+      AnimeCategory(name: '动作'),
+      AnimeCategory(name: '犯罪'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0468569',
   ),
   AnimeSubject(
     id: 47703,
-    title: 'The Godfather',
+    title: '教父',
     originalTitle: 'The Godfather',
     summary: '科里昂家族权力交接中的犯罪史诗。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0068646/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0068646/img',
     date: '1972-03-14',
     platform: 'Movie',
-    language: 'English',
-    region: 'United States',
+    language: '英语',
+    region: '美国',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Crime'),
-      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: '犯罪'),
+      AnimeCategory(name: '剧情'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0068646',
   ),
   AnimeSubject(
     id: 181795,
-    title: 'Spirited Away',
+    title: '千与千寻',
     originalTitle: '千と千尋の神隠し',
     summary: '少女误入神灵世界，为救父母开始独自面对陌生规则。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt0245429/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt0245429/img',
     date: '2001-07-20',
     platform: 'Movie',
-    language: 'Japanese',
-    region: 'Japan',
+    language: '日语',
+    region: '日本',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Fantasy'),
-      AnimeCategory(name: 'Adventure'),
+      AnimeCategory(name: '奇幻'),
+      AnimeCategory(name: '冒险'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'Animation'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt0245429',
   ),
   AnimeSubject(
     id: 287158,
-    title: 'Your Name',
+    title: '你的名字。',
     originalTitle: '君の名は。',
     summary: '两个少年少女在梦中交换身体，并追寻彼此的命运交点。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt5311514/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt5311514/img',
     date: '2016-08-26',
     platform: 'Movie',
-    language: 'Japanese',
-    region: 'Japan',
+    language: '日语',
+    region: '日本',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Fantasy'),
-      AnimeCategory(name: 'Drama'),
+      AnimeCategory(name: '奇幻'),
+      AnimeCategory(name: '剧情'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'Animation'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt5311514',
   ),
   AnimeSubject(
     id: 1055672,
-    title: 'Dune',
+    title: '沙丘',
     originalTitle: 'Dune',
     summary: '少年继承沙漠星球的命运，在权力、生态和预言中成长。',
-    coverUrl: null,
-    bannerUrl: null,
+    coverUrl: 'https://images.metahub.space/poster/medium/tt1160419/img',
+    bannerUrl: 'https://images.metahub.space/background/medium/tt1160419/img',
     date: '2021-09-03',
     platform: 'Movie',
-    language: 'English',
-    region: 'United States',
+    language: '英语',
+    region: '美国',
     status: '电影',
     categories: [
       AnimeCategory(name: '电影'),
-      AnimeCategory(name: 'Science fiction'),
-      AnimeCategory(name: 'Adventure'),
+      AnimeCategory(name: '科幻'),
+      AnimeCategory(name: '冒险'),
     ],
     tags: [
       AnimeTag(name: 'Wikidata'),
       AnimeTag(name: 'IMDb'),
     ],
     totalEpisodes: 1,
-    source: 'wikidata',
+    source: 'cinemeta:movie:tt1160419',
   ),
 ];

@@ -1,15 +1,39 @@
 import 'package:anime/src/app/anime_app.dart';
+import 'package:anime/src/catalog/catalog_page.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
+
+const _internalMetadataProviderNames = [
+  'Bangumi',
+  'AniList',
+  'Jikan',
+  'Kitsu',
+  'Cinemeta',
+  'TVMaze',
+  'Wikidata',
+  'Wikimedia',
+  'Archive',
+  'PeerTube',
+  'MyAnimeList',
+];
+
+void _expectInternalMetadataProvidersHidden() {
+  for (final provider in _internalMetadataProviderNames) {
+    expect(
+      find.textContaining(provider, findRichText: true),
+      findsNothing,
+      reason: '$provider should stay hidden from public-facing copy',
+    );
+  }
+}
 
 void main() {
   testWidgets('home shows AniCh style tabs and profile entry', (tester) async {
@@ -67,7 +91,7 @@ void main() {
     await tester.tap(find.text('查看详情'));
     await tester.pumpAndSettle();
 
-    expect(find.text('立即观看'), findsOneWidget);
+    expect(find.text('查找自定义线路'), findsOneWidget);
     expect(find.text('Inception'), findsWidgets);
   });
 
@@ -149,12 +173,19 @@ void main() {
 
     await tester.tap(find.text('番剧').first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('来自 Bangumi / AniList 的番剧元数据'), findsOneWidget);
+    expect(find.textContaining('近期热门番剧与中文资料'), findsNothing);
+    _expectInternalMetadataProvidersHidden();
     expect(find.text('孤独摇滚！'), findsWidgets);
+    expect(find.text('Breaking Bad'), findsNothing);
+    expect(find.text('Inception'), findsNothing);
 
     await tester.tap(find.text('剧集').first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('接入 TVMaze 影视剧元数据'), findsOneWidget);
+    expect(find.textContaining('近期热门剧集与中文资料'), findsNothing);
+    expect(find.textContaining('收录 '), findsNothing);
+    expect(find.textContaining('中文资料 '), findsNothing);
+    expect(find.textContaining('均可尝试规则查源'), findsNothing);
+    _expectInternalMetadataProvidersHidden();
     expect(find.text('Breaking Bad'), findsWidgets);
 
     await tester.tap(find.text('韩剧').last);
@@ -164,14 +195,55 @@ void main() {
 
     await tester.tap(find.text('电影').first);
     await tester.pumpAndSettle();
-    expect(find.textContaining('接入 Wikidata 电影元数据'), findsOneWidget);
+    expect(find.textContaining('热门电影与开放影片'), findsNothing);
+    expect(find.textContaining('可直接播放 '), findsNothing);
+    _expectInternalMetadataProvidersHidden();
     expect(find.text('Inception'), findsWidgets);
     expect(find.text('剧场版测试片'), findsNothing);
+    expect(find.text('公版测试短片'), findsWidgets);
+    expect(find.text('直连播放'), findsWidgets);
+    expect(find.text('规则查源'), findsWidgets);
+    expect(find.text('2013年'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilterChip, '直连播放'));
+    await tester.pumpAndSettle();
+    expect(find.text('公版测试短片'), findsWidgets);
+    expect(find.text('Inception'), findsNothing);
+
+    await tester.tap(find.widgetWithText(FilterChip, '规则查源'));
+    await tester.pumpAndSettle();
+    expect(find.text('Inception'), findsWidgets);
+    expect(find.text('公版测试短片'), findsNothing);
+
+    await tester.tap(find.widgetWithText(FilterChip, '全部').last);
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('科幻').last);
     await tester.pumpAndSettle();
     expect(find.text('Inception'), findsWidgets);
     expect(find.text('The Godfather'), findsNothing);
+  });
+
+  testWidgets('detail hides internal provider metadata', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(
+          home: DetailPage(subject: _playableMovieSubject),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('开放许可媒体，可直接播放'), findsWidgets);
+    _expectInternalMetadataProvidersHidden();
   });
 
   testWidgets('profile history preview expands in place', (tester) async {
@@ -275,7 +347,7 @@ void main() {
     expect(find.text('个人中心'), findsNothing);
   });
 
-  testWidgets('settings navigation opens settings hub with resource entries', (
+  testWidgets('settings navigation opens consolidated playback entries', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1200, 800);
@@ -298,8 +370,9 @@ void main() {
 
     expect(find.text('设置'), findsWidgets);
     expect(find.text('下载管理'), findsOneWidget);
-    expect(find.text('规则管理'), findsOneWidget);
-    expect(find.text('视频源'), findsWidgets);
+    expect(find.text('播放规则'), findsOneWidget);
+    expect(find.text('自定义仓库'), findsNothing);
+    expect(find.text('外部源目录'), findsNothing);
     expect(find.text('弹幕设置'), findsOneWidget);
     expect(find.text('播放设置'), findsOneWidget);
 
@@ -331,36 +404,50 @@ void main() {
 
       await tester.tap(find.byTooltip('我的'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('规则管理').first);
+      await tester.tap(find.text('播放规则').first);
       await tester.pumpAndSettle();
 
-      expect(find.text('规则管理'), findsWidgets);
+      expect(find.text('播放规则'), findsWidgets);
       expect(find.text('播放规则插件'), findsOneWidget);
+      expect(find.text('自动规则包'), findsOneWidget);
+      expect(find.text('测试 TVBox'), findsOneWidget);
+      expect(find.text('提供 2 条可执行播放规则'), findsOneWidget);
       expect(find.text('番剧规则'), findsOneWidget);
+      expect(find.text('全部启用'), findsOneWidget);
+      expect(find.text('全部关闭'), findsOneWidget);
 
       await tester.tap(find.byTooltip('添加规则'));
       await tester.pumpAndSettle();
-      expect(find.text('导入仓库 URL'), findsOneWidget);
+      expect(find.text('粘贴 GitHub 仓库或 raw JSON'), findsOneWidget);
       expect(find.text('新建规则'), findsOneWidget);
       await tester.tap(find.text('从规则仓库导入'));
       await tester.pumpAndSettle();
 
       expect(find.text('规则仓库'), findsWidgets);
       expect(find.text('omofun03'), findsOneWidget);
-      expect(find.text('CreamyCake CSS 播放规则'), findsOneWidget);
-      expect(find.text('导入'), findsOneWidget);
+      expect(find.text('内置番剧规则'), findsOneWidget);
+      expect(find.textContaining('已内置 22 条规则目录'), findsOneWidget);
+      expect(find.text('批量安装'), findsOneWidget);
+      expect(find.text('自定义仓库'), findsOneWidget);
+      expect(find.text('粘贴仓库地址'), findsOneWidget);
 
-      await tester.tap(find.text('导入'));
-      await tester.pumpAndSettle();
-
-      expect(
-        _FakeAnimeController.lastRulePlugins.repositories.first.url,
-        'https://sub.creamycake.org/v1/css1.json',
+      final pasteRepositoryButton = find.widgetWithText(
+        OutlinedButton,
+        '粘贴仓库地址',
       );
+      await tester.ensureVisible(pasteRepositoryButton);
+      await tester.tap(pasteRepositoryButton);
+      await tester.pumpAndSettle();
+      expect(find.text('添加自定义仓库'), findsOneWidget);
+      expect(find.text('扫描 / 预览'), findsOneWidget);
+      expect(find.textContaining('配置字段会按原样保留'), findsOneWidget);
+      expect(find.textContaining('出于安全考虑'), findsNothing);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byTooltip('返回'));
       await tester.pumpAndSettle();
-      expect(find.text('规则管理'), findsWidgets);
+      expect(find.text('播放规则'), findsWidgets);
 
       await tester.tap(find.byTooltip('更多操作').first);
       await tester.pumpAndSettle();
@@ -381,13 +468,17 @@ void main() {
       expect(find.text('韩剧看看'), findsNothing);
       expect(find.text('电影先生'), findsNothing);
 
-      await tester.tap(find.byKey(const ValueKey('ruleRepositoryRail:series')));
+      await tester.tap(
+        find.byKey(const ValueKey('ruleRepositorySegment:series')),
+      );
       await tester.pumpAndSettle();
       expect(find.text('韩剧看看'), findsOneWidget);
       expect(find.text('电影先生'), findsNothing);
       expect(find.text('omofun03'), findsNothing);
 
-      await tester.tap(find.byKey(const ValueKey('ruleRepositoryRail:movie')));
+      await tester.tap(
+        find.byKey(const ValueKey('ruleRepositorySegment:movie')),
+      );
       await tester.pumpAndSettle();
       expect(find.text('电影先生'), findsOneWidget);
       expect(find.text('电影港'), findsOneWidget);
@@ -395,7 +486,7 @@ void main() {
     },
   );
 
-  testWidgets('source management page lists catalog and saves toggles', (
+  testWidgets('legacy source route redirects to automatic rule packages', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1200, 900);
@@ -415,23 +506,66 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('我的'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('视频源').first);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AnimeApp)),
+    );
+    container.read(routerProvider).go('/profile/sources');
     await tester.pumpAndSettle();
 
-    expect(find.text('视频源管理'), findsWidgets);
-    expect(find.text('已导入视频源'), findsOneWidget);
+    expect(find.text('播放规则插件'), findsOneWidget);
+    expect(find.text('自动规则包'), findsOneWidget);
     expect(find.text('测试 TVBox'), findsOneWidget);
-    expect(find.text('测试直播'), findsOneWidget);
-    expect(find.text('未检测'), findsWidgets);
+    expect(find.text('已登记外部资源'), findsNothing);
+    expect(find.text('测试直播'), findsNothing);
 
-    final switches = find.byType(Switch);
-    expect(switches, findsNWidgets(2));
-    await tester.tap(switches.first);
+    final repository = const RulePluginRepository();
+    final installed = repository.installedRules(
+      _FakeAnimeController.lastRulePlugins,
+    );
+    final installedEnabled = installed
+        .where(
+          (rule) => _FakeAnimeController.lastRulePlugins.isEnabled(rule.id),
+        )
+        .length;
+    final installedPlayback = installed
+        .where(
+          (rule) =>
+              _FakeAnimeController.lastRulePlugins.isEnabled(rule.id) &&
+              rule.searchable &&
+              rule.canResolveNatively,
+        )
+        .length;
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('ruleMetric:已安装')),
+        matching: find.text('${installed.length + 2}'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('ruleMetric:已启用')),
+        matching: find.text('${installedEnabled + 2}'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('ruleMetric:参与查源')),
+        matching: find.text('${installedPlayback + 2}'),
+      ),
+      findsOneWidget,
+    );
+
+    final packageSwitch = find.byKey(
+      const ValueKey('automaticRulePackage:source:tvbox'),
+    );
+    expect(packageSwitch, findsOneWidget);
+    await tester.tap(packageSwitch);
     await tester.pumpAndSettle();
 
     expect(_FakeAnimeController.lastSourceToggle, ('source:tvbox', false));
+    expect(tester.widget<Switch>(packageSwitch).value, isFalse);
   });
 
   testWidgets('playback settings rows are actionable', (tester) async {
@@ -462,19 +596,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_FakeAnimeController.lastSettings.speed, 1.5);
-
-    if (!kReleaseMode) {
-      await tester.scrollUntilVisible(
-        find.text('影视资料源'),
-        360,
-        scrollable: find.byType(Scrollable).last,
-      );
-      await tester.tap(find.text('影视资料源'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('影视资料源：TVMaze'), findsOneWidget);
-      expect(find.text('启用影视资料源'), findsOneWidget);
-    }
   });
 }
 
@@ -521,9 +642,18 @@ class _FakeAnimeController extends AnimeController {
   Future<void> toggleVideoSource(String id, bool enabled) async {
     lastSourceToggle = (id, enabled);
     final current = state.value ?? const AnimeState(homeFeed: _feed);
+    final toggled = current.sourceCatalog.toggleSource(id, enabled);
+    final activePlaybackRuleCount = toggled.sources
+        .where((source) => source.enabled)
+        .fold<int>(
+          0,
+          (count, source) => count + toggled.playbackRuleCountFor(source.id),
+        );
     state = AsyncData(
       current.copyWith(
-        sourceCatalog: current.sourceCatalog.toggleSource(id, enabled),
+        sourceCatalog: toggled.copyWith(
+          activePlaybackRuleCount: activePlaybackRuleCount,
+        ),
       ),
     );
   }
@@ -601,7 +731,7 @@ class _FakeAnimeController extends AnimeController {
     final current = state.value ?? const AnimeState(homeFeed: _feed);
     lastRulePlugins = current.rulePlugins.copyWith(
       installedIds: {...current.rulePlugins.installedIds, importedRule.id},
-      enabledIds: {...current.rulePlugins.enabledIds, importedRule.id},
+      enabledIds: current.rulePlugins.enabledIds,
       customRules: [...current.rulePlugins.customRules, importedRule],
       repositories: [
         RuleRepositoryRecord(
@@ -632,18 +762,24 @@ class _FakeAnimeController extends AnimeController {
   }
 
   @override
-  Future<List<AnimeSubject>> discoverSubjects() async {
+  Future<List<AnimeSubject>> discoverSubjects({
+    bool waitForRefresh = false,
+  }) async {
     return const [_subject, _seriesSubject, _movieSubject];
   }
 
   @override
-  Future<List<AnimeSubject>> seriesSubjects() async {
+  Future<List<AnimeSubject>> seriesSubjects({
+    bool waitForRefresh = false,
+  }) async {
     return const [_seriesSubject, _koreanSeriesSubject];
   }
 
   @override
-  Future<List<AnimeSubject>> movieSubjects() async {
-    return const [_movieSubject, _movieDramaSubject];
+  Future<List<AnimeSubject>> movieSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    return const [_movieSubject, _playableMovieSubject, _movieDramaSubject];
   }
 
   @override
@@ -816,6 +952,24 @@ const _movieDramaSubject = AnimeSubject(
   source: 'wikidata',
 );
 
+const _playableMovieSubject = AnimeSubject(
+  id: 70001,
+  title: '公版测试短片',
+  originalTitle: 'Public Domain Test Short',
+  summary: '来自 Wikimedia Commons 的开放许可媒体，可直接播放。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2025-05-01',
+  platform: 'Movie',
+  language: 'English',
+  region: 'Internet Archive',
+  status: 'Internet Archive',
+  categories: [AnimeCategory(name: '纪录片')],
+  tags: [AnimeTag(name: 'Internet Archive')],
+  totalEpisodes: 1,
+  source: 'archive:public-domain-test-short',
+);
+
 const _feed = AnimeHomeFeed(
   hero: _subject,
   recent: [_subject],
@@ -853,6 +1007,9 @@ final _historyEntries = [
 const _sourceCatalog = SourceCatalogState(
   version: 1,
   totalSources: 2,
+  playbackRuleCounts: {'source:tvbox': 2, 'source:m3u': 0},
+  availablePlaybackRuleCount: 2,
+  activePlaybackRuleCount: 2,
   sources: [
     VideoSource(
       id: 'source:tvbox',
