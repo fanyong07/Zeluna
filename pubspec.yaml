@@ -14,7 +14,7 @@ publish_to: 'none'
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.0+7
 
 environment:
   sdk: ^3.11.1
@@ -73,7 +73,11 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/brand/
+    - assets/brand/anime_logo_app_icon.png
+    - assets/brand/anime_logo_app_icon_192.png
+    - assets/brand/anime_logo_app_icon_512.png
+    - assets/brand/anime_logo_mark.png
+    - assets/brand/anime_logo_mark_512.png
     - assets/shaders/anime4k/
     - assets/data/sources_catalog.json
 

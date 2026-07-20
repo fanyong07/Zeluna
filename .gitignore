@@ -55,6 +55,10 @@ artifacts/
 dist/
 output/
 
+# Local brand concept iterations; only the selected anime_logo_* assets ship.
+assets/brand/zeluna_anime_logo_app_icon_v*.png
+assets/brand/zeluna_logo_*.png
+
 # Local Android/Gradle caches
 android/.gradle/
 android/build/
