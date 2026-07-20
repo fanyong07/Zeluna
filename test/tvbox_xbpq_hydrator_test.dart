@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:anime/src/rules/rule_models.dart';
@@ -75,6 +76,92 @@ void main() {
       expect(rawSite['ext'], isA<Map>());
     }
   });
+
+  test(
+    'limits one source to two remote requests and releases failed slots',
+    () async {
+      var activeRequests = 0;
+      var peakRequests = 0;
+      var requestCount = 0;
+      final gates = <Completer<void>>[];
+      final secondStarted = Completer<void>();
+      final fourthStarted = Completer<void>();
+      final sixthStarted = Completer<void>();
+      final hydrator = TvBoxXbpqHydrator(
+        client: MockClient((request) async {
+          requestCount++;
+          activeRequests++;
+          if (activeRequests > peakRequests) peakRequests = activeRequests;
+          final gate = Completer<void>();
+          gates.add(gate);
+          if (requestCount == 2) secondStarted.complete();
+          if (requestCount == 4) fourthStarted.complete();
+          if (requestCount == 6) sixthStarted.complete();
+          try {
+            await gate.future;
+            if (request.url.path.endsWith('/remote-0.json')) {
+              throw StateError('simulated network failure');
+            }
+            return http.Response(
+              jsonEncode(_completeConfig()),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          } finally {
+            activeRequests--;
+          }
+        }),
+      );
+      addTearDown(hydrator.close);
+      final hydration = hydrator.hydrateSource(
+        _sourceWithSites([
+          for (var index = 0; index < 6; index++)
+            _site('remote-$index', './remote-$index.json'),
+        ]),
+      );
+
+      await secondStarted.future.timeout(const Duration(seconds: 1));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(requestCount, 2);
+      expect(activeRequests, 2);
+      expect(peakRequests, 2);
+
+      gates[0].complete();
+      gates[1].complete();
+      await fourthStarted.future.timeout(const Duration(seconds: 1));
+      expect(requestCount, 4);
+      expect(activeRequests, 2);
+      expect(peakRequests, 2);
+
+      gates[2].complete();
+      gates[3].complete();
+      await sixthStarted.future.timeout(const Duration(seconds: 1));
+      expect(requestCount, 6);
+      expect(activeRequests, 2);
+      expect(peakRequests, 2);
+
+      gates[4].complete();
+      gates[5].complete();
+      final result = await hydration.timeout(const Duration(seconds: 1));
+
+      expect(activeRequests, 0);
+      expect(peakRequests, 2);
+      expect(
+        result.sites
+            .where((site) => site.status == TvBoxXbpqHydrationStatus.hydrated)
+            .length,
+        5,
+      );
+      expect(
+        result.sites
+            .where(
+              (site) => site.status == TvBoxXbpqHydrationStatus.fetchFailed,
+            )
+            .length,
+        1,
+      );
+    },
+  );
 
   test('uses catalog baseUrl when importUrl is empty', () async {
     var requestCount = 0;

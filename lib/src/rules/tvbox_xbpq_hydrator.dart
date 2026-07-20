@@ -79,6 +79,7 @@ class TvBoxXbpqHydrator {
   final Duration failureCacheTtl;
   final Map<String, _CachedFetch> _cache = {};
   final Map<String, Future<_JsonFetch>> _inFlight = {};
+  final _remoteFetchLimiter = _AsyncLimiter(2);
 
   Future<TvBoxXbpqHydrationResult> hydrateSource(VideoSource source) async {
     if (source.kind != VideoSourceKind.tvBox) {
@@ -336,13 +337,15 @@ class TvBoxXbpqHydrator {
     final active = _inFlight[key];
     if (active != null) return active;
 
-    final request = _fetchJsonUncached(uri).then((result) {
-      _cache[key] = _CachedFetch(
-        result,
-        _clock().add(result.isSuccess ? successCacheTtl : failureCacheTtl),
-      );
-      return result;
-    });
+    final request = _remoteFetchLimiter.run(() => _fetchJsonUncached(uri)).then(
+      (result) {
+        _cache[key] = _CachedFetch(
+          result,
+          _clock().add(result.isSuccess ? successCacheTtl : failureCacheTtl),
+        );
+        return result;
+      },
+    );
     _inFlight[key] = request;
     return request.whenComplete(() {
       if (identical(_inFlight[key], request)) _inFlight.remove(key);
@@ -683,4 +686,39 @@ class _CachedFetch {
 
 class _ResponseTooLarge implements Exception {
   const _ResponseTooLarge();
+}
+
+class _AsyncLimiter {
+  _AsyncLimiter(this.maxConcurrent) : assert(maxConcurrent > 0);
+
+  final int maxConcurrent;
+  int _active = 0;
+  final List<Completer<void>> _waiters = [];
+
+  Future<T> run<T>(Future<T> Function() operation) async {
+    await _acquire();
+    try {
+      return await operation();
+    } finally {
+      _release();
+    }
+  }
+
+  Future<void> _acquire() {
+    if (_active < maxConcurrent) {
+      _active++;
+      return Future<void>.value();
+    }
+    final waiter = Completer<void>();
+    _waiters.add(waiter);
+    return waiter.future;
+  }
+
+  void _release() {
+    if (_waiters.isNotEmpty) {
+      _waiters.removeAt(0).complete();
+      return;
+    }
+    _active--;
+  }
 }

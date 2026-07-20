@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../accounts/local_account_repository.dart';
 import '../app/anime_app.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
@@ -131,13 +132,20 @@ class _ProfileBanner extends StatelessWidget {
                               ),
                               if (!compact) ...[
                                 const SizedBox(width: 10),
-                                const SmallBadge(label: '年度大会员', active: true),
+                                SmallBadge(
+                                  label: state.accountSession.isSignedIn
+                                      ? '本机账号'
+                                      : '游客',
+                                  active: state.accountSession.isSignedIn,
+                                ),
                               ],
                             ],
                           ),
                           SizedBox(height: compact ? 4 : 8),
                           Text(
-                            'UID ${state.profile.uid} · 浓度 ${state.profile.density} · 硬币 ${state.profile.coins}',
+                            state.accountSession.isSignedIn
+                                ? 'UID ${state.profile.uid} · ${state.accountSession.current!.email}'
+                                : '游客空间 · 登录后可使用独立收藏和历史',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.titleSmall
@@ -161,16 +169,16 @@ class _ProfileBanner extends StatelessWidget {
                     ),
                     if (!compact) ...[
                       _BannerMetric(
-                        label: '片单',
-                        value: '${state.favorites.length + 24}',
+                        label: '追番',
+                        value: '${state.following.length}',
                       ),
                       _BannerMetric(
                         label: '收藏',
-                        value: '${state.favorites.length + 156}',
+                        value: '${state.favorites.length}',
                       ),
                       _BannerMetric(
-                        label: '关注',
-                        value: '${state.following.length + 36}',
+                        label: '历史',
+                        value: '${state.history.length}',
                       ),
                     ],
                   ],
@@ -225,95 +233,40 @@ class _ProfilePlaylistSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 760;
-    final subjects = [
-      state.homeFeed.hero,
-      ...state.homeFeed.recommended,
-      ...state.homeFeed.recent,
-    ];
+    final entries = state.following.take(8).toList(growable: false);
     return AppPanel(
       child: Column(
         children: [
           SectionTitle(
-            title: '我的片单',
-            action: TextButton(
-              onPressed: () => context.push('/profile/following'),
-              child: Text('全部 ${state.following.length} ›'),
-            ),
+            title: '我的追番',
+            action: entries.isEmpty
+                ? null
+                : TextButton(
+                    onPressed: () => context.push('/profile/following'),
+                    child: Text('全部 ${state.following.length} ›'),
+                  ),
           ),
           SizedBox(height: compact ? 10 : 14),
-          SizedBox(
-            height: compact ? 124 : 150,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return _CreatePlaylistCard(
-                    onTap: () => context.push('/profile/home-settings'),
+          if (entries.isEmpty)
+            const _InlineEmpty('还没有追番，在详情页点击“追番”后会显示在这里')
+          else
+            SizedBox(
+              height: compact ? 124 : 150,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemBuilder: (context, index) {
+                  final subject = entries[index].subject;
+                  return _PlaylistCard(
+                    title: subject.title,
+                    subject: subject,
+                    onTap: () => _openDetail(context, subject),
                   );
-                }
-                final subject = subjects[index % subjects.length];
-                final labels = ['年度必看', '治愈系动画', '科幻电影精选', '异世界冒险', '悬疑推理'];
-                return _PlaylistCard(
-                  title: labels[(index - 1) % labels.length],
-                  count: 12 + index * 3,
-                  subject: subject,
-                  onTap: () => _openDetail(context, subject),
-                );
-              },
-              separatorBuilder: (context, index) => const SizedBox(width: 12),
-              itemCount: subjects.isEmpty ? 1 : 6,
+                },
+                separatorBuilder: (context, index) => const SizedBox(width: 12),
+                itemCount: entries.length,
+              ),
             ),
-          ),
         ],
-      ),
-    );
-  }
-}
-
-class _CreatePlaylistCard extends StatelessWidget {
-  const _CreatePlaylistCard({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: compact ? 132 : 150,
-        child: AppPanel(
-          padding: EdgeInsets.all(compact ? 10 : 14),
-          color: AppColors.panelHigh,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.add,
-                color: AppColors.primary,
-                size: compact ? 28 : 34,
-              ),
-              SizedBox(height: compact ? 8 : 12),
-              Text(
-                '新建片单',
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: AppColors.text,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              if (!compact) ...[
-                const SizedBox(height: 4),
-                Text(
-                  '打开片单管理',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ],
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -322,13 +275,11 @@ class _CreatePlaylistCard extends StatelessWidget {
 class _PlaylistCard extends StatelessWidget {
   const _PlaylistCard({
     required this.title,
-    required this.count,
     required this.subject,
     required this.onTap,
   });
 
   final String title;
-  final int count;
   final AnimeSubject subject;
   final VoidCallback onTap;
 
@@ -378,7 +329,7 @@ class _PlaylistCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        '$count 部 · 打开',
+                        '已加入追番 · 打开详情',
                         style: Theme.of(
                           context,
                         ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -416,6 +367,14 @@ class _ProfileShortcutSection extends StatelessWidget {
                   : (constraints.maxWidth / 168).floor().clamp(3, 6);
               final shortcuts = [
                 _ShortcutTile(
+                  icon: state.accountSession.isSignedIn
+                      ? Icons.account_circle
+                      : Icons.login_rounded,
+                  title: '账号管理',
+                  value: state.accountSession.isSignedIn ? '已登录' : '登录 / 注册',
+                  onTap: () => context.push('/profile/account'),
+                ),
+                _ShortcutTile(
                   icon: Icons.bookmark_border,
                   title: '追番列表',
                   value: '${state.following.length}',
@@ -425,7 +384,7 @@ class _ProfileShortcutSection extends StatelessWidget {
                   icon: Icons.favorite,
                   title: '全部收藏',
                   value: '${state.favorites.length}',
-                  onTap: () => context.push('/profile/images'),
+                  onTap: () => context.push('/profile/favorites'),
                 ),
                 _ShortcutTile(
                   icon: Icons.history,
@@ -636,6 +595,7 @@ class _HistoryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
     return SizedBox(
       width: 190,
       child: InkWell(
@@ -688,14 +648,16 @@ class _HistoryCard extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 5),
-                      LinearProgressIndicator(
-                        value: _entryProgress(entry),
-                        minHeight: 3,
-                        borderRadius: BorderRadius.circular(3),
-                        backgroundColor: AppColors.border,
-                        color: AppColors.primary,
-                      ),
+                      if (progress != null) ...[
+                        const SizedBox(height: 5),
+                        LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 3,
+                          borderRadius: BorderRadius.circular(3),
+                          backgroundColor: AppColors.border,
+                          color: AppColors.primary,
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -821,22 +783,42 @@ class DownloadManagementPage extends ConsumerWidget {
     return AsyncAnimeGate(
       builder: (context, state) {
         final tasks = state.offlineTasks;
-        return _ProfileScaffold(
-          title: '离线缓存',
+        final compact = MediaQuery.sizeOf(context).width < 760;
+        return AppChrome(
           active: ChromeDestination.download,
-          child: tasks.isEmpty
-              ? const _ProfileEmptyState(
-                  title: '还没有下载任务',
-                  message: '在详情页点击下载后，单文件线路会显示在这里。',
-                )
-              : ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
-                  itemCount: tasks.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(height: 10),
-                  itemBuilder: (context, index) =>
-                      _DownloadTaskCard(task: tasks[index]),
-                ),
+          showSearch: false,
+          title: '离线缓存',
+          onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 24,
+              120,
+            ),
+            child: tasks.isEmpty
+                ? const _ProfileEmptyState(
+                    title: '还没有下载任务',
+                    message: '在详情页点击下载后，任务会显示在这里。',
+                  )
+                : ListView.separated(
+                    itemCount: tasks.length + 1,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return AppPanel(
+                          child: SectionTitle(
+                            title: '全部下载',
+                            subtitle: '${tasks.length} 个离线任务，可在这里暂停、继续或删除',
+                            icon: Icons.download_for_offline_outlined,
+                          ),
+                        );
+                      }
+                      return _DownloadTaskCard(task: tasks[index - 1]);
+                    },
+                  ),
+          ),
         );
       },
     );
@@ -998,59 +980,22 @@ class _ProfileRightRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final finished = state.history.where(_isFinishedEntry).length;
+    final latest = state.history.isEmpty ? null : state.history.first;
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
       children: [
         AppPanel(
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '观看时长统计'),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: 136,
-                height: 136,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    CircularProgressIndicator(
-                      value: 0.72,
-                      strokeWidth: 12,
-                      backgroundColor: AppColors.border,
-                      color: AppColors.primary,
-                    ),
-                    Center(
-                      child: Text(
-                        '${32 + state.history.length}\n小时',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          color: AppColors.text,
-                          fontWeight: FontWeight.w900,
-                          height: 1.15,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  for (var i = 0; i < 16; i++) ...[
-                    Expanded(
-                      child: Container(
-                        height: 18.0 + (i % 7) * 8,
-                        decoration: BoxDecoration(
-                          color: i == 13
-                              ? AppColors.primary
-                              : AppColors.primary.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                    if (i != 15) const SizedBox(width: 4),
-                  ],
-                ],
+              const SectionTitle(title: '观看概览'),
+              const SizedBox(height: 14),
+              _HistoryStatRow(label: '观看记录', value: '${state.history.length}'),
+              _HistoryStatRow(label: '已看完', value: '$finished'),
+              _HistoryStatRow(
+                label: '最近观看',
+                value: latest == null ? '暂无' : latest.subject.title,
               ),
             ],
           ),
@@ -1063,26 +1008,26 @@ class _ProfileRightRail extends StatelessWidget {
               const SizedBox(height: 12),
               _RailAction(
                 icon: Icons.schedule,
-                title: '稍后观看',
+                title: '观看记录',
                 value: '${state.history.length}',
                 onTap: () => _scrollToHistory(context),
               ),
               _RailAction(
                 icon: Icons.bookmark_border,
-                title: '想看列表',
+                title: '追番列表',
                 value: '${state.following.length}',
                 onTap: () => context.push('/profile/following'),
               ),
               _RailAction(
-                icon: Icons.check_circle_outline,
-                title: '已看完',
-                value: '${state.history.where(_isFinishedEntry).length}',
-                onTap: () => _scrollToHistory(context),
+                icon: Icons.favorite_border,
+                title: '收藏列表',
+                value: '${state.favorites.length}',
+                onTap: () => context.push('/profile/favorites'),
               ),
               _RailAction(
-                icon: Icons.star_border,
-                title: '评分记录',
-                value: '36',
+                icon: Icons.feedback_outlined,
+                title: '反馈记录',
+                value: '${state.feedbacks.length}',
                 onTap: () => context.push('/profile/feedback'),
               ),
               _RailAction(
@@ -1105,16 +1050,18 @@ class _ProfileRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '设备同步'),
+              const SectionTitle(title: '本机账号数据'),
               const SizedBox(height: 12),
-              const _DeviceRow(
+              _DeviceRow(
                 icon: Icons.devices_rounded,
                 title: '当前设备',
-                status: '本地保存',
+                status: state.accountSession.isSignedIn ? '仅本机' : '游客空间',
               ),
               const SizedBox(height: 8),
               Text(
-                '尚未登录云端账号，历史、收藏和设置不会跨设备同步。',
+                state.accountSession.isSignedIn
+                    ? '当前账号的数据已与其他本机账号隔离；暂不支持跨设备同步。'
+                    : '登录或创建本机账号后，可将收藏、追番、历史和偏好与其他使用者分开。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -1207,7 +1154,9 @@ class _DeviceRow extends StatelessWidget {
           Text(
             status,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: status == '在线' ? Colors.greenAccent : AppColors.muted,
+              color: status == '在线' || status == '已登录'
+                  ? Colors.greenAccent
+                  : AppColors.muted,
             ),
           ),
         ],
@@ -1369,6 +1318,7 @@ class _HistoryListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
     return InkWell(
       onTap: () => _playEntry(context, entry),
       borderRadius: BorderRadius.circular(8),
@@ -1415,14 +1365,16 @@ class _HistoryListTile extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  LinearProgressIndicator(
-                    value: _entryProgress(entry),
-                    minHeight: 4,
-                    borderRadius: BorderRadius.circular(4),
-                    backgroundColor: AppColors.border,
-                    color: AppColors.primary,
-                  ),
+                  if (progress != null) ...[
+                    const SizedBox(height: 10),
+                    LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(4),
+                      backgroundColor: AppColors.border,
+                      color: AppColors.primary,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1501,80 +1453,6 @@ class _HistoryStatRow extends StatelessWidget {
         ],
       ),
     );
-  }
-}
-
-class AccountSettingsPage extends ConsumerStatefulWidget {
-  const AccountSettingsPage({super.key});
-
-  @override
-  ConsumerState<AccountSettingsPage> createState() =>
-      _AccountSettingsPageState();
-}
-
-class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
-  late final TextEditingController _nickname;
-
-  @override
-  void initState() {
-    super.initState();
-    _nickname = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _nickname.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AsyncAnimeGate(
-      builder: (context, state) {
-        if (_nickname.text.isEmpty) _nickname.text = state.profile.nickname;
-        return _ProfileScaffold(
-          title: '账号管理',
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
-            children: [
-              _SettingsCard(
-                children: [
-                  _ReadonlyRow(title: 'UID', value: state.profile.uid),
-                  _ReadonlyRow(title: '浓度', value: '${state.profile.density}'),
-                  _ReadonlyRow(title: '硬币', value: '${state.profile.coins}'),
-                ],
-              ),
-              const SizedBox(height: 12),
-              _SettingsCard(
-                children: [
-                  SizedBox(
-                    height: 78,
-                    child: TextField(
-                      controller: _nickname,
-                      decoration: const InputDecoration(labelText: '本地昵称'),
-                      onSubmitted: (_) => _saveProfile(state.profile),
-                    ),
-                  ),
-                  _ActionRow(
-                    icon: Icons.save_outlined,
-                    title: '保存本地资料',
-                    subtitle: '仅保存在本机，不接入登录账号',
-                    onTap: () => _saveProfile(state.profile),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _saveProfile(UserProfileSettings profile) {
-    ref
-        .read(animeControllerProvider.notifier)
-        .updateProfile(profile.copyWith(nickname: _nickname.text.trim()));
-    _showToast(context, '账号资料已保存');
   }
 }
 
@@ -1789,7 +1667,7 @@ class VersionInfoPage extends StatelessWidget {
             children: [
               _SettingsCard(
                 children: [
-                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'anime'),
+                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'Zeluna'),
                   _ReadonlyRow(
                     title: '版本',
                     value: info == null
@@ -2613,8 +2491,17 @@ Future<void> _playDownloadTask(
     return;
   }
   final controller = ref.read(animeControllerProvider.notifier);
-  await controller.addHistory(task.subject, task.episode);
-  if (!context.mounted) return;
+  final accountContextVersion = controller.accountContextVersion;
+  final recorded = await controller.addHistory(
+    task.subject,
+    task.episode,
+    expectedAccountContextVersion: accountContextVersion,
+  );
+  if (!context.mounted ||
+      !recorded ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
   context.push(
     '/player',
     extra: PlaySessionRequest(
@@ -2684,23 +2571,38 @@ String _downloadBytesLabel(int bytes) {
 Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
   final ref = ProviderScope.containerOf(context, listen: false);
   final controller = ref.read(animeControllerProvider.notifier);
+  final accountContextVersion = controller.accountContextVersion;
   var episode = entry.episode;
   var episodes = <AnimeEpisode>[];
   try {
     final detail = await controller.detail(entry.subject);
     episodes = detail.episodes;
     episode ??= episodes.firstOrNull;
+  } on AccountException {
+    return;
   } catch (_) {
+    if (!controller.isAccountContextCurrent(accountContextVersion)) return;
     episode ??= entry.episode;
   }
-  if (!context.mounted) return;
+  if (!context.mounted ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
   if (episode == null) {
     _showToast(context, '这条记录没有可继续播放的集数');
     _openDetail(context, entry.subject);
     return;
   }
-  await controller.addHistory(entry.subject, episode);
-  if (!context.mounted) return;
+  final recorded = await controller.addHistory(
+    entry.subject,
+    episode,
+    expectedAccountContextVersion: accountContextVersion,
+  );
+  if (!context.mounted ||
+      !recorded ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
   context.push(
     '/player',
     extra: PlaySessionRequest(
@@ -2731,10 +2633,10 @@ void _scrollToHistory(BuildContext context) {
   );
 }
 
-double _entryProgress(LibraryEntry entry) {
+double? _entryProgress(LibraryEntry entry) {
   final total = entry.subject.totalEpisodes;
   final number = entry.episode?.number ?? 1;
-  if (total <= 0) return 0.35;
+  if (total <= 0) return null;
   return (number / total).clamp(0.05, 1.0);
 }
 

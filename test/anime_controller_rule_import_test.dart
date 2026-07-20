@@ -4,7 +4,9 @@ import 'dart:io';
 
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/data/bangumi_metadata_repository.dart';
+import 'package:anime/src/data/external_service_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/domain/subject_content_type.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
@@ -66,8 +68,95 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 20));
   });
 
+  test('fresh one-hour home cache skips startup metadata refresh', () async {
+    final tempDirectory = await Directory.systemTemp.createTemp(
+      'anime-controller-fresh-home-cache-',
+    );
+    Hive.init(tempDirectory.path);
+    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+    await settings.put('services', _bangumiOnlyServices.toJson());
+    await settings.close();
+    final library = await Hive.openBox<dynamic>('anime.library.v2');
+    await library.put('metadata.cache.home', {
+      'version': 2,
+      'fetchedAt': DateTime.now().toUtc().toIso8601String(),
+      'feed': _homeFeed.toJson(),
+    });
+    await library.close();
+
+    final repository = _ControlledBangumiMetadataRepository();
+    final container = ProviderContainer(
+      overrides: [
+        bangumiMetadataRepositoryProvider.overrideWithValue(repository),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _EmptySourceCatalogRepository(),
+        ),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      await Hive.close();
+      if (await tempDirectory.exists()) {
+        await tempDirectory.delete(recursive: true);
+      }
+    });
+
+    final initial = await container.read(animeControllerProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+
+    expect(initial.homeFeed.hero.title, _homeSubject.title);
+    expect(repository.homeFeedStarted, isFalse);
+  });
+
   test(
-    'anime discovery is immediate and rejects series or movie items',
+    'legacy home cache is shown immediately but refreshed as stale',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-legacy-home-cache-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _bangumiOnlyServices.toJson());
+      await settings.close();
+      final library = await Hive.openBox<dynamic>('anime.library.v2');
+      await library.put('metadata.cache.home', {
+        'version': 1,
+        'feed': _mixedHomeFeed.toJson(),
+      });
+      await library.close();
+
+      final repository = _ControlledBangumiMetadataRepository();
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(repository),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        if (!repository.homeFeedCompleter.isCompleted) {
+          repository.homeFeedCompleter.complete(_homeFeed);
+        }
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      final initial = await container.read(animeControllerProvider.future);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(initial.homeFeed.recent, hasLength(3));
+      expect(repository.homeFeedStarted, isTrue);
+      repository.homeFeedCompleter.complete(_homeFeed);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    },
+  );
+
+  test(
+    'anime discovery is immediate and rejects series and all movie formats',
     () async {
       final tempDirectory = await Directory.systemTemp.createTemp(
         'anime-controller-anime-filter-',
@@ -110,15 +199,238 @@ void main() {
 
       final refreshedFuture = controller.discoverSubjects(waitForRefresh: true);
       repository.discoveryCompleter.complete(const [
+        _animeSeriesSubject,
         _animeMovieSubject,
         _seriesSubject,
         _movieSubject,
       ]);
       final refreshed = await refreshedFuture;
 
-      expect(refreshed.map((item) => item.source), contains('jikan'));
+      expect(refreshed.map((item) => item.title), contains('测试动画剧集'));
+      expect(refreshed.map((item) => item.title), isNot(contains('测试动画电影')));
       expect(refreshed.map((item) => item.source), isNot(contains('tvmaze')));
       expect(refreshed.map((item) => item.source), isNot(contains('wikidata')));
+    },
+  );
+
+  test(
+    'merged search metadata keeps shorter Chinese title and summary',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-chinese-merge-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _mergeServices.toJson());
+      await settings.close();
+
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _ContentBangumiMetadataRepository(
+              fixtureHomeFeed: _homeFeed,
+              searchResults: const [_shortChineseDuplicate],
+            ),
+          ),
+          externalServiceRepositoryProvider.overrideWithValue(
+            _ContentExternalServiceRepository(
+              anilistSearchResults: const [_longEnglishDuplicate],
+            ),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      await container.read(animeControllerProvider.future);
+      final results = await container
+          .read(animeControllerProvider.notifier)
+          .search('Shared Original');
+
+      expect(results, hasLength(1));
+      expect(results.single.title, _shortChineseDuplicate.title);
+      expect(results.single.summary, _shortChineseDuplicate.summary);
+      expect(results.single.source, 'anilist');
+    },
+  );
+
+  test(
+    'home anime lists stay isolated while series and movie highlights remain',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-home-partition-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _partitionServices.toJson());
+      await settings.close();
+
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _ContentBangumiMetadataRepository(fixtureHomeFeed: _mixedHomeFeed),
+          ),
+          externalServiceRepositoryProvider.overrideWithValue(
+            _ContentExternalServiceRepository(
+              seriesResults: const [_seriesSubject],
+              movieResults: const [_movieSubject],
+            ),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      await container.read(animeControllerProvider.future);
+      AnimeHomeFeed? refreshed;
+      for (var attempt = 0; attempt < 100; attempt++) {
+        final feed = container.read(animeControllerProvider).value?.homeFeed;
+        if (feed != null &&
+            feed.seriesHighlights.isNotEmpty &&
+            feed.movieHighlights.isNotEmpty) {
+          refreshed = feed;
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      expect(refreshed, isNotNull);
+      final animeLists = [
+        refreshed!.recent,
+        refreshed.recommended,
+        refreshed.index,
+      ];
+      for (final subjects in animeLists) {
+        expect(
+          subjects.map(subjectContentTypeOf),
+          everyElement(SubjectContentType.anime),
+        );
+      }
+      expect(
+        refreshed.seriesHighlights.map(subjectContentTypeOf),
+        everyElement(SubjectContentType.series),
+      );
+      expect(
+        refreshed.movieHighlights.map(subjectContentTypeOf),
+        everyElement(SubjectContentType.movie),
+      );
+    },
+  );
+
+  test(
+    'weekly schedule keeps Bangumi Chinese data and never injects AniList',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-schedule-bangumi-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _scheduleServices.toJson());
+      await settings.close();
+      final external = _ContentExternalServiceRepository(
+        anilistTrendingResults: const [_scheduleEnglishSubject],
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _ContentBangumiMetadataRepository(
+              fixtureHomeFeed: _homeFeed,
+              scheduleResults: const {
+                0: [_scheduleChineseSubject],
+              },
+            ),
+          ),
+          externalServiceRepositoryProvider.overrideWithValue(external),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      final schedule = await controller.weeklySchedule();
+      final subjects = schedule.values.expand((items) => items).toList();
+
+      expect(subjects, hasLength(1));
+      expect(subjects.single.title, '周期表中文标题');
+      expect(subjects.single.summary, '周期表中文简介。');
+      expect(subjects, isNot(contains(_scheduleEnglishSubject)));
+      expect(external.anilistTrendingCalls, 0);
+    },
+  );
+
+  test(
+    'weekly schedule falls back to the existing Chinese home anime',
+    () async {
+      final tempDirectory = await Directory.systemTemp.createTemp(
+        'anime-controller-schedule-home-fallback-',
+      );
+      Hive.init(tempDirectory.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _scheduleServices.toJson());
+      await settings.close();
+      final external = _ContentExternalServiceRepository(
+        anilistTrendingResults: const [_scheduleEnglishSubject],
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          bangumiMetadataRepositoryProvider.overrideWithValue(
+            _ContentBangumiMetadataRepository(fixtureHomeFeed: _homeFeed),
+          ),
+          externalServiceRepositoryProvider.overrideWithValue(external),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await tempDirectory.exists()) {
+          await tempDirectory.delete(recursive: true);
+        }
+      });
+
+      await container.read(animeControllerProvider.future);
+      final schedule = await container
+          .read(animeControllerProvider.notifier)
+          .weeklySchedule();
+
+      expect(
+        schedule.values.expand((items) => items).map((item) => item.id),
+        contains(_homeSubject.id),
+      );
+      expect(
+        schedule.values.expand((items) => items),
+        isNot(contains(_scheduleEnglishSubject)),
+      );
+      expect(external.anilistTrendingCalls, 0);
     },
   );
 
@@ -697,11 +1009,18 @@ https://stream.example/live/cctv1.m3u8
           .read(animeControllerProvider.future)
           .timeout(const Duration(milliseconds: 500));
       expect(initial.sourceCatalog.activePlaybackRuleCount, 0);
-      await requestStarted.future.timeout(const Duration(milliseconds: 500));
+      expect(requestCount, 0);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(
+        requestCount,
+        0,
+        reason: 'startup hydration should leave the first UI second free',
+      );
+      await requestStarted.future.timeout(const Duration(seconds: 2));
 
       final controller = container.read(animeControllerProvider.notifier);
       final disabling = controller.setAllInstalledRulePluginsEnabled(false);
-      await Future<void>.delayed(Duration.zero);
+      await disabling.timeout(const Duration(milliseconds: 500));
       expect(
         container
             .read(animeControllerProvider)
@@ -720,14 +1039,16 @@ https://stream.example/live/cctv1.m3u8
           headers: {'content-type': 'application/json'},
         ),
       );
-      await disabling.timeout(const Duration(seconds: 1));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
       var state = container.read(animeControllerProvider).requireValue;
       expect(requestCount, 1);
-      expect(state.sourceCatalog.availablePlaybackRuleCount, 1);
+      expect(state.sourceCatalog.availablePlaybackRuleCount, 0);
       expect(state.sourceCatalog.activePlaybackRuleCount, 0);
-      expect(state.sourceCatalog.playbackRuleCountFor('source:xbpq'), 1);
+      expect(state.sourceCatalog.playbackRuleCountFor('source:xbpq'), 0);
 
-      await controller.setAllInstalledRulePluginsEnabled(true);
+      await controller
+          .setAllInstalledRulePluginsEnabled(true)
+          .timeout(const Duration(milliseconds: 500));
       state = container.read(animeControllerProvider).requireValue;
       expect(
         requestCount,
@@ -814,6 +1135,43 @@ const _bangumiOnlyServices = ExternalServiceSettings(
   peerTubeEnabled: false,
   wikimediaCommonsEnabled: false,
   anilistEnabled: false,
+  jikanEnabled: false,
+  kitsuEnabled: false,
+  bangumiEnabled: true,
+  publicCollectionSyncEnabled: false,
+);
+
+const _mergeServices = ExternalServiceSettings(
+  mediaMetadataEnabled: false,
+  cinemetaEnabled: false,
+  peerTubeEnabled: false,
+  wikimediaCommonsEnabled: false,
+  anilistEnabled: true,
+  jikanEnabled: false,
+  kitsuEnabled: false,
+  bangumiEnabled: true,
+  preferBangumiChinese: false,
+  publicCollectionSyncEnabled: false,
+);
+
+const _partitionServices = ExternalServiceSettings(
+  mediaMetadataEnabled: true,
+  cinemetaEnabled: true,
+  peerTubeEnabled: false,
+  wikimediaCommonsEnabled: false,
+  anilistEnabled: false,
+  jikanEnabled: false,
+  kitsuEnabled: false,
+  bangumiEnabled: true,
+  publicCollectionSyncEnabled: false,
+);
+
+const _scheduleServices = ExternalServiceSettings(
+  mediaMetadataEnabled: false,
+  cinemetaEnabled: false,
+  peerTubeEnabled: false,
+  wikimediaCommonsEnabled: false,
+  anilistEnabled: true,
   jikanEnabled: false,
   kitsuEnabled: false,
   bangumiEnabled: true,
@@ -926,6 +1284,86 @@ class _ControlledBangumiMetadataRepository extends BangumiMetadataRepository {
     discoveryStarted = true;
     return discoveryCompleter.future;
   }
+}
+
+class _ContentBangumiMetadataRepository extends BangumiMetadataRepository {
+  _ContentBangumiMetadataRepository({
+    required this.fixtureHomeFeed,
+    this.searchResults = const [],
+    this.scheduleResults = const {},
+  }) : super(client: MockClient((_) async => http.Response('not found', 404)));
+
+  final AnimeHomeFeed fixtureHomeFeed;
+  final List<AnimeSubject> searchResults;
+  final Map<int, List<AnimeSubject>> scheduleResults;
+
+  @override
+  AnimeHomeFeed fallbackHomeFeed() => fixtureHomeFeed;
+
+  @override
+  Future<AnimeHomeFeed> homeFeed() async => fixtureHomeFeed;
+
+  @override
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule() async =>
+      scheduleResults;
+
+  @override
+  Future<List<AnimeSubject>> searchSubjects({
+    required String keyword,
+    String sort = 'match',
+    Map<String, Object?> filters = const {
+      'type': [2],
+    },
+    int limit = 24,
+    int offset = 0,
+  }) async => searchResults;
+}
+
+class _ContentExternalServiceRepository extends ExternalServiceRepository {
+  _ContentExternalServiceRepository({
+    this.anilistSearchResults = const [],
+    this.anilistTrendingResults = const [],
+    this.seriesResults = const [],
+    this.movieResults = const [],
+  }) : super(client: MockClient((_) async => http.Response('not found', 404)));
+
+  final List<AnimeSubject> anilistSearchResults;
+  final List<AnimeSubject> anilistTrendingResults;
+  final List<AnimeSubject> seriesResults;
+  final List<AnimeSubject> movieResults;
+  var anilistTrendingCalls = 0;
+
+  @override
+  Future<List<AnimeSubject>> anilistSearch(
+    String keyword, {
+    int perPage = 24,
+  }) async => anilistSearchResults;
+
+  @override
+  Future<List<AnimeSubject>> anilistTrending({
+    int perPage = 24,
+    int page = 1,
+    String season = '',
+    int? seasonYear,
+  }) async {
+    anilistTrendingCalls++;
+    return anilistTrendingResults;
+  }
+
+  @override
+  Future<List<AnimeSubject>> cinemetaFeed({
+    required String type,
+    int pages = 6,
+    String genre = '',
+  }) async => type == 'series' ? seriesResults : movieResults;
+
+  @override
+  Future<List<AnimeSubject>> movieMetadataFeed({
+    String keyword = '',
+    bool includeCinemeta = true,
+    bool includeArchive = true,
+    int cinemetaPages = 6,
+  }) async => movieResults;
 }
 
 class _EmptySourceCatalogRepository extends SourceCatalogRepository {
@@ -1067,6 +1505,90 @@ const _homeSubject = AnimeSubject(
   totalEpisodes: 12,
 );
 
+const _shortChineseDuplicate = AnimeSubject(
+  id: 601,
+  title: '共享作品',
+  originalTitle: 'Shared Original',
+  summary: '短中文简介。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-01-01',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '连载中',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [],
+  totalEpisodes: 12,
+  source: 'bangumi',
+);
+
+const _longEnglishDuplicate = AnimeSubject(
+  id: 602,
+  title: 'Shared Original',
+  originalTitle: 'Shared Original',
+  summary:
+      'This deliberately much longer English synopsis has enough metadata to '
+      'win the quality comparison, but it must not replace verified Chinese.',
+  coverUrl: 'https://images.example/shared.jpg',
+  bannerUrl: 'https://images.example/shared-banner.jpg',
+  date: '2026-01-01',
+  platform: 'TV',
+  language: 'Japanese',
+  region: 'Japan',
+  status: 'Running',
+  categories: [AnimeCategory(name: 'Animation')],
+  tags: [],
+  totalEpisodes: 12,
+  ratingScore: 8.8,
+  source: 'anilist',
+);
+
+const _scheduleEnglishSubject = AnimeSubject(
+  id: 701,
+  title: 'Schedule Original',
+  originalTitle: 'スケジュール作品',
+  summary: 'English schedule synopsis.',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-07-19',
+  platform: 'TV',
+  language: 'Japanese',
+  region: 'Japan',
+  status: 'Running',
+  categories: [AnimeCategory(name: 'Animation')],
+  tags: [],
+  totalEpisodes: 12,
+  source: 'anilist',
+);
+
+const _scheduleChineseSubject = AnimeSubject(
+  id: 702,
+  title: '周期表中文标题',
+  originalTitle: 'スケジュール作品',
+  summary: '周期表中文简介。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-07-19',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '连载中',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [],
+  totalEpisodes: 12,
+  source: 'bangumi',
+);
+
+const _mixedHomeFeed = AnimeHomeFeed(
+  hero: _homeSubject,
+  recent: [_homeSubject, _seriesSubject, _movieSubject],
+  recommended: [_seriesSubject, _homeSubject, _movieSubject],
+  index: [_movieSubject, _seriesSubject, _homeSubject],
+  categories: [AnimeCategory(name: '动画')],
+  tags: [AnimeTag(name: '测试')],
+);
+
 const _homeFeed = AnimeHomeFeed(
   hero: _homeSubject,
   recent: [_homeSubject],
@@ -1080,7 +1602,7 @@ const _animeMovieSubject = AnimeSubject(
   id: 2,
   title: '测试动画电影',
   originalTitle: 'Test Anime Movie',
-  summary: '动画来源即使平台标记为 Movie，也应保留在番剧频道。',
+  summary: '动画来源的平台标记为 Movie 时，应只进入电影频道。',
   coverUrl: null,
   bannerUrl: null,
   date: '2026-02-01',
@@ -1092,6 +1614,24 @@ const _animeMovieSubject = AnimeSubject(
   tags: [],
   totalEpisodes: 1,
   source: 'jikan',
+);
+
+const _animeSeriesSubject = AnimeSubject(
+  id: 5,
+  title: '测试动画剧集',
+  originalTitle: 'Test Anime Series',
+  summary: '非电影格式的动画作品应保留在番剧频道。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-02-01',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '连载中',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [],
+  totalEpisodes: 12,
+  source: 'anilist',
 );
 
 const _seriesSubject = AnimeSubject(

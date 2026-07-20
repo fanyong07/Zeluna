@@ -254,7 +254,7 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
   }
 }
 
-class SubjectListPage extends ConsumerWidget {
+class SubjectListPage extends ConsumerStatefulWidget {
   const SubjectListPage({
     super.key,
     required this.title,
@@ -267,21 +267,53 @@ class SubjectListPage extends ConsumerWidget {
   final Future<List<AnimeSubject>> Function(WidgetRef ref) loader;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SubjectListPage> createState() => _SubjectListPageState();
+}
+
+class _SubjectListPageState extends ConsumerState<SubjectListPage> {
+  late Future<List<AnimeSubject>> _subjectsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _subjectsFuture = _loadSubjects();
+  }
+
+  @override
+  void didUpdateWidget(covariant SubjectListPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.title != widget.title ||
+        oldWidget.subtitle != widget.subtitle ||
+        !identical(oldWidget.loader, widget.loader)) {
+      _subjectsFuture = _loadSubjects();
+    }
+  }
+
+  Future<List<AnimeSubject>> _loadSubjects() {
+    return Future<List<AnimeSubject>>.sync(() => widget.loader(ref));
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return AppChrome(
-      active: subtitle == '标签'
+      active: widget.subtitle == '标签'
           ? ChromeDestination.movie
           : ChromeDestination.series,
-      title: subtitle == null ? title : '$subtitle：$title',
+      title: widget.subtitle == null
+          ? widget.title
+          : '${widget.subtitle}：${widget.title}',
       showSearch: false,
       onBack: () => safeNavigateBack(context),
-      rightRail: _StaticFilterRail(title: subtitle ?? '筛选'),
+      rightRail: _StaticFilterRail(title: widget.subtitle ?? '筛选'),
       child: FutureBuilder<List<AnimeSubject>>(
-        future: loader(ref),
+        future: _subjectsFuture,
         builder: (context, snapshot) {
           final subjects = snapshot.data ?? const <AnimeSubject>[];
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return _SubjectListLoading(
+              title: widget.title,
+              subtitle: widget.subtitle,
+            );
           }
           final compact = MediaQuery.sizeOf(context).width < 760;
           return Padding(
@@ -291,9 +323,72 @@ class SubjectListPage extends ConsumerWidget {
               compact ? 14 : 0,
               24,
             ),
-            child: _SubjectResultView(subjects: subjects, title: title),
+            child: _SubjectResultView(subjects: subjects, title: widget.title),
           );
         },
+      ),
+    );
+  }
+}
+
+class _SubjectListLoading extends StatelessWidget {
+  const _SubjectListLoading({required this.title, required this.subtitle});
+
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        compact ? 14 : 24,
+        compact ? 8 : 18,
+        compact ? 14 : 0,
+        24,
+      ),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: AppPanel(
+            key: const ValueKey('subject-list-loading'),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 18 : 24,
+              vertical: compact ? 18 : 22,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.view_module_outlined,
+                  size: compact ? 28 : 32,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '正在整理$title',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '正在加载${subtitle ?? '内容'}结果…',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -610,18 +705,31 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
 
   bool _matchesType(AnimeSubject subject, String type, String text) {
     final normalized = type.toLowerCase();
-    if (normalized == '电影') return subject.platform.toLowerCase() == 'movie';
+    if (normalized == '电影') {
+      return subjectMatchesContentType(subject, SubjectContentType.movie);
+    }
     if (normalized == '美剧') {
-      return text.contains('united states') || text.contains('english');
+      return text.contains('united states') ||
+          text.contains('english') ||
+          text.contains('美国') ||
+          text.contains('英语');
     }
     if (normalized == '英剧') {
-      return text.contains('united kingdom') || text.contains('british');
+      return text.contains('united kingdom') ||
+          text.contains('british') ||
+          text.contains('英国');
     }
     if (normalized == '韩剧') {
-      return text.contains('korea') || text.contains('korean');
+      return text.contains('korea') ||
+          text.contains('korean') ||
+          text.contains('韩国') ||
+          text.contains('韩语');
     }
     if (normalized == '日剧') {
-      return text.contains('japan') || text.contains('japanese');
+      return text.contains('japan') ||
+          text.contains('japanese') ||
+          text.contains('日本') ||
+          text.contains('日语');
     }
     const aliases = {
       '剧情': ['drama', '剧情'],
@@ -642,20 +750,26 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
       '日语' =>
         text.contains('日语') ||
             text.contains('japanese') ||
-            text.contains('japan'),
+            text.contains('japan') ||
+            text.contains('日本'),
       '国语' =>
         text.contains('国语') ||
+            text.contains('中文') ||
             text.contains('chinese') ||
-            text.contains('china'),
+            text.contains('china') ||
+            text.contains('中国'),
       '英语' =>
         text.contains('英语') ||
             text.contains('english') ||
             text.contains('united states') ||
-            text.contains('united kingdom'),
+            text.contains('united kingdom') ||
+            text.contains('美国') ||
+            text.contains('英国'),
       '韩语' =>
         text.contains('韩语') ||
             text.contains('korean') ||
-            text.contains('korea'),
+            text.contains('korea') ||
+            text.contains('韩国'),
       '其他' =>
         !(_matchesLanguage(subject, '日语') ||
             _matchesLanguage(subject, '国语') ||
@@ -1384,7 +1498,7 @@ class _FilterChipButton extends StatelessWidget {
   }
 }
 
-class SchedulePage extends ConsumerWidget {
+class SchedulePage extends ConsumerStatefulWidget {
   const SchedulePage({super.key});
 
   static const _weekdays = [
@@ -1398,7 +1512,35 @@ class SchedulePage extends ConsumerWidget {
   ];
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SchedulePage> createState() => _SchedulePageState();
+}
+
+class _SchedulePageState extends ConsumerState<SchedulePage>
+    with SingleTickerProviderStateMixin {
+  late final TabController _tabController;
+  late final Future<Map<int, List<AnimeSubject>>> _scheduleFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(
+      length: SchedulePage._weekdays.length,
+      vsync: this,
+      initialIndex: DateTime.now().weekday % 7,
+    );
+    _scheduleFuture = ref
+        .read(animeControllerProvider.notifier)
+        .weeklySchedule();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return AppChrome(
       active: ChromeDestination.schedule,
       title: '周期表',
@@ -1408,41 +1550,45 @@ class SchedulePage extends ConsumerWidget {
         builder: (context, state) => _ScheduleRightRail(state: state),
       ),
       child: FutureBuilder<Map<int, List<AnimeSubject>>>(
-        future: ref.read(animeControllerProvider.notifier).weeklySchedule(),
+        future: _scheduleFuture,
         builder: (context, snapshot) {
           final schedule = snapshot.data ?? const <int, List<AnimeSubject>>{};
-          return DefaultTabController(
-            length: _weekdays.length,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
-              child: Column(
-                children: [
-                  _WeekCalendarStrip(
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
+            child: Column(
+              children: [
+                AnimatedBuilder(
+                  animation: _tabController.animation!,
+                  builder: (context, child) => _WeekCalendarStrip(
                     schedule: schedule,
-                    onSelected: (index) =>
-                        DefaultTabController.of(context).animateTo(index),
+                    selectedIndex: _tabController.animation!.value
+                        .round()
+                        .clamp(0, SchedulePage._weekdays.length - 1),
+                    onSelected: _tabController.animateTo,
                   ),
-                  const SizedBox(height: 16),
-                  Expanded(
-                    child: AppPanel(
-                      padding: EdgeInsets.zero,
-                      child: snapshot.connectionState == ConnectionState.waiting
-                          ? const Center(child: CircularProgressIndicator())
-                          : TabBarView(
-                              children: [
-                                for (final item in _weekdays)
-                                  _SubjectResultView(
-                                    subjects:
-                                        schedule[item.$1] ??
-                                        const <AnimeSubject>[],
-                                    title: item.$2,
-                                  ),
-                              ],
-                            ),
-                    ),
+                ),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: AppPanel(
+                    padding: EdgeInsets.zero,
+                    child: snapshot.connectionState == ConnectionState.waiting
+                        ? const Center(child: CircularProgressIndicator())
+                        : TabBarView(
+                            controller: _tabController,
+                            children: [
+                              for (final item in SchedulePage._weekdays)
+                                _SubjectResultView(
+                                  key: ValueKey('schedule-result-${item.$1}'),
+                                  subjects:
+                                      schedule[item.$1] ??
+                                      const <AnimeSubject>[],
+                                  title: item.$2,
+                                ),
+                            ],
+                          ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           );
         },
@@ -1452,7 +1598,11 @@ class SchedulePage extends ConsumerWidget {
 }
 
 class _SubjectResultView extends StatelessWidget {
-  const _SubjectResultView({required this.subjects, required this.title});
+  const _SubjectResultView({
+    super.key,
+    required this.subjects,
+    required this.title,
+  });
 
   final List<AnimeSubject> subjects;
   final String title;
@@ -1815,29 +1965,59 @@ Future<void> _openTorrentResource(
   }
 }
 
-class DetailPage extends ConsumerWidget {
+class DetailPage extends ConsumerStatefulWidget {
   const DetailPage({super.key, required this.subject});
 
   final AnimeSubject subject;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<DetailPage> createState() => _DetailPageState();
+}
+
+class _DetailPageState extends ConsumerState<DetailPage> {
+  late Future<AnimeDetailBundle> _detailFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _detailFuture = _loadDetail();
+  }
+
+  @override
+  void didUpdateWidget(covariant DetailPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!sameSubjectIdentity(oldWidget.subject, widget.subject)) {
+      _detailFuture = _loadDetail();
+    }
+  }
+
+  Future<AnimeDetailBundle> _loadDetail() {
+    return ref.read(animeControllerProvider.notifier).detail(widget.subject);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return FutureBuilder<AnimeDetailBundle>(
-      future: ref.read(animeControllerProvider.notifier).detail(subject),
+      future: _detailFuture,
       builder: (context, snapshot) {
         final detail = snapshot.data;
         final bundle =
             detail ??
             AnimeDetailBundle(
-              subject: subject,
+              subject: widget.subject,
               episodes: const [],
               characters: const [],
               staff: const [],
               recommendations: const [],
             );
         final animeState = ref.watch(animeControllerProvider).value;
-        final favorite =
+        final following =
             animeState?.following.any(
+              (item) => sameSubjectIdentity(item.subject, bundle.subject),
+            ) ??
+            false;
+        final collected =
+            animeState?.favorites.any(
               (item) => sameSubjectIdentity(item.subject, bundle.subject),
             ) ??
             false;
@@ -1845,10 +2025,19 @@ class DetailPage extends ConsumerWidget {
             .where((item) => sameSubjectIdentity(item.subject, bundle.subject))
             .firstOrNull;
 
-        void play(AnimeEpisode episode) {
-          ref
-              .read(animeControllerProvider.notifier)
-              .addHistory(bundle.subject, episode);
+        Future<void> play(AnimeEpisode episode) async {
+          final controller = ref.read(animeControllerProvider.notifier);
+          final accountContextVersion = controller.accountContextVersion;
+          final recorded = await controller.addHistory(
+            bundle.subject,
+            episode,
+            expectedAccountContextVersion: accountContextVersion,
+          );
+          if (!context.mounted ||
+              !recorded ||
+              !controller.isAccountContextCurrent(accountContextVersion)) {
+            return;
+          }
           context.push(
             '/player',
             extra: PlaySessionRequest(
@@ -1901,11 +2090,12 @@ class DetailPage extends ConsumerWidget {
                         child: _DetailHero(
                           key: const ValueKey('detailHero'),
                           subject: bundle.subject,
-                          favorite: favorite,
+                          following: following,
+                          collected: collected,
                           onPlay: continueEpisode() == null
                               ? null
                               : () => play(continueEpisode()!),
-                          onFavorite: () async {
+                          onFollowing: () async {
                             final selected = await ref
                                 .read(animeControllerProvider.notifier)
                                 .toggleFollowing(bundle.subject);
@@ -1913,6 +2103,17 @@ class DetailPage extends ConsumerWidget {
                               _showToast(
                                 context,
                                 selected ? '已加入追番列表' : '已取消追番',
+                              );
+                            }
+                          },
+                          onCollect: () async {
+                            final selected = await ref
+                                .read(animeControllerProvider.notifier)
+                                .toggleFavorite(bundle.subject);
+                            if (context.mounted) {
+                              _showToast(
+                                context,
+                                selected ? '已加入收藏列表' : '已取消收藏',
                               );
                             }
                           },
@@ -2103,40 +2304,22 @@ class _HomeRightRail extends StatelessWidget {
         AppPanel(
           child: Column(
             children: [
-              SectionTitle(
-                title: '我的片单',
-                action: Text(
-                  '全部 12 ›',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: AppColors.muted,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
+              const SectionTitle(title: '我的内容'),
               const SizedBox(height: 12),
               _PlaylistRow(
-                image: feed.hero.coverUrl,
-                title: '我想看',
-                count: state.favorites.length + 56,
+                image: state.following.firstOrNull?.subject.coverUrl,
+                title: '追番',
+                count: state.following.length,
               ),
               _PlaylistRow(
-                image: feed.recent.firstOrNull?.coverUrl,
-                title: '稍后观看',
-                count: state.history.length + 24,
+                image: state.favorites.firstOrNull?.subject.coverUrl,
+                title: '收藏',
+                count: state.favorites.length,
               ),
               _PlaylistRow(
-                image: feed.recommended.firstOrNull?.coverUrl,
-                title: '年度必看',
-                count: state.following.length + 18,
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () {},
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('新建片单'),
-                ),
+                image: state.history.firstOrNull?.subject.coverUrl,
+                title: '观看记录',
+                count: state.history.length,
               ),
             ],
           ),
@@ -2162,75 +2345,6 @@ class _HomeRightRail extends StatelessWidget {
                   trailing: '刚刚',
                   onTap: () => onOpen(subject),
                 ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '观看进度'),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  SizedBox(
-                    width: 82,
-                    height: 82,
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        CircularProgressIndicator(
-                          value: state.history.isEmpty ? 0.68 : 0.82,
-                          strokeWidth: 8,
-                          backgroundColor: AppColors.border,
-                          color: AppColors.primary,
-                        ),
-                        Center(
-                          child: Text(
-                            state.history.isEmpty ? '68%' : '82%',
-                            style: Theme.of(context).textTheme.titleLarge
-                                ?.copyWith(
-                                  color: AppColors.text,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 18),
-                  Expanded(
-                    child: Text(
-                      '本周观看时长\n${state.history.length * 2 + 16}小时 24分钟',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: AppColors.text,
-                        height: 1.5,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  for (var i = 0; i < 7; i++) ...[
-                    Expanded(
-                      child: Container(
-                        height: 24.0 + (i % 4) * 12,
-                        decoration: BoxDecoration(
-                          color: i == 4
-                              ? AppColors.primary
-                              : AppColors.primary.withValues(alpha: 0.28),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                    if (i != 6) const SizedBox(width: 8),
-                  ],
-                ],
-              ),
             ],
           ),
         ),
@@ -3412,16 +3526,20 @@ class _DetailHero extends StatelessWidget {
   const _DetailHero({
     super.key,
     required this.subject,
-    required this.favorite,
+    required this.following,
+    required this.collected,
     required this.onPlay,
-    required this.onFavorite,
+    required this.onFollowing,
+    required this.onCollect,
     required this.onDownload,
   });
 
   final AnimeSubject subject;
-  final bool favorite;
+  final bool following;
+  final bool collected;
   final VoidCallback? onPlay;
-  final VoidCallback onFavorite;
+  final VoidCallback onFollowing;
+  final VoidCallback onCollect;
   final VoidCallback onDownload;
 
   @override
@@ -3464,10 +3582,17 @@ class _DetailHero extends StatelessWidget {
           compact: compact,
         ),
         AccentButton(
-          icon: favorite ? Icons.check_rounded : Icons.add_rounded,
-          label: favorite ? '已追番' : '追番',
+          icon: following ? Icons.check_rounded : Icons.add_rounded,
+          label: following ? '已追番' : '追番',
           filled: false,
-          onTap: onFavorite,
+          onTap: onFollowing,
+          compact: compact,
+        ),
+        AccentButton(
+          icon: collected ? Icons.favorite : Icons.favorite_border,
+          label: collected ? '已收藏' : '收藏',
+          filled: false,
+          onTap: onCollect,
           compact: compact,
         ),
         AccentButton(
@@ -4328,9 +4453,14 @@ class _SearchRightRail extends StatelessWidget {
 }
 
 class _WeekCalendarStrip extends StatelessWidget {
-  const _WeekCalendarStrip({required this.schedule, required this.onSelected});
+  const _WeekCalendarStrip({
+    required this.schedule,
+    required this.selectedIndex,
+    required this.onSelected,
+  });
 
   final Map<int, List<AnimeSubject>> schedule;
+  final int selectedIndex;
   final ValueChanged<int> onSelected;
 
   @override
@@ -4344,15 +4474,20 @@ class _WeekCalendarStrip extends StatelessWidget {
         separatorBuilder: (context, index) => const SizedBox(width: 10),
         itemBuilder: (context, index) {
           final day = days[index];
-          return SizedBox(
-            width: 210,
-            child: InkWell(
-              onTap: () => onSelected(index),
-              borderRadius: BorderRadius.circular(8),
-              child: _DayCard(
-                label: day.$2,
-                subjects: schedule[day.$1] ?? const [],
-                active: day.$1 == DateTime.now().weekday % 7,
+          return Semantics(
+            key: ValueKey('schedule-day-$index'),
+            button: true,
+            selected: index == selectedIndex,
+            child: SizedBox(
+              width: 210,
+              child: InkWell(
+                onTap: () => onSelected(index),
+                borderRadius: BorderRadius.circular(8),
+                child: _DayCard(
+                  label: day.$2,
+                  subjects: schedule[day.$1] ?? const [],
+                  active: index == selectedIndex,
+                ),
               ),
             ),
           );

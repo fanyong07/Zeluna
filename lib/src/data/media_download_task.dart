@@ -159,7 +159,7 @@ class MediaDownloadTask {
   }
 
   Map<String, dynamic> toJson() => {
-    'version': 1,
+    'version': 2,
     'id': id,
     'subject': subject.toJson(),
     'episode': episode.toJson(),
@@ -169,8 +169,10 @@ class MediaDownloadTask {
     'lineId': lineId,
     'providerName': providerName,
     'format': format,
-    'url': url,
-    'headers': _persistableHeaders(headers),
+    // Remote URLs and headers can carry short-lived credentials. Persisted
+    // tasks resolve a fresh playback line instead of storing either value.
+    'url': null,
+    'headers': const <String, String>{},
     'downloadedBytes': downloadedBytes,
     'totalBytes': totalBytes,
     'temporaryPath': temporaryPath,
@@ -179,13 +181,12 @@ class MediaDownloadTask {
     'lastModified': lastModified,
     'completedUnits': completedUnits,
     'totalUnits': totalUnits,
-    'message': message,
+    'message': _persistableMessage(message, status),
   };
 
   factory MediaDownloadTask.fromJson(Map<String, dynamic> json) {
     final subjectJson = json['subject'];
     final episodeJson = json['episode'];
-    final rawHeaders = json['headers'];
     return MediaDownloadTask(
       id: json['id']?.toString() ?? '',
       subject: subjectJson is Map
@@ -207,13 +208,8 @@ class MediaDownloadTask {
       lineId: _blankToNull(json['lineId']),
       providerName: _blankToNull(json['providerName']),
       format: _blankToNull(json['format']),
-      url: _blankToNull(json['url']),
-      headers: rawHeaders is Map
-          ? {
-              for (final entry in rawHeaders.entries)
-                entry.key.toString(): entry.value.toString(),
-            }
-          : const {},
+      url: null,
+      headers: const {},
       downloadedBytes: _intValue(json['downloadedBytes']),
       totalBytes: _intValue(json['totalBytes']),
       temporaryPath: _blankToNull(json['temporaryPath']),
@@ -222,7 +218,13 @@ class MediaDownloadTask {
       lastModified: _blankToNull(json['lastModified']),
       completedUnits: _intValue(json['completedUnits']),
       totalUnits: _intValue(json['totalUnits']),
-      message: json['message']?.toString() ?? '',
+      message: _persistableMessage(
+        json['message']?.toString() ?? '',
+        MediaDownloadTaskStatus.values.firstWhere(
+          (item) => item.name == json['status']?.toString(),
+          orElse: () => MediaDownloadTaskStatus.failed,
+        ),
+      ),
     );
   }
 
@@ -257,11 +259,36 @@ class MediaDownloadTask {
 
 const _unset = Object();
 
-Map<String, String> _persistableHeaders(Map<String, String> headers) {
-  const blocked = {'authorization', 'cookie', 'proxy-authorization'};
-  return {
-    for (final entry in headers.entries)
-      if (!blocked.contains(entry.key.toLowerCase())) entry.key: entry.value,
+String _persistableMessage(String message, MediaDownloadTaskStatus status) {
+  final text = message.trim();
+  if (text.isEmpty) return '';
+  final lower = text.toLowerCase();
+  final mayContainCredentials =
+      RegExp(r'https?://', caseSensitive: false).hasMatch(text) ||
+      lower.contains('authorization') ||
+      lower.contains('bearer ') ||
+      lower.contains('cookie') ||
+      lower.contains('credential') ||
+      lower.contains('signature') ||
+      lower.contains('token=') ||
+      lower.contains('secret=');
+  if (mayContainCredentials) {
+    return status == MediaDownloadTaskStatus.failed
+        ? '下载失败，可稍后重试'
+        : status.statusSafeMessage;
+  }
+  return text.length <= 240 ? text : '${text.substring(0, 240)}…';
+}
+
+extension on MediaDownloadTaskStatus {
+  String get statusSafeMessage => switch (this) {
+    MediaDownloadTaskStatus.queued => '等待下载',
+    MediaDownloadTaskStatus.resolving => '正在查找线路',
+    MediaDownloadTaskStatus.downloading => '正在下载',
+    MediaDownloadTaskStatus.paused => '下载已暂停',
+    MediaDownloadTaskStatus.completed => '下载完成',
+    MediaDownloadTaskStatus.failed => '下载失败，可稍后重试',
+    MediaDownloadTaskStatus.cancelled => '下载已取消',
   };
 }
 

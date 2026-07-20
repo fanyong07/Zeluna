@@ -554,10 +554,10 @@ class LibraryEntry {
 
 class UserProfileSettings {
   const UserProfileSettings({
-    this.nickname = 'fanyong',
-    this.uid = '31979',
-    this.density = 110,
-    this.coins = 22,
+    this.nickname = '游客',
+    this.uid = '',
+    this.density = 0,
+    this.coins = 0,
   });
 
   final String nickname;
@@ -595,10 +595,10 @@ class UserProfileSettings {
 
   factory UserProfileSettings.fromJson(Map<String, dynamic> json) {
     return UserProfileSettings(
-      nickname: json['nickname']?.toString() ?? 'fanyong',
-      uid: json['uid']?.toString() ?? '31979',
-      density: _intFromJson(json['density'], fallback: 110),
-      coins: _intFromJson(json['coins'], fallback: 22),
+      nickname: json['nickname']?.toString() ?? '游客',
+      uid: json['uid']?.toString() ?? '',
+      density: _intFromJson(json['density'], fallback: 0),
+      coins: _intFromJson(json['coins'], fallback: 0),
     );
   }
 }

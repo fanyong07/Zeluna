@@ -502,6 +502,70 @@ void main() {
     },
   );
 
+  test('rule lookup caches isolate accounts and skip private rules', () async {
+    RulePlaybackSourceRepository.clearRuntimeCaches();
+    addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+    final baseRule = _animekoLookupRule(
+      id: 'custom:animeko:account-cache',
+      name: 'Account cache',
+      host: 'account-cache.example',
+      groupId: 'account-cache',
+      priority: 0,
+    );
+    final resolver = _DelayedRulePlaybackResolver(
+      delays: {baseRule.id: Duration.zero},
+      availableRuleIds: {baseRule.id},
+    );
+
+    RulePlaybackSourceRepository sourceFor(
+      RulePlugin rule,
+      String cacheNamespace,
+    ) {
+      return RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: resolver,
+        cacheNamespace: cacheNamespace,
+      );
+    }
+
+    final accountA = sourceFor(baseRule, 'account-a:1');
+    await accountA.linesForEpisode(_animeSubject, _episode);
+    await accountA.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id]);
+
+    final accountB = sourceFor(baseRule, 'account-b:1');
+    await accountB.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id, baseRule.id]);
+
+    final changedConfig = baseRule.copyWith(
+      requestHeaders: const {'X-Variant': 'new-config'},
+    );
+    await sourceFor(
+      changedConfig,
+      'account-a:1',
+    ).linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id, baseRule.id, baseRule.id]);
+
+    final privateRule = baseRule.copyWith(
+      requestHeaders: const {'Cookie': 'session=private'},
+    );
+    final privateSource = sourceFor(privateRule, 'account-private:1');
+    await privateSource.linesForEpisode(_animeSubject, _episode);
+    await privateSource.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+    ]);
+  });
+
   test(
     'quick lookup total budget does not accumulate across rule waves',
     () async {

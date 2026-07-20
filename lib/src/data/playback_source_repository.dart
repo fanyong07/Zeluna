@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import '../domain/anime_models.dart';
@@ -180,15 +181,18 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
     required RulePluginState ruleState,
     RulePlaybackResolver? resolver,
     Duration quickLookupBudget = _quickLookupTotalBudget,
+    String cacheNamespace = 'shared',
   }) : _repository = repository,
        _ruleState = ruleState,
        _resolver = resolver ?? _sharedResolver,
-       _quickLookupBudget = quickLookupBudget;
+       _quickLookupBudget = quickLookupBudget,
+       _cacheNamespace = cacheNamespace;
 
   final RulePluginRepository _repository;
   final RulePluginState _ruleState;
   final RulePlaybackResolver _resolver;
   final Duration _quickLookupBudget;
+  final String _cacheNamespace;
 
   static final RulePlaybackResolver _sharedResolver = RulePlaybackResolver();
   static final LinkedHashMap<String, _CachedRuleLookup> _ruleLookupCache =
@@ -197,6 +201,14 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
       <String, Future<List<PlaybackLine>>>{};
   static final LinkedHashMap<String, _RuleHealth> _ruleHealth =
       LinkedHashMap<String, _RuleHealth>();
+  static int _runtimeCacheGeneration = 0;
+
+  static void clearRuntimeCaches() {
+    _runtimeCacheGeneration++;
+    _ruleLookupCache.clear();
+    _inFlightRuleLookups.clear();
+    _ruleHealth.clear();
+  }
 
   @override
   Future<List<PlaybackLine>> linesForEpisode(
@@ -364,6 +376,17 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
     AnimeEpisode episode, {
     required bool verifyPlayable,
   }) {
+    if (_ruleContainsPrivateCredentials(rule)) {
+      return _resolver
+          .resolveRule(
+            rule: rule,
+            subject: subject,
+            episode: episode,
+            verifyPlayable: verifyPlayable,
+          )
+          .catchError((Object _) => const <PlaybackLine>[]);
+    }
+    final cacheGeneration = _runtimeCacheGeneration;
     final now = DateTime.now();
     final cacheKey = _ruleLookupCacheKey(
       rule,
@@ -392,6 +415,9 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
         .then((lines) {
           stopwatch.stop();
           final immutableLines = List<PlaybackLine>.unmodifiable(lines);
+          if (cacheGeneration != _runtimeCacheGeneration) {
+            return immutableLines;
+          }
           final available = immutableLines.any((line) => line.available);
           _rememberRuleHealth(rule, available, stopwatch.elapsed);
           _storeCachedRuleLookup(
@@ -548,7 +574,8 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
     required bool verifyPlayable,
   }) {
     final verification = verifyPlayable ? 'verified' : 'unverified';
-    return '${identityHashCode(_resolver)}|$verification|${rule.id}|${rule.version}|'
+    return '$_cacheNamespace|${identityHashCode(_resolver)}|$verification|'
+        '${_ruleConfigDigest(rule)}|${rule.id}|${rule.version}|'
         '${rule.updatedAt.microsecondsSinceEpoch}|${rule.engine}|'
         '${rule.baseUrl}|${rule.searchUrl}|${subject.source}|${subject.id}|'
         '${subject.title}|${subject.originalTitle}|${episode.id}|'
@@ -556,7 +583,8 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
   }
 
   String _ruleHealthKey(RulePlugin rule) {
-    return '${rule.contentType.name}|${rule.id}|${rule.version}|'
+    return '$_cacheNamespace|${_ruleConfigDigest(rule)}|'
+        '${rule.contentType.name}|${rule.id}|${rule.version}|'
         '${rule.updatedAt.microsecondsSinceEpoch}';
   }
 
@@ -567,6 +595,54 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
       SubjectContentType.movie => RuleContentType.movie,
     };
   }
+}
+
+String _ruleConfigDigest(RulePlugin rule) {
+  try {
+    return sha256.convert(utf8.encode(jsonEncode(rule.toJson()))).toString();
+  } catch (_) {
+    return identityHashCode(rule).toRadixString(16);
+  }
+}
+
+bool _ruleContainsPrivateCredentials(RulePlugin rule) {
+  if (rule.requiresPrivateAuth ||
+      (rule.animeko?.cookies.trim().isNotEmpty ?? false)) {
+    return true;
+  }
+  if (rule.requestHeaders.entries.any(
+    (entry) => _looksSensitiveName(entry.key) && entry.value.trim().isNotEmpty,
+  )) {
+    return true;
+  }
+  return _containsSensitiveConfig(rule.rawConfig);
+}
+
+bool _containsSensitiveConfig(Object? value, [String key = '']) {
+  if (value is Map) {
+    return value.entries.any(
+      (entry) => _containsSensitiveConfig(entry.value, entry.key.toString()),
+    );
+  }
+  if (value is Iterable) {
+    return value.any((item) => _containsSensitiveConfig(item, key));
+  }
+  return _looksSensitiveName(key) &&
+      value?.toString().trim().isNotEmpty == true;
+}
+
+bool _looksSensitiveName(String name) {
+  final normalized = name.toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+  return normalized.contains('auth') ||
+      normalized.contains('cookie') ||
+      normalized.contains('credential') ||
+      normalized.contains('password') ||
+      normalized.contains('session') ||
+      normalized.contains('signature') ||
+      normalized.contains('secret') ||
+      normalized.contains('token') ||
+      normalized == 'apikey' ||
+      normalized == 'accesskey';
 }
 
 class _RuleResolution {

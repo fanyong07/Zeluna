@@ -11,11 +11,17 @@ void main() {
       createdAt: DateTime.utc(2026, 7, 18, 1),
       updatedAt: DateTime.utc(2026, 7, 18, 2),
       status: MediaDownloadTaskStatus.paused,
-      url: 'https://cdn.example/video.mp4',
+      url: 'https://cdn.example/video.mp4?X-Amz-Signature=signed-secret',
       headers: const {
         'Referer': 'https://example.test/',
         'Cookie': 'session=secret',
         'Authorization': 'Bearer secret',
+        'X-API-Key': 'api-secret',
+        'X-Access-Token': 'access-secret',
+        'Client-Secret': 'client-secret',
+        'X-Auth': 'auth-secret',
+        'X-Session': 'session-secret',
+        'X-Signature': 'signature-secret',
       },
       downloadedBytes: 512,
       totalBytes: 1024,
@@ -30,14 +36,44 @@ void main() {
     final json = task.toJson();
     final restored = MediaDownloadTask.fromJson(json);
 
-    expect(json['headers'], {'Referer': 'https://example.test/'});
+    expect(json['headers'], isEmpty);
+    expect(json['url'], isNull);
     expect(restored.status, MediaDownloadTaskStatus.paused);
     expect(restored.downloadedBytes, 512);
     expect(restored.totalBytes, 1024);
     expect(restored.progress, 0.5);
     expect(restored.completedUnits, 2);
     expect(restored.totalUnits, 4);
-    expect(restored.headers, {'Referer': 'https://example.test/'});
+    expect(restored.headers, isEmpty);
+    expect(restored.url, isNull);
+  });
+
+  test('legacy persisted credentials are removed while reading', () {
+    final json =
+        MediaDownloadTask(
+            id: 'legacy-sensitive',
+            subject: _subject,
+            episode: _episode,
+            createdAt: DateTime.utc(2026, 7, 18),
+            updatedAt: DateTime.utc(2026, 7, 18),
+            status: MediaDownloadTaskStatus.paused,
+          ).toJson()
+          ..['url'] = 'https://cdn.example/video.mp4?token=legacy-secret'
+          ..['headers'] = {
+            'Referer': 'https://example.test/',
+            'X-Session': 'legacy-session',
+            'X-Signature': 'legacy-signature',
+          }
+          ..['message'] =
+              'ClientException: failed https://cdn.example/video.mp4?token=legacy-secret';
+
+    final restored = MediaDownloadTask.fromJson(json);
+
+    expect(restored.url, isNull);
+    expect(restored.headers, isEmpty);
+    expect(restored.message, '下载已暂停');
+    expect(restored.message, isNot(contains('http')));
+    expect(restored.message, isNot(contains('legacy-secret')));
   });
 
   test('completed task creates a local playback line', () {

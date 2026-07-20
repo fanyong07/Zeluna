@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../accounts/account_page.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
@@ -51,6 +52,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         emptyTitle: '还没有追番',
         emptyMessage: '在详情页点“追番”后会加入这里，也可以从“我的”页进入。',
         entriesOf: (state) => state.following,
+        active: ChromeDestination.favorite,
+      ),
+    ),
+    GoRoute(
+      path: '/profile/favorites',
+      builder: (context, state) => LibraryPage(
+        title: '全部收藏',
+        emptyTitle: '还没有收藏',
+        emptyMessage: '在详情页点击收藏后会显示在这里。',
+        entriesOf: (state) => state.favorites,
         active: ChromeDestination.favorite,
       ),
     ),
@@ -147,10 +158,12 @@ class AnimeApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
     final appearance =
-        ref.watch(animeControllerProvider).value?.appearance ??
+        ref.watch(
+          animeControllerProvider.select((state) => state.value?.appearance),
+        ) ??
         const AppearanceSettings();
     return MaterialApp.router(
-      title: 'anime',
+      title: 'Zeluna',
       debugShowCheckedModeBanner: false,
       theme: AnimeTheme.light(
         compact: appearance.compactMode,

@@ -16,6 +16,73 @@ void main() {
   });
 
   test(
+    'weekly schedule uses the calendar endpoint and preserves Chinese fields',
+    () async {
+      var requestCount = 0;
+      final repository = BangumiMetadataRepository(
+        client: MockClient((request) async {
+          requestCount++;
+          expect(request.method, 'GET');
+          expect(request.url.path, '/calendar');
+          return _jsonListResponse([
+            {
+              'weekday': {'id': 7, 'cn': '星期日'},
+              'items': [
+                {
+                  'id': 1001,
+                  'name': 'Sunday Original',
+                  'name_cn': '周日中文番剧',
+                  'summary': '这是来自 Bangumi 的中文简介。',
+                  'air_date': '2026-07-19',
+                  'images': {'large': 'https://example.com/sunday.jpg'},
+                  'rating': {'score': 8.7, 'total': 1234},
+                  'rank': 88,
+                },
+              ],
+            },
+            {
+              'weekday': {'id': 2, 'cn': '星期二'},
+              'items': [
+                {
+                  'id': 1002,
+                  'name': 'Tuesday Original',
+                  'name_cn': '周二中文番剧',
+                  'summary': '周二中文简介。',
+                  'air_date': '2026-07-21',
+                  'images': {'common': 'https://example.com/tuesday.jpg'},
+                },
+              ],
+            },
+          ]);
+        }),
+      );
+
+      final schedule = await repository.weeklySchedule();
+
+      expect(requestCount, 1);
+      expect(schedule.keys, containsAll(List.generate(7, (index) => index)));
+      expect(schedule[0], hasLength(1), reason: 'weekday 7 must map to Sunday');
+      expect(schedule[2], hasLength(1));
+      final sunday = schedule[0]!.single;
+      expect(sunday.title, '周日中文番剧');
+      expect(sunday.originalTitle, 'Sunday Original');
+      expect(sunday.summary, '这是来自 Bangumi 的中文简介。');
+      expect(sunday.date, '2026-07-19');
+      expect(sunday.platform, 'TV');
+      expect(sunday.source, 'bangumi');
+      expect(sunday.ratingRank, 88);
+    },
+  );
+
+  test('weekly schedule returns empty when calendar fails', () async {
+    final repository = BangumiMetadataRepository(
+      client: MockClient((_) async => http.Response('unavailable', 503)),
+    );
+
+    expect(await repository.weeklySchedule(), isEmpty);
+  });
+
+  test(
     'home feed uses a rolling recent window and distinct quality picks',
     () async {
       String? recentFloor;

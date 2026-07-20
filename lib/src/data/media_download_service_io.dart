@@ -50,6 +50,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         directoryProvider: _directoryProvider,
       );
     }
+    final progressDispatcher = _DownloadProgressDispatcher(onProgress);
 
     final directory = await _directoryProvider();
     await directory.create(recursive: true);
@@ -69,7 +70,6 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
     var totalBytes = 0;
     String? etag = request.etag;
     String? lastModified = request.lastModified;
-    var lastProgressAt = DateTime.fromMillisecondsSinceEpoch(0);
 
     MediaDownloadResult stoppedResult() {
       final outcome = control.reason == MediaDownloadStopReason.cancel
@@ -88,13 +88,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
     }
 
     void emitProgress({bool force = false}) {
-      final now = DateTime.now();
-      if (!force &&
-          now.difference(lastProgressAt) < const Duration(milliseconds: 180)) {
-        return;
-      }
-      lastProgressAt = now;
-      onProgress(
+      progressDispatcher.add(
         MediaDownloadProgress(
           downloadedBytes: existingBytes,
           totalBytes: totalBytes,
@@ -103,6 +97,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
           etag: etag,
           lastModified: lastModified,
         ),
+        force: force,
       );
     }
 
@@ -368,7 +363,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         etag: etag,
         lastModified: lastModified,
       );
-    } catch (error) {
+    } catch (_) {
       if (control.reason == MediaDownloadStopReason.cancel) {
         if (await temporary.exists()) await temporary.delete();
         existingBytes = 0;
@@ -379,7 +374,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
       }
       return MediaDownloadResult(
         outcome: MediaDownloadOutcome.failed,
-        message: '下载失败：$error',
+        message: '下载连接失败，可稍后继续',
         path: target?.path,
         temporaryPath: temporary.path,
         bytes: existingBytes,
@@ -388,6 +383,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         lastModified: lastModified,
       );
     } finally {
+      progressDispatcher.flush();
       await iterator?.cancel();
       await sink?.close();
       client.close();
@@ -421,6 +417,50 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
     } else if (entityType == FileSystemEntityType.file) {
       await file.delete();
     }
+  }
+}
+
+const _downloadProgressInterval = Duration(milliseconds: 500);
+
+class _DownloadProgressDispatcher {
+  _DownloadProgressDispatcher(this._onProgress);
+
+  final void Function(MediaDownloadProgress progress) _onProgress;
+  DateTime _lastPublishedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  MediaDownloadProgress? _pending;
+
+  void add(MediaDownloadProgress progress, {bool force = false}) {
+    _pending = progress;
+    final now = DateTime.now();
+    if (!force &&
+        !_isTerminal(progress) &&
+        now.difference(_lastPublishedAt) < _downloadProgressInterval) {
+      return;
+    }
+    _publish(now);
+  }
+
+  void flush() {
+    if (_pending == null) return;
+    _publish(DateTime.now());
+  }
+
+  void _publish(DateTime now) {
+    final progress = _pending;
+    if (progress == null) return;
+    _pending = null;
+    _lastPublishedAt = now;
+    _onProgress(progress);
+  }
+
+  bool _isTerminal(MediaDownloadProgress progress) {
+    final bytesComplete =
+        progress.totalBytes > 0 &&
+        progress.downloadedBytes >= progress.totalBytes;
+    final unitsComplete =
+        progress.totalUnits > 0 &&
+        progress.completedUnits >= progress.totalUnits;
+    return bytesComplete || unitsComplete;
   }
 }
 

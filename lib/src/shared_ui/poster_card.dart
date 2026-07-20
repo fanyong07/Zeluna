@@ -74,7 +74,7 @@ class _PosterCardState extends State<PosterCard> {
                         fit: StackFit.expand,
                         children: [
                           if (widget.landscape)
-                            BackdropArt(
+                            _PosterCardBackdropArt(
                               bannerUrl: widget.subject.bannerUrl,
                               posterUrl: widget.subject.coverUrl,
                               title: widget.subject.title,
@@ -183,27 +183,66 @@ class PosterArt extends StatelessWidget {
     final fallbackColor = _fallbackColor(coverUrl, title);
     final url = coverUrl?.trim() ?? '';
     if (_isNetworkUrl(url)) {
-      return Image.network(
-        url,
-        fit: fit,
-        alignment: alignment,
-        filterQuality: FilterQuality.medium,
-        webHtmlElementStrategy: allowHtmlFallback
-            ? WebHtmlElementStrategy.fallback
-            : WebHtmlElementStrategy.never,
-        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-          if (wasSynchronouslyLoaded || frame != null) return child;
-          return PosterPlaceholder(
-            color: fallbackColor,
-            title: title,
-            loading: true,
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+          final cacheWidth = _decodeDimension(
+            constraints.hasBoundedWidth ? constraints.maxWidth : null,
+            pixelRatio,
+          );
+          final cacheHeight = _decodeDimension(
+            constraints.hasBoundedHeight ? constraints.maxHeight : null,
+            pixelRatio,
+          );
+          return Image.network(
+            url,
+            fit: fit,
+            alignment: alignment,
+            filterQuality: FilterQuality.low,
+            cacheWidth: cacheWidth,
+            cacheHeight: cacheHeight,
+            webHtmlElementStrategy: allowHtmlFallback
+                ? WebHtmlElementStrategy.fallback
+                : WebHtmlElementStrategy.never,
+            frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+              if (wasSynchronouslyLoaded || frame != null) return child;
+              return PosterPlaceholder(color: fallbackColor, title: title);
+            },
+            errorBuilder: (context, error, stackTrace) =>
+                PosterPlaceholder(color: fallbackColor, title: title),
           );
         },
-        errorBuilder: (context, error, stackTrace) =>
-            PosterPlaceholder(color: fallbackColor, title: title),
       );
     }
     return PosterPlaceholder(color: fallbackColor, title: title);
+  }
+}
+
+class _PosterCardBackdropArt extends StatelessWidget {
+  const _PosterCardBackdropArt({
+    required this.bannerUrl,
+    required this.posterUrl,
+    required this.title,
+  });
+
+  final String? bannerUrl;
+  final String? posterUrl;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    final banner = bannerUrl?.trim() ?? '';
+    final poster = posterUrl?.trim() ?? '';
+    final imageUrl = _isNetworkUrl(banner)
+        ? banner
+        : _isNetworkUrl(poster)
+        ? poster
+        : null;
+    return PosterArt(
+      coverUrl: imageUrl == null ? null : _backdropUrl(imageUrl),
+      title: title,
+      allowHtmlFallback: false,
+    );
   }
 }
 
@@ -307,13 +346,11 @@ class PosterPlaceholder extends StatelessWidget {
             return const SizedBox.shrink();
           }
           if (loading) {
-            final indicatorSize = (shortest * 0.24).clamp(12.0, 24.0);
             return Center(
-              child: SizedBox.square(
-                dimension: indicatorSize,
-                child: CircularProgressIndicator(
-                  strokeWidth: indicatorSize < 18 ? 1.6 : 2.2,
-                ),
+              child: Icon(
+                Icons.image_outlined,
+                size: (shortest * 0.28).clamp(14.0, 26.0),
+                color: Colors.white.withValues(alpha: 0.62),
               ),
             );
           }
@@ -397,27 +434,21 @@ class _MediaPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(AppRadius.pill),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.62),
-            borderRadius: BorderRadius.circular(AppRadius.pill),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.76),
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        child: Text(
+          text,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
           ),
         ),
       ),
@@ -461,6 +492,17 @@ class _RatingBadge extends StatelessWidget {
 
 bool _isNetworkUrl(String value) =>
     value.startsWith('http://') || value.startsWith('https://');
+
+int? _decodeDimension(double? logicalPixels, double pixelRatio) {
+  if (logicalPixels == null ||
+      !logicalPixels.isFinite ||
+      logicalPixels <= 0 ||
+      !pixelRatio.isFinite ||
+      pixelRatio <= 0) {
+    return null;
+  }
+  return (logicalPixels * pixelRatio).ceil().clamp(1, 2048);
+}
 
 String _backdropUrl(String value) {
   if (!kIsWeb || !_isNetworkUrl(value)) return value;

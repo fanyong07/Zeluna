@@ -55,18 +55,7 @@ class SourceRuleBridge {
   }
 
   bool mayContributePlaybackRules(VideoSource source) {
-    if (source.kind != VideoSourceKind.tvBox || source.rawConfig.isEmpty) {
-      return false;
-    }
-    if (_rulesForSource(source).isNotEmpty) return true;
-    final sites = source.rawConfig['sites'];
-    if (sites is! List) return false;
-    return sites.whereType<Map>().any((site) {
-      final api = site['api']?.toString().trim().toLowerCase() ?? '';
-      if (api != 'csp_xbpq') return false;
-      final ext = site['ext'];
-      return ext is Map || (ext?.toString().trim().isNotEmpty ?? false);
-    });
+    return _rulesForSource(source).isNotEmpty || _hasHydratableXbpqSite(source);
   }
 
   SourceRuleBridgeResult _buildFromSourceRules(
@@ -110,7 +99,7 @@ class SourceRuleBridge {
     TvBoxXbpqHydrator hydrator,
   ) async {
     final baseline = _rulesForSource(source);
-    if (source.kind != VideoSourceKind.tvBox || source.rawConfig.isEmpty) {
+    if (!source.enabled || !_hasHydratableXbpqSite(source)) {
       return baseline;
     }
 
@@ -180,6 +169,20 @@ class SourceRuleBridge {
           : rule.note,
     );
   }
+}
+
+bool _hasHydratableXbpqSite(VideoSource source) {
+  if (source.kind != VideoSourceKind.tvBox || source.rawConfig.isEmpty) {
+    return false;
+  }
+  final sites = source.rawConfig['sites'];
+  if (sites is! List) return false;
+  return sites.whereType<Map>().any((site) {
+    final api = site['api']?.toString().trim().toLowerCase() ?? '';
+    if (api != 'csp_xbpq') return false;
+    final ext = site['ext'];
+    return ext is Map || (ext?.toString().trim().isNotEmpty ?? false);
+  });
 }
 
 bool _canParticipateInPlayback(RulePlugin rule) {

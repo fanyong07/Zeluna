@@ -187,7 +187,7 @@ void main() {
   });
 
   test(
-    'hydrated XBPQ joins counts and playback without a second catalog prefix',
+    'enabled XBPQ hydrates while disabled XBPQ stays off the network',
     () async {
       var requestCount = 0;
       final hydrator = TvBoxXbpqHydrator(
@@ -224,6 +224,17 @@ void main() {
         },
       );
       const catalog = SourceCatalogState(totalSources: 1, sources: [source]);
+      final disabledCatalog = catalog.copyWith(
+        sources: [source.copyWith(enabled: false)],
+      );
+
+      final disabledBeforeHydration = await bridge.buildHydrated(
+        disabledCatalog,
+      );
+      expect(requestCount, 0);
+      expect(disabledBeforeHydration.rules, isEmpty);
+      expect(disabledBeforeHydration.ruleCountsBySource[source.id], 0);
+      expect(disabledBeforeHydration.availableRuleCount, 0);
 
       final result = await bridge.buildHydrated(catalog);
       final attached = result.attachTo(catalog);
@@ -241,18 +252,79 @@ void main() {
       expect(attached.availablePlaybackRuleCount, 1);
       expect(attached.activePlaybackRuleCount, 1);
 
-      final disabledCatalog = catalog.copyWith(
-        sources: [source.copyWith(enabled: false)],
+      final disabledAfterHydration = await bridge.buildHydrated(
+        disabledCatalog,
       );
-      final disabled = await bridge.buildHydrated(disabledCatalog);
       expect(
         requestCount,
         1,
-        reason: 'hydrator success cache should be reused',
+        reason: 'disabled sources should not visit the hydrator or its cache',
       );
-      expect(disabled.rules, isEmpty);
-      expect(disabled.ruleCountsBySource[source.id], 1);
-      expect(disabled.availableRuleCount, 1);
+      expect(disabledAfterHydration.rules, isEmpty);
+      expect(disabledAfterHydration.ruleCountsBySource[source.id], 0);
+      expect(disabledAfterHydration.availableRuleCount, 0);
+    },
+  );
+
+  test(
+    'hydrated build skips sources that cannot add hydrated playback rules',
+    () async {
+      final hydrator = _RecordingTvBoxXbpqHydrator();
+      addTearDown(hydrator.close);
+      final bridge = SourceRuleBridge(xbpqHydrator: hydrator);
+      const disabledXbpq = VideoSource(
+        id: 'source:disabled-xbpq',
+        name: '关闭的 XBPQ',
+        kind: VideoSourceKind.tvBox,
+        importUrl: 'https://rules.example/catalog.json',
+        baseUrl: 'https://rules.example/catalog.json',
+        enabled: false,
+        rawConfig: {
+          'sites': [
+            {
+              'key': 'disabled-xbpq',
+              'api': 'csp_XBPQ',
+              'ext': './disabled.json',
+            },
+          ],
+        },
+      );
+      const jsonApi = VideoSource(
+        id: 'source:json-only',
+        name: 'JSON API',
+        kind: VideoSourceKind.tvBox,
+        importUrl: 'https://rules.example/json.json',
+        baseUrl: 'https://rules.example/json.json',
+        rawConfig: {
+          'sites': [
+            {
+              'key': 'json-api',
+              'type': 1,
+              'api': 'https://api.example.com/provide/vod',
+            },
+          ],
+        },
+      );
+      const live = VideoSource(
+        id: 'source:live',
+        name: 'M3U',
+        kind: VideoSourceKind.liveM3u,
+        importUrl: 'https://media.example/live.m3u',
+        baseUrl: 'https://media.example/live.m3u',
+      );
+
+      final result = await bridge.buildHydrated(
+        const SourceCatalogState(
+          totalSources: 3,
+          sources: [disabledXbpq, jsonApi, live],
+        ),
+      );
+
+      expect(hydrator.visitedSourceIds, isEmpty);
+      expect(result.ruleCountsBySource[disabledXbpq.id], 0);
+      expect(result.ruleCountsBySource[jsonApi.id], 3);
+      expect(result.ruleCountsBySource[live.id], 0);
+      expect(result.rules, hasLength(3));
     },
   );
 
@@ -397,3 +469,13 @@ const _completeXbpqConfig = <String, dynamic>{
   '播放标题': '>&&<',
   '播放链接': 'href="&&"',
 };
+
+class _RecordingTvBoxXbpqHydrator extends TvBoxXbpqHydrator {
+  final visitedSourceIds = <String>[];
+
+  @override
+  Future<TvBoxXbpqHydrationResult> hydrateSource(VideoSource source) async {
+    visitedSourceIds.add(source.id);
+    return const TvBoxXbpqHydrationResult(sites: []);
+  }
+}

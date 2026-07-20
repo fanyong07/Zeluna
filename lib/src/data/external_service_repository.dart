@@ -33,6 +33,7 @@ query ($perPage: Int, $search: String) {
   Page(page: 1, perPage: $perPage) {
     media(type: ANIME, search: $search, sort: SEARCH_MATCH) {
       id
+      format
       title { romaji english native }
       description(asHtml: false)
       coverImage { large extraLarge color }
@@ -64,6 +65,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
   Page(page: $page, perPage: $perPage) {
     media(type: ANIME, sort: TRENDING_DESC, season: $season, seasonYear: $seasonYear) {
       id
+      format
       title { romaji english native }
       description(asHtml: false)
       coverImage { large extraLarge color }
@@ -1221,7 +1223,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       coverUrl: cover['extraLarge']?.toString() ?? cover['large']?.toString(),
       bannerUrl: json['bannerImage']?.toString(),
       date: date,
-      platform: 'TV',
+      platform: json['format']?.toString() ?? 'TV',
       language: '日语',
       region: '日本',
       status: json['episodes'] == null ? '未确定' : '全${json['episodes']}集',

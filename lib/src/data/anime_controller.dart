@@ -5,6 +5,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../accounts/local_account_repository.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
@@ -114,6 +115,7 @@ class AnimeState {
     this.imageFavorites = const [],
     this.feedbacks = const [],
     this.profile = const UserProfileSettings(),
+    this.accountSession = const LocalAccountSession(),
     this.homePreferences = const HomePreferences(),
     this.appearance = const AppearanceSettings(),
     this.danmaku = const DanmakuSettings(),
@@ -133,6 +135,7 @@ class AnimeState {
   final List<LibraryEntry> imageFavorites;
   final List<LocalFeedback> feedbacks;
   final UserProfileSettings profile;
+  final LocalAccountSession accountSession;
   final HomePreferences homePreferences;
   final AppearanceSettings appearance;
   final DanmakuSettings danmaku;
@@ -152,6 +155,7 @@ class AnimeState {
     List<LibraryEntry>? imageFavorites,
     List<LocalFeedback>? feedbacks,
     UserProfileSettings? profile,
+    LocalAccountSession? accountSession,
     HomePreferences? homePreferences,
     AppearanceSettings? appearance,
     DanmakuSettings? danmaku,
@@ -171,6 +175,7 @@ class AnimeState {
       imageFavorites: imageFavorites ?? this.imageFavorites,
       feedbacks: feedbacks ?? this.feedbacks,
       profile: profile ?? this.profile,
+      accountSession: accountSession ?? this.accountSession,
       homePreferences: homePreferences ?? this.homePreferences,
       appearance: appearance ?? this.appearance,
       danmaku: danmaku ?? this.danmaku,
@@ -185,52 +190,105 @@ class AnimeState {
 class AnimeController extends AsyncNotifier<AnimeState> {
   static const _settingsBox = 'anime.settings.v2';
   static const _libraryBox = 'anime.library.v2';
+  static const _accountSettingKeys = [
+    'playback',
+    'profile',
+    'homePreferences',
+    'appearance',
+    'danmaku',
+    'misc',
+    'services',
+    'rulePlugins',
+    'sourceEnabled',
+  ];
+  static const _accountLibraryKeys = [
+    'favorites',
+    'history',
+    'following',
+    'offlineTasks',
+    'imageFavorites',
+    'feedbacks',
+  ];
   static const _animeMetadataCacheKey = 'metadata.cache.anime';
   static const _seriesMetadataCacheKey = 'metadata.cache.series';
   static const _movieMetadataCacheKey = 'metadata.cache.movie';
   static const _homeFeedCacheKey = 'metadata.cache.home';
-  static const _homeFeedCacheVersion = 1;
-  static const _metadataCacheVersion = 8;
+  static const _homeFeedCacheVersion = 2;
+  static const _legacyHomeFeedCacheVersion = 1;
+  static const _homeFeedCacheTtl = Duration(hours: 1);
+  static const _metadataCacheVersion = 9;
   static const _metadataCacheLimit = 1200;
   static const _metadataCacheTtl = Duration(hours: 8);
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
+  static const _sourceCatalogHydrationDelay = Duration(seconds: 1);
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
+  late LocalAccountRepository _accountRepository;
+  LocalAccount? _activeAccount;
   List<RulePlugin> _sourceCatalogRules = const [];
   int _homeRefreshVersion = 0;
   int _sourceCatalogRefreshVersion = 0;
+  int _accountContextVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _playbackPrefetches = <String, Future<void>>{};
   final _downloadRuns = <String, Future<void>>{};
   final _downloadPersistedAt = <String, DateTime>{};
   Future<void> _downloadWriteQueue = Future<void>.value();
+  Future<void> _accountOperationQueue = Future<void>.value();
   Timer? _downloadPersistTimer;
+
+  int get accountContextVersion => _accountContextVersion;
+
+  bool isAccountContextCurrent(int version) =>
+      version == _accountContextVersion;
 
   @override
   Future<AnimeState> build() async {
     final boxes = await Future.wait<Box<dynamic>>([
       Hive.openBox<dynamic>(_settingsBox),
       Hive.openBox<dynamic>(_libraryBox),
+      Hive.openBox<dynamic>(LocalAccountRepository.boxName),
     ]);
     _settings = boxes[0];
     _library = boxes[1];
-    final settingsJson = _settings.get('playback');
+    _accountRepository = LocalAccountRepository(boxes[2]);
+    final pendingDeletion = _accountRepository.pendingDeletion();
+    if (pendingDeletion != null) {
+      await _resumePendingDeletion(pendingDeletion).onError((_, _) {});
+    }
+    final pendingRegistration = _accountRepository.pendingRegistration();
+    LocalAccount? recoveredRegistration;
+    if (pendingRegistration != null) {
+      await _resumePendingRegistration(pendingRegistration);
+      recoveredRegistration = pendingRegistration.account;
+    }
+    _activeAccount =
+        recoveredRegistration ?? _accountRepository.currentAccount();
+    final accountSession = LocalAccountSession(
+      current: _activeAccount,
+      available: _accountRepository.listAccounts(),
+      hasPendingCleanup: _accountRepository.pendingDeletion() != null,
+    );
+    final settingsJson = _settings.get(_accountSettingsKey('playback'));
     final settings = settingsJson is Map
         ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
         : const PlaybackSettings();
-    final profileJson = _settings.get('profile');
-    final homeJson = _settings.get('homePreferences');
-    final appearanceJson = _settings.get('appearance');
-    final danmakuJson = _settings.get('danmaku');
-    final miscJson = _settings.get('misc');
-    final servicesJson = _settings.get('services');
-    final rulePluginsJson = _settings.get('rulePlugins');
-    final sourceEnabledJson = _settings.get('sourceEnabled');
+    final profileJson = _settings.get(_accountSettingsKey('profile'));
+    final homeJson = _settings.get(_accountSettingsKey('homePreferences'));
+    final appearanceJson = _settings.get(_accountSettingsKey('appearance'));
+    final danmakuJson = _settings.get(_accountSettingsKey('danmaku'));
+    final miscJson = _settings.get(_accountSettingsKey('misc'));
+    final servicesJson = _settings.get(_accountSettingsKey('services'));
+    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
+    final sourceEnabledJson = _settings.get(
+      _accountSettingsKey('sourceEnabled'),
+    );
     final services = servicesJson is Map
         ? ExternalServiceSettings.fromJson(servicesJson.cast<String, dynamic>())
         : const ExternalServiceSettings();
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
-    final feed = _readHomeFeedCache() ?? bangumiRepository.fallbackHomeFeed();
+    final cachedHomeFeed = _readHomeFeedCache();
+    final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
     final defaultRulePlugins = const RulePluginRepository().defaultState();
     final rulePlugins = rulePluginsJson is Map
         ? _mergeDefaultNativeRules(
@@ -241,7 +299,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           )
         : defaultRulePlugins;
     if (rulePluginsJson is Map) {
-      await _settings.put('rulePlugins', rulePlugins.toJson());
+      await _settings.put(
+        _accountSettingsKey('rulePlugins'),
+        rulePlugins.toJson(),
+      );
     }
     final loadedSourceCatalog = await _loadSourceCatalog(
       _enabledOverridesFromJson(sourceEnabledJson),
@@ -267,9 +328,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       offlineTasks: offlineTasks,
       imageFavorites: _readEntries('imageFavorites'),
       feedbacks: _readFeedbacks(),
-      profile: profileJson is Map
-          ? UserProfileSettings.fromJson(profileJson.cast<String, dynamic>())
-          : const UserProfileSettings(),
+      profile: _profileFromJson(profileJson, _activeAccount),
+      accountSession: accountSession,
       homePreferences: homeJson is Map
           ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
           : const HomePreferences(),
@@ -284,12 +344,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       rulePlugins: rulePlugins,
       sourceCatalog: sourceCatalog,
     );
-    unawaited(
-      Future<void>.delayed(
-        Duration.zero,
-        () => _refreshHomeFeed(services),
-      ).onError((_, _) {}),
-    );
+    if (recoveredRegistration != null) {
+      await _accountRepository.setActiveAccount(recoveredRegistration.id);
+      await _accountRepository.finalizeRegistration(recoveredRegistration.id);
+    }
+    if (!cachedHomeFeed.fresh) {
+      unawaited(
+        Future<void>.delayed(
+          Duration.zero,
+          () => _refreshHomeFeed(services),
+        ).onError((_, _) {}),
+      );
+    }
     _scheduleSourceCatalogHydration(loadedSourceCatalog);
     ref.onDispose(() {
       _downloadPersistTimer?.cancel();
@@ -479,10 +545,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     bool waitForRefresh = false,
   }) async {
     final services = state.value?.services ?? const ExternalServiceSettings();
-    if (!services.mediaMetadataEnabled &&
-        !services.publicCollectionSyncEnabled &&
-        !services.peerTubeEnabled &&
-        !services.wikimediaCommonsEnabled) {
+    if (!services.mediaMetadataEnabled) {
       return _subjectsOfType(_fallbackExternalMovies, SubjectContentType.movie);
     }
     return _metadataSubjects(
@@ -498,26 +561,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
               .movieMetadataFeed(
                 includeCinemeta:
                     services.mediaMetadataEnabled && services.cinemetaEnabled,
-                includeArchive: services.publicCollectionSyncEnabled,
+                includeArchive: false,
                 cinemetaPages: 6,
               ),
-          for (final keyword in const [
-            'animation',
-            'documentary',
-            'short film',
-          ])
-            for (final page in const [1, 2])
-              if (services.peerTubeEnabled)
-                ref
-                    .read(peerTubeRepositoryProvider)
-                    .search(keyword, page: page, limit: 36)
-                    .onError((_, _) => const <AnimeSubject>[]),
-          for (final page in const [1, 2])
-            if (services.wikimediaCommonsEnabled)
-              ref
-                  .read(wikimediaCommonsRepositoryProvider)
-                  .trending(page: page, limit: 48)
-                  .onError((_, _) => const <AnimeSubject>[]),
         ]);
         final subjects =
             _uniqueSubjects([
@@ -538,42 +584,77 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() {
     final services = state.value?.services ?? const ExternalServiceSettings();
-    return Future.wait([
-      if (services.bangumiEnabled)
-        ref
-            .read(bangumiMetadataRepositoryProvider)
-            .weeklySchedule()
-            .onError((_, _) => <int, List<AnimeSubject>>{}),
-      if (services.anilistEnabled)
-        ref
-            .read(externalServiceRepositoryProvider)
-            .anilistTrending(perPage: 48)
-            .onError((_, _) => const <AnimeSubject>[]),
-    ]).then((results) {
-      final baseResult = results.whereType<Map<int, List<AnimeSubject>>>();
-      final base = baseResult.isEmpty
-          ? <int, List<AnimeSubject>>{}
-          : baseResult.first;
-      final anilist = results
-          .whereType<List<AnimeSubject>>()
-          .expand((items) => items)
-          .toList();
-      final merged = {
-        for (var i = 0; i < 7; i++) i: [...?base[i]],
-      };
-      for (final subject in anilist) {
-        final date = DateTime.tryParse(subject.date ?? '');
-        final weekday = date == null ? subject.id % 7 : date.weekday % 7;
-        merged[weekday]!.add(subject);
-      }
-      return {
-        for (final entry in merged.entries)
-          entry.key: _uniqueSubjects(entry.value).take(36).toList(),
-      };
-    });
+    return _weeklyScheduleWithBudget(services);
+  }
+
+  Future<Map<int, List<AnimeSubject>>> _weeklyScheduleWithBudget(
+    ExternalServiceSettings services,
+  ) async {
+    const sourceBudget = Duration(seconds: 5);
+    final bangumi = ref.read(bangumiMetadataRepositoryProvider);
+    final primary = services.bangumiEnabled
+        ? await bangumi
+              .weeklySchedule()
+              .timeout(
+                sourceBudget,
+                onTimeout: () => <int, List<AnimeSubject>>{},
+              )
+              .onError((_, _) => <int, List<AnimeSubject>>{})
+        : <int, List<AnimeSubject>>{};
+    final schedule = {
+      for (var day = 0; day < 7; day++)
+        day: _uniqueSubjects(
+          (primary[day] ?? const <AnimeSubject>[]).where(
+            (subject) =>
+                subjectMatchesContentType(subject, SubjectContentType.anime),
+          ),
+        ).take(36).toList(growable: false),
+    };
+    if (schedule.values.any((items) => items.isNotEmpty)) return schedule;
+
+    final homeFallback = _scheduleChineseAnime(_homeSubjects);
+    if (homeFallback.isNotEmpty) {
+      return _groupScheduleSubjects(homeFallback);
+    }
+    final feed = bangumi.fallbackHomeFeed();
+    return _groupScheduleSubjects(
+      _scheduleChineseAnime([
+        feed.hero,
+        ...feed.index,
+        ...feed.recommended,
+        ...feed.recent,
+      ]),
+    );
+  }
+
+  List<AnimeSubject> _scheduleChineseAnime(Iterable<AnimeSubject> subjects) {
+    return _uniqueSubjects(
+      subjects.where(
+        (subject) =>
+            subjectMatchesContentType(subject, SubjectContentType.anime) &&
+            _containsChinese(subject.title) &&
+            _containsChinese(subject.summary),
+      ),
+    );
+  }
+
+  Map<int, List<AnimeSubject>> _groupScheduleSubjects(
+    Iterable<AnimeSubject> subjects,
+  ) {
+    final schedule = {for (var day = 0; day < 7; day++) day: <AnimeSubject>[]};
+    for (final subject in _uniqueSubjects(subjects)) {
+      final date = DateTime.tryParse(subject.date ?? '');
+      final day = date == null ? subject.id.abs() % 7 : date.weekday % 7;
+      schedule[day]!.add(subject);
+    }
+    return {
+      for (final entry in schedule.entries)
+        entry.key: entry.value.take(36).toList(growable: false),
+    };
   }
 
   Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
+    final accountContextVersion = _accountContextVersion;
     final current = state.value;
     final cacheKey = _subjectCacheKey(subject);
     final cached = current?.selectedSubjects[cacheKey];
@@ -598,8 +679,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             staff: const [],
             recommendations: const [],
           );
+      _ensureAccountContext(accountContextVersion);
       final previous = state.value;
-      if (previous != null) {
+      if (previous != null && accountContextVersion == _accountContextVersion) {
         state = AsyncData(
           previous.copyWith(
             selectedSubjects: {...previous.selectedSubjects, cacheKey: detail},
@@ -635,8 +717,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ),
       ],
     );
+    _ensureAccountContext(accountContextVersion);
     final previous = state.value;
-    if (previous != null) {
+    if (previous != null && accountContextVersion == _accountContextVersion) {
       state = AsyncData(
         previous.copyWith(
           selectedSubjects: {...previous.selectedSubjects, cacheKey: detail},
@@ -695,51 +778,57 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
-  }) {
+  }) async {
+    final accountContextVersion = _accountContextVersion;
+    final accountId = _activeAccount?.id;
+    late final List<PlaybackLine> lines;
     if (subject.source.startsWith('m3u-channel:')) {
-      return _m3uLinesForEpisode(subject, episode);
-    }
-    if (subject.source.startsWith('peertube:')) {
+      lines = await _m3uLinesForEpisode(subject, episode);
+    } else if (subject.source.startsWith('peertube:')) {
       final services = state.value?.services ?? const ExternalServiceSettings();
       if (!services.peerTubeEnabled) {
-        return Future.value(const <PlaybackLine>[]);
+        return const <PlaybackLine>[];
       }
-      return ref
+      lines = await ref
           .read(peerTubeRepositoryProvider)
           .linesForEpisode(subject, episode);
-    }
-    if (subject.source.startsWith('archive:')) {
+    } else if (subject.source.startsWith('archive:')) {
       final services = state.value?.services ?? const ExternalServiceSettings();
       if (!services.publicCollectionSyncEnabled) {
-        return Future.value(const <PlaybackLine>[]);
+        return const <PlaybackLine>[];
       }
-      return ref
+      lines = await ref
           .read(internetArchivePlaybackProvider)
           .linesForEpisode(subject, episode);
-    }
-    if (subject.source.startsWith('commons:')) {
+    } else if (subject.source.startsWith('commons:')) {
       final services = state.value?.services ?? const ExternalServiceSettings();
       if (!services.wikimediaCommonsEnabled) {
-        return Future.value(const <PlaybackLine>[]);
+        return const <PlaybackLine>[];
       }
-      return ref
+      lines = await ref
           .read(wikimediaCommonsRepositoryProvider)
           .linesForEpisode(subject, episode);
+    } else {
+      final ruleState =
+          state.value?.rulePlugins ??
+          const RulePluginRepository().defaultState();
+      final catalogRuleIds = _sourceCatalogRules.map((rule) => rule.id).toSet();
+      final effectiveRuleState = ruleState.copyWith(
+        installedIds: {...ruleState.installedIds, ...catalogRuleIds},
+        enabledIds: {...ruleState.enabledIds, ...catalogRuleIds},
+      );
+      lines = await RulePlaybackSourceRepository(
+        repository: RulePluginRepository(
+          extraRules: [..._sourceCatalogRules, ...ruleState.customRules],
+        ),
+        ruleState: effectiveRuleState,
+        resolver: ref.read(rulePlaybackResolverProvider),
+        cacheNamespace: '${accountId ?? 'guest'}:$accountContextVersion',
+      ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
     }
-    final ruleState =
-        state.value?.rulePlugins ?? const RulePluginRepository().defaultState();
-    final catalogRuleIds = _sourceCatalogRules.map((rule) => rule.id).toSet();
-    final effectiveRuleState = ruleState.copyWith(
-      installedIds: {...ruleState.installedIds, ...catalogRuleIds},
-      enabledIds: {...ruleState.enabledIds, ...catalogRuleIds},
-    );
-    return RulePlaybackSourceRepository(
-      repository: RulePluginRepository(
-        extraRules: [..._sourceCatalogRules, ...ruleState.customRules],
-      ),
-      ruleState: effectiveRuleState,
-      resolver: ref.read(rulePlaybackResolverProvider),
-    ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
+    return accountContextVersion == _accountContextVersion
+        ? lines
+        : const <PlaybackLine>[];
   }
 
   Future<List<PlaybackLine>> _m3uLinesForEpisode(
@@ -759,21 +848,29 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-  ) {
+  ) async {
+    final accountContextVersion = _accountContextVersion;
     final services = state.value?.services ?? const ExternalServiceSettings();
-    return ref
+    final candidates = await ref
         .read(externalServiceRepositoryProvider)
         .searchSubtitles(subject, episode, services);
+    return accountContextVersion == _accountContextVersion
+        ? candidates
+        : const <SubtitleCandidate>[];
   }
 
   Future<DanmakuTimeline> danmakuTimelineForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-  ) {
+  ) async {
+    final accountContextVersion = _accountContextVersion;
     final services = state.value?.services ?? const ExternalServiceSettings();
-    return ref
+    final timeline = await ref
         .read(danmakuRepositoryProvider)
         .timelineForEpisode(subject, episode, services);
+    return accountContextVersion == _accountContextVersion
+        ? timeline
+        : const DanmakuTimeline();
   }
 
   Future<List<DanmakuMatch>> danmakuForEpisode(
@@ -784,50 +881,224 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return timeline.sources;
   }
 
+  Future<void> registerAccount({
+    required String email,
+    required String nickname,
+    required String password,
+  }) => _runAccountOperation(() async {
+    final current = state.value;
+    if (current == null) throw const AccountException('应用状态尚未准备好');
+    _accountRepository.validateNewAccount(
+      email: email,
+      nickname: nickname,
+      password: password,
+    );
+    await _quiesceDownloadsForAccountChange();
+    await _settings.flush();
+    await _library.flush();
+    final shouldImportGuestData =
+        _activeAccount == null && current.accountSession.available.isEmpty;
+    await _accountRepository.beginRegistration(
+      email: email,
+      nickname: nickname,
+      password: password,
+      importGuestData: shouldImportGuestData,
+    );
+    final pending = _accountRepository.pendingRegistration();
+    if (pending == null) throw const AccountException('账号初始化失败，请重试');
+    await _resumePendingRegistration(pending);
+    await _activateAccount(pending.account);
+    await _accountRepository.finalizeRegistration(pending.account.id);
+  });
+
+  Future<void> loginAccount({
+    required String email,
+    required String password,
+  }) => _runAccountOperation(() async {
+    final account = await _accountRepository.login(
+      email: email,
+      password: password,
+    );
+    await _quiesceDownloadsForAccountChange();
+    await _activateAccount(account);
+  });
+
+  Future<void> signOutAccount() => _runAccountOperation(() async {
+    await _quiesceDownloadsForAccountChange();
+    await _activateAccount(null);
+  });
+
+  Future<void> changeAccountPassword({
+    required String currentPassword,
+    required String newPassword,
+  }) => _runAccountOperation(() async {
+    final account = _activeAccount;
+    if (account == null) throw const AccountException('请先登录账号');
+    await _accountRepository.changePassword(
+      accountId: account.id,
+      currentPassword: currentPassword,
+      newPassword: newPassword,
+    );
+  });
+
+  Future<void> deleteCurrentAccount({required String password}) =>
+      _runAccountOperation(() async {
+        final account = _activeAccount;
+        final current = state.value;
+        if (account == null || current == null) {
+          throw const AccountException('请先登录账号');
+        }
+        await _accountRepository.verifyAccountPassword(
+          accountId: account.id,
+          password: password,
+        );
+        await _quiesceDownloadsForAccountChange();
+        final latest = state.value;
+        final ownedDownloads = List<MediaDownloadTask>.from(
+          latest?.offlineTasks ?? const [],
+        );
+        final pendingDeletion = await _accountRepository.beginDeletion(
+          accountId: account.id,
+          taskIds: ownedDownloads.map((task) => task.id),
+          paths: ownedDownloads.expand(
+            (task) => <String?>[task.temporaryPath, task.localPath],
+          ),
+        );
+        await _activateAccount(null);
+        try {
+          await _resumePendingDeletion(pendingDeletion);
+        } finally {
+          final guest = state.value;
+          if (guest != null && _activeAccount == null) {
+            state = AsyncData(
+              guest.copyWith(
+                accountSession: LocalAccountSession(
+                  available: _accountRepository.listAccounts(),
+                  hasPendingCleanup:
+                      _accountRepository.pendingDeletion() != null,
+                ),
+              ),
+            );
+          }
+        }
+      });
+
+  Future<void> retryPendingAccountCleanup() => _runAccountOperation(() async {
+    final pending = _accountRepository.pendingDeletion();
+    if (pending != null) await _resumePendingDeletion(pending);
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        accountSession: LocalAccountSession(
+          current: _activeAccount,
+          available: _accountRepository.listAccounts(),
+          hasPendingCleanup: _accountRepository.pendingDeletion() != null,
+        ),
+      ),
+    );
+  });
+
   Future<void> updateSettings(PlaybackSettings settings) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current != null) {
       state = AsyncData(current.copyWith(settings: settings));
     }
-    await _settings.put('playback', settings.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'playback'),
+      settings.toJson(),
+    );
   }
 
-  Future<void> updateProfile(UserProfileSettings profile) async {
-    final current = state.value;
-    if (current != null) state = AsyncData(current.copyWith(profile: profile));
-    await _settings.put('profile', profile.toJson());
-  }
+  Future<void> updateProfile(UserProfileSettings profile) =>
+      _runAccountOperation(() async {
+        final current = state.value;
+        if (current == null) return;
+        var normalized = profile;
+        var session = current.accountSession;
+        final account = _activeAccount;
+        if (account != null) {
+          final updated = await _accountRepository.updateNickname(
+            account.id,
+            profile.nickname,
+          );
+          if (_activeAccount?.id != account.id) return;
+          _activeAccount = updated;
+          normalized = profile.copyWith(
+            nickname: updated.nickname,
+            uid: updated.shortId,
+          );
+          session = LocalAccountSession(
+            current: updated,
+            available: _accountRepository.listAccounts(),
+            hasPendingCleanup: _accountRepository.pendingDeletion() != null,
+          );
+        }
+        final latest = state.value;
+        if (latest == null) return;
+        state = AsyncData(
+          latest.copyWith(profile: normalized, accountSession: session),
+        );
+        await _settings.put(
+          _accountSettingsKeyFor(account?.id, 'profile'),
+          normalized.toJson(),
+        );
+      });
 
   Future<void> updateHomePreferences(HomePreferences preferences) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current != null) {
       state = AsyncData(current.copyWith(homePreferences: preferences));
     }
-    await _settings.put('homePreferences', preferences.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'homePreferences'),
+      preferences.toJson(),
+    );
   }
 
   Future<void> updateAppearance(AppearanceSettings settings) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current != null) {
       state = AsyncData(current.copyWith(appearance: settings));
     }
-    await _settings.put('appearance', settings.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'appearance'),
+      settings.toJson(),
+    );
   }
 
   Future<void> updateDanmaku(DanmakuSettings settings) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current != null) state = AsyncData(current.copyWith(danmaku: settings));
-    await _settings.put('danmaku', settings.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'danmaku'),
+      settings.toJson(),
+    );
   }
 
   Future<void> updateMisc(MiscSettings settings) async {
+    final accountId = _activeAccount?.id;
+    final accountContextVersion = _accountContextVersion;
     final current = state.value;
     if (current != null) state = AsyncData(current.copyWith(misc: settings));
-    await _settings.put('misc', settings.toJson());
-    await WakelockPlus.toggle(enable: settings.keepScreenOn).onError((_, _) {});
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'misc'),
+      settings.toJson(),
+    );
+    if (accountContextVersion == _accountContextVersion) {
+      await WakelockPlus.toggle(
+        enable: settings.keepScreenOn,
+      ).onError((_, _) {});
+    }
   }
 
   Future<void> updateServices(ExternalServiceSettings settings) async {
+    final accountId = _activeAccount?.id;
+    final accountContextVersion = _accountContextVersion;
     final normalized = settings.watchHubEnabled
         ? settings.copyWith(watchHubEnabled: false)
         : settings;
@@ -838,7 +1109,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (current != null) {
       state = AsyncData(current.copyWith(services: normalized));
     }
-    await _settings.put('services', normalized.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'services'),
+      normalized.toJson(),
+    );
     if (changed) {
       await Future.wait([
         _library.delete(_homeFeedCacheKey),
@@ -846,7 +1120,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         _library.delete(_seriesMetadataCacheKey),
         _library.delete(_movieMetadataCacheKey),
       ]);
-      unawaited(_refreshHomeFeed(normalized).onError((_, _) {}));
+      if (accountContextVersion == _accountContextVersion) {
+        unawaited(_refreshHomeFeed(normalized).onError((_, _) {}));
+      }
     }
   }
 
@@ -904,6 +1180,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> setAllInstalledRulePluginsEnabled(bool enabled) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current == null) return;
     final bridge = ref.read(sourceRuleBridgeProvider);
@@ -932,8 +1209,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       current.copyWith(rulePlugins: rulePlugins, sourceCatalog: sourceCatalog),
     );
     await Future.wait([
-      _settings.put('rulePlugins', rulePlugins.toJson()),
-      _settings.put('sourceEnabled', sourceCatalog.enabledById),
+      _settings.put(
+        _accountSettingsKeyFor(accountId, 'rulePlugins'),
+        rulePlugins.toJson(),
+      ),
+      _settings.put(
+        _accountSettingsKeyFor(accountId, 'sourceEnabled'),
+        sourceCatalog.enabledById,
+      ),
     ]);
     await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
   }
@@ -953,13 +1236,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<RuleImportResult> importRuleRepositoryUrl(String url) async {
+    final ownerAccountId = _activeAccount?.id;
     final bundle = await const RuleImporter().importFromUrl(url);
-    return _importRuleBundle(bundle);
+    if (_activeAccount?.id != ownerAccountId) {
+      throw const AccountException('账号已切换，请在当前账号下重新导入');
+    }
+    return _importRuleBundle(bundle, ownerAccountId: ownerAccountId);
   }
 
   Future<RuleImportResult> importRuleRepositoryText(String text) async {
+    final ownerAccountId = _activeAccount?.id;
     final bundle = const RuleImporter().importFromText(text);
-    return _importRuleBundle(bundle);
+    return _importRuleBundle(bundle, ownerAccountId: ownerAccountId);
   }
 
   Future<RuleImportResult> importSelectedRulePlugins({
@@ -967,12 +1255,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required List<RulePlugin> rules,
     String sourceUrl = '',
   }) {
+    final ownerAccountId = _activeAccount?.id;
     return _importRuleBundle(
       RuleImportBundle(
         name: repositoryName,
         rules: List<RulePlugin>.unmodifiable(rules),
         sourceUrl: sourceUrl,
       ),
+      ownerAccountId: ownerAccountId,
     );
   }
 
@@ -984,6 +1274,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     Iterable<String> ids,
     bool enabled,
   ) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current == null) return;
     final sourceIds = ids.toSet();
@@ -1009,7 +1300,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
-    await _settings.put('sourceEnabled', sourceCatalog.enabledById);
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'sourceEnabled'),
+      sourceCatalog.enabledById,
+    );
     await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
   }
 
@@ -1017,7 +1311,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final refreshVersion = ++_sourceCatalogRefreshVersion;
     unawaited(
       Future<void>.delayed(
-        Duration.zero,
+        _sourceCatalogHydrationDelay,
         () => _hydrateAndApplySourceCatalog(catalog, refreshVersion),
       ).onError((_, _) {}),
     );
@@ -1027,6 +1321,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     SourceCatalogState catalog,
     int refreshVersion,
   ) async {
+    if (refreshVersion != _sourceCatalogRefreshVersion) return;
     final hydrated = await ref
         .read(sourceRuleBridgeProvider)
         .buildHydrated(catalog);
@@ -1040,12 +1335,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> _updateRulePlugins(RulePluginState rulePlugins) async {
+    final accountId = _activeAccount?.id;
     final normalized = _normalizeRulePlugins(rulePlugins);
     final current = state.value;
     if (current != null) {
       state = AsyncData(current.copyWith(rulePlugins: normalized));
     }
-    await _settings.put('rulePlugins', normalized.toJson());
+    await _settings.put(
+      _accountSettingsKeyFor(accountId, 'rulePlugins'),
+      normalized.toJson(),
+    );
   }
 
   RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
@@ -1064,7 +1363,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
-  Future<RuleImportResult> _importRuleBundle(RuleImportBundle bundle) async {
+  Future<RuleImportResult> _importRuleBundle(
+    RuleImportBundle bundle, {
+    required String? ownerAccountId,
+  }) async {
+    if (_activeAccount?.id != ownerAccountId) {
+      throw const AccountException('账号已切换，请在当前账号下重新导入');
+    }
     if (bundle.rules.isEmpty) {
       return RuleImportResult(
         repositoryName: bundle.name,
@@ -1118,6 +1423,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
                 record.url.trim() != bundle.sourceUrl.trim()),
       ),
     ];
+    if (_activeAccount?.id != ownerAccountId) {
+      throw const AccountException('账号已切换，请在当前账号下重新导入');
+    }
     await _updateRulePlugins(
       current.rulePlugins.copyWith(
         installedIds: installed,
@@ -1167,9 +1475,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return next.any((item) => sameSubjectIdentity(item.subject, subject));
   }
 
-  Future<void> addHistory(AnimeSubject subject, AnimeEpisode? episode) async {
+  Future<bool> addHistory(
+    AnimeSubject subject,
+    AnimeEpisode? episode, {
+    int? expectedAccountContextVersion,
+  }) async {
+    final accountContextVersion =
+        expectedAccountContextVersion ?? _accountContextVersion;
+    if (!isAccountContextCurrent(accountContextVersion)) return false;
     final current = state.value;
-    if (current == null) return;
+    if (current == null) return false;
     final next = [
       LibraryEntry(
         subject: subject,
@@ -1186,6 +1501,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await ref
         .read(externalServiceRepositoryProvider)
         .syncLocalHistory(subject, episode, current.services);
+    return isAccountContextCurrent(accountContextVersion);
   }
 
   Future<String> queueOffline(
@@ -1359,7 +1675,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final run = () async {
       try {
         await _performDownload(taskId, preferStoredLine: preferStoredLine);
-      } catch (error) {
+      } catch (_) {
         final task = _downloadTask(taskId);
         if (task != null &&
             task.status != MediaDownloadTaskStatus.cancelled &&
@@ -1368,7 +1684,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             task.copyWith(
               status: MediaDownloadTaskStatus.failed,
               updatedAt: DateTime.now(),
-              message: '下载失败：$error',
+              message: '下载失败，可稍后重试',
             ),
           );
           await _persistDownloadTasksNow();
@@ -1434,7 +1750,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         task.episode,
         expandAll: true,
       );
-    } catch (error) {
+    } catch (_) {
       final latest = _downloadTask(taskId);
       if (latest == null ||
           latest.status == MediaDownloadTaskStatus.paused ||
@@ -1445,7 +1761,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         latest.copyWith(
           status: MediaDownloadTaskStatus.failed,
           updatedAt: DateTime.now(),
-          message: '查找下载线路失败：$error',
+          message: '查找下载线路失败，请稍后重试',
         ),
       );
       await _persistDownloadTasksNow();
@@ -1674,7 +1990,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       default:
         return;
     }
-    await _library.put(key, const []);
+    await _library.put(_accountLibraryKey(key), const []);
   }
 
   Future<void> submitFeedback({
@@ -1682,6 +1998,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required String content,
     AnimeSubject? subject,
   }) async {
+    final accountId = _activeAccount?.id;
     final current = state.value;
     if (current == null) return;
     final now = DateTime.now();
@@ -1694,20 +2011,36 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     final next = [feedback, ...current.feedbacks].take(80).toList();
     state = AsyncData(current.copyWith(feedbacks: next));
-    await _library.put('feedbacks', next.map((item) => item.toJson()).toList());
+    await _library.put(
+      _accountLibraryKeyFor(accountId, 'feedbacks'),
+      next.map((item) => item.toJson()).toList(),
+    );
   }
 
-  AnimeHomeFeed? _readHomeFeedCache() {
+  _HomeFeedCacheSnapshot _readHomeFeedCache() {
     final value = _library.get(_homeFeedCacheKey);
-    if (value is! Map || value['version'] != _homeFeedCacheVersion) {
-      return null;
+    if (value is! Map) return const _HomeFeedCacheSnapshot();
+    final version = value['version'];
+    if (version != _homeFeedCacheVersion &&
+        version != _legacyHomeFeedCacheVersion) {
+      return const _HomeFeedCacheSnapshot();
     }
     final feedJson = value['feed'];
-    if (feedJson is! Map) return null;
+    if (feedJson is! Map) return const _HomeFeedCacheSnapshot();
     try {
-      return AnimeHomeFeed.fromJson(feedJson.cast<String, dynamic>());
+      final feed = AnimeHomeFeed.fromJson(feedJson.cast<String, dynamic>());
+      final fetchedAt = DateTime.tryParse(value['fetchedAt']?.toString() ?? '');
+      final age = fetchedAt == null
+          ? null
+          : DateTime.now().toUtc().difference(fetchedAt.toUtc());
+      final fresh =
+          version == _homeFeedCacheVersion &&
+          age != null &&
+          !age.isNegative &&
+          age <= _homeFeedCacheTtl;
+      return _HomeFeedCacheSnapshot(feed: feed, fresh: fresh);
     } catch (_) {
-      return null;
+      return const _HomeFeedCacheSnapshot();
     }
   }
 
@@ -1773,23 +2106,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         : Future.value(const <AnimeSubject>[]);
     final movieFuture =
         Future.wait([
-          if (services.mediaMetadataEnabled && services.cinemetaEnabled)
+          if (services.mediaMetadataEnabled)
             external
-                .cinemetaFeed(type: 'movie', pages: 1)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.publicCollectionSyncEnabled)
-            external
-                .internetArchiveSearch('', limit: 18)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.peerTubeEnabled)
-            ref
-                .read(peerTubeRepositoryProvider)
-                .search('animation', limit: 18)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.wikimediaCommonsEnabled)
-            ref
-                .read(wikimediaCommonsRepositoryProvider)
-                .trending(limit: 18)
+                .movieMetadataFeed(
+                  includeCinemeta: services.cinemetaEnabled,
+                  includeArchive: false,
+                  cinemetaPages: 1,
+                )
                 .onError((_, _) => const <AnimeSubject>[]),
         ]).then(
           (groups) => _uniqueSubjects([
@@ -1965,15 +2288,29 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeHomeFeed base,
     _HomeHighlights highlights,
   ) {
+    final animeHighlights = _subjectsOfType(
+      highlights.anime,
+      SubjectContentType.anime,
+    );
+    final animeBaseRecommended = _subjectsOfType(
+      base.recommended,
+      SubjectContentType.anime,
+    );
+    final animeBaseRecent = _subjectsOfType(
+      base.recent,
+      SubjectContentType.anime,
+    );
+    final animeBaseIndex = _subjectsOfType(
+      base.index,
+      SubjectContentType.anime,
+    );
     final all = _uniqueSubjects([
       ..._interleaveSubjectGroups([
-        highlights.anime,
-        highlights.series,
-        highlights.movies,
-        base.recommended,
-        base.recent,
+        animeHighlights,
+        animeBaseRecommended,
+        animeBaseRecent,
       ], limitPerRound: 4),
-      ...base.index,
+      ...animeBaseIndex,
     ]);
     final rankedAll = [...all]
       ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
@@ -1982,12 +2319,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
     final hero = heroCandidates.firstOrNull ?? base.hero;
     final recentCandidates =
-        _uniqueSubjects([
-          ...base.recent,
-          ...highlights.anime,
-          ...highlights.series,
-          ...highlights.movies,
-        ])..sort((a, b) {
+        _uniqueSubjects([...animeBaseRecent, ...animeHighlights])..sort((a, b) {
           final rankOrder = _homeRank(b).compareTo(_homeRank(a));
           if (rankOrder != 0) return rankOrder;
           return (b.date ?? '').compareTo(a.date ?? '');
@@ -2009,13 +2341,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     return AnimeHomeFeed(
       hero: hero,
-      recent: recent.isEmpty ? base.recent : recent,
-      recommended: recommended.isEmpty ? base.recommended : recommended,
+      recent: recent.isEmpty ? animeBaseRecent : recent,
+      recommended: recommended.isEmpty ? animeBaseRecommended : recommended,
       index: all.take(360).toList(growable: false),
       categories: base.categories,
       tags: base.tags,
-      seriesHighlights: highlights.series.take(12).toList(growable: false),
-      movieHighlights: highlights.movies.take(12).toList(growable: false),
+      seriesHighlights: _subjectsOfType(
+        highlights.series,
+        SubjectContentType.series,
+      ).take(12).toList(growable: false),
+      movieHighlights: _subjectsOfType(
+        highlights.movies,
+        SubjectContentType.movie,
+      ).take(12).toList(growable: false),
     );
   }
 
@@ -2038,6 +2376,245 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return score;
   }
 
+  Future<void> _activateAccount(LocalAccount? account) async {
+    final accountId = account?.id;
+    final settingsJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'playback'),
+    );
+    final profileJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'profile'),
+    );
+    final homeJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'homePreferences'),
+    );
+    final appearanceJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'appearance'),
+    );
+    final danmakuJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'danmaku'),
+    );
+    final miscJson = _settings.get(_accountSettingsKeyFor(accountId, 'misc'));
+    final servicesJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'services'),
+    );
+    final rulePluginsJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'rulePlugins'),
+    );
+    final sourceEnabledJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'sourceEnabled'),
+    );
+    final misc = miscJson is Map
+        ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
+        : const MiscSettings();
+    final services = servicesJson is Map
+        ? ExternalServiceSettings.fromJson(servicesJson.cast<String, dynamic>())
+        : const ExternalServiceSettings();
+    final defaultRulePlugins = const RulePluginRepository().defaultState();
+    final rulePlugins = rulePluginsJson is Map
+        ? _mergeDefaultNativeRules(
+            _normalizeRulePlugins(
+              RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>()),
+            ),
+            defaultRulePlugins,
+          )
+        : defaultRulePlugins;
+    final loadedSourceCatalog = await _loadSourceCatalog(
+      _enabledOverridesFromJson(sourceEnabledJson),
+    );
+    final sourceBridge = ref
+        .read(sourceRuleBridgeProvider)
+        .build(loadedSourceCatalog);
+    final sourceCatalog = sourceBridge.attachTo(loadedSourceCatalog);
+    final offlineTasks = await _readDownloadTasksFor(accountId);
+    final current = state.value;
+    if (current == null) return;
+    await _accountRepository.setActiveAccount(accountId);
+    _activeAccount = account;
+    _accountContextVersion++;
+    RulePlaybackSourceRepository.clearRuntimeCaches();
+    ref.read(rulePlaybackResolverProvider).clearCaches();
+    ref.read(m3uSourceAdapterProvider).clearCache();
+    ref.read(torrentSourceAdapterProvider).clearCache();
+    ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
+    _homeRefreshVersion++;
+    _sourceCatalogRefreshVersion++;
+    _playbackPrefetches.clear();
+    _sourceCatalogRules = sourceBridge.rules;
+    final session = LocalAccountSession(
+      current: account,
+      available: _accountRepository.listAccounts(),
+      hasPendingCleanup: _accountRepository.pendingDeletion() != null,
+    );
+    state = AsyncData(
+      current.copyWith(
+        selectedSubjects: const {},
+        settings: settingsJson is Map
+            ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
+            : const PlaybackSettings(),
+        favorites: _readEntriesFor(accountId, 'favorites'),
+        history: _readEntriesFor(accountId, 'history'),
+        following: _readEntriesFor(accountId, 'following'),
+        offlineTasks: offlineTasks,
+        imageFavorites: _readEntriesFor(accountId, 'imageFavorites'),
+        feedbacks: _readFeedbacksFor(accountId),
+        profile: _profileFromJson(profileJson, account),
+        accountSession: session,
+        homePreferences: homeJson is Map
+            ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
+            : const HomePreferences(),
+        appearance: appearanceJson is Map
+            ? AppearanceSettings.fromJson(
+                appearanceJson.cast<String, dynamic>(),
+              )
+            : const AppearanceSettings(),
+        danmaku: danmakuJson is Map
+            ? DanmakuSettings.fromJson(danmakuJson.cast<String, dynamic>())
+            : const DanmakuSettings(),
+        misc: misc,
+        services: services,
+        rulePlugins: rulePlugins,
+        sourceCatalog: sourceCatalog,
+      ),
+    );
+    await WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {});
+    unawaited(_refreshHomeFeed(services).onError((_, _) {}));
+    _scheduleSourceCatalogHydration(loadedSourceCatalog);
+  }
+
+  Future<void> _resumePendingRegistration(
+    PendingLocalAccountRegistration pending,
+  ) async {
+    final accountId = pending.account.id;
+    if (pending.importGuestData) {
+      for (final key in _accountSettingKeys) {
+        if (key == 'profile') continue;
+        final value = _settings.get(key);
+        final target = _accountSettingsKeyFor(accountId, key);
+        if (value != null && !_settings.containsKey(target)) {
+          await _settings.put(target, value);
+        }
+      }
+      for (final key in _accountLibraryKeys) {
+        final value = _library.get(key);
+        final target = _accountLibraryKeyFor(accountId, key);
+        if (value != null && !_library.containsKey(target)) {
+          await _library.put(target, value);
+        }
+      }
+      for (final key in _accountSettingKeys) {
+        await _settings.delete(key);
+      }
+      for (final key in _accountLibraryKeys) {
+        await _library.delete(key);
+      }
+    }
+    await _accountRepository.completeRegistration(accountId);
+  }
+
+  Future<void> _resumePendingDeletion(
+    PendingLocalAccountDeletion pending,
+  ) async {
+    Object? firstError;
+
+    Future<void> attempt(Future<void> Function() action) async {
+      try {
+        await action();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+
+    final downloadService = ref.read(mediaDownloadServiceProvider);
+    for (final taskId in pending.taskIds) {
+      downloadService.cancel(taskId);
+    }
+    await attempt(
+      () => _accountRepository.deleteAccountRecord(pending.accountId),
+    );
+    for (final path in pending.paths) {
+      await attempt(() => downloadService.deleteFiles([path]));
+    }
+    for (final key in _accountSettingKeys) {
+      await attempt(
+        () => _settings.delete(_accountSettingsKeyFor(pending.accountId, key)),
+      );
+    }
+    for (final key in _accountLibraryKeys) {
+      await attempt(
+        () => _library.delete(_accountLibraryKeyFor(pending.accountId, key)),
+      );
+    }
+    if (firstError == null) {
+      await _accountRepository.completeDeletion(pending.accountId);
+      return;
+    }
+    throw const AccountException('账号已退出，但部分本机文件仍在清理；下次启动会自动继续');
+  }
+
+  Future<T> _runAccountOperation<T>(Future<T> Function() action) {
+    final operation = _accountOperationQueue.then((_) => action());
+    _accountOperationQueue = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
+  }
+
+  Future<void> _quiesceDownloadsForAccountChange() async {
+    final activeIds = state.value?.offlineTasks
+        .where((task) => task.isActive)
+        .map((task) => task.id)
+        .toList(growable: false);
+    if (activeIds != null) {
+      for (final taskId in activeIds) {
+        await pauseDownload(taskId);
+      }
+    }
+    await _persistDownloadTasksNow();
+    final runs = List<Future<void>>.from(_downloadRuns.values);
+    if (runs.isNotEmpty) {
+      await Future.wait(
+        runs,
+      ).timeout(const Duration(seconds: 3), onTimeout: () => const <void>[]);
+    }
+  }
+
+  UserProfileSettings _profileFromJson(Object? value, LocalAccount? account) {
+    var profile = value is Map
+        ? UserProfileSettings.fromJson(value.cast<String, dynamic>())
+        : const UserProfileSettings();
+    if (account != null) {
+      return profile.copyWith(
+        nickname: account.nickname,
+        uid: account.shortId,
+        density: profile.density < 0 ? 0 : profile.density,
+        coins: profile.coins < 0 ? 0 : profile.coins,
+      );
+    }
+    final isLegacyPlaceholder =
+        profile.nickname.trim().toLowerCase() == 'fanyong' &&
+        profile.uid == '31979';
+    if (isLegacyPlaceholder || profile.nickname.trim().isEmpty) {
+      profile = const UserProfileSettings();
+    }
+    return profile;
+  }
+
+  void _ensureAccountContext(int expectedVersion) {
+    if (expectedVersion != _accountContextVersion) {
+      throw const AccountException('账号已切换，请重新打开当前内容');
+    }
+  }
+
+  String _accountSettingsKey(String key) =>
+      _accountSettingsKeyFor(_activeAccount?.id, key);
+
+  String _accountLibraryKey(String key) =>
+      _accountLibraryKeyFor(_activeAccount?.id, key);
+
+  static String _accountSettingsKeyFor(String? accountId, String key) =>
+      accountId == null ? key : 'account.$accountId.$key';
+
+  static String _accountLibraryKeyFor(String? accountId, String key) =>
+      accountId == null ? key : 'account.$accountId.$key';
+
   List<LibraryEntry> _toggleSubject(
     List<LibraryEntry> entries,
     AnimeSubject subject,
@@ -2057,7 +2634,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   List<LibraryEntry> _readEntries(String key) {
-    final value = _library.get(key);
+    return _readEntriesFor(_activeAccount?.id, key);
+  }
+
+  List<LibraryEntry> _readEntriesFor(String? accountId, String key) {
+    final value = _library.get(_accountLibraryKeyFor(accountId, key));
     if (value is! List) return const [];
     return value
         .whereType<Map>()
@@ -2067,7 +2648,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<List<MediaDownloadTask>> _readDownloadTasks() async {
-    final value = _library.get('offlineTasks');
+    return _readDownloadTasksFor(_activeAccount?.id);
+  }
+
+  Future<List<MediaDownloadTask>> _readDownloadTasksFor(
+    String? accountId,
+  ) async {
+    final storageKey = _accountLibraryKeyFor(accountId, 'offlineTasks');
+    final value = _library.get(storageKey);
     if (value is! List) return const [];
     final tasks = <MediaDownloadTask>[];
     var migrated = false;
@@ -2076,6 +2664,21 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       MediaDownloadTask task;
       if (json.containsKey('status') && json.containsKey('id')) {
         task = MediaDownloadTask.fromJson(json);
+        final rawHeaders = json['headers'];
+        final storedHeaders = rawHeaders is Map
+            ? {
+                for (final entry in rawHeaders.entries)
+                  entry.key.toString(): entry.value.toString(),
+              }
+            : const <String, String>{};
+        final storedUrl = json['url']?.toString().trim() ?? '';
+        final storedMessage = json['message']?.toString() ?? '';
+        if (json['version'] != 2 ||
+            !_sameStringMap(storedHeaders, task.headers) ||
+            storedUrl != (task.url ?? '') ||
+            storedMessage != task.message) {
+          migrated = true;
+        }
       } else {
         task = MediaDownloadTask.fromLegacy(LibraryEntry.fromJson(json));
         migrated = true;
@@ -2129,7 +2732,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     if (migrated) {
       await _library.put(
-        'offlineTasks',
+        storageKey,
         tasks.map((item) => item.toJson()).toList(),
       );
     }
@@ -2173,12 +2776,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> _persistDownloadTasks() {
+    final storageKey = _accountLibraryKeyFor(
+      _activeAccount?.id,
+      'offlineTasks',
+    );
     final snapshot = state.value?.offlineTasks
         .map((item) => item.toJson())
         .toList(growable: false);
     if (snapshot == null) return Future<void>.value();
     final operation = _downloadWriteQueue.then(
-      (_) => _library.put('offlineTasks', snapshot),
+      (_) => _library.put(storageKey, snapshot),
     );
     _downloadWriteQueue = operation.then<void>((_) {}, onError: (_, _) {});
     return operation;
@@ -2450,9 +3057,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       originalTitle: primary.originalTitle.trim().isNotEmpty
           ? primary.originalTitle
           : secondary.originalTitle,
-      summary: primary.summary.length >= secondary.summary.length
-          ? primary.summary
-          : secondary.summary,
+      summary: _preferredLocalizedText(primary.summary, secondary.summary),
       coverUrl:
           _isDirectPlayable(primary) &&
               secondary.source.startsWith('cinemeta:') &&
@@ -2504,6 +3109,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return RegExp(r'[\u3400-\u9fff]').hasMatch(value);
   }
 
+  String _preferredLocalizedText(String first, String second) {
+    final firstChinese = _containsChinese(first);
+    final secondChinese = _containsChinese(second);
+    if (firstChinese != secondChinese) return firstChinese ? first : second;
+    return first.length >= second.length ? first : second;
+  }
+
   List<AnimeSubject> get _homeSubjects {
     final feed = state.value?.homeFeed;
     if (feed == null) return const [];
@@ -2520,11 +3132,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> _writeEntries(String key, List<LibraryEntry> entries) {
-    return _library.put(key, entries.map((item) => item.toJson()).toList());
+    final accountId = _activeAccount?.id;
+    return _library.put(
+      _accountLibraryKeyFor(accountId, key),
+      entries.map((item) => item.toJson()).toList(),
+    );
   }
 
   List<LocalFeedback> _readFeedbacks() {
-    final value = _library.get('feedbacks');
+    return _readFeedbacksFor(_activeAccount?.id);
+  }
+
+  List<LocalFeedback> _readFeedbacksFor(String? accountId) {
+    final value = _library.get(_accountLibraryKeyFor(accountId, 'feedbacks'));
     if (value is! List) return const [];
     return value
         .whereType<Map>()
@@ -2542,6 +3162,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             : entry.value.toString().toLowerCase() == 'true',
     };
   }
+}
+
+bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
+  if (left.length != right.length) return false;
+  for (final entry in left.entries) {
+    if (right[entry.key] != entry.value) return false;
+  }
+  return true;
 }
 
 String _stableRuleRepositoryId(String value) {
@@ -2563,6 +3191,13 @@ class _HomeHighlights {
   final List<AnimeSubject> anime;
   final List<AnimeSubject> series;
   final List<AnimeSubject> movies;
+}
+
+class _HomeFeedCacheSnapshot {
+  const _HomeFeedCacheSnapshot({this.feed, this.fresh = false});
+
+  final AnimeHomeFeed? feed;
+  final bool fresh;
 }
 
 class _SubjectCacheSnapshot {

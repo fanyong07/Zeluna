@@ -14,6 +14,7 @@ void main() {
       final repository = ExternalServiceRepository(
         client: MockClient((request) async {
           final body = jsonDecode(request.body) as Map<String, dynamic>;
+          expect(body['query']?.toString(), contains('format'));
           final variables = (body['variables'] as Map).cast<String, dynamic>();
           final page = variables['page'] as int;
           requestedPages.add(page);
@@ -25,6 +26,7 @@ void main() {
                   'media': [
                     {
                       'id': page,
+                      'format': page == 1 ? 'MOVIE' : 'TV',
                       'title': {
                         'romaji': 'Anime $page',
                         'english': 'Anime $page',
@@ -58,8 +60,49 @@ void main() {
       expect(requestedPages..sort(), [1, 2, 3]);
       expect(requestedPageSizes, everyElement(50));
       expect(subjects, hasLength(3));
+      expect(subjects.first.platform, 'MOVIE');
+      expect(subjects.skip(1).map((item) => item.platform), everyElement('TV'));
     },
   );
+
+  test('AniList search requests and preserves the release format', () async {
+    final repository = ExternalServiceRepository(
+      client: MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['query']?.toString(), contains('format'));
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'data': {
+                'Page': {
+                  'media': [
+                    {
+                      'id': 99,
+                      'format': 'MOVIE',
+                      'title': {
+                        'romaji': 'Anime Movie',
+                        'english': 'Anime Movie',
+                        'native': 'アニメ映画',
+                      },
+                      'startDate': {'year': 2026, 'month': 7, 'day': 19},
+                      'genres': ['Drama'],
+                      'tags': <Object>[],
+                    },
+                  ],
+                },
+              },
+            }),
+          ),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+
+    final subjects = await repository.anilistSearch('Anime Movie');
+
+    expect(subjects.single.platform, 'MOVIE');
+  });
 
   test('Jikan discovery feed combines airing and popularity pages', () async {
     final requested = <String>[];

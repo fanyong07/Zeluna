@@ -678,11 +678,9 @@ class _SideNavigation extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(
-              AppSpacing.sm,
-              AppSpacing.xs,
-              AppSpacing.sm,
-              AppSpacing.lg,
+            padding: const EdgeInsets.only(
+              top: AppSpacing.xs,
+              bottom: AppSpacing.lg,
             ),
             child: _NavItem(
               item: ChromeDestination.settings,
@@ -1016,7 +1014,6 @@ class _SearchField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < AppBreakpoints.compact;
     return Align(
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
@@ -1028,15 +1025,19 @@ class _SearchField extends StatelessWidget {
           style: Theme.of(context).textTheme.bodyMedium,
           decoration: InputDecoration(
             prefixIcon: const Icon(Icons.search_rounded, size: 20),
-            suffixIcon: compact
-                ? null
-                : const Padding(
-                    padding: EdgeInsets.only(right: AppSpacing.sm),
-                    child: Center(child: SmallBadge(label: '⌘ K')),
-                  ),
+            suffixIcon: IconButton(
+              key: const ValueKey('appSearchSubmit'),
+              tooltip: '搜索',
+              onPressed: onSearch == null
+                  ? null
+                  : () => onSearch!(controller?.text ?? ''),
+              icon: const Icon(Icons.arrow_forward_rounded, size: 20),
+            ),
             suffixIconConstraints: const BoxConstraints(
-              minWidth: 62,
-              minHeight: 34,
+              minWidth: 48,
+              maxWidth: 48,
+              minHeight: 48,
+              maxHeight: 48,
             ),
             hintText: '搜索番剧、剧集、电影、演员',
             fillColor: Theme.of(
@@ -1176,7 +1177,7 @@ class _BrandMark extends StatelessWidget {
               ),
               const SizedBox(height: AppSpacing.sm),
               Text(
-                'ANIME',
+                'Zeluna',
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: Theme.of(context).colorScheme.onSurface,
                   fontWeight: FontWeight.w900,

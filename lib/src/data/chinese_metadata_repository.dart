@@ -40,6 +40,12 @@ class ChineseMetadataRepository {
   static const _animeLookupConcurrency = 4;
   static final _imdbPattern = RegExp(r'\btt\d{5,12}\b', caseSensitive: false);
   static final _hanPattern = RegExp(r'[\u3400-\u9fff]');
+  static final _kanaPattern = RegExp(
+    r'[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fd-\u30ff\u31f0-\u31ff\uff66-\uff9d]',
+  );
+  static final _hangulPattern = RegExp(
+    r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]',
+  );
   static final _separatorPattern = RegExp(
     r'[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+',
   );
@@ -376,7 +382,12 @@ GROUP BY ?imdb
   }
 
   static bool _needsChineseText(String value) {
-    return !_hanPattern.hasMatch(value.trim());
+    final text = value.trim();
+    if (text.isEmpty) return true;
+    if (_kanaPattern.hasMatch(text) || _hangulPattern.hasMatch(text)) {
+      return true;
+    }
+    return !_hanPattern.hasMatch(text);
   }
 
   static String? _verifiedChinese(String? value) {

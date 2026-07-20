@@ -332,10 +332,23 @@ Future<MediaDownloadResult> downloadHlsMedia({
       etag: sourceEtag,
       lastModified: sourceLastModified,
     );
-  } catch (error) {
+  } on _HlsFailure catch (error) {
     return MediaDownloadResult(
       outcome: MediaDownloadOutcome.failed,
-      message: 'HLS 下载失败：$error',
+      message: error.message,
+      path: targetManifest.path,
+      temporaryPath: temporary.path,
+      bytes: downloadedBytes,
+      totalBytes: totalBytes,
+      etag: sourceEtag,
+      lastModified: sourceLastModified,
+      completedUnits: completedUnits,
+      totalUnits: totalUnits,
+    );
+  } catch (_) {
+    return MediaDownloadResult(
+      outcome: MediaDownloadOutcome.failed,
+      message: 'HLS 下载失败，可稍后重试',
       path: targetManifest.path,
       temporaryPath: temporary.path,
       bytes: downloadedBytes,

@@ -182,18 +182,41 @@ class BangumiMetadataRepository {
   }
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
-    final recentFloor = _dateText(DateTime.now().subtract(_recentWindow));
-    final subjects = await _searchSubjectPages(
-      keyword: '',
-      sort: 'heat',
-      filters: {
-        'type': const [2],
-        'air_date': ['>=$recentFloor'],
-      },
-      pageSize: 42,
-      pages: 3,
-    ).timeout(const Duration(seconds: 20), onTimeout: () => const []);
-    return _groupByWeekday(subjects.isEmpty ? _fallbackSubjects : subjects);
+    try {
+      final response = await _client
+          .get(Uri.parse('$_baseUrl/calendar'), headers: _headers)
+          .timeout(const Duration(seconds: 16));
+      if (response.statusCode != 200) return const {};
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! List) return const {};
+
+      final schedule = {
+        for (var day = 0; day < 7; day++) day: <AnimeSubject>[],
+      };
+      for (final rawGroup in decoded.whereType<Map>()) {
+        final group = rawGroup.cast<String, dynamic>();
+        final weekday = _intValue(_map(group['weekday'])['id']);
+        final items = group['items'];
+        if (weekday == null || weekday < 1 || items is! List) continue;
+        final day = weekday % 7;
+        schedule[day]!.addAll(
+          items
+              .whereType<Map>()
+              .map(
+                (item) =>
+                    _subjectFromCalendarJson(item.cast<String, dynamic>()),
+              )
+              .where((item) => item.id > 0 && item.title.trim().isNotEmpty),
+        );
+      }
+      if (schedule.values.every((items) => items.isEmpty)) return const {};
+      return {
+        for (final entry in schedule.entries)
+          entry.key: _uniqueSubjects(entry.value),
+      };
+    } catch (_) {
+      return const {};
+    }
   }
 
   Future<List<AnimeSubject>> discoverySubjects() async {
@@ -459,6 +482,16 @@ class BangumiMetadataRepository {
     );
   }
 
+  AnimeSubject _subjectFromCalendarJson(Map<String, dynamic> json) {
+    final rating = _map(json['rating']);
+    return _subjectFromJson({
+      ...json,
+      'date': json['air_date'],
+      'platform': _blankToNull(json['platform']?.toString()) ?? 'TV',
+      'rating': {...rating, if (json['rank'] != null) 'rank': json['rank']},
+    });
+  }
+
   AnimeEpisode _episodeFromJson(
     Map<String, dynamic> json,
     AnimeSubject subject,
@@ -702,19 +735,6 @@ class BangumiMetadataRepository {
       if (usedImages.add(image)) return image;
     }
     return images.firstOrNull;
-  }
-
-  Map<int, List<AnimeSubject>> _groupByWeekday(List<AnimeSubject> subjects) {
-    final result = {for (var i = 0; i < 7; i++) i: <AnimeSubject>[]};
-    for (final subject in subjects) {
-      final date = DateTime.tryParse(subject.date ?? '');
-      final weekday = date == null ? subject.id % 7 : date.weekday % 7;
-      result[weekday]!.add(subject);
-    }
-    for (final entry in result.entries) {
-      entry.value.sort((a, b) => (b.date ?? '').compareTo(a.date ?? ''));
-    }
-    return result;
   }
 
   Map<String, dynamic> _map(Object? value) {
