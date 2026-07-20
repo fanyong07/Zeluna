@@ -12,6 +12,14 @@ import '../domain/anime_models.dart';
 import 'rule_models.dart';
 
 const _playableProbeTimeout = Duration(seconds: 6);
+const _playlistMetadataTimeout = Duration(seconds: 3);
+const _metadataEnrichmentBudget = Duration(seconds: 2);
+const _probeChunkIdleTimeout = Duration(milliseconds: 300);
+const _initialProbeRangeEnd = 2048;
+const _maxBinaryProbeSampleBytes = 64 * 1024;
+const _maxManifestProbeSampleBytes = 512 * 1024;
+const _maxConcurrentPlayableProbes = 4;
+const _maxConcurrentMetadataProbes = 4;
 const _responseCacheTtl = Duration(minutes: 5);
 const _availableProbeCacheTtl = Duration(minutes: 2);
 const _failedProbeCacheTtl = Duration(seconds: 20);
@@ -34,6 +42,17 @@ class RulePlaybackResolver {
   final Map<String, Future<String>> _responseRequests = {};
   final Map<String, _TimedCacheEntry<_PlayableProbeResult>> _probeCache = {};
   final Map<String, Future<_PlayableProbeResult>> _probeRequests = {};
+  final _playableProbeLimiter = _AsyncLimiter(_maxConcurrentPlayableProbes);
+  final _metadataProbeLimiter = _AsyncLimiter(_maxConcurrentMetadataProbes);
+  var _cacheGeneration = 0;
+
+  void clearCaches() {
+    _cacheGeneration++;
+    _responseCache.clear();
+    _responseRequests.clear();
+    _probeCache.clear();
+    _probeRequests.clear();
+  }
 
   Future<List<PlaybackLine>> resolveRule({
     required RulePlugin rule,
@@ -221,7 +240,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: referer,
               quality: config.defaultResolution.trim().isEmpty
                   ? null
@@ -233,7 +252,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -375,7 +394,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: playPageUrl,
               headers: headers,
             )
@@ -384,7 +403,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -544,7 +563,7 @@ class RulePlaybackResolver {
               episode,
               url: normalizedPlayableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: playPageUrl,
               headers: headers,
             )
@@ -553,7 +572,7 @@ class RulePlaybackResolver {
               episode,
               url: normalizedPlayableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -802,7 +821,7 @@ class RulePlaybackResolver {
             episode,
             url: playableUrl,
             title: title,
-            latency: started.elapsed,
+            probe: probe,
             referer: endpoint.toString(),
             headers: headers,
           )
@@ -811,7 +830,7 @@ class RulePlaybackResolver {
             episode,
             url: playableUrl,
             title: title,
-            latency: started.elapsed,
+            latency: probe.latency,
             message: probe.message,
             headers: headers,
           );
@@ -831,6 +850,7 @@ class RulePlaybackResolver {
     final existing = _responseRequests[key];
     if (existing != null) return existing;
 
+    final cacheGeneration = _cacheGeneration;
     final request = client
         .get(requestUri, headers: requestHeaders)
         .timeout(timeout)
@@ -838,13 +858,15 @@ class RulePlaybackResolver {
     _responseRequests[key] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _responseCache,
-        key,
-        result,
-        _responseCacheTtl,
-        _maxResponseCacheEntries,
-      );
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _responseCache,
+          key,
+          result,
+          _responseCacheTtl,
+          _maxResponseCacheEntries,
+        );
+      }
       return result;
     } finally {
       if (identical(_responseRequests[key], request)) {
@@ -873,6 +895,7 @@ class RulePlaybackResolver {
     final existing = _responseRequests[key];
     if (existing != null) return existing;
 
+    final cacheGeneration = _cacheGeneration;
     final request = client
         .post(requestUri, headers: requestHeaders, body: body)
         .timeout(timeout)
@@ -880,13 +903,15 @@ class RulePlaybackResolver {
     _responseRequests[key] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _responseCache,
-        key,
-        result,
-        _responseCacheTtl,
-        _maxResponseCacheEntries,
-      );
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _responseCache,
+          key,
+          result,
+          _responseCacheTtl,
+          _maxResponseCacheEntries,
+        );
+      }
       return result;
     } finally {
       if (identical(_responseRequests[key], request)) {
@@ -907,24 +932,40 @@ class RulePlaybackResolver {
     AnimeEpisode episode, {
     required String url,
     required String title,
-    required Duration latency,
+    required _PlayableProbeResult probe,
     required String referer,
     String? quality,
     Map<String, String>? headers,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, referer);
+    final detectedQuality = _probeResolutionLabel(
+      probe.videoWidth,
+      probe.videoHeight,
+    );
     return PlaybackLine(
       id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
       title: title,
-      quality: quality ?? (rule.tags.contains('4K') ? '4K/HD' : 'HD'),
-      format: _formatForUrl(normalizedUrl, rule.engine),
+      quality:
+          detectedQuality ??
+          quality ??
+          _resolutionLabelForUrl(normalizedUrl) ??
+          (rule.tags.contains('4K') ? '4K/HD' : '分辨率未知'),
+      format: probe.format ?? _formatForUrl(normalizedUrl, rule.engine),
       url: normalizedUrl,
       headers: headers ?? _headers(rule: rule, referer: referer),
-      latency: latency,
-      sizeLabel: _sizeLabelForUrl(normalizedUrl),
+      latency: probe.latency,
+      sizeLabel: _probeSizeLabel(probe),
+      sizeBytes: probe.sizeBytes,
+      sizeEstimated: probe.sizeEstimated,
+      videoWidth: probe.videoWidth,
+      videoHeight: probe.videoHeight,
+      bitrate: probe.bitrate,
+      codecs: probe.codecs,
+      isLive: probe.isLive,
+      adaptive: probe.adaptive,
       available: true,
       message: '已解析到当前集的播放地址。',
     );
@@ -935,13 +976,15 @@ class RulePlaybackResolver {
     AnimeEpisode episode, {
     required String url,
     required String title,
-    required Duration latency,
+    required Duration? latency,
     required String message,
     required Map<String, String> headers,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, headers['Referer'] ?? '');
     return PlaybackLine(
-      id: 'rule:${rule.id}:${episode.id}:dead:${normalizedUrl.hashCode}',
+      // Keep the same logical id as the optimistic quick result so a failed
+      // verified probe replaces it instead of leaving a stale playable row.
+      id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
@@ -951,7 +994,6 @@ class RulePlaybackResolver {
       url: normalizedUrl,
       headers: headers,
       latency: latency,
-      sizeLabel: _sizeLabelForUrl(normalizedUrl),
       available: false,
       message: message,
     );
@@ -1030,10 +1072,8 @@ class RulePlaybackResolver {
       return const _PlayableProbeResult(false, '视频地址格式不正确。');
     }
     final requestUri = _ruleRequestUri(target);
-    final requestHeaders = _ruleRequestHeaders(
-      target,
-      _videoProbeHeaders(headers),
-    );
+    final sourceHeaders = _videoProbeHeaders(headers);
+    final requestHeaders = _ruleRequestHeaders(target, sourceHeaders);
     final key = _requestCacheKey('PROBE', requestUri, requestHeaders);
     final cached = _freshCacheValue(_probeCache, key);
     if (cached != null) return cached;
@@ -1041,17 +1081,28 @@ class RulePlaybackResolver {
     final existing = _probeRequests[key];
     if (existing != null) return existing;
 
-    final request = _performPlayableProbe(client, requestUri, requestHeaders);
+    final cacheGeneration = _cacheGeneration;
+    final request = _playableProbeLimiter.run(
+      () => _performPlayableProbe(
+        client,
+        sourceUri: target,
+        requestUri: requestUri,
+        headers: requestHeaders,
+        sourceHeaders: sourceHeaders,
+      ),
+    );
     _probeRequests[key] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _probeCache,
-        key,
-        result,
-        result.available ? _availableProbeCacheTtl : _failedProbeCacheTtl,
-        _maxProbeCacheEntries,
-      );
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _probeCache,
+          key,
+          result,
+          result.available ? _availableProbeCacheTtl : _failedProbeCacheTtl,
+          _maxProbeCacheEntries,
+        );
+      }
       return result;
     } finally {
       if (identical(_probeRequests[key], request)) {
@@ -1073,56 +1124,946 @@ class RulePlaybackResolver {
   }
 
   Future<_PlayableProbeResult> _performPlayableProbe(
-    http.Client client,
-    Uri requestUri,
-    Map<String, String> headers,
-  ) async {
+    http.Client client, {
+    required Uri sourceUri,
+    required Uri requestUri,
+    required Map<String, String> headers,
+    required Map<String, String> sourceHeaders,
+  }) async {
+    final stopwatch = Stopwatch()..start();
     try {
-      final response = await _sendPlayableProbe(
+      final sample = await _sendPlayableProbe(
         client,
         requestUri,
         headers,
-      ).timeout(_playableProbeTimeout);
+        timeout: _playableProbeTimeout,
+      );
+      stopwatch.stop();
+      final response = sample.response;
+      final measuredLatency = sample.latency ?? stopwatch.elapsed;
       if (response.statusCode >= 200 && response.statusCode < 400) {
-        return const _PlayableProbeResult(true, '');
+        _ProbeMediaMetadata metadata;
+        try {
+          metadata = await _probeMediaMetadata(
+            client,
+            sourceUri: sourceUri,
+            sourceHeaders: sourceHeaders,
+            sample: sample,
+          );
+        } catch (_) {
+          // Metadata is optional. Once the CDN has returned a successful
+          // response, a malformed manifest/container must not kill the line.
+          metadata = const _ProbeMediaMetadata();
+        }
+        return _PlayableProbeResult(
+          true,
+          '',
+          latency: measuredLatency,
+          format: metadata.format,
+          sizeBytes: metadata.sizeBytes,
+          sizeEstimated: metadata.sizeEstimated,
+          videoWidth: metadata.videoWidth,
+          videoHeight: metadata.videoHeight,
+          bitrate: metadata.bitrate,
+          codecs: metadata.codecs,
+          isLive: metadata.isLive,
+          adaptive: metadata.adaptive,
+        );
       }
       if (response.statusCode == 403) {
-        return const _PlayableProbeResult(false, '视频 CDN 拒绝访问，可能有防盗链或地区限制。');
+        return _PlayableProbeResult(
+          false,
+          '视频 CDN 拒绝访问，可能有防盗链或地区限制。',
+          latency: measuredLatency,
+        );
       }
       if (response.statusCode == 404) {
-        return const _PlayableProbeResult(false, '视频 CDN 返回 404，这条播放地址已经失效。');
+        return _PlayableProbeResult(
+          false,
+          '视频 CDN 返回 404，这条播放地址已经失效。',
+          latency: measuredLatency,
+        );
       }
       return _PlayableProbeResult(
         false,
         '视频 CDN 返回 HTTP ${response.statusCode}。',
+        latency: measuredLatency,
       );
     } on TimeoutException {
-      return const _PlayableProbeResult(false, '视频 CDN 连接超时。');
+      stopwatch.stop();
+      return _PlayableProbeResult(
+        false,
+        '视频 CDN 连接超时。',
+        latency: stopwatch.elapsed,
+      );
     } catch (error) {
-      return _PlayableProbeResult(false, '视频 CDN 无法访问：${_shortError(error)}');
+      stopwatch.stop();
+      return _PlayableProbeResult(
+        false,
+        '视频 CDN 无法访问：${_shortError(error)}',
+        latency: stopwatch.elapsed,
+      );
     }
   }
 
-  Future<http.StreamedResponse> _sendPlayableProbe(
+  Future<_ProbeMediaMetadata> _probeMediaMetadata(
+    http.Client client, {
+    required Uri sourceUri,
+    required Map<String, String> sourceHeaders,
+    required _PlayableProbeResponse sample,
+  }) async {
+    var metadata = _mediaMetadataFromSample(sourceUri, sample);
+    final needsExpandedManifest =
+        !sample.sampleComplete &&
+        (metadata.format == 'HLS' || metadata.format == 'DASH');
+    final needsExtraRequest =
+        needsExpandedManifest ||
+        (metadata.format == 'HLS' &&
+            (metadata.variantUri != null ||
+                (!metadata.isLive && metadata.sampleSegmentUri != null)));
+    if (!needsExtraRequest) return metadata;
+    final enriched = await _metadataProbeLimiter.runIfAvailable(() async {
+      final enrichmentStopwatch = Stopwatch()..start();
+      Duration requestTimeout() {
+        final remaining =
+            _metadataEnrichmentBudget - enrichmentStopwatch.elapsed;
+        if (remaining <= Duration.zero) {
+          throw TimeoutException('Media metadata enrichment timed out.');
+        }
+        return remaining < _playlistMetadataTimeout
+            ? remaining
+            : _playlistMetadataTimeout;
+      }
+
+      var enriched = metadata;
+      try {
+        if (needsExpandedManifest) {
+          final expandedSample = await _sendPlayableProbe(
+            client,
+            _ruleRequestUri(sourceUri),
+            _ruleRequestHeaders(
+              sourceUri,
+              _manifestProbeHeaders(sourceHeaders),
+            ),
+            timeout: requestTimeout(),
+          );
+          if (expandedSample.response.statusCode >= 200 &&
+              expandedSample.response.statusCode < 400) {
+            enriched = _mediaMetadataFromSample(sourceUri, expandedSample);
+          }
+        }
+        if (enriched.format != 'HLS') return enriched;
+
+        final variantUri = enriched.variantUri;
+        if (variantUri != null) {
+          final childHeaders = _mediaChildHeaders(
+            sourceUri,
+            variantUri,
+            sourceHeaders,
+          );
+          final variantSample = await _sendPlayableProbe(
+            client,
+            _ruleRequestUri(variantUri),
+            _ruleRequestHeaders(
+              variantUri,
+              _manifestProbeHeaders(childHeaders),
+            ),
+            timeout: requestTimeout(),
+          );
+          if (variantSample.response.statusCode >= 200 &&
+              variantSample.response.statusCode < 400) {
+            final media = _mediaMetadataFromSample(variantUri, variantSample);
+            var sizeBytes = media.sizeBytes;
+            var sizeEstimated = media.sizeEstimated;
+            final durationSeconds = media.durationSeconds;
+            if (sizeBytes == null &&
+                !media.isLive &&
+                durationSeconds != null &&
+                durationSeconds > 0 &&
+                enriched.bitrate != null &&
+                enriched.bitrate! > 0) {
+              sizeBytes = (enriched.bitrate! * durationSeconds / 8).round();
+              sizeEstimated = true;
+            }
+            enriched = enriched.copyWith(
+              sizeBytes: sizeBytes,
+              sizeEstimated: sizeEstimated,
+              isLive: media.isLive,
+              durationSeconds: durationSeconds,
+              sampleSegmentUri: media.sampleSegmentUri,
+              sampleSegmentDurationSeconds: media.sampleSegmentDurationSeconds,
+            );
+          }
+        }
+        if (enriched.sizeBytes == null && !enriched.isLive) {
+          enriched = await _estimateHlsSizeFromSegment(
+            client,
+            metadata: enriched,
+            credentialSourceUri: sourceUri,
+            sourceHeaders: sourceHeaders,
+            timeout: requestTimeout(),
+          );
+        }
+      } catch (_) {
+        // 规格补全失败不影响线路可播放性，保留首个清单已经确认的信息。
+      }
+      return enriched;
+    });
+    return enriched ?? metadata;
+  }
+
+  Future<_ProbeMediaMetadata> _estimateHlsSizeFromSegment(
+    http.Client client, {
+    required _ProbeMediaMetadata metadata,
+    required Uri credentialSourceUri,
+    required Map<String, String> sourceHeaders,
+    required Duration timeout,
+  }) async {
+    final segmentUri = metadata.sampleSegmentUri;
+    final segmentDuration = metadata.sampleSegmentDurationSeconds;
+    final totalDuration = metadata.durationSeconds;
+    if (segmentUri == null ||
+        segmentDuration == null ||
+        segmentDuration <= 0 ||
+        totalDuration == null ||
+        totalDuration <= 0) {
+      return metadata;
+    }
+    final segmentSample = await _sendPlayableProbe(
+      client,
+      _ruleRequestUri(segmentUri),
+      _ruleRequestHeaders(
+        segmentUri,
+        _mediaChildHeaders(credentialSourceUri, segmentUri, sourceHeaders),
+      ),
+      timeout: timeout,
+    );
+    if (segmentSample.response.statusCode < 200 ||
+        segmentSample.response.statusCode >= 400) {
+      return metadata;
+    }
+    final segmentBytes = _responseTotalBytes(segmentSample.response);
+    if (segmentBytes == null || segmentBytes <= 0) return metadata;
+    final estimatedBytes = (segmentBytes * totalDuration / segmentDuration)
+        .round();
+    return metadata.copyWith(sizeBytes: estimatedBytes, sizeEstimated: true);
+  }
+
+  Future<_PlayableProbeResponse> _sendPlayableProbe(
     http.Client client,
     Uri requestUri,
-    Map<String, String> headers,
-  ) async {
-    final request = http.Request('GET', requestUri)..headers.addAll(headers);
-    final response = await client.send(request);
-    if (response.statusCode < 200 || response.statusCode >= 400) {
-      final subscription = response.stream.listen(null);
-      await subscription.cancel();
-      return response;
+    Map<String, String> headers, {
+    required Duration timeout,
+  }) {
+    final abortTrigger = Completer<void>();
+    final operation = () async {
+      final stopwatch = Stopwatch()..start();
+      final request = http.AbortableRequest(
+        'GET',
+        requestUri,
+        abortTrigger: abortTrigger.future,
+      )..headers.addAll(headers);
+      final response = await client.send(request);
+      if (response.statusCode < 200 || response.statusCode >= 400) {
+        stopwatch.stop();
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        return _PlayableProbeResponse(response, latency: stopwatch.elapsed);
+      }
+      final stream = StreamIterator<List<int>>(response.stream);
+      final sample = <int>[];
+      Duration? firstByteLatency;
+      final manifestResponse = _isManifestResponse(requestUri, response);
+      final sampleLimit = manifestResponse
+          ? _maxManifestProbeSampleBytes
+          : _maxBinaryProbeSampleBytes;
+      final contentLength = int.tryParse(
+        response.headers['content-length'] ?? '',
+      );
+      final targetBytes = contentLength == null || contentLength <= 0
+          ? null
+          : contentLength.clamp(1, sampleLimit);
+      final readChunkedManifest = targetBytes == null && manifestResponse;
+      var sampleComplete = false;
+      try {
+        // 清单读取到 EOF/上限；未知长度的二进制只读首块，避免 Range 被忽略后持续下载。
+        var firstChunk = true;
+        while (sample.length < sampleLimit) {
+          var idleTimedOut = false;
+          final hasNext = firstChunk || !readChunkedManifest
+              ? await stream.moveNext()
+              : await stream.moveNext().timeout(
+                  _probeChunkIdleTimeout,
+                  onTimeout: () {
+                    idleTimedOut = true;
+                    return false;
+                  },
+                );
+          if (!hasNext) {
+            final totalBytes = _responseTotalBytes(response);
+            sampleComplete =
+                !idleTimedOut &&
+                (totalBytes == null || totalBytes <= sample.length);
+            break;
+          }
+          firstByteLatency ??= stopwatch.elapsed;
+          final chunk = stream.current;
+          final remaining = sampleLimit - sample.length;
+          sample.addAll(
+            chunk.length <= remaining ? chunk : chunk.take(remaining),
+          );
+          firstChunk = false;
+          if (targetBytes != null && sample.length >= targetBytes) {
+            final totalBytes = _responseTotalBytes(response);
+            sampleComplete = totalBytes != null && totalBytes <= sample.length;
+            break;
+          }
+          if (targetBytes == null && !readChunkedManifest) break;
+        }
+      } finally {
+        stopwatch.stop();
+        await stream.cancel();
+      }
+      return _PlayableProbeResponse(
+        response,
+        sample: List<int>.unmodifiable(sample),
+        latency: firstByteLatency ?? stopwatch.elapsed,
+        sampleComplete: sampleComplete,
+      );
+    }();
+    return operation.timeout(
+      timeout,
+      onTimeout: () {
+        if (!abortTrigger.isCompleted) abortTrigger.complete();
+        throw TimeoutException('Media probe timed out after $timeout.');
+      },
+    );
+  }
+}
+
+class _PlayableProbeResponse {
+  const _PlayableProbeResponse(
+    this.response, {
+    this.sample = const [],
+    this.latency,
+    this.sampleComplete = false,
+  });
+
+  final http.StreamedResponse response;
+  final List<int> sample;
+  final Duration? latency;
+  final bool sampleComplete;
+}
+
+class _ProbeMediaMetadata {
+  const _ProbeMediaMetadata({
+    this.format,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
+    this.variantUri,
+    this.durationSeconds,
+    this.sampleSegmentUri,
+    this.sampleSegmentDurationSeconds,
+  });
+
+  final String? format;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
+  final Uri? variantUri;
+  final double? durationSeconds;
+  final Uri? sampleSegmentUri;
+  final double? sampleSegmentDurationSeconds;
+
+  _ProbeMediaMetadata copyWith({
+    int? sizeBytes,
+    bool? sizeEstimated,
+    bool? isLive,
+    double? durationSeconds,
+    Uri? sampleSegmentUri,
+    double? sampleSegmentDurationSeconds,
+  }) {
+    return _ProbeMediaMetadata(
+      format: format,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      sizeEstimated: sizeEstimated ?? this.sizeEstimated,
+      videoWidth: videoWidth,
+      videoHeight: videoHeight,
+      bitrate: bitrate,
+      codecs: codecs,
+      isLive: isLive ?? this.isLive,
+      adaptive: adaptive,
+      variantUri: variantUri,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      sampleSegmentUri: sampleSegmentUri ?? this.sampleSegmentUri,
+      sampleSegmentDurationSeconds:
+          sampleSegmentDurationSeconds ?? this.sampleSegmentDurationSeconds,
+    );
+  }
+}
+
+_ProbeMediaMetadata _mediaMetadataFromSample(
+  Uri sourceUri,
+  _PlayableProbeResponse sample,
+) {
+  final text = utf8.decode(sample.sample, allowMalformed: true);
+  final format = _detectedMediaFormat(
+    sourceUri,
+    sample.response.headers['content-type'],
+    text,
+  );
+  if (format == 'HLS') {
+    return _hlsProbeMetadata(
+      sourceUri,
+      text,
+      sampleComplete: sample.sampleComplete,
+    );
+  }
+  if (format == 'DASH') return _dashProbeMetadata(sourceUri, text);
+
+  final dimensions = format == 'MP4'
+      ? _mp4Dimensions(sample.sample) ?? _resolutionDimensionsForUrl(sourceUri)
+      : _resolutionDimensionsForUrl(sourceUri);
+  return _ProbeMediaMetadata(
+    format: format,
+    sizeBytes: _responseTotalBytes(sample.response),
+    videoWidth: dimensions?.width,
+    videoHeight: dimensions?.height,
+  );
+}
+
+final RegExp _hlsExtensionPattern = RegExp(r'\.m3u8(?:$|[?#])');
+final RegExp _dashExtensionPattern = RegExp(r'\.mpd(?:$|[?#])');
+final RegExp _mp4ExtensionPattern = RegExp(r'\.(?:mp4|m4v)(?:$|[?#])');
+final RegExp _webmExtensionPattern = RegExp(r'\.webm(?:$|[?#])');
+final RegExp _flvExtensionPattern = RegExp(r'\.flv(?:$|[?#])');
+final RegExp _mkvExtensionPattern = RegExp(r'\.mkv(?:$|[?#])');
+final RegExp _manifestExtensionPattern = RegExp(r'\.(?:m3u8|mpd)(?:$|[?#])');
+
+String? _detectedMediaFormat(
+  Uri sourceUri,
+  String? rawContentType,
+  String sampleText,
+) {
+  final contentType = (rawContentType ?? '').toLowerCase();
+  final lowerUrl = sourceUri.toString().toLowerCase();
+  final trimmed = sampleText.trimLeft();
+  if (trimmed.startsWith('#EXTM3U') ||
+      contentType.contains('mpegurl') ||
+      _hlsExtensionPattern.hasMatch(lowerUrl)) {
+    return 'HLS';
+  }
+  if (trimmed.startsWith('<MPD') ||
+      trimmed.contains('<MPD ') ||
+      contentType.contains('dash+xml') ||
+      _dashExtensionPattern.hasMatch(lowerUrl)) {
+    return 'DASH';
+  }
+  if (contentType.contains('video/mp4') ||
+      _mp4ExtensionPattern.hasMatch(lowerUrl)) {
+    return 'MP4';
+  }
+  if (contentType.contains('webm') ||
+      _webmExtensionPattern.hasMatch(lowerUrl)) {
+    return 'WebM';
+  }
+  if (contentType.contains('x-flv') ||
+      _flvExtensionPattern.hasMatch(lowerUrl)) {
+    return 'FLV';
+  }
+  if (contentType.contains('matroska') ||
+      _mkvExtensionPattern.hasMatch(lowerUrl)) {
+    return 'MKV';
+  }
+  return null;
+}
+
+bool _isManifestResponse(Uri requestUri, http.StreamedResponse response) {
+  final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+  if (contentType.contains('mpegurl') || contentType.contains('dash+xml')) {
+    return true;
+  }
+  final target = _proxyUpstreamUri(requestUri) ?? requestUri;
+  final lower = target.toString().toLowerCase();
+  return _manifestExtensionPattern.hasMatch(lower);
+}
+
+Uri _resolvePlaylistReference(Uri playlistUri, String rawReference) {
+  final reference = Uri.tryParse(rawReference.trim());
+  if (reference == null) return playlistUri.resolve(rawReference);
+  final upstream = _proxyUpstreamUri(reference);
+  if (upstream != null) {
+    if (kIsWeb) {
+      return reference.hasScheme ? reference : Uri.base.resolveUri(reference);
     }
-    final stream = StreamIterator<List<int>>(response.stream);
+    return upstream;
+  }
+  return playlistUri.resolveUri(reference);
+}
+
+Uri? _proxyUpstreamUri(Uri uri) {
+  if (uri.path != '/media-proxy') return null;
+  final rawTarget = uri.queryParameters['url'];
+  final target = rawTarget == null ? null : Uri.tryParse(rawTarget);
+  if (target == null ||
+      !const {'http', 'https'}.contains(target.scheme.toLowerCase()) ||
+      target.host.isEmpty) {
+    return null;
+  }
+  return target;
+}
+
+int? _responseTotalBytes(http.StreamedResponse response) {
+  final contentRange = response.headers['content-range'] ?? '';
+  final rangeMatch = RegExp(r'/\s*(\d+)\s*$').firstMatch(contentRange);
+  final rangeTotal = int.tryParse(rangeMatch?.group(1) ?? '');
+  if (rangeTotal != null && rangeTotal > 0) return rangeTotal;
+  if (response.statusCode != 200) return null;
+  final contentLength = int.tryParse(response.headers['content-length'] ?? '');
+  return contentLength != null && contentLength > 0 ? contentLength : null;
+}
+
+_ProbeMediaMetadata _hlsProbeMetadata(
+  Uri sourceUri,
+  String manifest, {
+  required bool sampleComplete,
+}) {
+  final lines = manifest
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .toList(growable: false);
+  final variants = <_HlsProbeVariant>[];
+  for (var index = 0; index < lines.length; index++) {
+    final line = lines[index];
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+    final attributes = _parseHlsAttributes(
+      line.substring(line.indexOf(':') + 1),
+    );
+    String? uriText;
+    for (var uriIndex = index + 1; uriIndex < lines.length; uriIndex++) {
+      final candidate = lines[uriIndex];
+      if (candidate.isEmpty || candidate.startsWith('#')) continue;
+      uriText = candidate;
+      break;
+    }
+    if (uriText == null) continue;
+    final dimensions = _resolutionDimensions(attributes['RESOLUTION'] ?? '');
+    variants.add(
+      _HlsProbeVariant(
+        uri: _resolvePlaylistReference(sourceUri, uriText),
+        width: dimensions?.width,
+        height: dimensions?.height,
+        bitrate:
+            int.tryParse(attributes['AVERAGE-BANDWIDTH'] ?? '') ??
+            int.tryParse(attributes['BANDWIDTH'] ?? ''),
+        codecs: attributes['CODECS'],
+      ),
+    );
+  }
+  if (variants.isNotEmpty) {
+    variants.sort((left, right) {
+      final pixels = right.pixelCount.compareTo(left.pixelCount);
+      if (pixels != 0) return pixels;
+      return (right.bitrate ?? 0).compareTo(left.bitrate ?? 0);
+    });
+    final selected = variants.first;
+    return _ProbeMediaMetadata(
+      format: 'HLS',
+      videoWidth: selected.width,
+      videoHeight: selected.height,
+      bitrate: selected.bitrate,
+      codecs: selected.codecs,
+      adaptive: true,
+      variantUri: selected.uri,
+    );
+  }
+
+  final hasEndList = lines.contains('#EXT-X-ENDLIST');
+  final durationSeconds = lines
+      .where((line) => line.startsWith('#EXTINF:'))
+      .map((line) => line.substring('#EXTINF:'.length).split(',').first)
+      .map(double.tryParse)
+      .whereType<double>()
+      .fold<double>(0, (total, duration) => total + duration);
+  var byteRangeBytes = 0;
+  var mediaSegmentCount = 0;
+  var rangedMediaSegmentCount = 0;
+  Uri? sampleSegmentUri;
+  double? sampleSegmentDurationSeconds;
+  double? pendingDuration;
+  int? pendingByteRangeBytes;
+  for (final line in lines) {
+    if (line.startsWith('#EXTINF:')) {
+      pendingDuration = double.tryParse(
+        line.substring('#EXTINF:'.length).split(',').first,
+      );
+      continue;
+    }
+    if (line.startsWith('#EXT-X-BYTERANGE:')) {
+      pendingByteRangeBytes = int.tryParse(
+        line.substring('#EXT-X-BYTERANGE:'.length).split('@').first.trim(),
+      );
+      continue;
+    }
+    if (line.isEmpty || line.startsWith('#') || pendingDuration == null) {
+      continue;
+    }
+    mediaSegmentCount++;
+    if (pendingByteRangeBytes != null && pendingByteRangeBytes > 0) {
+      rangedMediaSegmentCount++;
+      byteRangeBytes += pendingByteRangeBytes;
+    }
+    sampleSegmentUri ??= _resolvePlaylistReference(sourceUri, line);
+    sampleSegmentDurationSeconds ??= pendingDuration;
+    pendingDuration = null;
+    pendingByteRangeBytes = null;
+  }
+  final hasExactByteRangeTotal =
+      mediaSegmentCount > 0 &&
+      rangedMediaSegmentCount == mediaSegmentCount &&
+      byteRangeBytes > 0;
+  final dimensions = _resolutionDimensionsForUrl(sourceUri);
+  return _ProbeMediaMetadata(
+    format: 'HLS',
+    sizeBytes: hasEndList && hasExactByteRangeTotal ? byteRangeBytes : null,
+    videoWidth: dimensions?.width,
+    videoHeight: dimensions?.height,
+    isLive: sampleComplete && !hasEndList,
+    durationSeconds: hasEndList && durationSeconds > 0 ? durationSeconds : null,
+    sampleSegmentUri: hasEndList ? sampleSegmentUri : null,
+    sampleSegmentDurationSeconds: hasEndList
+        ? sampleSegmentDurationSeconds
+        : null,
+  );
+}
+
+_ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
+  try {
+    final document = XmlDocument.parse(manifest);
+    final elements = document.descendants.whereType<XmlElement>().toList();
+    final mpd = _firstOrNull(
+      elements.where((item) => item.name.local == 'MPD'),
+    );
+    final isDynamic = mpd?.getAttribute('type')?.toLowerCase() == 'dynamic';
+    final durationSeconds = _parseIsoDurationSeconds(
+      mpd?.getAttribute('mediaPresentationDuration') ??
+          _firstOrNull(
+            elements
+                .where((item) => item.name.local == 'Period')
+                .map((item) => item.getAttribute('duration'))
+                .whereType<String>(),
+          ),
+    );
+    final allRepresentations = elements
+        .where((item) => item.name.local == 'Representation')
+        .toList();
+    final audioRepresentations = allRepresentations.where((item) {
+      final mimeType = _xmlInheritedAttribute(item, 'mimeType') ?? '';
+      final contentType = _xmlInheritedAttribute(item, 'contentType') ?? '';
+      return mimeType.toLowerCase().startsWith('audio/') ||
+          contentType.toLowerCase() == 'audio';
+    }).toList();
+    var representations = allRepresentations.where((item) {
+      final mimeType = _xmlInheritedAttribute(item, 'mimeType') ?? '';
+      final contentType = _xmlInheritedAttribute(item, 'contentType') ?? '';
+      return mimeType.toLowerCase().startsWith('video/') ||
+          contentType.toLowerCase() == 'video' ||
+          _xmlInheritedInt(item, 'width') != null ||
+          _xmlInheritedInt(item, 'height') != null;
+    }).toList();
+    if (representations.isEmpty) {
+      representations = allRepresentations
+          .where((item) => !audioRepresentations.contains(item))
+          .toList();
+    }
+    if (representations.isEmpty) representations = [...allRepresentations];
+    representations.sort((left, right) {
+      final leftWidth = _xmlInheritedInt(left, 'width') ?? 0;
+      final leftHeight = _xmlInheritedInt(left, 'height') ?? 0;
+      final rightWidth = _xmlInheritedInt(right, 'width') ?? 0;
+      final rightHeight = _xmlInheritedInt(right, 'height') ?? 0;
+      final pixels = (rightWidth * rightHeight).compareTo(
+        leftWidth * leftHeight,
+      );
+      if (pixels != 0) return pixels;
+      return (_xmlInheritedInt(right, 'bandwidth') ?? 0).compareTo(
+        _xmlInheritedInt(left, 'bandwidth') ?? 0,
+      );
+    });
+    final selected = _firstOrNull(representations);
+    audioRepresentations.sort(
+      (left, right) => (_xmlInheritedInt(right, 'bandwidth') ?? 0).compareTo(
+        _xmlInheritedInt(left, 'bandwidth') ?? 0,
+      ),
+    );
+    final selectedAudio = _firstOrNull(audioRepresentations);
+    final width = selected == null ? null : _xmlInheritedInt(selected, 'width');
+    final height = selected == null
+        ? null
+        : _xmlInheritedInt(selected, 'height');
+    final videoBitrate = selected == null
+        ? null
+        : _xmlInheritedInt(selected, 'bandwidth');
+    final audioBitrate = selectedAudio == null
+        ? null
+        : _xmlInheritedInt(selectedAudio, 'bandwidth');
+    final bitrate = videoBitrate == null && audioBitrate == null
+        ? null
+        : (videoBitrate ?? 0) + (audioBitrate ?? 0);
+    final videoCodecs = selected == null
+        ? null
+        : _xmlInheritedAttribute(selected, 'codecs');
+    final audioCodecs = selectedAudio == null
+        ? null
+        : _xmlInheritedAttribute(selectedAudio, 'codecs');
+    final codecs = [
+      videoCodecs,
+      audioCodecs,
+    ].whereType<String>().where((item) => item.trim().isNotEmpty).join(',');
+    final estimatedBytes =
+        !isDynamic &&
+            durationSeconds != null &&
+            durationSeconds > 0 &&
+            bitrate != null &&
+            bitrate > 0
+        ? (bitrate * durationSeconds / 8).round()
+        : null;
+    final fallbackDimensions = _resolutionDimensionsForUrl(sourceUri);
+    return _ProbeMediaMetadata(
+      format: 'DASH',
+      sizeBytes: estimatedBytes,
+      sizeEstimated: estimatedBytes != null,
+      videoWidth: width ?? fallbackDimensions?.width,
+      videoHeight: height ?? fallbackDimensions?.height,
+      bitrate: bitrate,
+      codecs: codecs.isEmpty ? null : codecs,
+      isLive: isDynamic,
+      adaptive: representations.length > 1,
+      durationSeconds: durationSeconds,
+    );
+  } catch (_) {
+    final dimensions = _resolutionDimensionsForUrl(sourceUri);
+    return _ProbeMediaMetadata(
+      format: 'DASH',
+      videoWidth: dimensions?.width,
+      videoHeight: dimensions?.height,
+    );
+  }
+}
+
+Map<String, String> _parseHlsAttributes(String value) {
+  final result = <String, String>{};
+  var index = 0;
+  while (index < value.length) {
+    while (index < value.length &&
+        (value.codeUnitAt(index) == 44 || value.codeUnitAt(index) == 32)) {
+      index++;
+    }
+    final equals = value.indexOf('=', index);
+    if (equals < 0) break;
+    final key = value.substring(index, equals).trim().toUpperCase();
+    index = equals + 1;
+    String parsed;
+    if (index < value.length && value.codeUnitAt(index) == 34) {
+      index++;
+      final end = value.indexOf('"', index);
+      if (end < 0) {
+        parsed = value.substring(index);
+        index = value.length;
+      } else {
+        parsed = value.substring(index, end);
+        index = end + 1;
+      }
+    } else {
+      final comma = value.indexOf(',', index);
+      if (comma < 0) {
+        parsed = value.substring(index).trim();
+        index = value.length;
+      } else {
+        parsed = value.substring(index, comma).trim();
+        index = comma + 1;
+      }
+    }
+    if (key.isNotEmpty) result[key] = parsed;
+  }
+  return result;
+}
+
+class _HlsProbeVariant {
+  const _HlsProbeVariant({
+    required this.uri,
+    this.width,
+    this.height,
+    this.bitrate,
+    this.codecs,
+  });
+
+  final Uri uri;
+  final int? width;
+  final int? height;
+  final int? bitrate;
+  final String? codecs;
+
+  int get pixelCount => (width ?? 0) * (height ?? 0);
+}
+
+class _ResolutionDimensions {
+  const _ResolutionDimensions({this.width, this.height});
+
+  final int? width;
+  final int? height;
+}
+
+_ResolutionDimensions? _resolutionDimensions(String value) {
+  final match = RegExp(
+    r'(\d{2,5})\s*x\s*(\d{2,5})',
+    caseSensitive: false,
+  ).firstMatch(value);
+  final width = int.tryParse(match?.group(1) ?? '');
+  final height = int.tryParse(match?.group(2) ?? '');
+  if (width == null || height == null || width <= 0 || height <= 0) {
+    return null;
+  }
+  return _ResolutionDimensions(width: width, height: height);
+}
+
+_ResolutionDimensions? _resolutionDimensionsForUrl(Uri uri) {
+  final text = Uri.decodeFull(uri.toString());
+  final exact = _resolutionDimensions(text);
+  if (exact != null) return exact;
+  final lower = text.toLowerCase();
+  if (RegExp(r'(^|[^a-z0-9])4k([^a-z0-9]|$)').hasMatch(lower) ||
+      RegExp(r'(^|[^0-9])2160p?([^0-9]|$)').hasMatch(lower)) {
+    return const _ResolutionDimensions(width: 3840, height: 2160);
+  }
+  for (final height in const [1440, 1080, 720, 576, 480, 360, 240]) {
+    if (RegExp('(^|[^0-9])${height}p?([^0-9]|\$)').hasMatch(lower)) {
+      return _ResolutionDimensions(height: height);
+    }
+  }
+  return null;
+}
+
+_ResolutionDimensions? _mp4Dimensions(List<int> bytes) {
+  if (bytes.length < 92) return null;
+  final data = ByteData.sublistView(Uint8List.fromList(bytes));
+  _ResolutionDimensions? best;
+  for (var typeOffset = 4; typeOffset + 4 <= bytes.length; typeOffset++) {
+    if (bytes[typeOffset] != 0x74 ||
+        bytes[typeOffset + 1] != 0x6B ||
+        bytes[typeOffset + 2] != 0x68 ||
+        bytes[typeOffset + 3] != 0x64) {
+      continue;
+    }
+    final dataOffset = typeOffset + 4;
+    if (dataOffset >= bytes.length) continue;
+    final version = bytes[dataOffset];
+    final widthOffset = dataOffset + (version == 1 ? 88 : 76);
+    final heightOffset = widthOffset + 4;
+    if (heightOffset + 4 > bytes.length) continue;
+    final width = data.getUint32(widthOffset, Endian.big) >> 16;
+    final height = data.getUint32(heightOffset, Endian.big) >> 16;
+    if (width < 16 || width > 16384 || height < 16 || height > 16384) {
+      continue;
+    }
+    final candidate = _ResolutionDimensions(width: width, height: height);
+    if (best == null ||
+        width * height > (best.width ?? 0) * (best.height ?? 0)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+String? _xmlInheritedAttribute(XmlElement element, String name) {
+  XmlNode? current = element;
+  while (current is XmlElement) {
+    final value = current.getAttribute(name)?.trim();
+    if (value != null && value.isNotEmpty) return value;
+    current = current.parent;
+  }
+  return null;
+}
+
+T? _firstOrNull<T>(Iterable<T> values) {
+  for (final value in values) {
+    return value;
+  }
+  return null;
+}
+
+int? _xmlInheritedInt(XmlElement element, String name) {
+  return int.tryParse(_xmlInheritedAttribute(element, name) ?? '');
+}
+
+double? _parseIsoDurationSeconds(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  final match = RegExp(
+    r'^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$',
+  ).firstMatch(value.trim().toUpperCase());
+  if (match == null) return null;
+  final days = double.tryParse(match.group(1) ?? '') ?? 0;
+  final hours = double.tryParse(match.group(2) ?? '') ?? 0;
+  final minutes = double.tryParse(match.group(3) ?? '') ?? 0;
+  final seconds = double.tryParse(match.group(4) ?? '') ?? 0;
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+}
+
+class _AsyncLimiter {
+  _AsyncLimiter(this.limit) : assert(limit > 0);
+
+  final int limit;
+  var _active = 0;
+  final List<Completer<void>> _waiters = [];
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    if (_active >= limit) {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+    } else {
+      _active++;
+    }
     try {
-      // 只确认首个响应块可读；Range 被忽略时也不会把整段视频缓冲进内存。
-      await stream.moveNext();
+      return await action();
     } finally {
-      await stream.cancel();
+      _release();
     }
-    return response;
+  }
+
+  Future<T?> runIfAvailable<T>(Future<T> Function() action) async {
+    // Metadata is optional. Skipping enrichment when all slots are busy keeps
+    // a confirmed playable line inside the repository's lookup budget.
+    if (_active >= limit) return null;
+    _active++;
+    try {
+      return await action();
+    } finally {
+      _release();
+    }
+  }
+
+  void _release() {
+    if (_waiters.isNotEmpty) {
+      // Transfer the active slot directly to the oldest waiter so a newly
+      // arriving task cannot overtake it or briefly exceed the limit.
+      _waiters.removeAt(0).complete();
+      return;
+    }
+    _active--;
   }
 }
 
@@ -1173,16 +2114,23 @@ String _requestCacheKey(
 }
 
 Uri _ruleRequestUri(Uri target) {
-  if (!kIsWeb) return target;
-  final base = Uri.base;
-  if (!const {'http', 'https'}.contains(base.scheme.toLowerCase())) {
+  return _ruleRequestUriForPlatform(target, isWeb: kIsWeb, baseUri: Uri.base);
+}
+
+Uri _ruleRequestUriForPlatform(
+  Uri target, {
+  required bool isWeb,
+  required Uri baseUri,
+}) {
+  if (!isWeb) return target;
+  if (!const {'http', 'https'}.contains(baseUri.scheme.toLowerCase())) {
     return target;
   }
   final host = target.host.toLowerCase();
   if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
     return target;
   }
-  return base.resolve(
+  return baseUri.resolve(
     '/media-proxy?url=${Uri.encodeQueryComponent(target.toString())}',
   );
 }
@@ -1191,27 +2139,94 @@ Map<String, String> _ruleRequestHeaders(
   Uri target,
   Map<String, String> headers,
 ) {
-  if (!kIsWeb || identical(_ruleRequestUri(target), target)) return headers;
-  final result = <String, String>{...headers};
-  for (final entry in const {
-    'User-Agent': 'X-Upstream-User-Agent',
-    'Referer': 'X-Upstream-Referer',
-    'Authorization': 'X-Upstream-Authorization',
-    'Cookie': 'X-Upstream-Cookie',
-  }.entries) {
-    final value = result.remove(entry.key);
-    if (value != null && value.trim().isNotEmpty) {
-      result[entry.value] = value;
+  return _ruleRequestHeadersForPlatform(
+    target,
+    headers,
+    isWeb: kIsWeb,
+    baseUri: Uri.base,
+  );
+}
+
+Map<String, String> _ruleRequestHeadersForPlatform(
+  Uri target,
+  Map<String, String> headers, {
+  required bool isWeb,
+  required Uri baseUri,
+}) {
+  if (!isWeb) return headers;
+  final requestUri = _ruleRequestUriForPlatform(
+    target,
+    isWeb: true,
+    baseUri: baseUri,
+  );
+  final usesMediaProxy =
+      requestUri.path == '/media-proxy' && requestUri.origin == baseUri.origin;
+  if (!usesMediaProxy) return headers;
+  const upstreamNames = <String, String>{
+    'user-agent': 'X-Upstream-User-Agent',
+    'referer': 'X-Upstream-Referer',
+    'authorization': 'X-Upstream-Authorization',
+    'cookie': 'X-Upstream-Cookie',
+    'x-appid': 'X-Upstream-X-AppId',
+    'x-timestamp': 'X-Upstream-X-Timestamp',
+    'x-signature': 'X-Upstream-X-Signature',
+  };
+  final result = <String, String>{};
+  for (final entry in headers.entries) {
+    final upstreamName = upstreamNames[entry.key.toLowerCase()];
+    if (upstreamName != null && entry.value.trim().isNotEmpty) {
+      result[upstreamName] = entry.value;
+    } else {
+      result[entry.key] = entry.value;
     }
   }
   return result;
 }
 
+@visibleForTesting
+Uri ruleRequestUriForWebTest(Uri target, Uri baseUri) =>
+    _ruleRequestUriForPlatform(target, isWeb: true, baseUri: baseUri);
+
+@visibleForTesting
+Map<String, String> ruleRequestHeadersForWebTest(
+  Uri target,
+  Map<String, String> headers,
+  Uri baseUri,
+) => _ruleRequestHeadersForPlatform(
+  target,
+  headers,
+  isWeb: true,
+  baseUri: baseUri,
+);
+
 class _PlayableProbeResult {
-  const _PlayableProbeResult(this.available, this.message);
+  const _PlayableProbeResult(
+    this.available,
+    this.message, {
+    this.latency,
+    this.format,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
+  });
 
   final bool available;
   final String message;
+  final Duration? latency;
+  final String? format;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
 }
 
 class HttpException implements Exception {
@@ -2032,7 +3047,7 @@ String? _extractPlayableUrl(String html, String baseUrl) {
   }
 
   final directMatch = RegExp(
-    r'https?:\\?/\\?/[^\s"<>]+?\.(?:m3u8|mp4|flv|m4v)(?:\?[^\s"<>]*)?',
+    r'https?:\\?/\\?/[^\s"<>]+?\.(?:m3u8|mpd|mp4|webm|mkv|flv|m4v)(?:\?[^\s"<>]*)?',
     caseSensitive: false,
   ).firstMatch(html);
   if (directMatch == null) return null;
@@ -2102,7 +3117,7 @@ bool _looksPlayable(String url) {
 bool _isExplicitPlayableUrl(String url) {
   final lower = url.toLowerCase();
   return RegExp(
-        r'\.(?:m3u8|mp4|flv|m4v)(?:$|[?#])',
+        r'\.(?:m3u8|mpd|mp4|webm|mkv|flv|m4v)(?:$|[?#])',
         caseSensitive: false,
       ).hasMatch(lower) ||
       lower.contains('/m3u8') ||
@@ -2223,17 +3238,22 @@ int _matchScore(String title, AnimeSubject subject) {
   return score;
 }
 
+final RegExp _titleSeparatorPattern = RegExp(r'[\s·・:：!！?？,，.。_\-—]+');
+final RegExp _whitespacePattern = RegExp(r'\s+');
+
 String _normalizeTitle(String value) {
-  return value
-      .toLowerCase()
-      .replaceAll(RegExp(r'[\s·・:：!！?？,，.。_\-—]+'), '')
-      .trim();
+  return value.toLowerCase().replaceAll(_titleSeparatorPattern, '').trim();
 }
 
 String _cleanText(String value) {
+  // Only spin up the HTML parser when the string actually contains markup or
+  // entities; plain titles/channel names just need whitespace collapsing.
+  if (!value.contains('<') && !value.contains('&')) {
+    return value.replaceAll(_whitespacePattern, ' ').trim();
+  }
   final text = html_parser.parseFragment(value).text;
   return text
-          ?.replaceAll(RegExp(r'\s+'), ' ')
+          ?.replaceAll(_whitespacePattern, ' ')
           .replaceAll('&nbsp;', ' ')
           .trim() ??
       '';
@@ -2248,7 +3268,59 @@ String _friendlyError(Object error) {
 }
 
 Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
-  return {...headers, 'Accept': '*/*', 'Range': 'bytes=0-2048'};
+  return {
+    ...headers,
+    'Accept': '*/*',
+    'Range': 'bytes=0-$_initialProbeRangeEnd',
+  };
+}
+
+Map<String, String> _manifestProbeHeaders(Map<String, String> headers) {
+  return {...headers, 'Range': 'bytes=0-${_maxManifestProbeSampleBytes - 1}'};
+}
+
+const _originBoundMediaHeaders = <String>{
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'cookie2',
+  'x-api-key',
+  'x-auth-token',
+  'x-access-token',
+  'x-appid',
+  'x-timestamp',
+  'x-signature',
+  'x-upstream-authorization',
+  'x-upstream-cookie',
+  'x-upstream-x-appid',
+  'x-upstream-x-timestamp',
+  'x-upstream-x-signature',
+};
+
+Map<String, String> _mediaChildHeaders(
+  Uri credentialSourceUri,
+  Uri childUri,
+  Map<String, String> headers,
+) {
+  if (_sameMediaOrigin(credentialSourceUri, childUri)) return headers;
+  return {
+    for (final entry in headers.entries)
+      if (!_originBoundMediaHeaders.contains(entry.key.toLowerCase()))
+        entry.key: entry.value,
+  };
+}
+
+bool _sameMediaOrigin(Uri left, Uri right) {
+  final leftOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(left) ?? left);
+  final rightOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(right) ?? right);
+  return leftOrigin != null && leftOrigin == rightOrigin;
+}
+
+String? _normalizedMediaOrigin(Uri uri) {
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme != 'http' && scheme != 'https' || uri.host.isEmpty) return null;
+  final port = uri.hasPort ? uri.port : (scheme == 'https' ? 443 : 80);
+  return '$scheme://${uri.host.toLowerCase()}:$port';
 }
 
 String _shortError(Object error) {
@@ -2262,15 +3334,40 @@ String _shortError(Object error) {
 String _formatForUrl(String url, String fallback) {
   final lower = url.toLowerCase();
   if (lower.contains('.m3u8') || lower.contains('type=m3u8')) return 'HLS';
+  if (lower.contains('.mpd') || lower.contains('type=mpd')) return 'DASH';
   if (lower.contains('.mp4')) return 'MP4';
+  if (lower.contains('.webm')) return 'WebM';
+  if (lower.contains('.mkv')) return 'MKV';
   if (lower.contains('.flv')) return 'FLV';
-  return fallback;
+  final normalizedFallback = fallback.trim().toUpperCase();
+  return switch (normalizedFallback) {
+    'HLS' || 'M3U8' => 'HLS',
+    'DASH' || 'MPD' => 'DASH',
+    'MP4' => 'MP4',
+    'WEBM' => 'WebM',
+    'MKV' => 'MKV',
+    'FLV' => 'FLV',
+    _ => '',
+  };
 }
 
-String _sizeLabelForUrl(String url) {
-  final lower = url.toLowerCase();
-  if (lower.contains('4k') || lower.contains('2160')) return '4K';
-  if (lower.contains('1080')) return '1080P';
-  if (lower.contains('720')) return '720P';
-  return '--';
+String? _probeResolutionLabel(int? width, int? height) {
+  if (height != null && height > 0) return '${height}P';
+  if (width != null && width >= 3800) return '2160P';
+  return null;
+}
+
+String? _resolutionLabelForUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final dimensions = _resolutionDimensionsForUrl(uri);
+  return _probeResolutionLabel(dimensions?.width, dimensions?.height);
+}
+
+String? _probeSizeLabel(_PlayableProbeResult probe) {
+  if (probe.isLive) return '动态流';
+  final bytes = probe.sizeBytes;
+  if (bytes == null || bytes <= 0) return null;
+  final value = (bytes / 1024 / 1024).toStringAsFixed(1);
+  return '${probe.sizeEstimated ? '约 ' : ''}$value MB';
 }

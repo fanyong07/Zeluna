@@ -77,6 +77,8 @@ https://stream.example/basketball.m3u8
         final line = channel.toPlaybackLine();
         expect(line.available, isTrue);
         expect(line.format, 'HLS');
+        expect(line.isLive, isTrue);
+        expect(line.adaptive, isFalse);
         expect(line.url, channel.streamUri.toString());
         expect(channel.requiresExternalClient, isFalse);
 

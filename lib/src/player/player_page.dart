@@ -18,6 +18,7 @@ import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'danmaku_overlay.dart';
+import 'playback_line_display.dart';
 import 'web_stream_player.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
@@ -75,6 +76,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
   Timer? _webLoadTimer;
+  final _localDanmakuTimers = <Timer>[];
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -125,6 +127,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     }
     _controlsHideTimer?.cancel();
     _webLoadTimer?.cancel();
+    for (final timer in _localDanmakuTimers) {
+      timer.cancel();
+    }
+    _localDanmakuTimers.clear();
     unawaited(_restoreSystemUi());
     unawaited(_player.dispose());
     _danmakuInput.dispose();
@@ -725,40 +731,30 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       if (!mounted || serial != _lineLookupSerial) return;
       final lines = _mergeLineLists(initialLines, expandedLines);
       final available = _availableLines(lines);
-      final currentLine = _line;
-      final currentFailed =
-          _playbackFailed ||
-          (currentLine != null && _failedLineIds.contains(currentLine.id));
-      PlaybackLine? nextLine = currentLine;
-      if (!currentFailed && currentLine != null) {
-        for (final candidate in available) {
-          if (candidate.id == currentLine.id) {
-            nextLine = candidate;
-            break;
-          }
-        }
-      }
-      if (currentFailed || !_isPlayableLine(nextLine)) {
-        nextLine = null;
-        for (final candidate in available) {
-          if (_failedLineIds.contains(candidate.id)) continue;
-          nextLine = candidate;
-          break;
-        }
-      }
-      final shouldOpen =
-          autoplay &&
-          _isPlayableLine(nextLine) &&
-          (currentFailed || !_isPlayableLine(currentLine));
+      final decision = decidePlaybackLineAfterValidation(
+        currentLine: _line,
+        loadedUrl: _loadedUrl,
+        lines: lines,
+        failedLineIds: _failedLineIds,
+        playbackFailed: _playbackFailed,
+        autoplay: autoplay,
+      );
       setState(() {
         _lines = lines;
-        _line = nextLine;
+        _line = decision.selectedLine;
         _lineLookupMessage = available.isEmpty
             ? _emptyLineMessage(lines, subject: widget.request.subject)
             : null;
       });
-      if (shouldOpen) {
-        await _openLine(nextLine!, force: true);
+      switch (decision.action) {
+        case PlaybackLineValidationAction.open:
+          await _openLine(decision.targetLine!, force: true);
+          break;
+        case PlaybackLineValidationAction.stop:
+          await _stopPlaybackForRemovedLine();
+          break;
+        case PlaybackLineValidationAction.keep:
+          break;
       }
     } catch (error) {
       if (!mounted || serial != _lineLookupSerial) return;
@@ -766,6 +762,26 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _lineLookupMessage = '线路解析失败：${_friendlyPlaybackError(error)}';
       });
     }
+  }
+
+  Future<void> _stopPlaybackForRemovedLine() async {
+    ++_openLineSerial;
+    _webLoadTimer?.cancel();
+    _webLoadTimer = null;
+    if (mounted) {
+      setState(() {
+        _line = null;
+        _loadedUrl = null;
+        _loadingLine = false;
+        _playing = false;
+        _buffering = false;
+        _playbackFailed = false;
+        _position = Duration.zero;
+        _duration = Duration.zero;
+        _buffer = Duration.zero;
+      });
+    }
+    await _player.stop();
   }
 
   Future<void> _openLine(PlaybackLine line, {bool force = false}) async {
@@ -1029,12 +1045,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       for (final line in _lines) line.id: line,
       for (final line in lines) line.id: line,
     };
+    // Panel refreshes may enrich the choices, but only _openLine may change
+    // the selected line so that the UI always describes the loaded media.
     setState(() {
       _lines = merged.values.toList(growable: false);
-      if (!_isPlayableLine(_line)) {
-        final available = _availableLines(_lines);
-        if (available.isNotEmpty) _line = available.first;
-      }
     });
   }
 
@@ -1297,10 +1311,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _localDanmaku.add(entry);
       _danmakuInput.clear();
     });
-    Timer(const Duration(seconds: 9), () {
+    late final Timer timer;
+    timer = Timer(const Duration(seconds: 9), () {
+      _localDanmakuTimers.remove(timer);
       if (!mounted) return;
       setState(() => _localDanmaku.removeWhere((item) => item.id == entry.id));
     });
+    _localDanmakuTimers.add(timer);
   }
 
   void _handleWebReady() {
@@ -2803,7 +2820,7 @@ bool _isHlsLine(PlaybackLine? line) {
 }
 
 List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
-  return lines.where(_isPlayableLine).toList(growable: false);
+  return playablePlaybackLinesInSourceOrder(lines);
 }
 
 List<PlaybackLine> _mergeLineLists(
@@ -3070,7 +3087,7 @@ class _LinePanelBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final availableLines = lines.where((line) => line.available).toList();
+    final availableLines = sortPlaybackLinesForDisplay(_availableLines(lines));
     final unavailableCount = lines.length - availableLines.length;
     return ListView(
       padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
@@ -3114,6 +3131,7 @@ class _LinePanelBody extends StatelessWidget {
                   ],
                   for (var i = 0; i < availableLines.length; i++) ...[
                     _LineTile(
+                      key: ValueKey(availableLines[i].id),
                       index: i,
                       line: availableLines[i],
                       selected: selected?.id == availableLines[i].id,
@@ -3439,16 +3457,22 @@ class _ModeItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: Colors.white, size: 20),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white, fontSize: 16),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -3456,6 +3480,7 @@ class _ModeItem extends StatelessWidget {
 
 class _LineTile extends StatelessWidget {
   const _LineTile({
+    super.key,
     required this.index,
     required this.line,
     required this.selected,
@@ -3469,21 +3494,22 @@ class _LineTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final status = line.available
-        ? '${line.latency?.inMilliseconds ?? 0}ms · ${line.sizeLabel ?? '--'}'
+    final latency = line.available
+        ? playbackLineLatencyLabel(line)
         : line.message ?? '待接入';
+    final metadata = playbackLineMediaLabel(line);
     return InkWell(
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
                     '线路${index + 1} · ${line.providerName} · ${line.title}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -3494,27 +3520,38 @@ class _LineTile extends StatelessWidget {
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    line.url ?? line.message ?? '后续从你自己的播放源接口返回 url',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  latency,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: line.available
+                        ? Colors.greenAccent
+                        : Colors.orangeAccent,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(width: 10),
+            const SizedBox(height: 4),
             Text(
-              status,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: line.available
-                    ? Colors.greenAccent
-                    : Colors.orangeAccent,
-              ),
+              line.url ?? line.message ?? '后续从你自己的播放源接口返回 url',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: Colors.white54),
             ),
+            if (line.available) ...[
+              const SizedBox(height: 5),
+              Text(
+                metadata,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.white70),
+              ),
+            ],
           ],
         ),
       ),

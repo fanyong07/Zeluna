@@ -203,6 +203,14 @@ class PlaybackLine {
     this.headers = const {},
     this.latency,
     this.sizeLabel,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
     this.available = false,
     this.message,
   });
@@ -218,6 +226,14 @@ class PlaybackLine {
   final Map<String, String> headers;
   final Duration? latency;
   final String? sizeLabel;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
   final bool available;
   final String? message;
 }

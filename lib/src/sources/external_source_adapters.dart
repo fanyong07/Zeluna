@@ -119,6 +119,7 @@ class M3uChannel {
       format: _formatForStreamUri(streamUri),
       url: streamUri.toString(),
       headers: headers,
+      isLive: true,
       available: true,
       message: '已从 M3U 解析直播地址，实际可用性会在打开时确认。',
     );
@@ -1026,15 +1027,16 @@ class _ScoredM3uChannel {
   final int score;
 }
 
+final RegExp _extInfAttributePattern = RegExp(
+  r'''([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))''',
+);
+
 _PendingM3uEntry _parseExtInf(String line) {
   final comma = _unquotedCommaIndex(line);
   final metadata = comma < 0 ? line : line.substring(0, comma);
   final name = comma < 0 ? '' : line.substring(comma + 1).trim();
   final attributes = <String, String>{};
-  final attributePattern = RegExp(
-    r'''([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))''',
-  );
-  for (final match in attributePattern.allMatches(metadata)) {
+  for (final match in _extInfAttributePattern.allMatches(metadata)) {
     final key = match.group(1)?.toLowerCase();
     final value = match.group(2) ?? match.group(3) ?? match.group(4) ?? '';
     if (key != null && key.isNotEmpty) attributes[key] = value.trim();
@@ -1245,11 +1247,19 @@ int _m3uSearchScore(M3uChannel channel, String query) {
   return -1;
 }
 
+final RegExp _searchTextStripPattern = RegExp(
+  r'[\s\p{P}\p{S}]+',
+  unicode: true,
+);
+
+final RegExp _numericOrHexHostPattern = RegExp(r'^(?:0x[0-9a-f]+|\d+)$');
+final RegExp _decimalOnlyPattern = RegExp(r'^\d+$');
+final RegExp _decimalOrHexOctetPattern = RegExp(r'^(?:\d+|0x[0-9a-f]+)$');
+final RegExp _hexGroupPattern = RegExp(r'^[0-9a-f]+$');
+final RegExp _decimalOctetPattern = RegExp(r'^\d{1,3}$');
+
 String _normalizeSearchText(String value) {
-  return value.trim().toLowerCase().replaceAll(
-    RegExp(r'[\s\p{P}\p{S}]+', unicode: true),
-    '',
-  );
+  return value.trim().toLowerCase().replaceAll(_searchTextStripPattern, '');
 }
 
 _ValidatedMagnet? _validatedMagnet(String? value) {
@@ -1363,13 +1373,11 @@ bool _isBlockedHost(String host) {
     final bytes = _parseIpv6Bytes(host);
     return bytes == null || _isBlockedIpv6(bytes);
   }
-  if (RegExp(r'^(?:0x[0-9a-f]+|\d+)$').hasMatch(host)) return true;
+  if (_numericOrHexHostPattern.hasMatch(host)) return true;
 
   final pieces = host.split('.');
-  final allNumeric = pieces.every((piece) => RegExp(r'^\d+$').hasMatch(piece));
-  final allNumericLike = pieces.every(
-    (piece) => RegExp(r'^(?:\d+|0x[0-9a-f]+)$').hasMatch(piece),
-  );
+  final allNumeric = pieces.every(_decimalOnlyPattern.hasMatch);
+  final allNumericLike = pieces.every(_decimalOrHexOctetPattern.hasMatch);
   if (allNumericLike && !allNumeric) return true;
   if (allNumeric && pieces.length != 4) return true;
   if (pieces.length != 4 || !allNumeric) return false;
@@ -1447,7 +1455,7 @@ List<int>? _parseIpv6Groups(String text) {
         ..add((ipv4[2] << 8) | ipv4[3]);
       continue;
     }
-    if (token.length > 4 || !RegExp(r'^[0-9a-f]+$').hasMatch(token)) {
+    if (token.length > 4 || !_hexGroupPattern.hasMatch(token)) {
       return null;
     }
     final value = int.tryParse(token, radix: 16);
@@ -1462,7 +1470,7 @@ List<int>? _parseIpv4Bytes(String host) {
   if (pieces.length != 4) return null;
   final values = <int>[];
   for (final piece in pieces) {
-    if (!RegExp(r'^\d{1,3}$').hasMatch(piece)) return null;
+    if (!_decimalOctetPattern.hasMatch(piece)) return null;
     final value = int.tryParse(piece);
     if (value == null || value < 0 || value > 255) return null;
     values.add(value);
