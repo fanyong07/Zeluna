@@ -28,10 +28,8 @@ import 'media_download_line_selector.dart';
 import 'media_download_result.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
-import 'peertube_repository.dart';
 import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
-import 'wikimedia_commons_repository.dart';
 import 'zeluna_backend_catalog_repository.dart';
 import 'zeluna_backend_playback_repository.dart';
 
@@ -206,13 +204,7 @@ final danmakuRepositoryProvider = Provider<DanmakuRepository>((ref) {
   return repository;
 });
 
-final peerTubeRepositoryProvider = Provider<PeerTubeRepository>(
-  (ref) => PeerTubeRepository(),
-);
 
-final wikimediaCommonsRepositoryProvider = Provider<WikimediaCommonsRepository>(
-  (ref) => WikimediaCommonsRepository(),
-);
 
 final chineseMetadataRepositoryProvider = Provider<ChineseMetadataRepository>(
   (ref) => ChineseMetadataRepository(
@@ -635,6 +627,57 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     };
   }
 
+  /// The unified backend only ships subject + episodes today. Characters,
+  /// staff, recommendations and tags come straight from the public metadata
+  /// services; failures leave the base bundle untouched.
+  Future<AnimeDetailBundle> _enrichSparseDetail(AnimeDetailBundle bundle) async {
+    if (bundle.characters.isNotEmpty ||
+        bundle.staff.isNotEmpty ||
+        bundle.recommendations.isNotEmpty) {
+      return bundle;
+    }
+    final subject = bundle.subject;
+    try {
+      AnimeDetailBundle? rich;
+      if (subject.source == 'bangumi' && subject.id > 0) {
+        rich = await ref
+            .read(bangumiMetadataRepositoryProvider)
+            .detail(subject.id, fallbackSubject: subject)
+            .timeout(const Duration(seconds: 14));
+      } else if (subject.source.startsWith('tmdb')) {
+        rich = await ref
+            .read(externalServiceRepositoryProvider)
+            .tmdbDetail(subject)
+            .timeout(const Duration(seconds: 14));
+      }
+      if (rich == null) return bundle;
+      final baseSummary = subject.summary.trim();
+      final richSummary = rich.subject.summary.trim();
+      return AnimeDetailBundle(
+        subject: subject.copyWith(
+          summary:
+              (baseSummary.isEmpty || baseSummary.startsWith('暂无')) &&
+                  richSummary.isNotEmpty
+              ? richSummary
+              : subject.summary,
+          categories: subject.categories.isEmpty
+              ? rich.subject.categories
+              : subject.categories,
+          tags: subject.tags.isEmpty ? rich.subject.tags : subject.tags,
+        ),
+        episodes: bundle.episodes.isNotEmpty ? bundle.episodes : rich.episodes,
+        characters: rich.characters,
+        staff: rich.staff,
+        recommendations: rich.recommendations,
+        watchLinks: bundle.watchLinks.isNotEmpty
+            ? bundle.watchLinks
+            : rich.watchLinks,
+      );
+    } on Exception {
+      return bundle;
+    }
+  }
+
   Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
     final accountContextVersion = _accountContextVersion;
     final current = state.value;
@@ -645,8 +688,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       return cached;
     }
     final repository = _backendCatalogRepository();
-    final detail =
-        await repository?.detail(subject) ?? _fallbackDetail(subject);
+    final detail = await _enrichSparseDetail(
+      await repository?.detail(subject) ?? _fallbackDetail(subject),
+    );
     _ensureAccountContext(accountContextVersion);
     final previous = state.value;
     if (previous != null && accountContextVersion == _accountContextVersion) {
@@ -738,14 +782,26 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) async {
     if (cancellationToken?.isCancelled ?? false) return const [];
     final accountContextVersion = _accountContextVersion;
-    final lines = await _backendLinesForEpisode(
-      subject,
-      episode,
-      cancellationToken: cancellationToken,
-    );
+    final results = await Future.wait(<Future<List<PlaybackLine>>>[
+      _backendLinesForEpisode(
+        subject,
+        episode,
+        cancellationToken: cancellationToken,
+      ),
+      _ruleLinesForEpisode(
+        subject,
+        episode,
+        expandAll: expandAll,
+        cancellationToken: cancellationToken,
+      ),
+    ]);
+    final merged = _mergePlaybackLines(<PlaybackLine>[
+      ...results[0],
+      ...results[1],
+    ]);
     return accountContextVersion == _accountContextVersion &&
             !(cancellationToken?.isCancelled ?? false)
-        ? lines
+        ? merged
         : const <PlaybackLine>[];
   }
 
@@ -775,6 +831,48 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           onTimeout: () => const <PlaybackLine>[],
         )
         .onError((_, _) => const <PlaybackLine>[]);
+  }
+
+  // 客户端 web-selector 规则线路：独立于后端路径，不受 _usesBackendPlayback
+  // 的 bangumi/tmdb 门禁限制。仅当用户导入过订阅(customRules 非空)时才发起，
+  // 保证默认行为仍是纯后端。空规则时仓库内部直接返回空。
+  Future<List<PlaybackLine>> _ruleLinesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    final ruleState = state.value?.rulePlugins;
+    if (ruleState == null || ruleState.customRules.isEmpty) {
+      return Future.value(const <PlaybackLine>[]);
+    }
+    final repository = RulePlaybackSourceRepository(
+      repository: _ruleRepositoryFor(ruleState),
+      ruleState: ruleState,
+    );
+    return repository
+        .linesForEpisodeMode(
+          subject,
+          episode,
+          expandAll: expandAll,
+          cancellationToken: cancellationToken,
+        )
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => const <PlaybackLine>[],
+        )
+        .onError((_, _) => const <PlaybackLine>[]);
+  }
+
+  List<PlaybackLine> _mergePlaybackLines(List<PlaybackLine> lines) {
+    final seen = <String>{};
+    final merged = <PlaybackLine>[];
+    for (final line in lines) {
+      final url = line.url ?? '';
+      final key = url.isNotEmpty ? url : '${line.providerId}:${line.id}';
+      if (seen.add(key)) merged.add(line);
+    }
+    return merged;
   }
 
   ZelunaBackendCatalogRepository? _backendCatalogRepository() {
@@ -826,7 +924,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) async* {
     final accountContextVersion = _accountContextVersion;
     final token = cancellationToken ?? RulePlaybackCancellationToken();
-    final lines = await _backendLinesForEpisode(
+    final backendLines = await _backendLinesForEpisode(
       subject,
       episode,
       cancellationToken: token,
@@ -834,12 +932,49 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (accountContextVersion != _accountContextVersion || token.isCancelled) {
       return;
     }
+    final ruleState = state.value?.rulePlugins;
+    final hasRules = ruleState != null && ruleState.customRules.isNotEmpty;
+    if (!hasRules) {
+      yield PlaybackLineLookupUpdate(
+        lines: backendLines,
+        completedRules: 1,
+        totalRules: 1,
+        phase: PlaybackLineLookupPhase.complete,
+      );
+      return;
+    }
+    // 先出后端线路(discovery)，再叠加规则仓库的渐进发现/验证流，
+    // 每次快照与后端线路合并去重后向 UI 推送。
     yield PlaybackLineLookupUpdate(
-      lines: lines,
-      completedRules: 1,
-      totalRules: 1,
-      phase: PlaybackLineLookupPhase.complete,
+      lines: backendLines,
+      completedRules: 0,
+      totalRules: 0,
+      phase: PlaybackLineLookupPhase.discovery,
     );
+    final repository = RulePlaybackSourceRepository(
+      repository: _ruleRepositoryFor(ruleState),
+      ruleState: ruleState,
+    );
+    await for (final update in repository.lineUpdatesForEpisode(
+      subject,
+      episode,
+      cancellationToken: token,
+    )) {
+      if (accountContextVersion != _accountContextVersion || token.isCancelled) {
+        return;
+      }
+      yield PlaybackLineLookupUpdate(
+        lines: _mergePlaybackLines(<PlaybackLine>[
+          ...backendLines,
+          ...update.lines,
+        ]),
+        completedRules: update.completedRules,
+        totalRules: update.totalRules,
+        phase: update.phase,
+        timedOut: update.timedOut,
+        resolvedProviderId: update.resolvedProviderId,
+      );
+    }
   }
 
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
@@ -2099,361 +2234,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
   }
 
-  // Legacy metadata merge is retained temporarily for migration rollback.
-  // ignore: unused_element
-  Future<_HomeHighlights> _loadHomeHighlights(
-    ExternalServiceSettings services,
-  ) async {
-    final external = ref.read(externalServiceRepositoryProvider);
-    final animeFuture =
-        Future.wait([
-          if (services.anilistEnabled)
-            external
-                .anilistTrending(perPage: 36)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.jikanEnabled)
-            external
-                .jikanTop(limit: 25)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.kitsuEnabled)
-            external
-                .kitsuTrending(limit: 20)
-                .onError((_, _) => const <AnimeSubject>[]),
-        ]).then(
-          (groups) => _uniqueSubjects([
-            ..._interleaveSubjectGroups(groups, limitPerRound: 8),
-            ...groups.expand((items) => items),
-          ], preferChinese: services.preferBangumiChinese),
-        );
-    final seriesFuture =
-        Future.wait([
-          if (services.mediaMetadataEnabled && services.tmdbEnabled)
-            external
-                .tmdbSeriesFeed(pages: 1)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.mediaMetadataEnabled && services.cinemetaEnabled)
-            external
-                .cinemetaFeed(type: 'series', pages: 1)
-                .onError((_, _) => const <AnimeSubject>[]),
-        ]).then(
-          (groups) => _uniqueSubjects([
-            ..._interleaveSubjectGroups(groups, limitPerRound: 6),
-            ...groups.expand((items) => items),
-          ], preferChinese: services.preferBangumiChinese),
-        );
-    final movieFuture =
-        Future.wait([
-          if (services.mediaMetadataEnabled && services.tmdbEnabled)
-            external
-                .tmdbMovieFeed(pages: 1)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.mediaMetadataEnabled)
-            external
-                .movieMetadataFeed(
-                  includeCinemeta: services.cinemetaEnabled,
-                  includeArchive: false,
-                  cinemetaPages: 1,
-                )
-                .onError((_, _) => const <AnimeSubject>[]),
-        ]).then(
-          (groups) => _uniqueSubjects([
-            ..._interleaveSubjectGroups(groups, limitPerRound: 6),
-            ...groups.expand((items) => items),
-          ], preferChinese: services.preferBangumiChinese),
-        );
-    final groups = await Future.wait([animeFuture, seriesFuture, movieFuture])
-        .timeout(
-          const Duration(seconds: 12),
-          onTimeout: () => const <List<AnimeSubject>>[[], [], []],
-        );
-    final enriched = await Future.wait([
-      _enrichSubjects(
-        groups[0],
-        services,
-        animeLookupLimit: 12,
-      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[0]),
-      _enrichSubjects(
-        groups[1],
-        services,
-        animeLookupLimit: 0,
-      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[1]),
-      _enrichSubjects(
-        groups[2],
-        services,
-        animeLookupLimit: 0,
-      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[2]),
-    ]);
-    final anime = services.preferBangumiChinese
-        ? enriched[0]
-              .where(_passesChineseAnimePreference)
-              .toList(growable: false)
-        : enriched[0];
-    return _HomeHighlights(
-      anime: anime,
-      series: enriched[1],
-      movies: enriched[2],
-    );
-  }
-
-  Future<List<AnimeSubject>> _enrichSubjects(
-    Iterable<AnimeSubject> subjects,
-    ExternalServiceSettings services, {
-    required int animeLookupLimit,
-  }) async {
-    final items = subjects.toList(growable: false);
-    if (items.isEmpty) return const [];
-    var enriched = items;
-    try {
-      enriched = await ref
-          .read(chineseMetadataRepositoryProvider)
-          .enrichSubjects(
-            items,
-            useBangumiForAnime:
-                services.preferBangumiChinese && services.bangumiEnabled,
-            animeLookupLimit: animeLookupLimit,
-          )
-          .timeout(const Duration(seconds: 24), onTimeout: () => items);
-    } catch (_) {
-      enriched = items;
-    }
-    return enriched.map(_localizeSubjectLabels).toList(growable: false);
-  }
-
-  bool _passesChineseAnimePreference(AnimeSubject subject) {
-    if (!subjectMatchesContentType(subject, SubjectContentType.anime)) {
-      return true;
-    }
-    final source = subject.source.trim().toLowerCase();
-    if (source != 'anilist' && source != 'jikan' && source != 'kitsu') {
-      return true;
-    }
-    // Keep a correctly localized title even when no reliable Chinese synopsis
-    // exists. The catalog replaces that synopsis with a Chinese placeholder,
-    // so missing translations do not remove otherwise valid shows.
-    return isLikelyChineseTitle(subject.title);
-  }
-
-  AnimeSubject _localizeSubjectLabels(AnimeSubject subject) {
-    final platform = _localizedLabel(subject.platform, const {
-      'movie': '电影',
-      'series': '剧集',
-      'scripted': '剧集',
-      'show': '剧集',
-      'reality': '真人秀',
-      'peertube': '开放视频',
-      'live': '直播',
-    });
-    final language = _localizedLabel(subject.language, const {
-      'english': '英语',
-      'japanese': '日语',
-      'korean': '韩语',
-      'chinese': '中文',
-      'mandarin': '国语',
-      'cantonese': '粤语',
-      'french': '法语',
-      'german': '德语',
-      'spanish': '西班牙语',
-      'italian': '意大利语',
-      'russian': '俄语',
-    });
-    final region = _localizedLabel(subject.region, const {
-      'united states': '美国',
-      'united kingdom': '英国',
-      'south korea': '韩国',
-      'korea, republic of': '韩国',
-      'japan': '日本',
-      'china': '中国',
-      'hong kong': '中国香港',
-      'taiwan': '中国台湾',
-      'canada': '加拿大',
-      'france': '法国',
-      'germany': '德国',
-      'italy': '意大利',
-      'spain': '西班牙',
-      'australia': '澳大利亚',
-    });
-    final status = _localizedLabel(subject.status, const {
-      'running': '连载中',
-      'ended': '已完结',
-      'in development': '制作中',
-      'to be determined': '待定',
-    });
-    final categories = subject.categories
-        .map(
-          (item) => AnimeCategory(
-            name: _localizedLabel(item.name, const {
-              'drama': '剧情',
-              'action': '动作',
-              'adventure': '冒险',
-              'fantasy': '奇幻',
-              'crime': '犯罪',
-              'thriller': '惊悚',
-              'horror': '恐怖',
-              'science fiction': '科幻',
-              'science-fiction': '科幻',
-              'sci-fi': '科幻',
-              'comedy': '喜剧',
-              'romance': '爱情',
-              'mystery': '悬疑',
-              'animation': '动画',
-              'documentary': '纪录片',
-              'family': '家庭',
-              'history': '历史',
-              'war': '战争',
-              'western': '西部',
-              'music': '音乐',
-              'supernatural': '超自然',
-              'reality': '真人秀',
-              'talk show': '脱口秀',
-            }),
-            count: item.count,
-            imageUrl: item.imageUrl,
-          ),
-        )
-        .toList(growable: false);
-    if (platform == subject.platform &&
-        language == subject.language &&
-        region == subject.region &&
-        status == subject.status &&
-        _sameCategoryLabels(categories, subject.categories)) {
-      return subject;
-    }
-    return AnimeSubject(
-      id: subject.id,
-      title: subject.title,
-      originalTitle: subject.originalTitle,
-      summary: subject.summary,
-      coverUrl: subject.coverUrl,
-      bannerUrl: subject.bannerUrl,
-      date: subject.date,
-      platform: platform,
-      language: language,
-      region: region,
-      status: status,
-      categories: categories,
-      tags: subject.tags,
-      totalEpisodes: subject.totalEpisodes,
-      ratingScore: subject.ratingScore,
-      ratingRank: subject.ratingRank,
-      ratingTotal: subject.ratingTotal,
-      source: subject.source,
-    );
-  }
-
-  String _localizedLabel(String value, Map<String, String> labels) {
-    final text = value.trim();
-    if (text.isEmpty) return text;
-    return labels[text.toLowerCase()] ?? text;
-  }
-
-  bool _sameCategoryLabels(
-    List<AnimeCategory> first,
-    List<AnimeCategory> second,
-  ) {
-    if (first.length != second.length) return false;
-    for (var i = 0; i < first.length; i++) {
-      if (first[i].name != second[i].name) return false;
-    }
-    return true;
-  }
-
-  // ignore: unused_element
-  AnimeHomeFeed _composeHomeFeed(
-    AnimeHomeFeed base,
-    _HomeHighlights highlights, {
-    required bool preferChinese,
-  }) {
-    final animeHighlights = _subjectsOfType(
-      highlights.anime,
-      SubjectContentType.anime,
-    );
-    final animeBaseRecommended = _subjectsOfType(
-      base.recommended,
-      SubjectContentType.anime,
-    );
-    final animeBaseRecent = _subjectsOfType(
-      base.recent,
-      SubjectContentType.anime,
-    );
-    final animeBaseIndex = _subjectsOfType(
-      base.index,
-      SubjectContentType.anime,
-    );
-    final all = _uniqueSubjects([
-      ..._interleaveSubjectGroups([
-        animeHighlights,
-        animeBaseRecommended,
-        animeBaseRecent,
-      ], limitPerRound: 4),
-      ...animeBaseIndex,
-    ], preferChinese: preferChinese);
-    final rankedAll = [...all]
-      ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
-    final heroCandidates =
-        rankedAll.where((item) => (item.bannerUrl ?? '').isNotEmpty).toList()
-          ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
-    final hero = heroCandidates.firstOrNull ?? base.hero;
-    final recentCandidates =
-        _uniqueSubjects([
-          ...animeBaseRecent,
-          ...animeHighlights,
-        ], preferChinese: preferChinese)..sort((a, b) {
-          final rankOrder = _homeRank(b).compareTo(_homeRank(a));
-          if (rankOrder != 0) return rankOrder;
-          return (b.date ?? '').compareTo(a.date ?? '');
-        });
-    final recent = <AnimeSubject>[];
-    for (final subject in recentCandidates) {
-      if (_sameSubject(subject, hero)) continue;
-      recent.add(subject);
-      if (recent.length >= 28) break;
-    }
-    final recommended = <AnimeSubject>[];
-    for (final subject in rankedAll) {
-      if (_sameSubject(subject, hero) ||
-          recent.any((item) => _sameSubject(item, subject))) {
-        continue;
-      }
-      recommended.add(subject);
-      if (recommended.length >= 36) break;
-    }
-    return AnimeHomeFeed(
-      hero: hero,
-      recent: recent.isEmpty ? animeBaseRecent : recent,
-      recommended: recommended.isEmpty ? animeBaseRecommended : recommended,
-      index: all.take(360).toList(growable: false),
-      categories: base.categories,
-      tags: base.tags,
-      seriesHighlights: _subjectsOfType(
-        highlights.series,
-        SubjectContentType.series,
-      ).take(12).toList(growable: false),
-      movieHighlights: _subjectsOfType(
-        highlights.movies,
-        SubjectContentType.movie,
-      ).take(12).toList(growable: false),
-    );
-  }
-
-  int _homeRank(AnimeSubject subject) {
-    var score = ((subject.ratingScore ?? 0) * 10).round();
-    if ((subject.bannerUrl ?? '').isNotEmpty) score += 30;
-    if ((subject.coverUrl ?? '').isNotEmpty) score += 12;
-    if (isLikelyChineseTitle(subject.title)) score += 20;
-    if (isLikelyChineseText(subject.summary)) score += 6;
-    if (_isDirectPlayable(subject)) score += 4;
-    final date = DateTime.tryParse(subject.date ?? '');
-    if (date != null) {
-      final age = DateTime.now().difference(date).inDays;
-      if (age >= 0 && age <= 180) {
-        score += 24;
-      } else if (age >= 0 && age <= 730) {
-        score += 10;
-      }
-    }
-    return score;
-  }
-
   Future<void> _activateAccount(LocalAccount? account) async {
     final accountId = account?.id;
     final settingsJson = _settings.get(
@@ -3121,28 +2901,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ].join(':');
   }
 
-  List<AnimeSubject> _interleaveSubjectGroups(
-    List<List<AnimeSubject>> groups, {
-    int limitPerRound = 8,
-  }) {
-    final result = <AnimeSubject>[];
-    final offsets = List<int>.filled(groups.length, 0);
-    var added = true;
-    while (added) {
-      added = false;
-      for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) {
-        final group = groups[groupIndex];
-        final start = offsets[groupIndex];
-        if (start >= group.length) continue;
-        final end = (start + limitPerRound).clamp(0, group.length);
-        result.addAll(group.sublist(start, end));
-        offsets[groupIndex] = end;
-        added = true;
-      }
-    }
-    return result;
-  }
-
   List<AnimeSubject> _uniqueSubjects(
     Iterable<AnimeSubject> subjects, {
     bool? preferChinese,
@@ -3181,11 +2939,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       }
     }
     return unique;
-  }
-
-  bool _sameSubject(AnimeSubject a, AnimeSubject b) {
-    final bKeys = _subjectIdentityKeys(b);
-    return _subjectIdentityKeys(a).any(bKeys.contains);
   }
 
   Set<String> _subjectIdentityKeys(AnimeSubject subject) {
@@ -3396,17 +3149,6 @@ String _stableRuleRepositoryId(String value) {
   return hash.toRadixString(16).padLeft(8, '0');
 }
 
-class _HomeHighlights {
-  const _HomeHighlights({
-    this.anime = const [],
-    this.series = const [],
-    this.movies = const [],
-  });
-
-  final List<AnimeSubject> anime;
-  final List<AnimeSubject> series;
-  final List<AnimeSubject> movies;
-}
 
 class _HomeFeedCacheSnapshot {
   const _HomeFeedCacheSnapshot({this.feed, this.fresh = false});
