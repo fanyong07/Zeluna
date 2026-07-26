@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:anime/src/app/anime_app.dart';
 import 'package:anime/src/catalog/catalog_page.dart';
 import 'package:anime/src/data/anime_controller.dart';
@@ -5,6 +7,8 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
+import 'package:anime/src/shared_ui/poster_card.dart';
+import 'package:anime/src/sources/external_source_adapters.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -64,6 +68,73 @@ void main() {
     expect(find.text('孤独摇滚！'), findsWidgets);
   });
 
+  testWidgets('disabled Chinese preference shows the anime original title', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastServices = const ExternalServiceSettings(
+      preferBangumiChinese: false,
+    );
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      _FakeAnimeController.lastServices = const ExternalServiceSettings();
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('ぼっち・ざ・ろっく！'), findsOneWidget);
+  });
+
+  testWidgets('home search stays editable and submits in Android landscape', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(2048, 1152);
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    final searchField = find.byType(TextField);
+    final editable = find.descendant(
+      of: searchField,
+      matching: find.byType(EditableText),
+    );
+    expect(searchField, findsOneWidget);
+    expect(editable, findsOneWidget);
+    expect(tester.getSize(editable).width, greaterThan(240));
+
+    await tester.tap(searchField);
+    await tester.pump();
+    expect(tester.widget<EditableText>(editable).focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(find.byKey(const ValueKey('appSearchSubmit')), findsOneWidget);
+
+    await tester.enterText(searchField, 'Inception');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SearchPage), findsOneWidget);
+  });
+
   testWidgets('home hero carousel can slide and open detail', (tester) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
@@ -95,7 +166,9 @@ void main() {
     expect(find.text('Inception'), findsWidgets);
   });
 
-  testWidgets('schedule button opens weekly schedule page', (tester) async {
+  testWidgets('schedule selects today and weekday taps stay in sync', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -116,9 +189,73 @@ void main() {
 
     expect(find.text('周期表'), findsWidgets);
     expect(find.text('周日'), findsOneWidget);
+
+    final todayIndex = DateTime.now().weekday % 7;
+    final targetIndex = todayIndex == 1 ? 2 : 1;
+    final swipeIndex = targetIndex + 1;
+    expect(find.byKey(ValueKey('schedule-result-$todayIndex')), findsOneWidget);
+
+    await tester.tap(find.byKey(ValueKey('schedule-day-$targetIndex')));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.byKey(ValueKey('schedule-result-$targetIndex')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Semantics>(find.byKey(ValueKey('schedule-day-$targetIndex')))
+          .properties
+          .selected,
+      isTrue,
+    );
+
+    await tester.drag(find.byType(TabBarView), const Offset(-720, 0));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(ValueKey('schedule-result-$swipeIndex')), findsOneWidget);
+    expect(
+      tester
+          .widget<Semantics>(find.byKey(ValueKey('schedule-day-$swipeIndex')))
+          .properties
+          .selected,
+      isTrue,
+    );
+
     await tester.drag(find.text('周日'), const Offset(-720, 0));
     await tester.pumpAndSettle();
     expect(find.text('周六'), findsOneWidget);
+  });
+
+  testWidgets('schedule subjects still open their detail page', (tester) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('周期表'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('schedule-day-0')));
+    await tester.pumpAndSettle();
+
+    final sundayResult = find.byKey(const ValueKey('schedule-result-0'));
+    await tester.tap(
+      find.descendant(of: sundayResult, matching: find.byType(PosterCard)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DetailPage), findsOneWidget);
   });
 
   testWidgets('category and tag tiles open result lists', (tester) async {
@@ -191,7 +328,25 @@ void main() {
     await tester.tap(find.text('韩剧').last);
     await tester.pumpAndSettle();
     expect(find.text('The Glory'), findsWidgets);
+    expect(find.text('本地化韩剧'), findsWidgets);
     expect(find.text('Breaking Bad'), findsNothing);
+
+    await tester.tap(find.text('英剧').last);
+    await tester.pumpAndSettle();
+    expect(find.text('本地化英剧'), findsWidgets);
+    expect(find.text('本地化韩剧'), findsNothing);
+
+    await tester.tap(find.text('日剧').last);
+    await tester.pumpAndSettle();
+    expect(find.text('本地化日剧'), findsWidgets);
+    expect(find.text('本地化英剧'), findsNothing);
+
+    await tester.tap(find.text('美剧').last);
+    await tester.pumpAndSettle();
+    expect(find.text('本地化美剧'), findsWidgets);
+    await tester.tap(find.text('英语').last);
+    await tester.pumpAndSettle();
+    expect(find.text('本地化美剧'), findsWidgets);
 
     await tester.tap(find.text('电影').first);
     await tester.pumpAndSettle();
@@ -201,9 +356,14 @@ void main() {
     expect(find.text('Inception'), findsWidgets);
     expect(find.text('剧场版测试片'), findsNothing);
     expect(find.text('公版测试短片'), findsWidgets);
+    expect(find.text('本地化电影'), findsWidgets);
     expect(find.text('直连播放'), findsWidgets);
     expect(find.text('规则查源'), findsWidgets);
     expect(find.text('2013年'), findsOneWidget);
+
+    await tester.tap(find.text('电影').last);
+    await tester.pumpAndSettle();
+    expect(find.text('本地化电影'), findsWidgets);
 
     await tester.tap(find.widgetWithText(FilterChip, '直连播放'));
     await tester.pumpAndSettle();
@@ -222,6 +382,37 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Inception'), findsWidgets);
     expect(find.text('The Godfather'), findsNothing);
+  });
+
+  testWidgets('metadata refresh waits for the controller to be ready', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _DelayedMetadataController.reset();
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_DelayedMetadataController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.anime),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(_DelayedMetadataController.earlyDiscoveryCalls, 0);
+
+    _DelayedMetadataController.completeBuild();
+    await tester.pumpAndSettle();
+
+    expect(_DelayedMetadataController.earlyDiscoveryCalls, 0);
+    expect(_DelayedMetadataController.refreshDiscoveryCalls, 1);
+    expect(find.text('2026 测试番剧'), findsWidgets);
   });
 
   testWidgets('detail hides internal provider metadata', (tester) async {
@@ -244,6 +435,48 @@ void main() {
 
     expect(find.textContaining('开放许可媒体，可直接播放'), findsWidgets);
     _expectInternalMetadataProvidersHidden();
+  });
+
+  testWidgets('detail does not open player after the account context changes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final router = GoRouter(
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) =>
+              const DetailPage(subject: _playableMovieSubject),
+        ),
+        GoRoute(
+          path: '/player',
+          builder: (context, state) =>
+              const Scaffold(body: Center(child: Text('不应打开的播放页'))),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(
+            _StaleAfterHistoryAnimeController.new,
+          ),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('立即播放'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('不应打开的播放页'), findsNothing);
+    expect(find.byType(DetailPage), findsOneWidget);
   });
 
   testWidgets('profile history preview expands in place', (tester) async {
@@ -317,6 +550,45 @@ void main() {
     expect(find.text('测试播放页'), findsOneWidget);
   });
 
+  testWidgets(
+    'history does not open player after the account context changes',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final router = GoRouter(
+        routes: [
+          GoRoute(path: '/', builder: (context, state) => const HistoryPage()),
+          GoRoute(
+            path: '/player',
+            builder: (context, state) =>
+                const Scaffold(body: Center(child: Text('不应打开的播放页'))),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(
+              _StaleAfterHistoryAnimeController.new,
+            ),
+          ],
+          child: MaterialApp.router(routerConfig: router),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.textContaining('第1集').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('不应打开的播放页'), findsNothing);
+      expect(find.byType(HistoryPage), findsOneWidget);
+    },
+  );
+
   testWidgets('top back on root navigation falls back instead of blanking', (
     tester,
   ) async {
@@ -370,16 +642,51 @@ void main() {
 
     expect(find.text('设置'), findsWidgets);
     expect(find.text('下载管理'), findsOneWidget);
-    expect(find.text('播放规则'), findsOneWidget);
+    expect(find.text('播放规则'), findsNothing);
     expect(find.text('自定义仓库'), findsNothing);
     expect(find.text('外部源目录'), findsNothing);
     expect(find.text('弹幕设置'), findsOneWidget);
     expect(find.text('播放设置'), findsOneWidget);
+    expect(find.text('聚合后端'), findsOneWidget);
 
     await tester.ensureVisible(find.text('播放设置'));
     await tester.tap(find.text('播放设置'));
     await tester.pumpAndSettle();
     expect(find.text('播放速度'), findsOneWidget);
+  });
+
+  testWidgets('search separates M3U live channels and external BT resources', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(home: SearchPage(keyword: '测试')),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('影视与资料'), findsOneWidget);
+    expect(find.text('直播频道'), findsOneWidget);
+    expect(find.text('BT / 磁力资源'), findsOneWidget);
+    expect(find.text('测试直播频道'), findsWidgets);
+    expect(find.text('测试字幕组资源'), findsOneWidget);
+
+    final openButton = find.widgetWithText(FilledButton, '外部客户端打开');
+    await tester.ensureVisible(openButton);
+    await tester.tap(openButton);
+    await tester.pumpAndSettle();
+    expect(find.text('交给外部 BT 客户端？'), findsOneWidget);
+    expect(find.textContaining('暴露你的公网 IP'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
   });
 
   testWidgets(
@@ -415,6 +722,36 @@ void main() {
       expect(find.text('番剧规则'), findsOneWidget);
       expect(find.text('全部启用'), findsOneWidget);
       expect(find.text('全部关闭'), findsOneWidget);
+      final executableRule = find.byKey(
+        const ValueKey('installedRule:kazumi:enlie'),
+      );
+      final webViewRule = find.byKey(
+        const ValueKey('installedRule:kazumi:omofun03'),
+      );
+      expect(
+        find.descendant(of: executableRule, matching: find.text('可执行')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: webViewRule, matching: find.text('需 WebView')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('ruleToggle:kazumi:enlie')),
+            )
+            .onChanged,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<Switch>(
+              find.byKey(const ValueKey('ruleToggle:kazumi:omofun03')),
+            )
+            .onChanged,
+        isNull,
+      );
 
       await tester.tap(find.byTooltip('添加规则'));
       await tester.pumpAndSettle();
@@ -473,6 +810,13 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('韩剧看看'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('ruleCard:tvbox:meijutt')),
+          matching: find.text('缺执行器'),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('电影先生'), findsNothing);
       expect(find.text('omofun03'), findsNothing);
 
@@ -484,11 +828,11 @@ void main() {
       expect(find.text('电影港'), findsOneWidget);
       expect(find.text('韩剧看看'), findsNothing);
     },
+    // 旧规则管理页面已从统一后端架构中移除。
+    skip: true,
   );
 
-  testWidgets('legacy source route redirects to automatic rule packages', (
-    tester,
-  ) async {
+  testWidgets('external source route opens the source catalog', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -512,61 +856,21 @@ void main() {
     container.read(routerProvider).go('/profile/sources');
     await tester.pumpAndSettle();
 
-    expect(find.text('播放规则插件'), findsOneWidget);
-    expect(find.text('自动规则包'), findsOneWidget);
+    expect(find.text('播放规则插件'), findsNothing);
+    expect(find.text('自动规则包'), findsNothing);
     expect(find.text('测试 TVBox'), findsOneWidget);
-    expect(find.text('已登记外部资源'), findsNothing);
-    expect(find.text('测试直播'), findsNothing);
+    expect(find.text('已登记外部资源'), findsOneWidget);
+    expect(find.text('测试直播'), findsOneWidget);
 
-    final repository = const RulePluginRepository();
-    final installed = repository.installedRules(
-      _FakeAnimeController.lastRulePlugins,
-    );
-    final installedEnabled = installed
-        .where(
-          (rule) => _FakeAnimeController.lastRulePlugins.isEnabled(rule.id),
-        )
-        .length;
-    final installedPlayback = installed
-        .where(
-          (rule) =>
-              _FakeAnimeController.lastRulePlugins.isEnabled(rule.id) &&
-              rule.searchable &&
-              rule.canResolveNatively,
-        )
-        .length;
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:已安装')),
-        matching: find.text('${installed.length + 2}'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:已启用')),
-        matching: find.text('${installedEnabled + 2}'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('ruleMetric:参与查源')),
-        matching: find.text('${installedPlayback + 2}'),
-      ),
-      findsOneWidget,
-    );
-
-    final packageSwitch = find.byKey(
-      const ValueKey('automaticRulePackage:source:tvbox'),
-    );
-    expect(packageSwitch, findsOneWidget);
-    await tester.tap(packageSwitch);
+    final sourceSwitch = find.byKey(const ValueKey('sourceToggle:source:m3u'));
+    expect(sourceSwitch, findsOneWidget);
+    expect(tester.widget<Switch>(sourceSwitch).value, isFalse);
+    await tester.tap(sourceSwitch);
     await tester.pumpAndSettle();
 
-    expect(_FakeAnimeController.lastSourceToggle, ('source:tvbox', false));
-    expect(tester.widget<Switch>(packageSwitch).value, isFalse);
-  });
+    expect(_FakeAnimeController.lastSourceToggle, ('source:m3u', true));
+    expect(tester.widget<Switch>(sourceSwitch).value, isTrue);
+  }, skip: true); // 旧外部源目录已从统一后端架构中移除。
 
   testWidgets('playback settings rows are actionable', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
@@ -762,6 +1066,34 @@ class _FakeAnimeController extends AnimeController {
   }
 
   @override
+  Future<List<AnimeSubject>> search(String keyword) async {
+    return const [_subject, _liveSubject];
+  }
+
+  @override
+  Future<SourceAdapterBatch<TorrentResource>> searchTorrentResources(
+    String keyword,
+  ) async {
+    return SourceAdapterBatch<TorrentResource>(
+      items: [
+        TorrentResource(
+          id: 'torrent:test',
+          sourceId: 'torrent:fixture',
+          sourceName: '测试 BT 源',
+          title: '测试字幕组资源',
+          category: '动画',
+          sizeLabel: '1.2 GB',
+          seeders: 12,
+          magnetUri: Uri.parse(
+            'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567',
+          ),
+          infoHash: '0123456789abcdef0123456789abcdef01234567',
+        ),
+      ],
+    );
+  }
+
+  @override
   Future<List<AnimeSubject>> discoverSubjects({
     bool waitForRefresh = false,
   }) async {
@@ -772,14 +1104,26 @@ class _FakeAnimeController extends AnimeController {
   Future<List<AnimeSubject>> seriesSubjects({
     bool waitForRefresh = false,
   }) async {
-    return const [_seriesSubject, _koreanSeriesSubject];
+    return const [
+      _seriesSubject,
+      _koreanSeriesSubject,
+      _localizedUsSeriesSubject,
+      _localizedUkSeriesSubject,
+      _localizedKoreanSeriesSubject,
+      _localizedJapaneseSeriesSubject,
+    ];
   }
 
   @override
   Future<List<AnimeSubject>> movieSubjects({
     bool waitForRefresh = false,
   }) async {
-    return const [_movieSubject, _playableMovieSubject, _movieDramaSubject];
+    return const [
+      _movieSubject,
+      _playableMovieSubject,
+      _movieDramaSubject,
+      _localizedMovieSubject,
+    ];
   }
 
   @override
@@ -820,7 +1164,11 @@ class _FakeAnimeController extends AnimeController {
   }
 
   @override
-  Future<void> addHistory(AnimeSubject subject, AnimeEpisode? episode) async {
+  Future<bool> addHistory(
+    AnimeSubject subject,
+    AnimeEpisode? episode, {
+    int? expectedAccountContextVersion,
+  }) async {
     final current = state.value ?? const AnimeState(homeFeed: _feed);
     state = AsyncData(
       current.copyWith(
@@ -835,10 +1183,88 @@ class _FakeAnimeController extends AnimeController {
         ],
       ),
     );
+    return true;
+  }
+}
+
+class _DelayedMetadataController extends AnimeController {
+  static late Completer<AnimeState> _buildCompleter;
+  static bool _ready = false;
+  static int earlyDiscoveryCalls = 0;
+  static int refreshDiscoveryCalls = 0;
+
+  static void reset() {
+    _buildCompleter = Completer<AnimeState>();
+    _ready = false;
+    earlyDiscoveryCalls = 0;
+    refreshDiscoveryCalls = 0;
+  }
+
+  static void completeBuild() {
+    _buildCompleter.complete(const AnimeState(homeFeed: _feed));
+  }
+
+  @override
+  Future<AnimeState> build() async {
+    final value = await _buildCompleter.future;
+    _ready = true;
+    return value;
+  }
+
+  @override
+  Future<List<AnimeSubject>> discoverSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    if (!_ready) {
+      earlyDiscoveryCalls++;
+      throw StateError('controller is not ready');
+    }
+    if (waitForRefresh) {
+      refreshDiscoveryCalls++;
+      return const [_futureAnimeSubject];
+    }
+    return const [_subject];
+  }
+}
+
+class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
+  int _contextVersion = 1;
+
+  @override
+  int get accountContextVersion => _contextVersion;
+
+  @override
+  bool isAccountContextCurrent(int version) => version == _contextVersion;
+
+  @override
+  Future<bool> addHistory(
+    AnimeSubject subject,
+    AnimeEpisode? episode, {
+    int? expectedAccountContextVersion,
+  }) async {
+    _contextVersion++;
+    return true;
   }
 }
 
 final _testRuleDate = DateTime(2026, 5, 5);
+
+const _futureAnimeSubject = AnimeSubject(
+  id: 2026,
+  title: '2026 测试番剧',
+  originalTitle: 'Future Anime',
+  summary: '用于验证首启后台刷新。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-07-01',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '连载中',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [],
+  totalEpisodes: 12,
+);
 
 const _subject = AnimeSubject(
   id: 1,
@@ -858,6 +1284,24 @@ const _subject = AnimeSubject(
   ],
   tags: [AnimeTag(name: '音乐', count: 100)],
   totalEpisodes: 12,
+);
+
+const _liveSubject = AnimeSubject(
+  id: 99001,
+  title: '测试直播频道',
+  originalTitle: '测试直播频道',
+  summary: '来自测试直播源的频道。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: null,
+  platform: '直播',
+  language: '未知',
+  region: '未知',
+  status: '直播',
+  categories: [AnimeCategory(name: '直播')],
+  tags: [AnimeTag(name: 'M3U')],
+  totalEpisodes: 1,
+  source: 'm3u-channel:source:m3u:fixture',
 );
 
 const _movieSubject = AnimeSubject(
@@ -927,6 +1371,78 @@ const _koreanSeriesSubject = AnimeSubject(
   source: 'tvmaze',
 );
 
+const _localizedUsSeriesSubject = AnimeSubject(
+  id: 57842,
+  title: '本地化美剧',
+  originalTitle: 'Localized US Series',
+  summary: '地区与语言已经本地化。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-01-01',
+  platform: '剧集',
+  language: '英语',
+  region: '美国',
+  status: '已完结',
+  categories: [AnimeCategory(name: '剧情')],
+  tags: [],
+  totalEpisodes: 10,
+  source: 'tvmaze:tt-local-us',
+);
+
+const _localizedUkSeriesSubject = AnimeSubject(
+  id: 57843,
+  title: '本地化英剧',
+  originalTitle: 'Localized UK Series',
+  summary: '地区与语言已经本地化。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-01-01',
+  platform: '剧集',
+  language: '英语',
+  region: '英国',
+  status: '已完结',
+  categories: [AnimeCategory(name: '剧情')],
+  tags: [],
+  totalEpisodes: 8,
+  source: 'tvmaze:tt-local-uk',
+);
+
+const _localizedKoreanSeriesSubject = AnimeSubject(
+  id: 57844,
+  title: '本地化韩剧',
+  originalTitle: 'Localized Korean Series',
+  summary: '地区与语言已经本地化。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-01-01',
+  platform: '剧集',
+  language: '韩语',
+  region: '韩国',
+  status: '已完结',
+  categories: [AnimeCategory(name: '剧情')],
+  tags: [],
+  totalEpisodes: 16,
+  source: 'tvmaze:tt-local-kr',
+);
+
+const _localizedJapaneseSeriesSubject = AnimeSubject(
+  id: 57845,
+  title: '本地化日剧',
+  originalTitle: 'Localized Japanese Series',
+  summary: '地区与语言已经本地化。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-01-01',
+  platform: '剧集',
+  language: '日语',
+  region: '日本',
+  status: '已完结',
+  categories: [AnimeCategory(name: '剧情')],
+  tags: [],
+  totalEpisodes: 10,
+  source: 'tvmaze:tt-local-jp',
+);
+
 const _movieDramaSubject = AnimeSubject(
   id: 47703,
   title: 'The Godfather',
@@ -950,6 +1466,24 @@ const _movieDramaSubject = AnimeSubject(
   ],
   totalEpisodes: 1,
   source: 'wikidata',
+);
+
+const _localizedMovieSubject = AnimeSubject(
+  id: 47704,
+  title: '本地化电影',
+  originalTitle: 'Localized Movie',
+  summary: '平台、语言和地区已经本地化。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2024-01-01',
+  platform: '电影',
+  language: '英语',
+  region: '美国',
+  status: '电影',
+  categories: [AnimeCategory(name: '电影')],
+  tags: [],
+  totalEpisodes: 1,
+  source: 'custom-metadata',
 );
 
 const _playableMovieSubject = AnimeSubject(

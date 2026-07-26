@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_importer.dart';
@@ -10,6 +12,78 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'cancellation aborts requests on a shared client without closing it',
+    () async {
+      final searchStarted = Completer<void>();
+      final releaseSearch = Completer<void>();
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final sharedClient = http.Client();
+      addTearDown(() async {
+        if (!releaseSearch.isCompleted) releaseSearch.complete();
+        sharedClient.close();
+        await server.close(force: true);
+      });
+      server.listen((request) async {
+        if (request.uri.path == '/health') {
+          request.response
+            ..statusCode = 200
+            ..write('ok');
+          await request.response.close();
+          return;
+        }
+        if (request.uri.path == '/vod/search.html') {
+          if (!searchStarted.isCompleted) searchStarted.complete();
+          await releaseSearch.future;
+          try {
+            request.response
+              ..statusCode = 200
+              ..write('<html></html>');
+            await request.response.close();
+          } catch (_) {
+            // The client is expected to abort this individual request.
+          }
+          return;
+        }
+        request.response.statusCode = 404;
+        await request.response.close();
+      });
+
+      final origin = 'http://${server.address.address}:${server.port}';
+      final resolver = RulePlaybackResolver(
+        client: sharedClient,
+        timeout: const Duration(seconds: 5),
+      );
+      final rule = _kazumiRule.copyWith(
+        id: 'kazumi:shared-client-cancel',
+        baseUrl: '$origin/',
+        searchUrl: '$origin/vod/search.html?wd=@keyword',
+        requestHeaders: const {},
+      );
+      final cancellationToken = RulePlaybackCancellationToken();
+      final resolving = resolver.resolveRule(
+        rule: rule,
+        subject: _animeSubject,
+        episode: _episode,
+        verifyPlayable: false,
+        cancellationToken: cancellationToken,
+      );
+
+      await searchStarted.future.timeout(const Duration(seconds: 2));
+      final stopwatch = Stopwatch()..start();
+      cancellationToken.cancel();
+      final lines = await resolving.timeout(const Duration(seconds: 1));
+      stopwatch.stop();
+
+      expect(lines, isEmpty);
+      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 800)));
+      final health = await sharedClient.get(Uri.parse('$origin/health'));
+      expect(health.statusCode, 200);
+      expect(health.body, 'ok');
+      releaseSearch.complete();
+    },
+  );
+
   test('Kazumi resolver extracts current episode playable url', () async {
     var playPageRequests = 0;
     var probeRequests = 0;
@@ -20,7 +94,9 @@ void main() {
         case '/test/01.m3u8':
           expect(request.headers['Range'], 'bytes=0-2048');
           probeRequests++;
-          return http.Response('#EXTM3U', 200);
+          return _playableHls();
+        case '/test/segment-1.ts':
+          return _playableSegment();
         case '/vod/search.html':
           return _html('''
             <div class="item">
@@ -52,10 +128,10 @@ void main() {
       verifyPlayable: false,
     );
 
-    expect(quickLines, hasLength(2));
+    expect(quickLines, hasLength(1));
     expect(quickLines.every((line) => line.available), isTrue);
     expect(playPageRequests, 1);
-    expect(probeRequests, 0);
+    expect(probeRequests, 1);
 
     final lines = await resolver.resolveRule(
       rule: _kazumiRule,
@@ -67,6 +143,8 @@ void main() {
     expect(lines.first.available, isTrue);
     expect(lines.first.url, 'https://cdn.example.com/test/01.m3u8');
     expect(lines.first.format, 'HLS');
+    expect(lines.first.sizeLabel, isNull);
+    expect(lines.first.isLive, isFalse);
     expect(playPageRequests, 1);
     expect(probeRequests, 1);
 
@@ -79,6 +157,377 @@ void main() {
     expect(cachedLines, hasLength(2));
     expect(playPageRequests, 1);
     expect(probeRequests, 1);
+  });
+
+  test('quick lookup rejects a dead explicit media url', () async {
+    var probeRequests = 0;
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/vod/search.html':
+          return _html('''
+            <div class="item">
+              <strong>测试番剧</strong>
+              <a class="detail" href="/detail/dead.html">详情</a>
+            </div>
+          ''');
+        case '/detail/dead.html':
+          return _html('''
+            <ul class="line"><li><a href="/play/dead.html">第1集</a></li></ul>
+          ''');
+        case '/play/dead.html':
+          return _html('''
+            <script>var player={"url":"https://cdn.example.com/dead.m3u8"};</script>
+          ''');
+        case '/dead.m3u8':
+          probeRequests++;
+          return http.Response('gone', 404);
+      }
+      return http.Response('not found', 404);
+    });
+    final resolver = RulePlaybackResolver(client: client);
+
+    final quick = await resolver.resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+      verifyPlayable: false,
+    );
+    expect(quick.single.available, isFalse);
+    expect(quick.single.message, contains('404'));
+    expect(probeRequests, 1);
+
+    final verified = await resolver.resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+    );
+
+    expect(verified.single.available, isFalse);
+    expect(verified.single.id, quick.single.id);
+    expect(probeRequests, 2);
+  });
+
+  test('quick lookup rejects a 200 HTML media response', () async {
+    final client = _singleLineClient(
+      mediaResponse: () => _html('<html><body>Access denied</body></html>'),
+      mediaPath: '/blocked.m3u8',
+    );
+
+    final lines = await RulePlaybackResolver(client: client).resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+      verifyPlayable: false,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isFalse);
+    expect(lines.single.message, contains('不是媒体内容'));
+  });
+
+  test(
+    'quick lookup rejects an HLS manifest without media references',
+    () async {
+      final client = _singleLineClient(
+        mediaResponse: () => http.Response(
+          '#EXTM3U\n#EXT-X-VERSION:3\n',
+          200,
+          headers: {'content-type': 'application/vnd.apple.mpegurl'},
+        ),
+        mediaPath: '/empty.m3u8',
+      );
+
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _animeSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isFalse);
+      expect(lines.single.message, contains('没有媒体分片'));
+    },
+  );
+
+  test(
+    'quick lookup returns the first playback road without waiting',
+    () async {
+      final slowProbe = Completer<http.Response>();
+      final secondSlowProbe = Completer<http.Response>();
+      var fourthRoadRequests = 0;
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/vod/search.html':
+            return _html('''
+            <div class="item">
+              <strong>测试番剧</strong>
+              <a class="detail" href="/detail/race.html">详情</a>
+            </div>
+          ''');
+          case '/detail/race.html':
+            return _html('''
+            <ul class="line"><li><a href="/play/slow.html">第1集</a></li></ul>
+            <ul class="line"><li><a href="/play/fast.html">第1集</a></li></ul>
+            <ul class="line"><li><a href="/play/slow-two.html">第1集</a></li></ul>
+            <ul class="line"><li><a href="/play/not-started.html">第1集</a></li></ul>
+          ''');
+          case '/play/slow.html':
+            return _html('''
+            <script>var player={"url":"https://cdn.example.com/slow-stream?id=1"};</script>
+          ''');
+          case '/play/fast.html':
+            return _html('''
+            <script>var player={"url":"https://cdn.example.com/fast.m3u8"};</script>
+          ''');
+          case '/fast.m3u8':
+            return _playableHls();
+          case '/segment-1.ts':
+            return _playableSegment();
+          case '/play/slow-two.html':
+            return _html('''
+            <script>var player={"url":"https://cdn.example.com/slow-stream-two?id=1"};</script>
+          ''');
+          case '/play/not-started.html':
+            fourthRoadRequests++;
+            return _html('''
+            <script>var player={"url":"https://cdn.example.com/fourth.m3u8"};</script>
+          ''');
+          case '/slow-stream':
+            return slowProbe.future;
+          case '/slow-stream-two':
+            return secondSlowProbe.future;
+        }
+        return http.Response('not found', 404);
+      });
+
+      final lines = await RulePlaybackResolver(client: client)
+          .resolveRule(
+            rule: _kazumiRule,
+            subject: _animeSubject,
+            episode: _episode,
+            verifyPlayable: false,
+          )
+          .timeout(const Duration(milliseconds: 500));
+
+      expect(lines, hasLength(1));
+      expect(lines.single.url, 'https://cdn.example.com/fast.m3u8');
+      expect(fourthRoadRequests, 0);
+      slowProbe.complete(http.Response('cancelled', 503));
+      secondSlowProbe.complete(http.Response('cancelled', 503));
+    },
+  );
+
+  test(
+    'quick lookup does not let a dead road beat a playable sibling',
+    () async {
+      final deadProbed = Completer<void>();
+      final fastPlayPage = Completer<http.Response>();
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/vod/search.html':
+            return _html('''
+            <div class="item">
+              <strong>测试番剧</strong>
+              <a class="detail" href="/detail/dead-race.html">详情</a>
+            </div>
+          ''');
+          case '/detail/dead-race.html':
+            return _html('''
+            <ul class="line"><li><a href="/play/dead-first.html">第1集</a></li></ul>
+            <ul class="line"><li><a href="/play/good-later.html">第1集</a></li></ul>
+          ''');
+          case '/play/dead-first.html':
+            return _html('''
+            <script>var player={"url":"https://cdn.example.com/dead.mp4"};</script>
+          ''');
+          case '/play/good-later.html':
+            return fastPlayPage.future;
+          case '/dead.mp4':
+            if (!deadProbed.isCompleted) deadProbed.complete();
+            return http.Response('gone', 404);
+          case '/good.mp4':
+            return http.Response.bytes(
+              _mp4ProbeSample(),
+              206,
+              headers: {
+                'content-type': 'video/mp4',
+                'content-range': 'bytes 0-1/2',
+              },
+            );
+        }
+        return http.Response('not found', 404);
+      });
+
+      var completed = false;
+      final resolving = RulePlaybackResolver(client: client)
+          .resolveRule(
+            rule: _kazumiRule,
+            subject: _animeSubject,
+            episode: _episode,
+            verifyPlayable: false,
+          )
+          .whenComplete(() => completed = true);
+
+      await deadProbed.future.timeout(const Duration(milliseconds: 500));
+      await Future<void>.delayed(Duration.zero);
+      expect(completed, isFalse);
+
+      fastPlayPage.complete(
+        _html('''
+        <script>var player={"url":"https://cdn.example.com/good.mp4"};</script>
+      '''),
+      );
+      final lines = await resolving.timeout(const Duration(milliseconds: 500));
+      expect(lines.single.url, 'https://cdn.example.com/good.mp4');
+      expect(lines.single.available, isTrue);
+    },
+  );
+
+  test(
+    'quick Kazumi lookup prefers HLS that succeeds inside the grace window',
+    () async {
+      final mp4Probed = Completer<void>();
+      final hlsProbe = Completer<http.Response>();
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/vod/search.html':
+            return _html('''
+              <div class="item">
+                <strong>测试番剧</strong>
+                <a class="detail" href="/detail/prefer-hls.html">详情</a>
+              </div>
+            ''');
+          case '/detail/prefer-hls.html':
+            return _html('''
+              <ul class="line"><li><a href="/play/fast-mp4.html">第1集</a></li></ul>
+              <ul class="line"><li><a href="/play/preferred-hls.html">第1集</a></li></ul>
+            ''');
+          case '/play/fast-mp4.html':
+            return _html('''
+              <script>var player={"url":"https://cdn.example.com/fast.mp4"};</script>
+            ''');
+          case '/play/preferred-hls.html':
+            return _html('''
+              <script>var player={"url":"https://cdn.example.com/preferred.m3u8"};</script>
+            ''');
+          case '/fast.mp4':
+            if (!mp4Probed.isCompleted) mp4Probed.complete();
+            return http.Response.bytes(
+              _mp4ProbeSample(),
+              206,
+              headers: {'content-type': 'video/mp4'},
+            );
+          case '/preferred.m3u8':
+            return hlsProbe.future;
+          case '/segment-1.ts':
+            return _playableSegment();
+        }
+        return http.Response('not found', 404);
+      });
+
+      var completed = false;
+      final resolving = RulePlaybackResolver(client: client)
+          .resolveRule(
+            rule: _kazumiRule,
+            subject: _animeSubject,
+            episode: _episode,
+            verifyPlayable: false,
+          )
+          .whenComplete(() => completed = true);
+
+      await mp4Probed.future.timeout(const Duration(milliseconds: 500));
+      await Future<void>.delayed(Duration.zero);
+      expect(completed, isFalse);
+      hlsProbe.complete(_playableHls());
+
+      final lines = await resolving.timeout(const Duration(milliseconds: 500));
+      expect(lines.single.url, 'https://cdn.example.com/preferred.m3u8');
+      expect(lines.single.format, 'HLS');
+    },
+  );
+
+  test(
+    'quick Kazumi lookup returns MP4 when HLS exceeds the grace window',
+    () async {
+      final hlsProbe = Completer<http.Response>();
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/vod/search.html':
+            return _html('''
+              <div class="item">
+                <strong>测试番剧</strong>
+                <a class="detail" href="/detail/hls-timeout.html">详情</a>
+              </div>
+            ''');
+          case '/detail/hls-timeout.html':
+            return _html('''
+              <ul class="line"><li><a href="/play/fallback-mp4.html">第1集</a></li></ul>
+              <ul class="line"><li><a href="/play/slow-hls.html">第1集</a></li></ul>
+            ''');
+          case '/play/fallback-mp4.html':
+            return _html('''
+              <script>var player={"url":"https://cdn.example.com/fallback.mp4"};</script>
+            ''');
+          case '/play/slow-hls.html':
+            return _html('''
+              <script>var player={"url":"https://cdn.example.com/slow.m3u8"};</script>
+            ''');
+          case '/fallback.mp4':
+            return http.Response.bytes(
+              _mp4ProbeSample(),
+              206,
+              headers: {'content-type': 'video/mp4'},
+            );
+          case '/slow.m3u8':
+            return hlsProbe.future;
+        }
+        return http.Response('not found', 404);
+      });
+
+      final stopwatch = Stopwatch()..start();
+      final lines = await RulePlaybackResolver(client: client)
+          .resolveRule(
+            rule: _kazumiRule,
+            subject: _animeSubject,
+            episode: _episode,
+            verifyPlayable: false,
+          )
+          .timeout(const Duration(seconds: 2));
+      stopwatch.stop();
+
+      expect(lines.single.url, 'https://cdn.example.com/fallback.mp4');
+      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 1600)));
+      hlsProbe.complete(http.Response('late', 503));
+    },
+  );
+
+  test('web media proxy keeps child URI and forwards protected headers', () {
+    final base = Uri.parse('http://127.0.0.1:5174/');
+    final upstream = Uri.parse('https://cdn.example.com/master.m3u8');
+    final proxy = ruleRequestUriForWebTest(upstream, base);
+    final childProxy = base.resolve(
+      '/media-proxy?url=${Uri.encodeQueryComponent('https://cdn.example.com/child.m3u8')}',
+    );
+
+    expect(proxy.path, '/media-proxy');
+    expect(proxy.queryParameters['url'], upstream.toString());
+    expect(ruleRequestUriForWebTest(childProxy, base), childProxy);
+
+    final headers = ruleRequestHeadersForWebTest(childProxy, const {
+      'user-agent': 'Fixture Agent',
+      'Referer': 'https://source.example/watch',
+      'authorization': 'Bearer secret',
+      'Cookie': 'sid=secret',
+      'Range': 'bytes=0-524287',
+    }, base);
+    expect(headers['X-Upstream-User-Agent'], 'Fixture Agent');
+    expect(headers['X-Upstream-Referer'], 'https://source.example/watch');
+    expect(headers['X-Upstream-Authorization'], 'Bearer secret');
+    expect(headers['X-Upstream-Cookie'], 'sid=secret');
+    expect(headers['Range'], 'bytes=0-524287');
+    expect(headers, isNot(contains('Cookie')));
+    expect(headers, isNot(contains('authorization')));
   });
 
   test('Kazumi probes independent playback lines concurrently', () async {
@@ -111,7 +560,9 @@ void main() {
           probeRequests++;
           if (probeRequests == 2) bothProbesStarted.complete();
           await bothProbesStarted.future.timeout(const Duration(seconds: 1));
-          return http.Response('#EXTM3U', 200);
+          return _playableHls();
+        case '/segment-1.ts':
+          return _playableSegment();
       }
       return http.Response('not found', 404);
     });
@@ -125,17 +576,903 @@ void main() {
     expect(probeRequests, 2);
   });
 
-  test('playable probe reads only the first ranged response chunk', () async {
-    final client = _StreamingProbeClient();
+  test(
+    'initial playable probes are limited to four concurrent requests',
+    () async {
+      final firstWaveStarted = Completer<void>();
+      final releaseFirstWave = Completer<void>();
+      var started = 0;
+      var active = 0;
+      var maxActive = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/vod/search.html') {
+          return _html('''
+          <div class="item">
+            <strong>测试番剧</strong>
+            <a class="detail" href="/detail/limited.html">详情</a>
+          </div>
+        ''');
+        }
+        if (request.url.path == '/detail/limited.html') {
+          return _html(
+            List.generate(
+              5,
+              (index) =>
+                  '<ul class="line"><li><a href="/play/$index.html">第1集</a></li></ul>',
+            ).join(),
+          );
+        }
+        if (request.url.path.startsWith('/play/')) {
+          final index = request.url.pathSegments[1].split('.').first;
+          return _html('''
+          <script>var player={"url":"https://cdn.example.com/probe-$index.mp4"};</script>
+        ''');
+        }
+        if (request.url.path.startsWith('/probe-')) {
+          expect(request.headers['Range'], 'bytes=0-2048');
+          started++;
+          active++;
+          if (active > maxActive) maxActive = active;
+          if (started == 4) firstWaveStarted.complete();
+          await releaseFirstWave.future;
+          active--;
+          return http.Response.bytes(
+            _mp4ProbeSample(),
+            200,
+            headers: {'content-type': 'video/mp4'},
+          );
+        }
+        return http.Response('not found', 404);
+      });
 
+      final resolving = RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _animeSubject,
+        episode: _episode,
+      );
+      await firstWaveStarted.future.timeout(const Duration(seconds: 1));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(started, 4);
+      releaseFirstWave.complete();
+
+      final lines = await resolving;
+      expect(lines, hasLength(5));
+      expect(lines.every((line) => line.available), isTrue);
+      expect(started, 5);
+      expect(maxActive, 4);
+    },
+  );
+
+  test(
+    'playable probe cancels an open stream after a bounded sample',
+    () async {
+      final client = _StreamingProbeClient();
+
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _animeSubject,
+        episode: _episode,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isTrue);
+      expect(client.probeRange, 'bytes=0-2048');
+      expect(client.probeStreamCancelled, isTrue);
+    },
+  );
+
+  test('single-file probe reads real size and MP4 resolution', () async {
+    final sample = _mp4TkhdSample(width: 1920, height: 1080);
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/video.mp4',
+      probe: (request) {
+        expect(request.headers['Range'], 'bytes=0-2048');
+        return http.Response.bytes(
+          sample,
+          206,
+          headers: {
+            'content-type': 'video/mp4',
+            'content-range': 'bytes 0-65535/52428800',
+            'content-length': '${sample.length}',
+          },
+        );
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(line.latency, isNotNull);
+    expect(line.format, 'MP4');
+    expect(line.sizeBytes, 50 * 1024 * 1024);
+    expect(line.sizeLabel, '50.0 MB');
+    expect(line.videoWidth, 1920);
+    expect(line.videoHeight, 1080);
+    expect(line.quality, '1080P');
+  });
+
+  test('single-file probe falls back to 200 Content-Length', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/video.webm',
+      probe: (request) => http.Response.bytes(
+        const [0x1A, 0x45, 0xDF, 0xA3],
+        200,
+        headers: {
+          'content-type': 'video/webm',
+          'content-length': '${10 * 1024 * 1024}',
+        },
+      ),
+    );
+
+    expect(line.available, isTrue);
+    expect(line.format, 'WebM');
+    expect(line.sizeBytes, 10 * 1024 * 1024);
+    expect(line.sizeLabel, '10.0 MB');
+  });
+
+  test(
+    'HLS master exposes highest resolution and estimated VOD size',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/master.m3u8',
+        probe: (request) {
+          switch (request.url.path) {
+            case '/master.m3u8':
+              return http.Response(
+                '''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480,CODECS="avc1.4d401f,mp4a.40.2"
+480/index.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,AVERAGE-BANDWIDTH=4000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+/media-proxy?url=https%3A%2F%2Fcdn.example.com%2F1080%2Findex.m3u8&referer=https%3A%2F%2Fexample.com%2F
+''',
+                200,
+                headers: {'content-type': 'application/vnd.apple.mpegurl'},
+              );
+            case '/1080/index.m3u8':
+              expect(request.headers['Range'], 'bytes=0-524287');
+              return http.Response(
+                '''
+#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+segment-1.ts
+#EXTINF:10.0,
+segment-2.ts
+#EXT-X-ENDLIST
+''',
+                200,
+                headers: {'content-type': 'application/vnd.apple.mpegurl'},
+              );
+            case '/1080/segment-1.ts':
+              return http.Response.bytes(
+                _mpegTsSample(),
+                206,
+                headers: {
+                  'content-type': 'video/mp2t',
+                  'content-range': 'bytes 0-2048/5000000',
+                },
+              );
+          }
+          return http.Response('not found', 404);
+        },
+      );
+
+      expect(line.available, isTrue);
+      expect(line.format, 'HLS');
+      expect(line.videoWidth, 1920);
+      expect(line.videoHeight, 1080);
+      expect(line.quality, '1080P');
+      expect(line.adaptive, isTrue);
+      expect(line.isLive, isFalse);
+      expect(line.bitrate, 4000000);
+      expect(line.codecs, 'avc1.640028,mp4a.40.2');
+      expect(line.sizeEstimated, isTrue);
+      expect(line.sizeBytes, 10000000);
+      expect(line.sizeLabel, '约 9.5 MB');
+    },
+  );
+
+  test('HLS master with a 404 child playlist is rejected', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/dead-master.m3u8',
+      probe: (request) {
+        if (request.url.path == '/dead-master.m3u8') {
+          return http.Response(
+            '''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480
+dead-child.m3u8
+''',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        return http.Response('gone', 404);
+      },
+    );
+
+    expect(line.available, isFalse);
+    expect(line.message, contains('子清单'));
+  });
+
+  test('HLS media playlist with a 404 first segment is rejected', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/dead-segment.m3u8',
+      probe: (request) {
+        if (request.url.path == '/dead-segment.m3u8') {
+          return _playableHls();
+        }
+        return http.Response('gone', 404);
+      },
+    );
+
+    expect(line.available, isFalse);
+    expect(line.message, contains('媒体分片'));
+  });
+
+  test(
+    'HLS metadata timeout retries during required reachability check',
+    () async {
+      final never = Completer<http.Response>();
+      var variantRequests = 0;
+      addTearDown(() {
+        if (!never.isCompleted) never.complete(http.Response('late', 503));
+      });
+      final stopwatch = Stopwatch()..start();
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/slow-master.m3u8',
+        probe: (request) {
+          if (request.url.path == '/slow-master.m3u8') {
+            return http.Response(
+              '''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+slow-variant.m3u8
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          if (request.url.path == '/slow-variant.m3u8') {
+            variantRequests++;
+            return variantRequests == 1 ? never.future : _playableHls();
+          }
+          if (request.url.path == '/segment-1.ts') {
+            return _playableSegment();
+          }
+          return http.Response('not found', 404);
+        },
+      );
+      stopwatch.stop();
+
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 4)));
+      expect(line.available, isTrue);
+      expect(line.videoWidth, 1920);
+      expect(line.videoHeight, 1080);
+      expect(line.bitrate, 5000000);
+      expect(line.sizeBytes, isNull);
+    },
+  );
+
+  test(
+    'malformed HLS child URI is rejected instead of bypassing reachability',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/malformed-master.m3u8',
+        probe: (request) => http.Response(
+          '''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+http://[
+''',
+          200,
+          headers: {'content-type': 'application/vnd.apple.mpegurl'},
+        ),
+      );
+
+      expect(line.available, isFalse);
+      expect(line.format, 'HLS');
+    },
+  );
+
+  test('cross-origin HLS children do not inherit source credentials', () async {
+    final requestedHosts = <String>[];
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/protected/master.m3u8',
+      probe: (request) {
+        requestedHosts.add(request.url.host);
+        switch (request.url.host) {
+          case 'cdn.example.com':
+            expect(request.headers['Cookie'], 'session=user-value');
+            expect(request.headers['Authorization'], 'Bearer user-value');
+            expect(request.headers['Range'], 'bytes=0-2048');
+            return http.Response(
+              '''
+#EXTM3U
+#EXT-X-STREAM-INF:RESOLUTION=1920x1080
+https://variants.example.net/media.m3u8
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          case 'variants.example.net':
+            expect(request.headers, isNot(contains('Cookie')));
+            expect(request.headers, isNot(contains('Authorization')));
+            expect(request.headers['Range'], 'bytes=0-524287');
+            return http.Response(
+              '''
+#EXTM3U
+#EXTINF:10.0,
+https://segments.example.org/segment.ts
+#EXT-X-ENDLIST
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          case 'segments.example.org':
+            expect(request.headers, isNot(contains('Cookie')));
+            expect(request.headers, isNot(contains('Authorization')));
+            expect(request.headers['Range'], 'bytes=0-2048');
+            return http.Response.bytes(
+              _mpegTsSample(),
+              206,
+              headers: {'content-range': 'bytes 0-2048/1048576'},
+            );
+        }
+        return http.Response('not found', 404);
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(
+      requestedHosts,
+      containsAll(<String>[
+        'cdn.example.com',
+        'variants.example.net',
+        'segments.example.org',
+      ]),
+    );
+  });
+
+  test('chunked HLS manifests are read through EOF without length', () async {
     final lines = await RulePlaybackResolver(
-      client: client,
+      client: _ChunkedPlaylistProbeClient(),
     ).resolveRule(rule: _kazumiRule, subject: _animeSubject, episode: _episode);
 
     expect(lines, hasLength(1));
-    expect(lines.single.available, isTrue);
-    expect(client.probeRange, 'bytes=0-2048');
-    expect(client.probeStreamCancelled, isTrue);
+    final line = lines.single;
+    expect(line.available, isTrue);
+    expect(line.videoWidth, 1920);
+    expect(line.videoHeight, 1080);
+    expect(line.isLive, isFalse);
+    expect(line.sizeEstimated, isTrue);
+    expect(line.sizeBytes, 10000000);
+  });
+
+  test('HLS VOD reads an end marker beyond the first 64 KB', () async {
+    final padding = List.generate(
+      9000,
+      (index) => '# manifest padding $index',
+    ).join('\n');
+    final manifest =
+        '''
+#EXTM3U
+#EXTINF:10.0,
+segment-1.ts
+$padding
+#EXTINF:10.0,
+segment-2.ts
+#EXT-X-ENDLIST
+''';
+    final manifestBytes = utf8.encode(manifest);
+    var manifestRequests = 0;
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/long-media.m3u8',
+      probe: (request) {
+        if (request.url.path == '/long-media.m3u8') {
+          manifestRequests++;
+          if (request.headers['Range'] == 'bytes=0-2048') {
+            return http.Response.bytes(
+              manifestBytes.take(2049).toList(growable: false),
+              206,
+              headers: {
+                'content-type': 'application/vnd.apple.mpegurl',
+                'content-range': 'bytes 0-2048/${manifestBytes.length}',
+              },
+            );
+          }
+          expect(request.headers['Range'], 'bytes=0-524287');
+          return http.Response.bytes(
+            manifestBytes,
+            206,
+            headers: {
+              'content-type': 'application/vnd.apple.mpegurl',
+              'content-range':
+                  'bytes 0-${manifestBytes.length - 1}/${manifestBytes.length}',
+            },
+          );
+        }
+        expect(request.url.path, '/segment-1.ts');
+        expect(request.headers['Range'], 'bytes=0-2048');
+        return http.Response.bytes(
+          _mpegTsSample(),
+          206,
+          headers: {
+            'content-type': 'video/mp2t',
+            'content-range': 'bytes 0-524287/5242880',
+          },
+        );
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(line.isLive, isFalse);
+    expect(line.sizeEstimated, isTrue);
+    expect(line.sizeBytes, 10 * 1024 * 1024);
+    expect(manifestRequests, 2);
+  });
+
+  test('HLS media playlist estimates size from one segment', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/media.m3u8',
+      probe: (request) {
+        if (request.url.path == '/media.m3u8') {
+          return http.Response(
+            '''
+#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+segment-1.ts
+#EXTINF:10.0,
+segment-2.ts
+#EXT-X-ENDLIST
+''',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        expect(request.url.path, '/segment-1.ts');
+        return http.Response.bytes(
+          _mpegTsSample(),
+          206,
+          headers: {
+            'content-type': 'video/mp2t',
+            'content-range': 'bytes 0-65535/5242880',
+          },
+        );
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(line.format, 'HLS');
+    expect(line.isLive, isFalse);
+    expect(line.sizeEstimated, isTrue);
+    expect(line.sizeBytes, 10 * 1024 * 1024);
+    expect(line.sizeLabel, '约 10.0 MB');
+  });
+
+  test(
+    'mixed HLS byte ranges are not reported as an exact total size',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/mixed-ranges.m3u8',
+        probe: (request) {
+          if (request.url.path == '/mixed-ranges.m3u8') {
+            return http.Response(
+              '''
+#EXTM3U
+#EXTINF:10.0,
+#EXT-X-BYTERANGE:1024@0
+shared.ts
+#EXTINF:10.0,
+standalone.ts
+#EXT-X-ENDLIST
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          if (request.url.path == '/shared.ts') {
+            return _playableSegment();
+          }
+          return http.Response('not found', 404);
+        },
+      );
+
+      expect(line.available, isTrue);
+      expect(line.sizeBytes, isNull);
+      expect(line.sizeEstimated, isFalse);
+      expect(line.sizeLabel, isNull);
+    },
+  );
+
+  test(
+    'live HLS verifies a recent segment instead of requiring ENDLIST',
+    () async {
+      final requestedSegments = <String>[];
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/live.m3u8',
+        probe: (request) {
+          if (request.url.path == '/live.m3u8') {
+            return http.Response(
+              '''
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:100
+#EXTINF:6.0,
+old.ts
+#EXTINF:6.0,
+current.ts
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          requestedSegments.add(request.url.path);
+          if (request.url.path == '/current.ts') return _playableSegment();
+          return http.Response('expired', 404);
+        },
+      );
+
+      expect(line.available, isTrue);
+      expect(line.isLive, isTrue);
+      expect(requestedSegments, contains('/current.ts'));
+      expect(requestedSegments, isNot(contains('/old.ts')));
+    },
+  );
+
+  test('HLS master falls back when its highest variant is dead', () async {
+    var lowerVariantRequests = 0;
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/fallback-master.m3u8',
+      probe: (request) {
+        switch (request.url.path) {
+          case '/fallback-master.m3u8':
+            return http.Response(
+              '''
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+dead-1080.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720
+working-720.m3u8
+''',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          case '/dead-1080.m3u8':
+            return http.Response('gone', 404);
+          case '/working-720.m3u8':
+            lowerVariantRequests++;
+            return _playableHls();
+          case '/segment-1.ts':
+            return _playableSegment();
+        }
+        return http.Response('not found', 404);
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(lowerVariantRequests, 1);
+  });
+
+  test('media MIME and octet-stream do not make text playable', () async {
+    for (final entry in <(String, String, String)>[
+      (
+        'https://cdn.example.com/fake.mp4',
+        'video/mp4',
+        '{"error":"access denied"}',
+      ),
+      (
+        'https://cdn.example.com/blob',
+        'application/octet-stream',
+        'not a media file',
+      ),
+    ]) {
+      final resolver = RulePlaybackResolver(
+        client: MockClient(
+          (_) async =>
+              http.Response(entry.$3, 200, headers: {'content-type': entry.$2}),
+        ),
+      );
+      final verified = await resolver.verifyPlaybackLine(
+        line: _networkLine(entry.$1),
+      );
+      expect(verified.available, isFalse, reason: entry.$1);
+    }
+  });
+
+  test('a short fake MPEG-TS response is rejected', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/short-ts.m3u8',
+      probe: (request) {
+        if (request.url.path == '/short-ts.m3u8') return _playableHls();
+        return http.Response.bytes(
+          const <int>[0x47, 0x40, 0x00, 0x10],
+          206,
+          headers: {'content-type': 'video/mp2t'},
+        );
+      },
+    );
+
+    expect(line.available, isFalse);
+    expect(line.message, contains('媒体分片'));
+  });
+
+  test(
+    'AES-128 HLS accepts an opaque segment only after key verification',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/encrypted.m3u8',
+        probe: (request) {
+          switch (request.url.path) {
+            case '/encrypted.m3u8':
+              return http.Response(
+                '''
+#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+#EXTINF:10.0,
+encrypted-segment.ts
+#EXT-X-ENDLIST
+''',
+                200,
+                headers: {'content-type': 'application/vnd.apple.mpegurl'},
+              );
+            case '/key.bin':
+              return http.Response.bytes(
+                List<int>.generate(16, (index) => index),
+                206,
+                headers: {'content-type': 'application/octet-stream'},
+              );
+            case '/encrypted-segment.ts':
+              return http.Response.bytes(
+                List<int>.generate(512, (index) => (index * 73) & 0xff),
+                206,
+                headers: {'content-type': 'application/octet-stream'},
+              );
+          }
+          return http.Response('not found', 404);
+        },
+      );
+
+      expect(line.available, isTrue);
+    },
+  );
+
+  test('AES-128 HLS is rejected when its key cannot be fetched', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/missing-key.m3u8',
+      probe: (request) {
+        if (request.url.path == '/missing-key.m3u8') {
+          return http.Response(
+            '''
+#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI="missing.bin"
+#EXTINF:10.0,
+encrypted-segment.ts
+#EXT-X-ENDLIST
+''',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        if (request.url.path == '/encrypted-segment.ts') {
+          fail('Encrypted segment must not be trusted before its key');
+        }
+        return http.Response('gone', 404);
+      },
+    );
+
+    expect(line.available, isFalse);
+  });
+
+  test(
+    'binary signature split across response chunks is still detected',
+    () async {
+      final verified =
+          await RulePlaybackResolver(
+            client: _SplitSignatureProbeClient(),
+          ).verifyPlaybackLine(
+            line: _networkLine('https://cdn.example.com/video.mp4'),
+          );
+
+      expect(verified.available, isTrue);
+      expect(verified.format, 'MP4');
+    },
+  );
+
+  test('Range rejection retries one bounded GET without Range', () async {
+    var requests = 0;
+    final resolver = RulePlaybackResolver(
+      client: MockClient((request) async {
+        requests++;
+        if (requests == 1) {
+          expect(request.headers['Range'], 'bytes=0-2048');
+          return http.Response('range unsupported', 416);
+        }
+        expect(request.headers, isNot(contains('Range')));
+        return http.Response.bytes(
+          _mp4ProbeSample(),
+          200,
+          headers: {'content-type': 'video/mp4'},
+        );
+      }),
+    );
+
+    final verified = await resolver.verifyPlaybackLine(
+      line: _networkLine('https://cdn.example.com/no-range.mp4'),
+    );
+    expect(verified.available, isTrue);
+    expect(requests, 2);
+  });
+
+  test(
+    'truncated HLS sample expands before checking media references',
+    () async {
+      final padding = List<String>.generate(
+        180,
+        (index) => '# padding $index',
+      ).join('\n');
+      final manifest =
+          '''
+#EXTM3U
+$padding
+#EXTINF:10.0,
+segment-1.ts
+#EXT-X-ENDLIST
+''';
+      final bytes = utf8.encode(manifest);
+      var manifestRequests = 0;
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/padded-before-segment.m3u8',
+        probe: (request) {
+          if (request.url.path == '/padded-before-segment.m3u8') {
+            manifestRequests++;
+            if (request.headers['Range'] == 'bytes=0-2048') {
+              return http.Response.bytes(
+                bytes.take(2049).toList(growable: false),
+                206,
+                headers: {
+                  'content-type': 'application/vnd.apple.mpegurl',
+                  'content-range': 'bytes 0-2048/${bytes.length}',
+                },
+              );
+            }
+            return http.Response.bytes(
+              bytes,
+              206,
+              headers: {
+                'content-type': 'application/vnd.apple.mpegurl',
+                'content-range': 'bytes 0-${bytes.length - 1}/${bytes.length}',
+              },
+            );
+          }
+          return _playableSegment();
+        },
+      );
+
+      expect(line.available, isTrue);
+      expect(manifestRequests, 2);
+    },
+  );
+
+  test(
+    'forceRefresh bypasses a cached successful probe before playback',
+    () async {
+      var requests = 0;
+      final resolver = RulePlaybackResolver(
+        client: MockClient((_) async {
+          requests++;
+          if (requests == 1) {
+            return http.Response.bytes(
+              _mp4ProbeSample(),
+              206,
+              headers: {'content-type': 'video/mp4'},
+            );
+          }
+          return http.Response('expired', 404);
+        }),
+      );
+      final candidate = _networkLine('https://cdn.example.com/expiring.mp4');
+
+      expect(
+        (await resolver.verifyPlaybackLine(line: candidate)).available,
+        isTrue,
+      );
+      expect(
+        (await resolver.verifyPlaybackLine(line: candidate)).available,
+        isTrue,
+      );
+      expect(requests, 1);
+      final refreshed = await resolver.verifyPlaybackLine(
+        line: candidate,
+        forceRefresh: true,
+      );
+      expect(refreshed.available, isFalse);
+      expect(requests, 2);
+    },
+  );
+
+  test('static DASH manifest exposes resolution and estimated size', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/video.mpd',
+      probe: (request) {
+        if (request.url.path != '/video.mpd') {
+          expect(
+            request.url.path,
+            anyOf('/init-v1080.m4s', '/chunk-v1080-1.m4s'),
+          );
+          return http.Response.bytes(
+            _mp4ProbeSample(),
+            206,
+            headers: {'content-type': 'video/mp4'},
+          );
+        }
+        return http.Response(
+          '''
+<MPD type="static" mediaPresentationDuration="PT60S">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate initialization="init-\$RepresentationID\$.m4s" media="chunk-\$RepresentationID\$-\$Number\$.m4s" startNumber="1" />
+      <Representation id="v720" width="1280" height="720" bandwidth="3000000" codecs="avc1.4d401f" />
+      <Representation id="v1080" width="1920" height="1080" bandwidth="8000000" codecs="hev1.1.6.L120" />
+    </AdaptationSet>
+    <AdaptationSet contentType="audio" mimeType="audio/mp4">
+      <Representation bandwidth="128000" codecs="mp4a.40.2" />
+    </AdaptationSet>
+  </Period>
+</MPD>
+''',
+          200,
+          headers: {'content-type': 'application/dash+xml'},
+        );
+      },
+    );
+
+    expect(line.available, isTrue);
+    expect(line.format, 'DASH');
+    expect(line.videoWidth, 1920);
+    expect(line.videoHeight, 1080);
+    expect(line.quality, '1080P');
+    expect(line.adaptive, isTrue);
+    expect(line.bitrate, 8128000);
+    expect(line.codecs, 'hev1.1.6.L120,mp4a.40.2');
+    expect(line.sizeEstimated, isTrue);
+    expect(line.sizeBytes, 60960000);
+    expect(line.sizeLabel, '约 58.1 MB');
+  });
+
+  test('DASH manifest is rejected when its media segment is dead', () async {
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/dead-video.mpd',
+      probe: (request) {
+        if (request.url.path == '/dead-video.mpd') {
+          return http.Response(
+            '''
+<MPD type="static">
+  <Period>
+    <AdaptationSet contentType="video" mimeType="video/mp4">
+      <SegmentTemplate initialization="init.m4s" media="chunk-\$Number\$.m4s" />
+      <Representation id="video" bandwidth="1000000" />
+    </AdaptationSet>
+  </Period>
+</MPD>
+''',
+            200,
+            headers: {'content-type': 'application/dash+xml'},
+          );
+        }
+        if (request.url.path == '/init.m4s') {
+          return http.Response.bytes(
+            _mp4ProbeSample(),
+            206,
+            headers: {'content-type': 'video/mp4'},
+          );
+        }
+        return http.Response('gone', 404);
+      },
+    );
+
+    expect(line.available, isFalse);
+    expect(line.message, contains('媒体分片'));
   });
 
   test(
@@ -193,7 +1530,14 @@ void main() {
     final client = MockClient((request) async {
       switch (request.url.path) {
         case '/movie.mp4':
-          return http.Response('video', 200);
+          return http.Response.bytes(
+            const [0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70],
+            206,
+            headers: {
+              'content-type': 'video/mp4',
+              'content-range': 'bytes 0-7/1024',
+            },
+          );
         case '/search.html':
           return _html('''
             <div class="module-item-pic">
@@ -450,7 +1794,9 @@ void main() {
     final client = MockClient((request) async {
       switch (request.url.path) {
         case '/anime/02.m3u8':
-          return http.Response('#EXTM3U', 200);
+          return _playableHls();
+        case '/anime/segment-1.ts':
+          return _playableSegment();
         case '/search':
           expect(request.url.query, contains('wd='));
           return _html('''
@@ -490,11 +1836,133 @@ void main() {
   });
 }
 
+const _playableHlsManifest = '''
+#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.0,
+segment-1.ts
+#EXT-X-ENDLIST
+''';
+
+http.Response _playableHls() => http.Response(
+  _playableHlsManifest,
+  200,
+  headers: {'content-type': 'application/vnd.apple.mpegurl'},
+);
+
+http.Response _playableSegment() => http.Response.bytes(
+  _mpegTsSample(),
+  206,
+  headers: {'content-type': 'video/mp2t'},
+);
+
+List<int> _mpegTsSample() {
+  final bytes = List<int>.filled(188 * 2, 0);
+  bytes[0] = 0x47;
+  bytes[188] = 0x47;
+  return bytes;
+}
+
+List<int> _mp4ProbeSample() {
+  return <int>[
+    0,
+    0,
+    0,
+    24,
+    ...ascii.encode('ftyp'),
+    ...List<int>.filled(16, 0),
+  ];
+}
+
+MockClient _singleLineClient({
+  required String mediaPath,
+  required http.Response Function() mediaResponse,
+}) {
+  return MockClient((request) async {
+    if (request.url.path == mediaPath) return mediaResponse();
+    switch (request.url.path) {
+      case '/vod/search.html':
+        return _html('''
+          <div class="item">
+            <strong>测试番剧</strong>
+            <a class="detail" href="/detail/probe.html">详情</a>
+          </div>
+        ''');
+      case '/detail/probe.html':
+        return _html('''
+          <ul class="line"><li><a href="/play/probe.html">第1集</a></li></ul>
+        ''');
+      case '/play/probe.html':
+        return _html('''
+          <script>var player={"url":"https://cdn.example.com$mediaPath"};</script>
+        ''');
+    }
+    return http.Response('not found', 404);
+  });
+}
+
 http.Response _html(String body) => http.Response(
   body,
   200,
   headers: {'content-type': 'text/html; charset=utf-8'},
 );
+
+Future<PlaybackLine> _resolveSinglePlayableLine(
+  String playableUrl, {
+  required FutureOr<http.Response> Function(http.Request request) probe,
+}) async {
+  final client = MockClient((request) async {
+    switch (request.url.path) {
+      case '/vod/search.html':
+        return _html('''
+          <div class="item">
+            <strong>测试番剧</strong>
+            <a class="detail" href="/detail/metadata.html">详情</a>
+          </div>
+        ''');
+      case '/detail/metadata.html':
+        return _html('''
+          <ul class="line"><li><a href="/play/metadata.html">第1集</a></li></ul>
+        ''');
+      case '/play/metadata.html':
+        return _html('''
+          <script>var player={"url":"$playableUrl"};</script>
+        ''');
+      default:
+        return await probe(request);
+    }
+  });
+  final lines = await RulePlaybackResolver(
+    client: client,
+  ).resolveRule(rule: _kazumiRule, subject: _animeSubject, episode: _episode);
+  expect(lines, hasLength(1));
+  return lines.single;
+}
+
+PlaybackLine _networkLine(String url) => PlaybackLine(
+  id: 'probe-line',
+  episodeId: 1,
+  providerId: 'probe',
+  providerName: 'Probe',
+  title: 'Probe line',
+  quality: '',
+  format: '',
+  url: url,
+  available: true,
+);
+
+Uint8List _mp4TkhdSample({required int width, required int height}) {
+  final bytes = Uint8List(104);
+  final data = ByteData.sublistView(bytes);
+  data.setUint32(0, 12, Endian.big);
+  bytes.setRange(4, 8, ascii.encode('ftyp'));
+  data.setUint32(12, 92, Endian.big);
+  bytes.setRange(16, 20, ascii.encode('tkhd'));
+  bytes[20] = 0;
+  data.setUint32(96, width << 16, Endian.big);
+  data.setUint32(100, height << 16, Endian.big);
+  return bytes;
+}
 
 class _StreamingProbeClient extends http.BaseClient {
   String? probeRange;
@@ -503,11 +1971,19 @@ class _StreamingProbeClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final path = request.url.path;
+    if (path == '/segment-1.ts') {
+      final response = _playableSegment();
+      return http.StreamedResponse(
+        Stream.value(response.bodyBytes),
+        response.statusCode,
+        headers: response.headers,
+      );
+    }
     if (path == '/stream.m3u8') {
-      probeRange = request.headers['Range'];
+      probeRange ??= request.headers['Range'];
       late final StreamController<List<int>> controller;
       controller = StreamController<List<int>>(
-        onListen: () => controller.add(utf8.encode('#EXTM3U')),
+        onListen: () => controller.add(utf8.encode(_playableHlsManifest)),
         onCancel: () {
           probeStreamCancelled = true;
           return controller.close();
@@ -539,6 +2015,69 @@ class _StreamingProbeClient extends http.BaseClient {
       Stream.value(utf8.encode(body)),
       statusCode,
       headers: {'content-type': 'text/html; charset=utf-8'},
+    );
+  }
+}
+
+class _SplitSignatureProbeClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final sample = _mp4ProbeSample();
+    return http.StreamedResponse(
+      Stream<List<int>>.fromIterable(<List<int>>[
+        sample.take(2).toList(growable: false),
+        sample.skip(2).toList(growable: false),
+      ]),
+      206,
+      headers: {'content-type': 'video/mp4'},
+    );
+  }
+}
+
+class _ChunkedPlaylistProbeClient extends http.BaseClient {
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (request.url.path == '/chunked/segment-1.ts') {
+      final response = _playableSegment();
+      return http.StreamedResponse(
+        Stream.value(response.bodyBytes),
+        response.statusCode,
+        headers: response.headers,
+      );
+    }
+    final chunks = switch (request.url.path) {
+      '/vod/search.html' => [
+        '<div class="item"><strong>测试番剧</strong>',
+        '<a class="detail" href="/detail/chunked.html">详情</a></div>',
+      ],
+      '/detail/chunked.html' => [
+        '<ul class="line"><li>',
+        '<a href="/play/chunked.html">第1集</a></li></ul>',
+      ],
+      '/play/chunked.html' => [
+        '<script>var player={"url":"https://cdn.example.com/chunked/master.m3u8"',
+        '};</script>',
+      ],
+      '/chunked/master.m3u8' => [
+        '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,',
+        'AVERAGE-BANDWIDTH=4000000,RESOLUTION=1920x1080\nvariant.m3u8\n',
+      ],
+      '/chunked/variant.m3u8' => [
+        '#EXTM3U\n#EXTINF:10.0,\nsegment-1.ts\n',
+        '#EXTINF:10.0,\nsegment-2.ts\n#EXT-X-ENDLIST\n',
+      ],
+      _ => const ['not found'],
+    };
+    final notFound = chunks.length == 1 && chunks.single == 'not found';
+    final playlist = request.url.path.endsWith('.m3u8');
+    return http.StreamedResponse(
+      Stream<List<int>>.fromIterable(chunks.map(utf8.encode)),
+      notFound ? 404 : 200,
+      headers: {
+        'content-type': playlist
+            ? 'application/vnd.apple.mpegurl'
+            : 'text/html; charset=utf-8',
+      },
     );
   }
 }

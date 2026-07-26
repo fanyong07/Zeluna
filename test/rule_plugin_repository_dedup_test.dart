@@ -133,6 +133,41 @@ void main() {
     },
   );
 
+  test('same-name drpy rules with different scripts remain separate', () {
+    final first = _rule(
+      id: 'drpy:first',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 23),
+      engine: 'drpy-js',
+      includeKazumi: false,
+      baseUrl: '',
+      searchUrl: '',
+      rawConfig: const {'extUrl': 'https://rules-a.example/lib/site.js'},
+    );
+    final second = _rule(
+      id: 'drpy:second',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 23),
+      engine: 'drpy-js',
+      includeKazumi: false,
+      baseUrl: '',
+      searchUrl: '',
+      rawConfig: const {'extUrl': 'https://rules-b.example/lib/site.js'},
+    );
+
+    final repository = RulePluginRepository(extraRules: [first, second]);
+
+    expect(repository.byId(first.id)?.id, first.id);
+    expect(repository.byId(second.id)?.id, second.id);
+    expect(
+      repository.allRules
+          .where((rule) => {first.id, second.id}.contains(rule.id))
+          .map((rule) => rule.id)
+          .toSet(),
+      {first.id, second.id},
+    );
+  });
+
   test('ports, queries and non-Latin names are not collapsed accidentally', () {
     final portA = _rule(
       id: 'user:port-a',
@@ -204,6 +239,130 @@ void main() {
 
     expect(normalized.repositories, hasLength(2));
   });
+
+  test('execution readiness reports real blockers', () {
+    final executable = _rule(
+      id: 'ready:native',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+    );
+    final webView = _rule(
+      id: 'blocked:webview',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      requiresWebView: true,
+    );
+    final privateAuth = _rule(
+      id: 'blocked:auth',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      requiresPrivateAuth: true,
+    );
+    final missingConfig = _rule(
+      id: 'blocked:config',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      includeKazumi: false,
+    );
+    final unsupportedEngine = _rule(
+      id: 'blocked:engine',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      engine: 'drpy-js',
+    );
+    final directApi = _rule(
+      id: 'ready:json-api',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      engine: 'tvbox-json-api',
+    );
+    final incompleteXbpq = _rule(
+      id: 'blocked:xbpq',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      engine: 'XBPQ',
+    );
+
+    expect(executable.executionStatus, RuleExecutionStatus.executable);
+    expect(directApi.executionStatus, RuleExecutionStatus.executable);
+    expect(webView.executionStatus, RuleExecutionStatus.needsWebView);
+    expect(privateAuth.executionStatus, RuleExecutionStatus.needsPrivateAuth);
+    expect(missingConfig.executionStatus, RuleExecutionStatus.missingConfig);
+    expect(incompleteXbpq.executionStatus, RuleExecutionStatus.missingConfig);
+    expect(
+      unsupportedEngine.executionStatus,
+      RuleExecutionStatus.missingConfig,
+    );
+    expect(executable.canResolveNatively, isTrue);
+    expect(webView.canResolveNatively, isFalse);
+    expect(privateAuth.canResolveNatively, isFalse);
+    expect(missingConfig.canResolveNatively, isFalse);
+    expect(unsupportedEngine.canResolveNatively, isFalse);
+  });
+
+  test('normalization keeps blocked rules installed but never enabled', () {
+    final executable = _rule(
+      id: 'ready:installed',
+      name: '可执行规则',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 18),
+      baseUrl: 'https://ready.example/',
+      searchUrl: 'https://ready.example/search?wd=@keyword',
+    );
+    final blockedRules = [
+      _rule(
+        id: 'blocked:webview-installed',
+        name: 'WebView 规则',
+        version: '1.0',
+        updatedAt: DateTime(2026, 7, 18),
+        baseUrl: 'https://webview.example/',
+        searchUrl: 'https://webview.example/search?wd=@keyword',
+        requiresWebView: true,
+      ),
+      _rule(
+        id: 'blocked:auth-installed',
+        name: '授权规则',
+        version: '1.0',
+        updatedAt: DateTime(2026, 7, 18),
+        baseUrl: 'https://auth.example/',
+        searchUrl: 'https://auth.example/search?wd=@keyword',
+        requiresPrivateAuth: true,
+      ),
+      _rule(
+        id: 'blocked:config-installed',
+        name: '缺配置规则',
+        version: '1.0',
+        updatedAt: DateTime(2026, 7, 18),
+        baseUrl: 'https://config.example/',
+        searchUrl: 'https://config.example/search?wd=@keyword',
+        includeKazumi: false,
+      ),
+      _rule(
+        id: 'blocked:engine-installed',
+        name: '缺执行器规则',
+        version: '1.0',
+        updatedAt: DateTime(2026, 7, 18),
+        baseUrl: 'https://engine.example/',
+        searchUrl: 'https://engine.example/search?wd=@keyword',
+        engine: 'csp',
+      ),
+    ];
+    final rules = [executable, ...blockedRules];
+    final repository = RulePluginRepository(extraRules: rules);
+    final allIds = rules.map((rule) => rule.id).toSet();
+
+    final normalized = repository.normalizeState(
+      RulePluginState(
+        installedIds: allIds,
+        enabledIds: allIds,
+        customRules: rules,
+      ),
+    );
+
+    expect(normalized.installedIds, allIds);
+    expect(normalized.enabledIds, {executable.id});
+    expect(normalized.customRules, hasLength(rules.length));
+  });
 }
 
 RulePlugin _rule({
@@ -215,6 +374,12 @@ RulePlugin _rule({
   String baseUrl = 'https://duplicate.example/',
   String searchUrl = 'https://duplicate.example/search?wd=@keyword',
   RuleContentType contentType = RuleContentType.anime,
+  bool searchable = true,
+  bool requiresWebView = false,
+  bool requiresPrivateAuth = false,
+  bool includeKazumi = true,
+  String? unsupportedReason,
+  Map<String, dynamic> rawConfig = const {},
 }) {
   return RulePlugin(
     id: id,
@@ -228,15 +393,21 @@ RulePlugin _rule({
     tags: const ['native'],
     baseUrl: baseUrl,
     searchUrl: searchUrl,
-    searchable: true,
+    searchable: searchable,
     quickSearch: true,
     filterable: false,
-    kazumi: const KazumiParserConfig(
-      searchList: '//div',
-      searchName: '//a',
-      searchResult: '//a',
-      chapterRoads: '//ul',
-      chapterResult: '//li/a',
-    ),
+    requiresWebView: requiresWebView,
+    requiresPrivateAuth: requiresPrivateAuth,
+    kazumi: includeKazumi
+        ? const KazumiParserConfig(
+            searchList: '//div',
+            searchName: '//a',
+            searchResult: '//a',
+            chapterRoads: '//ul',
+            chapterResult: '//li/a',
+          )
+        : null,
+    unsupportedReason: unsupportedReason,
+    rawConfig: rawConfig,
   );
 }

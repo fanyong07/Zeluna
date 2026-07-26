@@ -5,104 +5,610 @@ import 'package:flutter/foundation.dart';
 import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
+import 'package:xml/xml.dart';
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import '../domain/anime_models.dart';
+import 'android_csp_bridge.dart';
+import 'csp_rule_support.dart';
+import 'drpy_runtime.dart';
 import 'rule_models.dart';
 
 const _playableProbeTimeout = Duration(seconds: 6);
+const _playlistMetadataTimeout = Duration(seconds: 3);
+const _metadataEnrichmentBudget = Duration(seconds: 2);
+const _probeChunkIdleTimeout = Duration(milliseconds: 300);
+const _initialProbeRangeEnd = 2048;
+const _maxBinaryProbeSampleBytes = 64 * 1024;
+const _maxManifestProbeSampleBytes = 512 * 1024;
+const _minimumBinaryProbeBytes = 4 * 1024;
+const _maxDrpyMediaRedirects = 3;
+const _maxConcurrentPlayableProbes = 4;
+const _maxConcurrentMetadataProbes = 4;
 const _responseCacheTtl = Duration(minutes: 5);
 const _availableProbeCacheTtl = Duration(minutes: 2);
 const _failedProbeCacheTtl = Duration(seconds: 20);
 const _maxResponseCacheEntries = 128;
 const _maxProbeCacheEntries = 256;
 
+class RulePlaybackCancellationToken {
+  final Set<void Function()> _callbacks = <void Function()>{};
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    final callbacks = _callbacks.toList(growable: false);
+    _callbacks.clear();
+    for (final callback in callbacks) {
+      try {
+        callback();
+      } catch (_) {
+        // Cancellation is best-effort; one client must not prevent the rest
+        // of the lookup session from being stopped.
+      }
+    }
+  }
+
+  void Function() register(void Function() callback) {
+    if (_cancelled) {
+      try {
+        callback();
+      } catch (_) {
+        // Already cancelled: registering work must not revive or fail it.
+      }
+      return () {};
+    }
+    _callbacks.add(callback);
+    return () => _callbacks.remove(callback);
+  }
+}
+
+final Object _rulePlaybackResolveContextKey = Object();
+final Object _drpyPublicMediaProbeKey = Object();
+
+class _RulePlaybackResolveContext {
+  const _RulePlaybackResolveContext(this.cancellationToken);
+
+  final RulePlaybackCancellationToken? cancellationToken;
+}
+
+_RulePlaybackResolveContext? get _activeRulePlaybackResolveContext =>
+    Zone.current[_rulePlaybackResolveContextKey]
+        as _RulePlaybackResolveContext?;
+
+bool get _requiresDrpyPublicMediaProbe =>
+    Zone.current[_drpyPublicMediaProbeKey] == true;
+
 class RulePlaybackResolver {
   RulePlaybackResolver({
     http.Client? client,
+    http.Client? drpyPublicClient,
+    AndroidCspBridge? cspBridge,
+    DrpyRuntime? drpyRuntime,
     this.timeout = const Duration(seconds: 10),
-  }) : _client = client;
+  }) : _client = client,
+       _drpyPublicClient = drpyPublicClient,
+       _cspBridge = cspBridge ?? AndroidCspBridge(),
+       _drpyRuntime = drpyRuntime ?? DrpyRuntime();
 
   static const _desktopUserAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   final http.Client? _client;
+  final http.Client? _drpyPublicClient;
+  final AndroidCspBridge _cspBridge;
+  final DrpyRuntime _drpyRuntime;
   final Duration timeout;
   final Map<String, _TimedCacheEntry<String>> _responseCache = {};
   final Map<String, Future<String>> _responseRequests = {};
   final Map<String, _TimedCacheEntry<_PlayableProbeResult>> _probeCache = {};
   final Map<String, Future<_PlayableProbeResult>> _probeRequests = {};
+  final _playableProbeLimiter = _AsyncLimiter(_maxConcurrentPlayableProbes);
+  final _metadataProbeLimiter = _AsyncLimiter(_maxConcurrentMetadataProbes);
+  Future<AndroidCspCapabilities>? _cspCapabilitiesRequest;
+  final Map<String, Future<void>> _cspPreparationRequests = {};
+  var _cacheGeneration = 0;
+
+  void clearCaches() {
+    _cacheGeneration++;
+    _responseCache.clear();
+    _responseRequests.clear();
+    _probeCache.clear();
+    _probeRequests.clear();
+  }
+
+  /// Verifies a concrete media URL before it is handed to the player.
+  ///
+  /// `PlaybackLine.available` is intentionally upgraded here from a source
+  /// claim to a real network/media probe result. This is also used by direct
+  /// sources (AniCh/M3U/open media) that do not go through a rule parser.
+  Future<PlaybackLine> verifyPlaybackLine({
+    required PlaybackLine line,
+    bool enrichMetadata = true,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return line;
+    final rawUrl = line.url?.trim() ?? '';
+    final target = Uri.tryParse(rawUrl);
+    if (target == null ||
+        !const {'http', 'https'}.contains(target.scheme.toLowerCase()) ||
+        target.host.isEmpty) {
+      // Local/offline media is validated by the native player. Network-like
+      // lines with no valid HTTP endpoint must never be marked playable.
+      if (target != null && target.scheme.toLowerCase() == 'file') return line;
+      return _copyPlaybackLineWithProbe(
+        line,
+        const _PlayableProbeResult(false, '视频地址格式不正确。'),
+      );
+    }
+
+    final resolveContext = _RulePlaybackResolveContext(cancellationToken);
+    return runZoned(() async {
+      final injectedClient = line.publicHttpOnly
+          ? _drpyPublicClient ?? _client
+          : _client;
+      final ownedClient = injectedClient == null;
+      final client =
+          injectedClient ??
+          (line.publicHttpOnly
+              ? _drpyRuntime.createPublicHttpClient()
+              : http.Client());
+      try {
+        final headers = <String, String>{
+          'User-Agent': _desktopUserAgent,
+          ...line.headers,
+        };
+        if (line.publicHttpOnly) {
+          await _drpyRuntime.ensurePublicUri(target);
+        }
+        final probe = await runZoned(
+          () => _probePlayableUrl(
+            client,
+            rawUrl,
+            headers,
+            enrichMetadata: enrichMetadata,
+            forceRefresh: forceRefresh,
+          ),
+          zoneValues: line.publicHttpOnly
+              ? {_drpyPublicMediaProbeKey: true}
+              : const <Object, Object?>{},
+        );
+        return _copyPlaybackLineWithProbe(line, probe);
+      } catch (error) {
+        if (cancellationToken?.isCancelled ?? false) return line;
+        return _copyPlaybackLineWithProbe(
+          line,
+          _PlayableProbeResult(false, _friendlyError(error)),
+        );
+      } finally {
+        if (ownedClient) client.close();
+      }
+    }, zoneValues: {_rulePlaybackResolveContextKey: resolveContext});
+  }
 
   Future<List<PlaybackLine>> resolveRule({
     required RulePlugin rule,
     required AnimeSubject subject,
     required AnimeEpisode episode,
     bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async {
-    if (rule.requiresCaptcha || rule.unsupportedReason != null) {
-      return [
-        _unavailableLine(
-          rule,
-          subject,
-          episode,
-          rule.unsupportedReason ?? '该规则需要验证码或 WebView 手动处理，解析器不会绕过验证。',
-        ),
-      ];
-    }
-
-    final ownedClient = _client == null;
-    final client = _client ?? http.Client();
-    final started = Stopwatch()..start();
-    try {
-      return switch (rule.engine.toLowerCase()) {
-        'native' => await _resolveKazumi(
-          client,
-          rule,
-          subject,
-          episode,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-        'xbpq' => await _resolveXbpq(
-          client,
-          rule,
-          subject,
-          episode,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-        'tvbox-json-api' => await _resolveTvBoxJsonApi(
-          client,
-          rule,
-          subject,
-          episode,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-        'animeko-web-selector' => await _resolveAnimekoWebSelector(
-          client,
-          rule,
-          subject,
-          episode,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-        _ => [
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final resolveContext = _RulePlaybackResolveContext(cancellationToken);
+    return runZoned(() async {
+      if (rule.requiresCaptcha || rule.unsupportedReason != null) {
+        if (rule.engine.toLowerCase() == 'android-csp') return const [];
+        return [
           _unavailableLine(
             rule,
             subject,
             episode,
-            '该规则属于 ${rule.engine}，需要接入对应规则执行器后才能解析。',
+            rule.unsupportedReason ?? '该规则需要验证码或 WebView 手动处理，解析器不会绕过验证。',
           ),
-        ],
-      };
-    } catch (error) {
-      return [_unavailableLine(rule, subject, episode, _friendlyError(error))];
-    } finally {
-      started.stop();
-      if (ownedClient) client.close();
+        ];
+      }
+
+      final isDrpy = rule.engine.toLowerCase() == 'drpy-js';
+      final injectedClient = isDrpy ? _drpyPublicClient ?? _client : _client;
+      final ownedClient = injectedClient == null;
+      final client =
+          injectedClient ??
+          (isDrpy ? _drpyRuntime.createPublicHttpClient() : http.Client());
+      final started = Stopwatch()..start();
+      try {
+        return switch (rule.engine.toLowerCase()) {
+          'native' => await _resolveKazumi(
+            client,
+            rule,
+            subject,
+            episode,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+          'xbpq' => await _resolveXbpq(
+            client,
+            rule,
+            subject,
+            episode,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+          'drpy-js' => await _resolveDrpy(
+            client,
+            rule,
+            subject,
+            episode,
+            verifyPlayable: verifyPlayable,
+          ),
+          'android-csp' => await _resolveAndroidCsp(
+            client,
+            rule,
+            subject,
+            episode,
+            verifyPlayable: verifyPlayable,
+          ),
+          'tvbox-json-api' => await _resolveTvBoxJsonApi(
+            client,
+            rule,
+            subject,
+            episode,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+          'tvbox-xml-api' => await _resolveTvBoxXmlApi(
+            client,
+            rule,
+            subject,
+            episode,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+          'animeko-web-selector' => await _resolveAnimekoWebSelector(
+            client,
+            rule,
+            subject,
+            episode,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+          _ => [
+            _unavailableLine(
+              rule,
+              subject,
+              episode,
+              '该规则属于 ${rule.engine}，需要接入对应规则执行器后才能解析。',
+            ),
+          ],
+        };
+      } catch (error) {
+        if (cancellationToken?.isCancelled ?? false) return const [];
+        return [
+          _unavailableLine(rule, subject, episode, _friendlyError(error)),
+        ];
+      } finally {
+        started.stop();
+        if (ownedClient) client.close();
+      }
+    }, zoneValues: {_rulePlaybackResolveContextKey: resolveContext});
+  }
+
+  Future<List<PlaybackLine>> _resolveDrpy(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+  }) async {
+    final raw = rule.rawConfig;
+    final inlineSource = raw['inlineSource']?.toString() ?? '';
+    final extUrl = raw['extUrl']?.toString() ?? '';
+    final runtimeResult = await _drpyRuntime.resolve(
+      DrpyRuntimeRequest(
+        ruleId: rule.id,
+        keyword: subject.title,
+        episodeNumber: episode.number,
+        episodeTitle: episode.title,
+        ruleSource: inlineSource,
+        ruleUrl: extUrl,
+        requestHeaders: rule.requestHeaders,
+        credentialOrigin: rule.baseUrl,
+      ),
+      client: client,
+    );
+    if (runtimeResult.error != null || runtimeResult.candidates.isEmpty) {
+      return const [];
     }
+
+    final lines = <PlaybackLine>[];
+    for (final candidate in runtimeResult.candidates) {
+      if (candidate.requiresSniffing) continue;
+      if (_activeRulePlaybackResolveContext?.cancellationToken?.isCancelled ??
+          false) {
+        return const [];
+      }
+      var referer = '';
+      for (final entry in candidate.headers.entries) {
+        if (entry.key.toLowerCase() == 'referer' &&
+            entry.value.trim().isNotEmpty) {
+          referer = entry.value.trim();
+          break;
+        }
+      }
+      final playableUrl = _normalizePlayableUrl(candidate.url, referer);
+      final target = Uri.tryParse(playableUrl);
+      if (target == null ||
+          !const {'http', 'https'}.contains(target.scheme.toLowerCase()) ||
+          target.host.isEmpty) {
+        continue;
+      }
+      try {
+        await _drpyRuntime.ensurePublicUri(target);
+      } catch (_) {
+        continue;
+      }
+      final baseHeaders = _headers(rule: rule, referer: referer);
+      final credentialOrigin = Uri.tryParse(rule.baseUrl.trim());
+      final headers = credentialOrigin == null
+          ? _withoutOriginBoundMediaHeaders(baseHeaders)
+          : _mediaChildHeaders(credentialOrigin, target, baseHeaders);
+      for (final entry in candidate.headers.entries) {
+        final name = entry.key.trim();
+        final value = entry.value.trim();
+        if (name.isNotEmpty && value.isNotEmpty) headers[name] = value;
+      }
+      final probe = await runZoned(
+        () => _playableCandidateStatus(
+          client,
+          playableUrl,
+          headers,
+          verifyPlayable: verifyPlayable,
+        ),
+        zoneValues: {_drpyPublicMediaProbeKey: true},
+      );
+      if (!probe.available) continue;
+      final lineName = candidate.lineName.trim().isEmpty
+          ? rule.name
+          : candidate.lineName.trim();
+      lines.add(
+        _availableLine(
+          rule,
+          episode,
+          url: playableUrl,
+          title: '${episode.displayTitle} 路 $lineName',
+          probe: probe,
+          referer: referer,
+          headers: headers,
+          publicHttpOnly: true,
+        ),
+      );
+    }
+    return lines;
+  }
+
+  Future<List<PlaybackLine>> _resolveAndroidCsp(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+  }) async {
+    if (!_cspBridge.isSupported) return const [];
+    final raw = rule.rawConfig;
+    final spiderMd5 = androidCspSpiderMd5(raw);
+    final api = androidCspApi(raw);
+    if (spiderMd5 == null ||
+        api.isEmpty ||
+        !isAuditedAndroidCspConfig(raw, fallbackApi: api)) {
+      return const [];
+    }
+
+    try {
+      final capabilities = await _cspCapabilities();
+      final package = capabilities.packageForMd5(spiderMd5);
+      if (package == null || !package.allowsApi(api)) return const [];
+      await _prepareCspPackage(spiderMd5);
+      if (_activeRulePlaybackResolveContext?.cancellationToken?.isCancelled ??
+          false) {
+        return const [];
+      }
+
+      final rawSiteKey = androidCspSiteKey(raw, rule.id);
+      final siteKey = rawSiteKey.length <= 150
+          ? rawSiteKey
+          : '${rawSiteKey.substring(0, 120)}:${rule.id.hashCode}';
+      final site = AndroidCspSite(
+        spiderMd5: spiderMd5,
+        siteKey: siteKey,
+        api: api,
+        ext: androidCspEncodedExt(raw),
+      );
+      await _cspBridge.initialize(site);
+
+      _RankedResult<Map<String, dynamic>>? bestMatch;
+      var preference = 0;
+      for (final keyword in _searchKeywords(subject)) {
+        if (_activeRulePlaybackResolveContext?.cancellationToken?.isCancelled ??
+            false) {
+          return const [];
+        }
+        try {
+          final decoded = jsonDecode(
+            await _cspBridge.searchContent(
+              site: site,
+              keyword: keyword,
+              quick: false,
+              page: '1',
+            ),
+          );
+          final ranked = _rankBestTvBoxItem(
+            _tvBoxItems(decoded),
+            subject,
+            preference++,
+          );
+          if (ranked != null &&
+              (bestMatch == null || ranked.score > bestMatch.score)) {
+            bestMatch = ranked;
+          }
+        } catch (_) {
+          preference++;
+        }
+      }
+      var item = bestMatch?.value;
+      if (item == null) return const [];
+
+      if (_tvBoxPlayUrl(item).isEmpty) {
+        final vodId = item['vod_id']?.toString().trim() ?? '';
+        if (vodId.isEmpty) return const [];
+        final details = _tvBoxItems(
+          jsonDecode(await _cspBridge.detailContent(site: site, ids: [vodId])),
+        );
+        if (details.isEmpty) return const [];
+        item = details.first;
+      }
+
+      final groups = _tvBoxPlayGroups(item);
+      if (groups.isEmpty) return const [];
+      return _collectPlaybackCandidates(
+        [
+          for (var index = 0; index < groups.length && index < 8; index++)
+            () => _resolveAndroidCspLine(
+              client,
+              rule,
+              episode,
+              site,
+              groups[index],
+              androidCspVipFlags(raw),
+              verifyPlayable: verifyPlayable,
+            ),
+        ],
+        verifyPlayable: verifyPlayable,
+        candidateTimeout: timeout,
+      );
+    } catch (_) {
+      // CSP failures are remembered by the rule-health layer, but are not
+      // emitted as dozens of dead playback rows. The imported rule remains.
+      return const [];
+    }
+  }
+
+  Future<PlaybackLine?> _resolveAndroidCspLine(
+    http.Client client,
+    RulePlugin rule,
+    AnimeEpisode episode,
+    AndroidCspSite site,
+    _TvBoxPlayGroup group,
+    List<String> vipFlags, {
+    required bool verifyPlayable,
+  }) async {
+    final selected = _pickTvBoxEpisode(group.episodes, episode);
+    if (selected == null) return null;
+    try {
+      final decoded = jsonDecode(
+        await _cspBridge.playerContent(
+          site: site,
+          flag: group.name,
+          id: selected.url,
+          vipFlags: vipFlags,
+        ),
+      );
+      if (decoded is! Map) return null;
+      final result = decoded.cast<String, dynamic>();
+      final rawUrl = result['url']?.toString().trim() ?? '';
+      if (rawUrl.isEmpty) return null;
+      final base = androidCspPinnedBase(site.spiderMd5);
+      final playableUrl = _normalizePlayableUrl(rawUrl, base);
+      if (!_looksPlayable(playableUrl)) return null;
+
+      final parse = int.tryParse(result['parse']?.toString() ?? '') ?? 0;
+      if (parse != 0 && !_isExplicitPlayableUrl(playableUrl)) return null;
+      final playerHeaders = _cspPlayerHeaders(
+        result['header'] ?? result['headers'],
+      );
+      final referer = _headerValue(playerHeaders, 'referer') ?? base;
+      final headers = _headers(rule: rule, referer: referer)
+        ..addAll(playerHeaders);
+      final probe = await _playableCandidateStatus(
+        client,
+        playableUrl,
+        headers,
+        verifyPlayable: verifyPlayable,
+      );
+      if (!probe.available) return null;
+      final lineName = group.name.trim().isEmpty
+          ? rule.name
+          : group.name.trim();
+      return _availableLine(
+        rule,
+        episode,
+        url: playableUrl,
+        title: '${selected.title} · $lineName',
+        probe: probe,
+        referer: referer,
+        headers: headers,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<AndroidCspCapabilities> _cspCapabilities() =>
+      _cspCapabilitiesRequest ??= _cspBridge.getCapabilities();
+
+  Future<void> _prepareCspPackage(String spiderMd5) async {
+    final existing = _cspPreparationRequests[spiderMd5];
+    if (existing != null) return existing;
+    late final Future<void> request;
+    request = _cspBridge.prepare(spiderMd5).then<void>((prepared) {
+      if (prepared.md5 != spiderMd5) {
+        throw const AndroidCspException(
+          'csp_artifact_hash_mismatch',
+          'The prepared CSP package did not match the requested digest.',
+        );
+      }
+    });
+    _cspPreparationRequests[spiderMd5] = request;
+    try {
+      await request;
+    } catch (_) {
+      if (identical(_cspPreparationRequests[spiderMd5], request)) {
+        _cspPreparationRequests.remove(spiderMd5);
+      }
+      rethrow;
+    }
+  }
+
+  Map<String, String> _cspPlayerHeaders(Object? value) {
+    Object? decoded = value;
+    if (decoded is String && decoded.trim().startsWith('{')) {
+      try {
+        decoded = jsonDecode(decoded);
+      } catch (_) {
+        return const {};
+      }
+    }
+    if (decoded is! Map) return const {};
+    final result = <String, String>{};
+    for (final entry in decoded.entries) {
+      final name = entry.key.toString().trim();
+      final headerValue = entry.value?.toString().trim() ?? '';
+      if (name.isNotEmpty && headerValue.isNotEmpty) {
+        result[name] = headerValue;
+      }
+    }
+    return result;
+  }
+
+  String? _headerValue(Map<String, String> headers, String name) {
+    final normalized = name.toLowerCase();
+    for (final entry in headers.entries) {
+      if (entry.key.toLowerCase() == normalized) return entry.value;
+    }
+    return null;
   }
 
   Future<List<PlaybackLine>> _resolveAnimekoWebSelector(
@@ -145,21 +651,27 @@ class RulePlaybackResolver {
     if (episodeLinks.isEmpty) {
       return [_unavailableLine(rule, subject, episode, '详情页没有解析到当前集的播放入口。')];
     }
+    final verifyQuickCandidates = !verifyPlayable && episodeLinks.length > 1;
 
-    final lines = (await Future.wait([
-      for (var index = 0; index < episodeLinks.length; index++)
-        _resolveAnimekoLine(
-          client,
-          rule,
-          config,
-          episode,
-          detailUrl,
-          episodeLinks[index],
-          index,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-    ])).whereType<PlaybackLine>().toList(growable: false);
+    final lines = await _collectPlaybackCandidates(
+      [
+        for (var index = 0; index < episodeLinks.length; index++)
+          () => _resolveAnimekoLine(
+            client,
+            rule,
+            config,
+            episode,
+            detailUrl,
+            episodeLinks[index],
+            index,
+            started,
+            verifyPlayable: verifyPlayable,
+            verifyExplicitMedia: verifyQuickCandidates,
+          ),
+      ],
+      verifyPlayable: verifyPlayable,
+      candidateTimeout: timeout,
+    );
 
     if (lines.isEmpty) {
       return [
@@ -179,6 +691,7 @@ class RulePlaybackResolver {
     int index,
     Stopwatch started, {
     required bool verifyPlayable,
+    bool verifyExplicitMedia = false,
   }) async {
     try {
       final playHtml = await _get(
@@ -203,6 +716,7 @@ class RulePlaybackResolver {
         playableUrl,
         headers,
         verifyPlayable: verifyPlayable,
+        verifyExplicitMedia: verifyExplicitMedia,
       );
       final title =
           '${link.title.isEmpty ? episode.displayTitle : link.title} · 线路${index + 1}';
@@ -212,7 +726,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: referer,
               quality: config.defaultResolution.trim().isEmpty
                   ? null
@@ -224,7 +738,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -303,21 +817,31 @@ class RulePlaybackResolver {
     if (roadNodes.isEmpty) {
       return [_unavailableLine(rule, subject, episode, '详情页没有解析到播放线路。')];
     }
+    final verifyQuickCandidates = !verifyPlayable && roadNodes.length > 1;
 
-    final lines = (await Future.wait([
-      for (var roadIndex = 0; roadIndex < roadNodes.length; roadIndex++)
-        _resolveKazumiLine(
-          client,
-          rule,
-          config,
-          episode,
-          detailUrl,
-          roadNodes[roadIndex],
-          roadIndex,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-    ])).whereType<PlaybackLine>().toList(growable: false);
+    final lines = await _collectPlaybackCandidates(
+      [
+        for (var roadIndex = 0; roadIndex < roadNodes.length; roadIndex++)
+          () => _resolveKazumiLine(
+            client,
+            rule,
+            config,
+            episode,
+            detailUrl,
+            roadNodes[roadIndex],
+            roadIndex,
+            started,
+            verifyPlayable: verifyPlayable,
+            verifyExplicitMedia: verifyQuickCandidates,
+          ),
+      ],
+      verifyPlayable: verifyPlayable,
+      candidateTimeout: timeout,
+      preferredQuickCandidate: verifyQuickCandidates
+          ? _isHlsPlaybackLine
+          : null,
+      preferredCandidateGrace: const Duration(milliseconds: 1100),
+    );
 
     if (lines.isEmpty) {
       return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
@@ -335,6 +859,7 @@ class RulePlaybackResolver {
     int roadIndex,
     Stopwatch started, {
     required bool verifyPlayable,
+    bool verifyExplicitMedia = false,
   }) async {
     try {
       final episodeNodes = _xpathNodes(road, config.chapterResult);
@@ -358,6 +883,7 @@ class RulePlaybackResolver {
         playableUrl,
         headers,
         verifyPlayable: verifyPlayable,
+        verifyExplicitMedia: verifyExplicitMedia,
       );
       final title = '${episode.displayTitle} · 线路${roadIndex + 1}';
       return probe.available
@@ -366,7 +892,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: playPageUrl,
               headers: headers,
             )
@@ -375,7 +901,7 @@ class RulePlaybackResolver {
               episode,
               url: playableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -459,20 +985,24 @@ class RulePlaybackResolver {
     var playGroups = _segmentsByRule(detailHtml, config.playArray);
     if (playGroups.isEmpty) playGroups = [detailHtml];
 
-    final lines = (await Future.wait([
-      for (var groupIndex = 0; groupIndex < playGroups.length; groupIndex++)
-        _resolveXbpqLine(
-          client,
-          rule,
-          config,
-          episode,
-          detailUrl,
-          playGroups[groupIndex],
-          groupIndex,
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-    ])).whereType<PlaybackLine>().toList(growable: false);
+    final lines = await _collectPlaybackCandidates(
+      [
+        for (var groupIndex = 0; groupIndex < playGroups.length; groupIndex++)
+          () => _resolveXbpqLine(
+            client,
+            rule,
+            config,
+            episode,
+            detailUrl,
+            playGroups[groupIndex],
+            groupIndex,
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+      ],
+      verifyPlayable: verifyPlayable,
+      candidateTimeout: timeout,
+    );
 
     if (lines.isEmpty) {
       return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
@@ -535,7 +1065,7 @@ class RulePlaybackResolver {
               episode,
               url: normalizedPlayableUrl,
               title: title,
-              latency: started.elapsed,
+              probe: probe,
               referer: playPageUrl,
               headers: headers,
             )
@@ -544,7 +1074,7 @@ class RulePlaybackResolver {
               episode,
               url: normalizedPlayableUrl,
               title: title,
-              latency: started.elapsed,
+              latency: probe.latency,
               message: probe.message,
               headers: headers,
             );
@@ -616,10 +1146,57 @@ class RulePlaybackResolver {
     Stopwatch started, {
     required bool verifyPlayable,
   }) async {
+    return _resolveTvBoxApi(
+      client,
+      rule,
+      subject,
+      episode,
+      started,
+      apiLabel: 'JSON',
+      decodeItems: (text) => _tvBoxItems(jsonDecode(text)),
+      verifyPlayable: verifyPlayable,
+    );
+  }
+
+  Future<List<PlaybackLine>> _resolveTvBoxXmlApi(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Stopwatch started, {
+    required bool verifyPlayable,
+  }) async {
+    return _resolveTvBoxApi(
+      client,
+      rule,
+      subject,
+      episode,
+      started,
+      apiLabel: 'XML',
+      decodeItems: _tvBoxXmlItems,
+      verifyPlayable: verifyPlayable,
+    );
+  }
+
+  Future<List<PlaybackLine>> _resolveTvBoxApi(
+    http.Client client,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Stopwatch started, {
+    required String apiLabel,
+    required List<Map<String, dynamic>> Function(String) decodeItems,
+    required bool verifyPlayable,
+  }) async {
     final endpoint = Uri.tryParse(rule.baseUrl.trim());
     if (endpoint == null || !endpoint.hasScheme || endpoint.host.isEmpty) {
       return [
-        _unavailableLine(rule, subject, episode, '该 TVBox JSON 源缺少有效接口地址。'),
+        _unavailableLine(
+          rule,
+          subject,
+          episode,
+          '该 TVBox $apiLabel 源缺少有效接口地址。',
+        ),
       ];
     }
 
@@ -635,6 +1212,7 @@ class RulePlaybackResolver {
             endpoint,
             searchUri,
             preference++,
+            decodeItems,
           ),
         );
       }
@@ -647,35 +1225,44 @@ class RulePlaybackResolver {
     if (_tvBoxPlayUrl(item).isEmpty) {
       final vodId = item['vod_id']?.toString().trim() ?? '';
       if (vodId.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(
-            await _get(
-              client,
-              _tvBoxDetailUri(endpoint, vodId),
-              _headers(rule: rule, referer: endpoint.toString()),
-            ),
-          );
-          final details = _tvBoxItems(decoded);
-          if (details.isNotEmpty) item = details.first;
-        } catch (_) {
-          // 搜索响应本身可能已经包含播放地址，详情补查失败时继续使用原数据。
+        for (final detailUri in _tvBoxDetailUris(endpoint, vodId)) {
+          try {
+            final details = decodeItems(
+              await _get(
+                client,
+                detailUri,
+                _headers(rule: rule, referer: endpoint.toString()),
+              ),
+            );
+            if (details.isEmpty) continue;
+            item = details.first;
+            if (_tvBoxPlayUrl(item).isNotEmpty) {
+              break;
+            }
+          } catch (_) {
+            // 聚合接口的 detail/videolist 支持并不一致，逐个尝试。
+          }
         }
       }
     }
 
     final groups = _tvBoxPlayGroups(item);
-    final lines = (await Future.wait([
-      for (var index = 0; index < groups.length && index < 8; index++)
-        _resolveTvBoxLine(
-          client,
-          rule,
-          episode,
-          endpoint,
-          groups[index],
-          started,
-          verifyPlayable: verifyPlayable,
-        ),
-    ])).whereType<PlaybackLine>().toList(growable: false);
+    final lines = await _collectPlaybackCandidates(
+      [
+        for (var index = 0; index < groups.length && index < 8; index++)
+          () => _resolveTvBoxLine(
+            client,
+            rule,
+            episode,
+            endpoint,
+            groups[index],
+            started,
+            verifyPlayable: verifyPlayable,
+          ),
+      ],
+      verifyPlayable: verifyPlayable,
+      candidateTimeout: timeout,
+    );
     if (lines.isEmpty) {
       return [
         _unavailableLine(rule, subject, episode, '已找到条目，但当前集没有可直接播放的地址。'),
@@ -691,16 +1278,17 @@ class RulePlaybackResolver {
     Uri endpoint,
     Uri searchUri,
     int preference,
+    List<Map<String, dynamic>> Function(String) decodeItems,
   ) async {
     try {
-      final decoded = jsonDecode(
+      final items = decodeItems(
         await _get(
           client,
           searchUri,
           _headers(rule: rule, referer: endpoint.toString()),
         ),
       );
-      return _rankBestTvBoxItem(_tvBoxItems(decoded), subject, preference);
+      return _rankBestTvBoxItem(items, subject, preference);
     } catch (_) {
       // TVBox 聚合接口格式并不完全一致，单个查询失败时让其他查询继续。
       return null;
@@ -739,7 +1327,7 @@ class RulePlaybackResolver {
             episode,
             url: playableUrl,
             title: title,
-            latency: started.elapsed,
+            probe: probe,
             referer: endpoint.toString(),
             headers: headers,
           )
@@ -748,7 +1336,7 @@ class RulePlaybackResolver {
             episode,
             url: playableUrl,
             title: title,
-            latency: started.elapsed,
+            latency: probe.latency,
             message: probe.message,
             headers: headers,
           );
@@ -759,33 +1347,41 @@ class RulePlaybackResolver {
     Uri url,
     Map<String, String> headers,
   ) async {
+    _throwIfLookupCancelled(url);
     final requestUri = _ruleRequestUri(url);
     final requestHeaders = _ruleRequestHeaders(url, headers);
     final key = _requestCacheKey('GET', requestUri, requestHeaders);
     final cached = _freshCacheValue(_responseCache, key);
     if (cached != null) return cached;
 
-    final existing = _responseRequests[key];
+    final inFlightKey = _resolveScopedInFlightKey(key);
+    final existing = _responseRequests[inFlightKey];
     if (existing != null) return existing;
 
-    final request = client
-        .get(requestUri, headers: requestHeaders)
-        .timeout(timeout)
-        .then(_responseText);
-    _responseRequests[key] = request;
+    final cacheGeneration = _cacheGeneration;
+    final request = _sendBufferedRequest(
+      client,
+      'GET',
+      requestUri,
+      requestHeaders,
+    ).then(_responseText);
+    _responseRequests[inFlightKey] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _responseCache,
-        key,
-        result,
-        _responseCacheTtl,
-        _maxResponseCacheEntries,
-      );
+      _throwIfLookupCancelled(requestUri);
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _responseCache,
+          key,
+          result,
+          _responseCacheTtl,
+          _maxResponseCacheEntries,
+        );
+      }
       return result;
     } finally {
-      if (identical(_responseRequests[key], request)) {
-        _responseRequests.remove(key);
+      if (identical(_responseRequests[inFlightKey], request)) {
+        _responseRequests.remove(inFlightKey);
       }
     }
   }
@@ -796,6 +1392,7 @@ class RulePlaybackResolver {
     String body,
     Map<String, String> headers,
   ) async {
+    _throwIfLookupCancelled(url);
     final requestUri = _ruleRequestUri(url);
     final requestHeaders = _ruleRequestHeaders(url, headers);
     final key = _requestCacheKey(
@@ -807,28 +1404,83 @@ class RulePlaybackResolver {
     final cached = _freshCacheValue(_responseCache, key);
     if (cached != null) return cached;
 
-    final existing = _responseRequests[key];
+    final inFlightKey = _resolveScopedInFlightKey(key);
+    final existing = _responseRequests[inFlightKey];
     if (existing != null) return existing;
 
-    final request = client
-        .post(requestUri, headers: requestHeaders, body: body)
-        .timeout(timeout)
-        .then(_responseText);
-    _responseRequests[key] = request;
+    final cacheGeneration = _cacheGeneration;
+    final request = _sendBufferedRequest(
+      client,
+      'POST',
+      requestUri,
+      requestHeaders,
+      body: body,
+    ).then(_responseText);
+    _responseRequests[inFlightKey] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _responseCache,
-        key,
-        result,
-        _responseCacheTtl,
-        _maxResponseCacheEntries,
-      );
+      _throwIfLookupCancelled(requestUri);
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _responseCache,
+          key,
+          result,
+          _responseCacheTtl,
+          _maxResponseCacheEntries,
+        );
+      }
       return result;
     } finally {
-      if (identical(_responseRequests[key], request)) {
-        _responseRequests.remove(key);
+      if (identical(_responseRequests[inFlightKey], request)) {
+        _responseRequests.remove(inFlightKey);
       }
+    }
+  }
+
+  Future<http.Response> _sendBufferedRequest(
+    http.Client client,
+    String method,
+    Uri uri,
+    Map<String, String> headers, {
+    String? body,
+  }) async {
+    final abortTrigger = Completer<void>();
+    void abort() {
+      if (!abortTrigger.isCompleted) abortTrigger.complete();
+    }
+
+    final cancellationToken =
+        _activeRulePlaybackResolveContext?.cancellationToken;
+    final unregisterCancellation = cancellationToken?.register(abort);
+    final request = http.AbortableRequest(
+      method,
+      uri,
+      abortTrigger: abortTrigger.future,
+    )..headers.addAll(headers);
+    if (body != null) request.body = body;
+    final operation = client.send(request).then(http.Response.fromStream);
+    try {
+      return await operation.timeout(
+        timeout,
+        onTimeout: () {
+          abort();
+          throw TimeoutException('Rule request timed out after $timeout.');
+        },
+      );
+    } finally {
+      unregisterCancellation?.call();
+    }
+  }
+
+  String _resolveScopedInFlightKey(String key) {
+    final context = _activeRulePlaybackResolveContext;
+    return context == null ? key : '$key|resolve:${identityHashCode(context)}';
+  }
+
+  void _throwIfLookupCancelled([Uri? uri]) {
+    if (_activeRulePlaybackResolveContext?.cancellationToken?.isCancelled ??
+        false) {
+      throw http.RequestAbortedException(uri);
     }
   }
 
@@ -836,7 +1488,7 @@ class RulePlaybackResolver {
     if (response.statusCode < 200 || response.statusCode >= 400) {
       throw HttpException('HTTP ${response.statusCode}');
     }
-    return response.body;
+    return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
 
   PlaybackLine _availableLine(
@@ -844,24 +1496,42 @@ class RulePlaybackResolver {
     AnimeEpisode episode, {
     required String url,
     required String title,
-    required Duration latency,
+    required _PlayableProbeResult probe,
     required String referer,
     String? quality,
     Map<String, String>? headers,
+    bool publicHttpOnly = false,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, referer);
+    final detectedQuality = _probeResolutionLabel(
+      probe.videoWidth,
+      probe.videoHeight,
+    );
     return PlaybackLine(
       id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
       title: title,
-      quality: quality ?? (rule.tags.contains('4K') ? '4K/HD' : 'HD'),
-      format: _formatForUrl(normalizedUrl, rule.engine),
+      quality:
+          detectedQuality ??
+          quality ??
+          _resolutionLabelForUrl(normalizedUrl) ??
+          (rule.tags.contains('4K') ? '4K/HD' : '分辨率未知'),
+      format: probe.format ?? _formatForUrl(normalizedUrl, rule.engine),
       url: normalizedUrl,
       headers: headers ?? _headers(rule: rule, referer: referer),
-      latency: latency,
-      sizeLabel: _sizeLabelForUrl(normalizedUrl),
+      latency: probe.latency,
+      sizeLabel: _probeSizeLabel(probe),
+      sizeBytes: probe.sizeBytes,
+      sizeEstimated: probe.sizeEstimated,
+      videoWidth: probe.videoWidth,
+      videoHeight: probe.videoHeight,
+      bitrate: probe.bitrate,
+      codecs: probe.codecs,
+      isLive: probe.isLive,
+      adaptive: probe.adaptive,
+      publicHttpOnly: publicHttpOnly,
       available: true,
       message: '已解析到当前集的播放地址。',
     );
@@ -872,13 +1542,15 @@ class RulePlaybackResolver {
     AnimeEpisode episode, {
     required String url,
     required String title,
-    required Duration latency,
+    required Duration? latency,
     required String message,
     required Map<String, String> headers,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, headers['Referer'] ?? '');
     return PlaybackLine(
-      id: 'rule:${rule.id}:${episode.id}:dead:${normalizedUrl.hashCode}',
+      // Keep the same logical id as the optimistic quick result so a failed
+      // verified probe replaces it instead of leaving a stale playable row.
+      id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
@@ -888,7 +1560,6 @@ class RulePlaybackResolver {
       url: normalizedUrl,
       headers: headers,
       latency: latency,
-      sizeLabel: _sizeLabelForUrl(normalizedUrl),
       available: false,
       message: message,
     );
@@ -960,39 +1631,61 @@ class RulePlaybackResolver {
   Future<_PlayableProbeResult> _probePlayableUrl(
     http.Client client,
     String url,
-    Map<String, String> headers,
-  ) async {
+    Map<String, String> headers, {
+    bool enrichMetadata = true,
+    bool forceRefresh = false,
+  }) async {
     final target = Uri.tryParse(url);
     if (target == null || !target.hasScheme) {
       return const _PlayableProbeResult(false, '视频地址格式不正确。');
     }
+    _throwIfLookupCancelled(target);
     final requestUri = _ruleRequestUri(target);
-    final requestHeaders = _ruleRequestHeaders(
-      target,
-      _videoProbeHeaders(headers),
+    final sourceHeaders = _videoProbeHeaders(headers);
+    final requestHeaders = _ruleRequestHeaders(target, sourceHeaders);
+    final key = _requestCacheKey(
+      '${enrichMetadata ? 'PROBE' : 'PROBE_QUICK'}'
+      '${_requiresDrpyPublicMediaProbe ? '_DRPY_PUBLIC' : ''}',
+      requestUri,
+      requestHeaders,
     );
-    final key = _requestCacheKey('PROBE', requestUri, requestHeaders);
-    final cached = _freshCacheValue(_probeCache, key);
-    if (cached != null) return cached;
+    if (!forceRefresh) {
+      final cached = _freshCacheValue(_probeCache, key);
+      if (cached != null) return cached;
+    }
 
-    final existing = _probeRequests[key];
+    final inFlightKey = _resolveScopedInFlightKey(key);
+    final existing = _probeRequests[inFlightKey];
     if (existing != null) return existing;
 
-    final request = _performPlayableProbe(client, requestUri, requestHeaders);
-    _probeRequests[key] = request;
+    final cacheGeneration = _cacheGeneration;
+    final request = _playableProbeLimiter.run(
+      () => _performPlayableProbe(
+        client,
+        sourceUri: target,
+        requestUri: requestUri,
+        headers: requestHeaders,
+        sourceHeaders: sourceHeaders,
+        enrichMetadata: enrichMetadata,
+      ),
+    );
+    _probeRequests[inFlightKey] = request;
     try {
       final result = await request;
-      _storeCacheValue(
-        _probeCache,
-        key,
-        result,
-        result.available ? _availableProbeCacheTtl : _failedProbeCacheTtl,
-        _maxProbeCacheEntries,
-      );
+      _throwIfLookupCancelled(requestUri);
+      if (cacheGeneration == _cacheGeneration) {
+        _storeCacheValue(
+          _probeCache,
+          key,
+          result,
+          result.available ? _availableProbeCacheTtl : _failedProbeCacheTtl,
+          _maxProbeCacheEntries,
+        );
+      }
       return result;
     } finally {
-      if (identical(_probeRequests[key], request)) {
-        _probeRequests.remove(key);
+      if (identical(_probeRequests[inFlightKey], request)) {
+        _probeRequests.remove(inFlightKey);
       }
     }
   }
@@ -1002,64 +1695,1578 @@ class RulePlaybackResolver {
     String url,
     Map<String, String> headers, {
     required bool verifyPlayable,
+    bool verifyExplicitMedia = false,
   }) {
-    if (!verifyPlayable && _isExplicitPlayableUrl(url)) {
-      return Future.value(const _PlayableProbeResult(true, ''));
-    }
-    return _probePlayableUrl(client, url, headers);
+    // A URL-looking string is only a candidate. Even the quick path performs
+    // a bounded media probe so dead CDN links and HTML error pages never leave
+    // the resolver as `available=true`.
+    return _probePlayableUrl(
+      client,
+      url,
+      headers,
+      enrichMetadata: verifyPlayable || verifyExplicitMedia,
+    );
   }
 
   Future<_PlayableProbeResult> _performPlayableProbe(
-    http.Client client,
-    Uri requestUri,
-    Map<String, String> headers,
-  ) async {
+    http.Client client, {
+    required Uri sourceUri,
+    required Uri requestUri,
+    required Map<String, String> headers,
+    required Map<String, String> sourceHeaders,
+    required bool enrichMetadata,
+  }) async {
+    final stopwatch = Stopwatch()..start();
     try {
-      final response = await _sendPlayableProbe(
+      var sample = await _sendPlayableProbe(
         client,
         requestUri,
         headers,
-      ).timeout(_playableProbeTimeout);
-      if (response.statusCode >= 200 && response.statusCode < 400) {
-        return const _PlayableProbeResult(true, '');
+        timeout: _playableProbeTimeout,
+      );
+      stopwatch.stop();
+      var response = sample.response;
+      final measuredLatency = sample.latency ?? stopwatch.elapsed;
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        if (!sample.sampleComplete &&
+            _isManifestResponse(requestUri, response)) {
+          try {
+            final expandedSample = await _sendPlayableProbe(
+              client,
+              _ruleRequestUri(sourceUri),
+              _ruleRequestHeaders(
+                sourceUri,
+                _manifestProbeHeaders(sourceHeaders),
+              ),
+              timeout: _playlistMetadataTimeout,
+            );
+            if (expandedSample.response.statusCode >= 200 &&
+                expandedSample.response.statusCode < 300) {
+              sample = expandedSample;
+              response = expandedSample.response;
+            }
+          } catch (_) {
+            // The bounded initial sample is still validated below. If it does
+            // not contain a complete manifest, the line will be rejected.
+          }
+        }
+        final validation = _validatePlayableSample(sourceUri, sample);
+        if (!validation.available) {
+          return _PlayableProbeResult(
+            false,
+            validation.message,
+            latency: measuredLatency,
+          );
+        }
+        final detectedFormat = _detectedMediaFormat(
+          sourceUri,
+          response.headers['content-type'],
+          utf8.decode(sample.sample, allowMalformed: true),
+        );
+        _ProbeMediaMetadata metadata;
+        try {
+          metadata = _mediaMetadataFromSample(sourceUri, sample);
+          if (enrichMetadata) {
+            metadata = await _probeMediaMetadata(
+              client,
+              sourceUri: sourceUri,
+              sourceHeaders: sourceHeaders,
+              sample: sample,
+            );
+          }
+        } catch (_) {
+          if (detectedFormat == 'HLS' || detectedFormat == 'DASH') {
+            return _PlayableProbeResult(
+              false,
+              '媒体清单格式无效，无法确认真实播放分片。',
+              latency: measuredLatency,
+            );
+          }
+          // Container metadata is optional for a signature-confirmed file.
+          metadata = const _ProbeMediaMetadata();
+        }
+        if (metadata.format == 'HLS') {
+          final hlsFailure = await _verifyHlsMediaReachability(
+            client,
+            sourceUri: sourceUri,
+            sourceHeaders: sourceHeaders,
+            metadata: metadata,
+          );
+          if (hlsFailure != null) {
+            return _PlayableProbeResult(
+              false,
+              hlsFailure,
+              latency: measuredLatency,
+            );
+          }
+        }
+        if (metadata.format == 'DASH') {
+          final dashFailure = await _verifyDashMediaReachability(
+            client,
+            sourceUri: sourceUri,
+            sourceHeaders: sourceHeaders,
+            metadata: metadata,
+          );
+          if (dashFailure != null) {
+            return _PlayableProbeResult(
+              false,
+              dashFailure,
+              latency: measuredLatency,
+            );
+          }
+        }
+        return _PlayableProbeResult(
+          true,
+          '',
+          latency: measuredLatency,
+          format: metadata.format,
+          sizeBytes: metadata.sizeBytes,
+          sizeEstimated: metadata.sizeEstimated,
+          videoWidth: metadata.videoWidth,
+          videoHeight: metadata.videoHeight,
+          bitrate: metadata.bitrate,
+          codecs: metadata.codecs,
+          isLive: metadata.isLive,
+          adaptive: metadata.adaptive,
+        );
       }
       if (response.statusCode == 403) {
-        return const _PlayableProbeResult(false, '视频 CDN 拒绝访问，可能有防盗链或地区限制。');
+        return _PlayableProbeResult(
+          false,
+          '视频 CDN 拒绝访问，可能有防盗链或地区限制。',
+          latency: measuredLatency,
+        );
       }
       if (response.statusCode == 404) {
-        return const _PlayableProbeResult(false, '视频 CDN 返回 404，这条播放地址已经失效。');
+        return _PlayableProbeResult(
+          false,
+          '视频 CDN 返回 404，这条播放地址已经失效。',
+          latency: measuredLatency,
+        );
       }
       return _PlayableProbeResult(
         false,
         '视频 CDN 返回 HTTP ${response.statusCode}。',
+        latency: measuredLatency,
       );
     } on TimeoutException {
-      return const _PlayableProbeResult(false, '视频 CDN 连接超时。');
+      stopwatch.stop();
+      return _PlayableProbeResult(
+        false,
+        '视频 CDN 连接超时。',
+        latency: stopwatch.elapsed,
+      );
     } catch (error) {
-      return _PlayableProbeResult(false, '视频 CDN 无法访问：${_shortError(error)}');
+      stopwatch.stop();
+      return _PlayableProbeResult(
+        false,
+        '视频 CDN 无法访问：${_shortError(error)}',
+        latency: stopwatch.elapsed,
+      );
     }
   }
 
-  Future<http.StreamedResponse> _sendPlayableProbe(
+  Future<_ProbeMediaMetadata> _probeMediaMetadata(
+    http.Client client, {
+    required Uri sourceUri,
+    required Map<String, String> sourceHeaders,
+    required _PlayableProbeResponse sample,
+  }) async {
+    var metadata = _mediaMetadataFromSample(sourceUri, sample);
+    final needsExpandedManifest =
+        !sample.sampleComplete &&
+        (metadata.format == 'HLS' || metadata.format == 'DASH');
+    final needsExtraRequest =
+        needsExpandedManifest ||
+        (metadata.format == 'HLS' &&
+            (metadata.variantUri != null ||
+                (!metadata.isLive && metadata.sampleSegmentUri != null)));
+    if (!needsExtraRequest) return metadata;
+    final enriched = await _metadataProbeLimiter.runIfAvailable(() async {
+      final enrichmentStopwatch = Stopwatch()..start();
+      Duration requestTimeout() {
+        final remaining =
+            _metadataEnrichmentBudget - enrichmentStopwatch.elapsed;
+        if (remaining <= Duration.zero) {
+          throw TimeoutException('Media metadata enrichment timed out.');
+        }
+        return remaining < _playlistMetadataTimeout
+            ? remaining
+            : _playlistMetadataTimeout;
+      }
+
+      var enriched = metadata;
+      try {
+        if (needsExpandedManifest) {
+          final expandedSample = await _sendPlayableProbe(
+            client,
+            _ruleRequestUri(sourceUri),
+            _ruleRequestHeaders(
+              sourceUri,
+              _manifestProbeHeaders(sourceHeaders),
+            ),
+            timeout: requestTimeout(),
+          );
+          if (expandedSample.response.statusCode >= 200 &&
+              expandedSample.response.statusCode < 400) {
+            enriched = _mediaMetadataFromSample(sourceUri, expandedSample);
+          }
+        }
+        if (enriched.format != 'HLS') return enriched;
+
+        final variantUri = enriched.variantUri;
+        if (variantUri != null) {
+          final childHeaders = _mediaChildHeaders(
+            sourceUri,
+            variantUri,
+            sourceHeaders,
+          );
+          final variantSample = await _sendPlayableProbe(
+            client,
+            _ruleRequestUri(variantUri),
+            _ruleRequestHeaders(
+              variantUri,
+              _manifestProbeHeaders(childHeaders),
+            ),
+            timeout: requestTimeout(),
+          );
+          if (variantSample.response.statusCode >= 200 &&
+              variantSample.response.statusCode < 400) {
+            final media = _mediaMetadataFromSample(variantUri, variantSample);
+            var sizeBytes = media.sizeBytes;
+            var sizeEstimated = media.sizeEstimated;
+            final durationSeconds = media.durationSeconds;
+            if (sizeBytes == null &&
+                !media.isLive &&
+                durationSeconds != null &&
+                durationSeconds > 0 &&
+                enriched.bitrate != null &&
+                enriched.bitrate! > 0) {
+              sizeBytes = (enriched.bitrate! * durationSeconds / 8).round();
+              sizeEstimated = true;
+            }
+            enriched = enriched.copyWith(
+              sizeBytes: sizeBytes,
+              sizeEstimated: sizeEstimated,
+              isLive: media.isLive,
+              durationSeconds: durationSeconds,
+              sampleSegmentUri: media.sampleSegmentUri,
+              sampleSegmentUris: media.sampleSegmentUris,
+              segmentCandidates: media.segmentCandidates,
+              sampleSegmentDurationSeconds: media.sampleSegmentDurationSeconds,
+            );
+          }
+        }
+        if (enriched.sizeBytes == null && !enriched.isLive) {
+          enriched = await _estimateHlsSizeFromSegment(
+            client,
+            metadata: enriched,
+            credentialSourceUri: sourceUri,
+            sourceHeaders: sourceHeaders,
+            timeout: requestTimeout(),
+          );
+        }
+      } catch (_) {
+        // 规格补全失败不影响线路可播放性，保留首个清单已经确认的信息。
+      }
+      return enriched;
+    });
+    return enriched ?? metadata;
+  }
+
+  Future<String?> _verifyHlsMediaReachability(
+    http.Client client, {
+    required Uri sourceUri,
+    required Map<String, String> sourceHeaders,
+    required _ProbeMediaMetadata metadata,
+  }) async {
+    final variants = metadata.variants.isNotEmpty
+        ? metadata.variants.take(3).toList(growable: false)
+        : metadata.variantUri == null
+        ? const <_HlsProbeVariant>[]
+        : <_HlsProbeVariant>[_HlsProbeVariant(uri: metadata.variantUri!)];
+    if (variants.isEmpty) {
+      return _verifyHlsSegments(
+        client,
+        credentialSourceUri: sourceUri,
+        sourceHeaders: sourceHeaders,
+        metadata: metadata,
+      );
+    }
+
+    String? lastFailure;
+    for (final variant in variants) {
+      try {
+        final variantHeaders = _mediaChildHeaders(
+          sourceUri,
+          variant.uri,
+          sourceHeaders,
+        );
+        final variantSample = await _sendPlayableProbe(
+          client,
+          _ruleRequestUri(variant.uri),
+          _ruleRequestHeaders(
+            variant.uri,
+            _manifestProbeHeaders(variantHeaders),
+          ),
+          timeout: _playlistMetadataTimeout,
+        );
+        final validation = _validatePlayableSample(variant.uri, variantSample);
+        if (variantSample.response.statusCode < 200 ||
+            variantSample.response.statusCode >= 300 ||
+            !validation.available) {
+          lastFailure = 'HLS 子清单已经失效。';
+          continue;
+        }
+        final mediaMetadata = _mediaMetadataFromSample(
+          variant.uri,
+          variantSample,
+        );
+        final failure = await _verifyHlsSegments(
+          client,
+          credentialSourceUri: variant.uri,
+          sourceHeaders: variantHeaders,
+          metadata: mediaMetadata,
+        );
+        if (failure == null) return null;
+        lastFailure = failure;
+      } on TimeoutException {
+        lastFailure = 'HLS 子清单或媒体分片验证超时。';
+      } catch (_) {
+        lastFailure = 'HLS 子清单无法解析或访问。';
+      }
+    }
+    return lastFailure ?? 'HLS 主清单内没有可播放的子清单。';
+  }
+
+  Future<String?> _verifyHlsSegments(
+    http.Client client, {
+    required Uri credentialSourceUri,
+    required Map<String, String> sourceHeaders,
+    required _ProbeMediaMetadata metadata,
+  }) async {
+    final candidates = metadata.segmentCandidates.isNotEmpty
+        ? metadata.segmentCandidates.take(3).toList(growable: false)
+        : metadata.sampleSegmentUris.isNotEmpty
+        ? metadata.sampleSegmentUris
+              .take(3)
+              .map((uri) => _HlsProbeSegment(uri: uri))
+              .toList(growable: false)
+        : metadata.sampleSegmentUri == null
+        ? const <_HlsProbeSegment>[]
+        : <_HlsProbeSegment>[_HlsProbeSegment(uri: metadata.sampleSegmentUri!)];
+    if (candidates.isEmpty) {
+      return 'HLS 清单没有返回可验证的媒体分片。';
+    }
+    var timedOut = false;
+    final keyAvailability = <Uri, bool>{};
+    for (final candidate in candidates) {
+      try {
+        var aes128KeyVerified = false;
+        if (candidate.usesAes128) {
+          final keyUri = candidate.keyUri;
+          if (keyUri == null) continue;
+          aes128KeyVerified =
+              keyAvailability[keyUri] ??
+              await _verifyHlsAes128Key(
+                client,
+                credentialSourceUri: credentialSourceUri,
+                keyUri: keyUri,
+                sourceHeaders: sourceHeaders,
+              );
+          keyAvailability[keyUri] = aes128KeyVerified;
+          if (!aes128KeyVerified) continue;
+        }
+        final segmentUri = candidate.uri;
+        final segmentHeaders = _mediaChildHeaders(
+          credentialSourceUri,
+          segmentUri,
+          sourceHeaders,
+        );
+        final segmentSample = await _sendPlayableProbe(
+          client,
+          _ruleRequestUri(segmentUri),
+          _ruleRequestHeaders(segmentUri, _videoProbeHeaders(segmentHeaders)),
+          timeout: _playlistMetadataTimeout,
+        );
+        if (segmentSample.response.statusCode >= 200 &&
+            segmentSample.response.statusCode < 300 &&
+            (_validatePlayableSample(segmentUri, segmentSample).available ||
+                (aes128KeyVerified &&
+                    _isOpaqueEncryptedHlsSegment(segmentSample)))) {
+          return null;
+        }
+      } on TimeoutException {
+        timedOut = true;
+      } catch (_) {
+        // Try another recent/alternate segment before rejecting the line.
+      }
+    }
+    return timedOut ? 'HLS 媒体分片验证超时。' : 'HLS 清单存在，但媒体分片无法读取。';
+  }
+
+  Future<bool> _verifyHlsAes128Key(
+    http.Client client, {
+    required Uri credentialSourceUri,
+    required Uri keyUri,
+    required Map<String, String> sourceHeaders,
+  }) async {
+    final keyHeaders = _mediaChildHeaders(
+      credentialSourceUri,
+      keyUri,
+      sourceHeaders,
+    );
+    final sample = await _sendPlayableProbe(
+      client,
+      _ruleRequestUri(keyUri),
+      _ruleRequestHeaders(keyUri, _videoProbeHeaders(keyHeaders)),
+      timeout: _playlistMetadataTimeout,
+    );
+    return sample.response.statusCode >= 200 &&
+        sample.response.statusCode < 300 &&
+        sample.sample.length == 16;
+  }
+
+  Future<String?> _verifyDashMediaReachability(
+    http.Client client, {
+    required Uri sourceUri,
+    required Map<String, String> sourceHeaders,
+    required _ProbeMediaMetadata metadata,
+  }) async {
+    if (metadata.dashResources.isEmpty) {
+      return 'DASH 清单没有可验证的初始化或媒体分片。';
+    }
+    for (final resource in metadata.dashResources.take(3)) {
+      try {
+        final childHeaders = _mediaChildHeaders(
+          sourceUri,
+          resource.uri,
+          sourceHeaders,
+        );
+        final sample = await _sendPlayableProbe(
+          client,
+          _ruleRequestUri(resource.uri),
+          _ruleRequestHeaders(resource.uri, _videoProbeHeaders(childHeaders)),
+          timeout: _playlistMetadataTimeout,
+        );
+        if (sample.response.statusCode < 200 ||
+            sample.response.statusCode >= 300 ||
+            !_validatePlayableSample(resource.uri, sample).available) {
+          return 'DASH ${resource.label}无法读取。';
+        }
+      } on TimeoutException {
+        return 'DASH ${resource.label}验证超时。';
+      } catch (_) {
+        return 'DASH ${resource.label}无法访问。';
+      }
+    }
+    return null;
+  }
+
+  Future<_ProbeMediaMetadata> _estimateHlsSizeFromSegment(
+    http.Client client, {
+    required _ProbeMediaMetadata metadata,
+    required Uri credentialSourceUri,
+    required Map<String, String> sourceHeaders,
+    required Duration timeout,
+  }) async {
+    final segmentUri = metadata.sampleSegmentUri;
+    final segmentDuration = metadata.sampleSegmentDurationSeconds;
+    final totalDuration = metadata.durationSeconds;
+    if (segmentUri == null ||
+        segmentDuration == null ||
+        segmentDuration <= 0 ||
+        totalDuration == null ||
+        totalDuration <= 0) {
+      return metadata;
+    }
+    final segmentSample = await _sendPlayableProbe(
+      client,
+      _ruleRequestUri(segmentUri),
+      _ruleRequestHeaders(
+        segmentUri,
+        _mediaChildHeaders(credentialSourceUri, segmentUri, sourceHeaders),
+      ),
+      timeout: timeout,
+    );
+    if (segmentSample.response.statusCode < 200 ||
+        segmentSample.response.statusCode >= 400) {
+      return metadata;
+    }
+    final segmentBytes = _responseTotalBytes(segmentSample.response);
+    if (segmentBytes == null || segmentBytes <= 0) return metadata;
+    final estimatedBytes = (segmentBytes * totalDuration / segmentDuration)
+        .round();
+    return metadata.copyWith(sizeBytes: estimatedBytes, sizeEstimated: true);
+  }
+
+  Future<_PlayableProbeResponse> _sendPlayableProbe(
     http.Client client,
     Uri requestUri,
-    Map<String, String> headers,
-  ) async {
-    final request = http.Request('GET', requestUri)..headers.addAll(headers);
-    final response = await client.send(request);
-    if (response.statusCode < 200 || response.statusCode >= 400) {
-      final subscription = response.stream.listen(null);
-      await subscription.cancel();
-      return response;
+    Map<String, String> headers, {
+    required Duration timeout,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    final first = await _sendPlayableProbeOnce(
+      client,
+      requestUri,
+      headers,
+      timeout: timeout,
+    );
+    const rangeRejectedStatuses = <int>{400, 405, 416};
+    final hasRange = headers.keys.any((name) => name.toLowerCase() == 'range');
+    if (!hasRange ||
+        !rangeRejectedStatuses.contains(first.response.statusCode)) {
+      return first;
     }
-    final stream = StreamIterator<List<int>>(response.stream);
+    final remaining = timeout - stopwatch.elapsed;
+    if (remaining <= Duration.zero) return first;
+    return _sendPlayableProbeOnce(
+      client,
+      requestUri,
+      _withoutHeaderIgnoreCase(headers, 'range'),
+      timeout: remaining,
+    );
+  }
+
+  Future<_PlayableProbeResponse> _sendPlayableProbeOnce(
+    http.Client client,
+    Uri requestUri,
+    Map<String, String> headers, {
+    required Duration timeout,
+  }) async {
+    final drpyPublicOnly = _requiresDrpyPublicMediaProbe;
+    final abortTrigger = Completer<void>();
+    void abort() {
+      if (!abortTrigger.isCompleted) abortTrigger.complete();
+    }
+
+    final cancellationToken =
+        _activeRulePlaybackResolveContext?.cancellationToken;
+    final unregisterCancellation = cancellationToken?.register(abort);
+    final operation = () async {
+      final stopwatch = Stopwatch()..start();
+      var currentUri = requestUri;
+      var currentHeaders = headers;
+      late http.StreamedResponse response;
+      for (var redirect = 0; ; redirect++) {
+        if (drpyPublicOnly) {
+          await _drpyRuntime.ensurePublicUri(
+            _proxyUpstreamUri(currentUri) ?? currentUri,
+          );
+        }
+        final request =
+            http.AbortableRequest(
+                'GET',
+                currentUri,
+                abortTrigger: abortTrigger.future,
+              )
+              ..followRedirects = !drpyPublicOnly
+              ..headers.addAll(currentHeaders);
+        response = await client.send(request);
+        final location = response.headers['location'];
+        if (!drpyPublicOnly ||
+            !_isHttpRedirect(response.statusCode) ||
+            location == null ||
+            location.trim().isEmpty) {
+          break;
+        }
+        if (redirect >= _maxDrpyMediaRedirects) {
+          final subscription = response.stream.listen(null);
+          await subscription.cancel();
+          throw const HttpException('drpy media redirect limit reached.');
+        }
+        final nextUri = currentUri.resolve(location.trim());
+        await _drpyRuntime.ensurePublicUri(
+          _proxyUpstreamUri(nextUri) ?? nextUri,
+        );
+        currentHeaders = _mediaChildHeaders(
+          currentUri,
+          nextUri,
+          currentHeaders,
+        );
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        currentUri = nextUri;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 400) {
+        stopwatch.stop();
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        return _PlayableProbeResponse(response, latency: stopwatch.elapsed);
+      }
+      final stream = StreamIterator<List<int>>(response.stream);
+      final sample = <int>[];
+      Duration? firstByteLatency;
+      final manifestResponse = _isManifestResponse(requestUri, response);
+      final sampleLimit = manifestResponse
+          ? _maxManifestProbeSampleBytes
+          : _maxBinaryProbeSampleBytes;
+      final contentLength = int.tryParse(
+        response.headers['content-length'] ?? '',
+      );
+      final targetBytes = contentLength == null || contentLength <= 0
+          ? null
+          : contentLength.clamp(1, sampleLimit);
+      final readUnknownLength = targetBytes == null;
+      var sampleComplete = false;
+      try {
+        // 清单读取到 EOF/上限；未知长度的二进制累计到最小嗅探量，
+        // 既允许容器签名跨 chunk，也避免 Range 被忽略后持续下载。
+        var firstChunk = true;
+        while (sample.length < sampleLimit) {
+          var idleTimedOut = false;
+          final hasNext = firstChunk || !readUnknownLength
+              ? await stream.moveNext()
+              : await stream.moveNext().timeout(
+                  _probeChunkIdleTimeout,
+                  onTimeout: () {
+                    idleTimedOut = true;
+                    return false;
+                  },
+                );
+          if (!hasNext) {
+            final totalBytes = _responseTotalBytes(response);
+            sampleComplete =
+                !idleTimedOut &&
+                (totalBytes == null || totalBytes <= sample.length);
+            break;
+          }
+          firstByteLatency ??= stopwatch.elapsed;
+          final chunk = stream.current;
+          final remaining = sampleLimit - sample.length;
+          sample.addAll(
+            chunk.length <= remaining ? chunk : chunk.take(remaining),
+          );
+          firstChunk = false;
+          if (targetBytes != null && sample.length >= targetBytes) {
+            final totalBytes = _responseTotalBytes(response);
+            sampleComplete = totalBytes != null && totalBytes <= sample.length;
+            break;
+          }
+          if (targetBytes == null &&
+              !manifestResponse &&
+              sample.length >= _minimumBinaryProbeBytes) {
+            break;
+          }
+        }
+      } finally {
+        stopwatch.stop();
+        await stream.cancel();
+      }
+      return _PlayableProbeResponse(
+        response,
+        sample: List<int>.unmodifiable(sample),
+        latency: firstByteLatency ?? stopwatch.elapsed,
+        sampleComplete: sampleComplete,
+      );
+    }();
     try {
-      // 只确认首个响应块可读；Range 被忽略时也不会把整段视频缓冲进内存。
-      await stream.moveNext();
+      return await operation.timeout(
+        timeout,
+        onTimeout: () {
+          abort();
+          throw TimeoutException('Media probe timed out after $timeout.');
+        },
+      );
     } finally {
-      await stream.cancel();
+      unregisterCancellation?.call();
     }
-    return response;
+  }
+}
+
+bool _isHttpRedirect(int statusCode) =>
+    statusCode == 301 ||
+    statusCode == 302 ||
+    statusCode == 303 ||
+    statusCode == 307 ||
+    statusCode == 308;
+
+class _PlayableProbeResponse {
+  const _PlayableProbeResponse(
+    this.response, {
+    this.sample = const [],
+    this.latency,
+    this.sampleComplete = false,
+  });
+
+  final http.StreamedResponse response;
+  final List<int> sample;
+  final Duration? latency;
+  final bool sampleComplete;
+}
+
+class _ProbeMediaMetadata {
+  const _ProbeMediaMetadata({
+    this.format,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
+    this.variantUri,
+    this.variants = const <_HlsProbeVariant>[],
+    this.durationSeconds,
+    this.sampleSegmentUri,
+    this.sampleSegmentUris = const <Uri>[],
+    this.segmentCandidates = const <_HlsProbeSegment>[],
+    this.sampleSegmentDurationSeconds,
+    this.dashResources = const <_DashProbeResource>[],
+  });
+
+  final String? format;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
+  final Uri? variantUri;
+  final List<_HlsProbeVariant> variants;
+  final double? durationSeconds;
+  final Uri? sampleSegmentUri;
+  final List<Uri> sampleSegmentUris;
+  final List<_HlsProbeSegment> segmentCandidates;
+  final double? sampleSegmentDurationSeconds;
+  final List<_DashProbeResource> dashResources;
+
+  _ProbeMediaMetadata copyWith({
+    int? sizeBytes,
+    bool? sizeEstimated,
+    bool? isLive,
+    double? durationSeconds,
+    Uri? sampleSegmentUri,
+    List<Uri>? sampleSegmentUris,
+    List<_HlsProbeSegment>? segmentCandidates,
+    double? sampleSegmentDurationSeconds,
+  }) {
+    return _ProbeMediaMetadata(
+      format: format,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      sizeEstimated: sizeEstimated ?? this.sizeEstimated,
+      videoWidth: videoWidth,
+      videoHeight: videoHeight,
+      bitrate: bitrate,
+      codecs: codecs,
+      isLive: isLive ?? this.isLive,
+      adaptive: adaptive,
+      variantUri: variantUri,
+      variants: variants,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
+      sampleSegmentUri: sampleSegmentUri ?? this.sampleSegmentUri,
+      sampleSegmentUris: sampleSegmentUris ?? this.sampleSegmentUris,
+      segmentCandidates: segmentCandidates ?? this.segmentCandidates,
+      sampleSegmentDurationSeconds:
+          sampleSegmentDurationSeconds ?? this.sampleSegmentDurationSeconds,
+      dashResources: dashResources,
+    );
+  }
+}
+
+_ProbeMediaMetadata _mediaMetadataFromSample(
+  Uri sourceUri,
+  _PlayableProbeResponse sample,
+) {
+  final text = utf8.decode(sample.sample, allowMalformed: true);
+  final format = _detectedMediaFormat(
+    sourceUri,
+    sample.response.headers['content-type'],
+    text,
+  );
+  if (format == 'HLS') {
+    return _hlsProbeMetadata(
+      sourceUri,
+      text,
+      sampleComplete: sample.sampleComplete,
+    );
+  }
+  if (format == 'DASH') return _dashProbeMetadata(sourceUri, text);
+
+  final dimensions = format == 'MP4'
+      ? _mp4Dimensions(sample.sample) ?? _resolutionDimensionsForUrl(sourceUri)
+      : _resolutionDimensionsForUrl(sourceUri);
+  return _ProbeMediaMetadata(
+    format: format,
+    sizeBytes: _responseTotalBytes(sample.response),
+    videoWidth: dimensions?.width,
+    videoHeight: dimensions?.height,
+  );
+}
+
+final RegExp _hlsExtensionPattern = RegExp(r'\.m3u8(?:$|[?#])');
+final RegExp _dashExtensionPattern = RegExp(r'\.mpd(?:$|[?#])');
+final RegExp _mp4ExtensionPattern = RegExp(r'\.(?:mp4|m4v)(?:$|[?#])');
+final RegExp _webmExtensionPattern = RegExp(r'\.webm(?:$|[?#])');
+final RegExp _flvExtensionPattern = RegExp(r'\.flv(?:$|[?#])');
+final RegExp _mkvExtensionPattern = RegExp(r'\.mkv(?:$|[?#])');
+final RegExp _manifestExtensionPattern = RegExp(r'\.(?:m3u8|mpd)(?:$|[?#])');
+
+String? _detectedMediaFormat(
+  Uri sourceUri,
+  String? rawContentType,
+  String sampleText,
+) {
+  final contentType = (rawContentType ?? '').toLowerCase();
+  final lowerUrl = sourceUri.toString().toLowerCase();
+  final trimmed = sampleText.trimLeft();
+  if (trimmed.startsWith('#EXTM3U')) {
+    return 'HLS';
+  }
+  if (trimmed.startsWith('<MPD') || trimmed.contains('<MPD ')) {
+    return 'DASH';
+  }
+  if (contentType.contains('mpegurl')) return 'HLS';
+  if (contentType.contains('dash+xml')) return 'DASH';
+  if (contentType.contains('video/mp4')) {
+    return 'MP4';
+  }
+  if (contentType.contains('webm')) {
+    return 'WebM';
+  }
+  if (contentType.contains('x-flv')) {
+    return 'FLV';
+  }
+  if (contentType.contains('matroska')) {
+    return 'MKV';
+  }
+  if (_hlsExtensionPattern.hasMatch(lowerUrl)) return 'HLS';
+  if (_dashExtensionPattern.hasMatch(lowerUrl)) return 'DASH';
+  if (_mp4ExtensionPattern.hasMatch(lowerUrl)) return 'MP4';
+  if (_webmExtensionPattern.hasMatch(lowerUrl)) return 'WebM';
+  if (_flvExtensionPattern.hasMatch(lowerUrl)) return 'FLV';
+  if (_mkvExtensionPattern.hasMatch(lowerUrl)) return 'MKV';
+  return null;
+}
+
+bool _isManifestResponse(Uri requestUri, http.StreamedResponse response) {
+  final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+  if (contentType.contains('mpegurl') || contentType.contains('dash+xml')) {
+    return true;
+  }
+  final target = _proxyUpstreamUri(requestUri) ?? requestUri;
+  final lower = target.toString().toLowerCase();
+  return _manifestExtensionPattern.hasMatch(lower);
+}
+
+Uri _resolvePlaylistReference(Uri playlistUri, String rawReference) {
+  final reference = Uri.tryParse(rawReference.trim());
+  if (reference == null) return playlistUri.resolve(rawReference);
+  final upstream = _proxyUpstreamUri(reference);
+  if (upstream != null) {
+    if (kIsWeb) {
+      return reference.hasScheme ? reference : Uri.base.resolveUri(reference);
+    }
+    return upstream;
+  }
+  return playlistUri.resolveUri(reference);
+}
+
+Uri? _safeHttpPlaylistReference(Uri playlistUri, String rawReference) {
+  try {
+    final resolved = _resolvePlaylistReference(playlistUri, rawReference);
+    final upstream = _proxyUpstreamUri(resolved) ?? resolved;
+    if (!const {'http', 'https'}.contains(upstream.scheme.toLowerCase()) ||
+        upstream.host.isEmpty) {
+      return null;
+    }
+    return resolved;
+  } catch (_) {
+    return null;
+  }
+}
+
+Uri? _proxyUpstreamUri(Uri uri) {
+  if (uri.path != '/media-proxy') return null;
+  final rawTarget = uri.queryParameters['url'];
+  final target = rawTarget == null ? null : Uri.tryParse(rawTarget);
+  if (target == null ||
+      !const {'http', 'https'}.contains(target.scheme.toLowerCase()) ||
+      target.host.isEmpty) {
+    return null;
+  }
+  return target;
+}
+
+int? _responseTotalBytes(http.StreamedResponse response) {
+  final contentRange = response.headers['content-range'] ?? '';
+  final rangeMatch = RegExp(r'/\s*(\d+)\s*$').firstMatch(contentRange);
+  final rangeTotal = int.tryParse(rangeMatch?.group(1) ?? '');
+  if (rangeTotal != null && rangeTotal > 0) return rangeTotal;
+  if (response.statusCode != 200) return null;
+  final contentLength = int.tryParse(response.headers['content-length'] ?? '');
+  return contentLength != null && contentLength > 0 ? contentLength : null;
+}
+
+_ProbeMediaMetadata _hlsProbeMetadata(
+  Uri sourceUri,
+  String manifest, {
+  required bool sampleComplete,
+}) {
+  final lines = manifest
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .toList(growable: false);
+  final variants = <_HlsProbeVariant>[];
+  for (var index = 0; index < lines.length; index++) {
+    final line = lines[index];
+    if (!line.startsWith('#EXT-X-STREAM-INF:')) continue;
+    final attributes = _parseHlsAttributes(
+      line.substring(line.indexOf(':') + 1),
+    );
+    String? uriText;
+    for (var uriIndex = index + 1; uriIndex < lines.length; uriIndex++) {
+      final candidate = lines[uriIndex];
+      if (candidate.isEmpty || candidate.startsWith('#')) continue;
+      uriText = candidate;
+      break;
+    }
+    if (uriText == null) continue;
+    final dimensions = _resolutionDimensions(attributes['RESOLUTION'] ?? '');
+    final variantUri = _safeHttpPlaylistReference(sourceUri, uriText);
+    if (variantUri != null) {
+      variants.add(
+        _HlsProbeVariant(
+          uri: variantUri,
+          width: dimensions?.width,
+          height: dimensions?.height,
+          bitrate:
+              int.tryParse(attributes['AVERAGE-BANDWIDTH'] ?? '') ??
+              int.tryParse(attributes['BANDWIDTH'] ?? ''),
+          codecs: attributes['CODECS'],
+        ),
+      );
+    }
+  }
+  if (variants.isNotEmpty) {
+    variants.sort((left, right) {
+      final pixels = right.pixelCount.compareTo(left.pixelCount);
+      if (pixels != 0) return pixels;
+      return (right.bitrate ?? 0).compareTo(left.bitrate ?? 0);
+    });
+    final selected = variants.first;
+    return _ProbeMediaMetadata(
+      format: 'HLS',
+      videoWidth: selected.width,
+      videoHeight: selected.height,
+      bitrate: selected.bitrate,
+      codecs: selected.codecs,
+      adaptive: true,
+      variantUri: selected.uri,
+      variants: List<_HlsProbeVariant>.unmodifiable(variants),
+    );
+  }
+
+  final hasEndList = lines.contains('#EXT-X-ENDLIST');
+  final durationSeconds = lines
+      .where((line) => line.startsWith('#EXTINF:'))
+      .map((line) => line.substring('#EXTINF:'.length).split(',').first)
+      .map(double.tryParse)
+      .whereType<double>()
+      .fold<double>(0, (total, duration) => total + duration);
+  var byteRangeBytes = 0;
+  var mediaSegmentCount = 0;
+  var rangedMediaSegmentCount = 0;
+  Uri? sampleSegmentUri;
+  final sampleSegmentUris = <Uri>[];
+  final segmentCandidates = <_HlsProbeSegment>[];
+  double? sampleSegmentDurationSeconds;
+  double? pendingDuration;
+  int? pendingByteRangeBytes;
+  String? encryptionMethod;
+  Uri? encryptionKeyUri;
+  for (final line in lines) {
+    if (line.startsWith('#EXTINF:')) {
+      pendingDuration = double.tryParse(
+        line.substring('#EXTINF:'.length).split(',').first,
+      );
+      continue;
+    }
+    if (line.startsWith('#EXT-X-KEY:')) {
+      final attributes = _parseHlsAttributes(
+        line.substring(line.indexOf(':') + 1),
+      );
+      final method = attributes['METHOD']?.trim().toUpperCase();
+      if (method == null || method.isEmpty || method == 'NONE') {
+        encryptionMethod = null;
+        encryptionKeyUri = null;
+      } else {
+        encryptionMethod = method;
+        final rawKeyUri = attributes['URI']?.trim();
+        encryptionKeyUri = rawKeyUri == null || rawKeyUri.isEmpty
+            ? null
+            : _safeHttpPlaylistReference(sourceUri, rawKeyUri);
+      }
+      continue;
+    }
+    if (line.startsWith('#EXT-X-BYTERANGE:')) {
+      pendingByteRangeBytes = int.tryParse(
+        line.substring('#EXT-X-BYTERANGE:'.length).split('@').first.trim(),
+      );
+      continue;
+    }
+    if (line.isEmpty || line.startsWith('#') || pendingDuration == null) {
+      continue;
+    }
+    mediaSegmentCount++;
+    if (pendingByteRangeBytes != null && pendingByteRangeBytes > 0) {
+      rangedMediaSegmentCount++;
+      byteRangeBytes += pendingByteRangeBytes;
+    }
+    final segmentUri = _safeHttpPlaylistReference(sourceUri, line);
+    if (segmentUri != null) {
+      sampleSegmentUris.add(segmentUri);
+      segmentCandidates.add(
+        _HlsProbeSegment(
+          uri: segmentUri,
+          encryptionMethod: encryptionMethod,
+          keyUri: encryptionKeyUri,
+        ),
+      );
+    }
+    sampleSegmentDurationSeconds ??= pendingDuration;
+    pendingDuration = null;
+    pendingByteRangeBytes = null;
+  }
+  final hasExactByteRangeTotal =
+      mediaSegmentCount > 0 &&
+      rangedMediaSegmentCount == mediaSegmentCount &&
+      byteRangeBytes > 0;
+  final dimensions = _resolutionDimensionsForUrl(sourceUri);
+  final orderedSegmentUris = hasEndList
+      ? sampleSegmentUris
+      : sampleSegmentUris.reversed.toList(growable: false);
+  final orderedSegmentCandidates = hasEndList
+      ? segmentCandidates
+      : segmentCandidates.reversed.toList(growable: false);
+  sampleSegmentUri = _firstOrNull(orderedSegmentUris);
+  return _ProbeMediaMetadata(
+    format: 'HLS',
+    sizeBytes: hasEndList && hasExactByteRangeTotal ? byteRangeBytes : null,
+    videoWidth: dimensions?.width,
+    videoHeight: dimensions?.height,
+    isLive: sampleComplete && !hasEndList,
+    durationSeconds: hasEndList && durationSeconds > 0 ? durationSeconds : null,
+    sampleSegmentUri: sampleSegmentUri,
+    sampleSegmentUris: List<Uri>.unmodifiable(orderedSegmentUris),
+    segmentCandidates: List<_HlsProbeSegment>.unmodifiable(
+      orderedSegmentCandidates,
+    ),
+    sampleSegmentDurationSeconds: sampleSegmentDurationSeconds,
+  );
+}
+
+_ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
+  try {
+    final document = XmlDocument.parse(manifest);
+    final elements = document.descendants.whereType<XmlElement>().toList();
+    final mpd = _firstOrNull(
+      elements.where((item) => item.name.local == 'MPD'),
+    );
+    final isDynamic = mpd?.getAttribute('type')?.toLowerCase() == 'dynamic';
+    final durationSeconds = _parseIsoDurationSeconds(
+      mpd?.getAttribute('mediaPresentationDuration') ??
+          _firstOrNull(
+            elements
+                .where((item) => item.name.local == 'Period')
+                .map((item) => item.getAttribute('duration'))
+                .whereType<String>(),
+          ),
+    );
+    final allRepresentations = elements
+        .where((item) => item.name.local == 'Representation')
+        .toList();
+    final audioRepresentations = allRepresentations.where((item) {
+      final mimeType = _xmlInheritedAttribute(item, 'mimeType') ?? '';
+      final contentType = _xmlInheritedAttribute(item, 'contentType') ?? '';
+      return mimeType.toLowerCase().startsWith('audio/') ||
+          contentType.toLowerCase() == 'audio';
+    }).toList();
+    var representations = allRepresentations.where((item) {
+      final mimeType = _xmlInheritedAttribute(item, 'mimeType') ?? '';
+      final contentType = _xmlInheritedAttribute(item, 'contentType') ?? '';
+      return mimeType.toLowerCase().startsWith('video/') ||
+          contentType.toLowerCase() == 'video' ||
+          _xmlInheritedInt(item, 'width') != null ||
+          _xmlInheritedInt(item, 'height') != null;
+    }).toList();
+    if (representations.isEmpty) {
+      representations = allRepresentations
+          .where((item) => !audioRepresentations.contains(item))
+          .toList();
+    }
+    if (representations.isEmpty) representations = [...allRepresentations];
+    representations.sort((left, right) {
+      final leftWidth = _xmlInheritedInt(left, 'width') ?? 0;
+      final leftHeight = _xmlInheritedInt(left, 'height') ?? 0;
+      final rightWidth = _xmlInheritedInt(right, 'width') ?? 0;
+      final rightHeight = _xmlInheritedInt(right, 'height') ?? 0;
+      final pixels = (rightWidth * rightHeight).compareTo(
+        leftWidth * leftHeight,
+      );
+      if (pixels != 0) return pixels;
+      return (_xmlInheritedInt(right, 'bandwidth') ?? 0).compareTo(
+        _xmlInheritedInt(left, 'bandwidth') ?? 0,
+      );
+    });
+    final selected = _firstOrNull(representations);
+    audioRepresentations.sort(
+      (left, right) => (_xmlInheritedInt(right, 'bandwidth') ?? 0).compareTo(
+        _xmlInheritedInt(left, 'bandwidth') ?? 0,
+      ),
+    );
+    final selectedAudio = _firstOrNull(audioRepresentations);
+    final width = selected == null ? null : _xmlInheritedInt(selected, 'width');
+    final height = selected == null
+        ? null
+        : _xmlInheritedInt(selected, 'height');
+    final videoBitrate = selected == null
+        ? null
+        : _xmlInheritedInt(selected, 'bandwidth');
+    final audioBitrate = selectedAudio == null
+        ? null
+        : _xmlInheritedInt(selectedAudio, 'bandwidth');
+    final bitrate = videoBitrate == null && audioBitrate == null
+        ? null
+        : (videoBitrate ?? 0) + (audioBitrate ?? 0);
+    final videoCodecs = selected == null
+        ? null
+        : _xmlInheritedAttribute(selected, 'codecs');
+    final audioCodecs = selectedAudio == null
+        ? null
+        : _xmlInheritedAttribute(selectedAudio, 'codecs');
+    final codecs = [
+      videoCodecs,
+      audioCodecs,
+    ].whereType<String>().where((item) => item.trim().isNotEmpty).join(',');
+    final estimatedBytes =
+        !isDynamic &&
+            durationSeconds != null &&
+            durationSeconds > 0 &&
+            bitrate != null &&
+            bitrate > 0
+        ? (bitrate * durationSeconds / 8).round()
+        : null;
+    final fallbackDimensions = _resolutionDimensionsForUrl(sourceUri);
+    final resources = selected == null
+        ? const <_DashProbeResource>[]
+        : _dashProbeResources(sourceUri, selected);
+    return _ProbeMediaMetadata(
+      format: 'DASH',
+      sizeBytes: estimatedBytes,
+      sizeEstimated: estimatedBytes != null,
+      videoWidth: width ?? fallbackDimensions?.width,
+      videoHeight: height ?? fallbackDimensions?.height,
+      bitrate: bitrate,
+      codecs: codecs.isEmpty ? null : codecs,
+      isLive: isDynamic,
+      adaptive: representations.length > 1,
+      durationSeconds: durationSeconds,
+      dashResources: resources,
+    );
+  } catch (_) {
+    final dimensions = _resolutionDimensionsForUrl(sourceUri);
+    return _ProbeMediaMetadata(
+      format: 'DASH',
+      videoWidth: dimensions?.width,
+      videoHeight: dimensions?.height,
+    );
+  }
+}
+
+List<_DashProbeResource> _dashProbeResources(
+  Uri manifestUri,
+  XmlElement representation,
+) {
+  final resources = <_DashProbeResource>[];
+  final baseUri = _dashRepresentationBaseUri(manifestUri, representation);
+  final templateAttributes = _dashSegmentTemplateAttributes(representation);
+  if (templateAttributes.isNotEmpty) {
+    final initialization = _dashExpandTemplate(
+      templateAttributes['initialization'],
+      representation,
+      templateAttributes,
+    );
+    final media = _dashExpandTemplate(
+      templateAttributes['media'],
+      representation,
+      templateAttributes,
+    );
+    final initializationUri = initialization == null
+        ? null
+        : _safeHttpPlaylistReference(baseUri, initialization);
+    final mediaUri = media == null
+        ? null
+        : _safeHttpPlaylistReference(baseUri, media);
+    if (initializationUri != null) {
+      resources.add(_DashProbeResource(initializationUri, '初始化分片'));
+    }
+    if (mediaUri != null && mediaUri != initializationUri) {
+      resources.add(_DashProbeResource(mediaUri, '媒体分片'));
+    }
+  }
+
+  if (resources.isEmpty) {
+    final segmentList = _dashInheritedChild(representation, 'SegmentList');
+    if (segmentList != null) {
+      final initialization = _xmlDirectChild(segmentList, 'Initialization');
+      final initializationSource = initialization?.getAttribute('sourceURL');
+      final initializationUri = initializationSource == null
+          ? null
+          : _safeHttpPlaylistReference(baseUri, initializationSource);
+      if (initializationUri != null) {
+        resources.add(_DashProbeResource(initializationUri, '初始化分片'));
+      }
+      final firstSegment = _firstOrNull(
+        _xmlDirectChildren(segmentList, 'SegmentURL'),
+      );
+      final mediaSource = firstSegment?.getAttribute('media');
+      final mediaUri = mediaSource == null
+          ? null
+          : _safeHttpPlaylistReference(baseUri, mediaSource);
+      if (mediaUri != null && mediaUri != initializationUri) {
+        resources.add(_DashProbeResource(mediaUri, '媒体分片'));
+      }
+    }
+  }
+
+  if (resources.isEmpty) {
+    final segmentBase = _dashInheritedChild(representation, 'SegmentBase');
+    final directBase = _xmlDirectChild(representation, 'BaseURL');
+    if (directBase != null || (segmentBase != null && baseUri != manifestUri)) {
+      resources.add(_DashProbeResource(baseUri, '媒体文件'));
+    }
+  }
+  return List<_DashProbeResource>.unmodifiable(resources);
+}
+
+Uri _dashRepresentationBaseUri(Uri manifestUri, XmlElement representation) {
+  final hierarchy = <XmlElement>[];
+  XmlNode? current = representation;
+  while (current is XmlElement) {
+    hierarchy.add(current);
+    current = current.parent;
+  }
+  var result = manifestUri;
+  for (final element in hierarchy.reversed) {
+    final baseText = _xmlDirectChild(element, 'BaseURL')?.innerText.trim();
+    if (baseText != null && baseText.isNotEmpty) {
+      result = _safeHttpPlaylistReference(result, baseText) ?? result;
+    }
+  }
+  return result;
+}
+
+Map<String, String> _dashSegmentTemplateAttributes(XmlElement representation) {
+  final hierarchy = <XmlElement>[];
+  XmlNode? current = representation;
+  while (current is XmlElement) {
+    hierarchy.add(current);
+    current = current.parent;
+  }
+  final result = <String, String>{};
+  XmlElement? timelineSource;
+  for (final element in hierarchy.reversed) {
+    final template = _xmlDirectChild(element, 'SegmentTemplate');
+    if (template == null) continue;
+    for (final attribute in template.attributes) {
+      result[attribute.name.local] = attribute.value;
+    }
+    if (_xmlDirectChild(template, 'SegmentTimeline') != null) {
+      timelineSource = template;
+    }
+  }
+  final timeline = timelineSource == null
+      ? null
+      : _xmlDirectChild(timelineSource, 'SegmentTimeline');
+  final firstTimelineEntry = timeline == null
+      ? null
+      : _firstOrNull(_xmlDirectChildren(timeline, 'S'));
+  final timelineStart = firstTimelineEntry?.getAttribute('t');
+  if (timelineStart != null && timelineStart.isNotEmpty) {
+    result['_firstTime'] = timelineStart;
+  }
+  return result;
+}
+
+String? _dashExpandTemplate(
+  String? template,
+  XmlElement representation,
+  Map<String, String> attributes,
+) {
+  if (template == null || template.trim().isEmpty) return null;
+  var result = template.trim();
+  final representationId = representation.getAttribute('id') ?? '';
+  final bandwidth =
+      representation.getAttribute('bandwidth') ??
+      _xmlInheritedAttribute(representation, 'bandwidth') ??
+      '';
+  result = result
+      .replaceAll(r'$RepresentationID$', representationId)
+      .replaceAll(r'$Bandwidth$', bandwidth);
+  final number = int.tryParse(attributes['startNumber'] ?? '') ?? 1;
+  result = result.replaceAllMapped(RegExp(r'\$Number(?:%0(\d+)d)?\$'), (match) {
+    final width = int.tryParse(match.group(1) ?? '') ?? 0;
+    return width <= 0 ? '$number' : number.toString().padLeft(width, '0');
+  });
+  if (result.contains(r'$Time$')) {
+    final firstTime = attributes['_firstTime'];
+    if (firstTime == null || firstTime.isEmpty) return null;
+    result = result.replaceAll(r'$Time$', firstTime);
+  }
+  return result.replaceAll(r'$$', r'$');
+}
+
+XmlElement? _dashInheritedChild(XmlElement element, String localName) {
+  XmlNode? current = element;
+  while (current is XmlElement) {
+    final child = _xmlDirectChild(current, localName);
+    if (child != null) return child;
+    current = current.parent;
+  }
+  return null;
+}
+
+XmlElement? _xmlDirectChild(XmlElement element, String localName) {
+  for (final child in element.childElements) {
+    if (child.name.local == localName) return child;
+  }
+  return null;
+}
+
+List<XmlElement> _xmlDirectChildren(XmlElement element, String localName) {
+  return element.childElements
+      .where((child) => child.name.local == localName)
+      .toList(growable: false);
+}
+
+Map<String, String> _parseHlsAttributes(String value) {
+  final result = <String, String>{};
+  var index = 0;
+  while (index < value.length) {
+    while (index < value.length &&
+        (value.codeUnitAt(index) == 44 || value.codeUnitAt(index) == 32)) {
+      index++;
+    }
+    final equals = value.indexOf('=', index);
+    if (equals < 0) break;
+    final key = value.substring(index, equals).trim().toUpperCase();
+    index = equals + 1;
+    String parsed;
+    if (index < value.length && value.codeUnitAt(index) == 34) {
+      index++;
+      final end = value.indexOf('"', index);
+      if (end < 0) {
+        parsed = value.substring(index);
+        index = value.length;
+      } else {
+        parsed = value.substring(index, end);
+        index = end + 1;
+      }
+    } else {
+      final comma = value.indexOf(',', index);
+      if (comma < 0) {
+        parsed = value.substring(index).trim();
+        index = value.length;
+      } else {
+        parsed = value.substring(index, comma).trim();
+        index = comma + 1;
+      }
+    }
+    if (key.isNotEmpty) result[key] = parsed;
+  }
+  return result;
+}
+
+class _HlsProbeVariant {
+  const _HlsProbeVariant({
+    required this.uri,
+    this.width,
+    this.height,
+    this.bitrate,
+    this.codecs,
+  });
+
+  final Uri uri;
+  final int? width;
+  final int? height;
+  final int? bitrate;
+  final String? codecs;
+
+  int get pixelCount => (width ?? 0) * (height ?? 0);
+}
+
+class _HlsProbeSegment {
+  const _HlsProbeSegment({
+    required this.uri,
+    this.encryptionMethod,
+    this.keyUri,
+  });
+
+  final Uri uri;
+  final String? encryptionMethod;
+  final Uri? keyUri;
+
+  bool get usesAes128 => encryptionMethod?.toUpperCase() == 'AES-128';
+}
+
+class _DashProbeResource {
+  const _DashProbeResource(this.uri, this.label);
+
+  final Uri uri;
+  final String label;
+}
+
+class _ResolutionDimensions {
+  const _ResolutionDimensions({this.width, this.height});
+
+  final int? width;
+  final int? height;
+}
+
+_ResolutionDimensions? _resolutionDimensions(String value) {
+  final match = RegExp(
+    r'(\d{2,5})\s*x\s*(\d{2,5})',
+    caseSensitive: false,
+  ).firstMatch(value);
+  final width = int.tryParse(match?.group(1) ?? '');
+  final height = int.tryParse(match?.group(2) ?? '');
+  if (width == null || height == null || width <= 0 || height <= 0) {
+    return null;
+  }
+  return _ResolutionDimensions(width: width, height: height);
+}
+
+_ResolutionDimensions? _resolutionDimensionsForUrl(Uri uri) {
+  final text = Uri.decodeFull(uri.toString());
+  final exact = _resolutionDimensions(text);
+  if (exact != null) return exact;
+  final lower = text.toLowerCase();
+  if (RegExp(r'(^|[^a-z0-9])4k([^a-z0-9]|$)').hasMatch(lower) ||
+      RegExp(r'(^|[^0-9])2160p?([^0-9]|$)').hasMatch(lower)) {
+    return const _ResolutionDimensions(width: 3840, height: 2160);
+  }
+  for (final height in const [1440, 1080, 720, 576, 480, 360, 240]) {
+    if (RegExp('(^|[^0-9])${height}p?([^0-9]|\$)').hasMatch(lower)) {
+      return _ResolutionDimensions(height: height);
+    }
+  }
+  return null;
+}
+
+_ResolutionDimensions? _mp4Dimensions(List<int> bytes) {
+  if (bytes.length < 92) return null;
+  final data = ByteData.sublistView(Uint8List.fromList(bytes));
+  _ResolutionDimensions? best;
+  for (var typeOffset = 4; typeOffset + 4 <= bytes.length; typeOffset++) {
+    if (bytes[typeOffset] != 0x74 ||
+        bytes[typeOffset + 1] != 0x6B ||
+        bytes[typeOffset + 2] != 0x68 ||
+        bytes[typeOffset + 3] != 0x64) {
+      continue;
+    }
+    final dataOffset = typeOffset + 4;
+    if (dataOffset >= bytes.length) continue;
+    final version = bytes[dataOffset];
+    final widthOffset = dataOffset + (version == 1 ? 88 : 76);
+    final heightOffset = widthOffset + 4;
+    if (heightOffset + 4 > bytes.length) continue;
+    final width = data.getUint32(widthOffset, Endian.big) >> 16;
+    final height = data.getUint32(heightOffset, Endian.big) >> 16;
+    if (width < 16 || width > 16384 || height < 16 || height > 16384) {
+      continue;
+    }
+    final candidate = _ResolutionDimensions(width: width, height: height);
+    if (best == null ||
+        width * height > (best.width ?? 0) * (best.height ?? 0)) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+String? _xmlInheritedAttribute(XmlElement element, String name) {
+  XmlNode? current = element;
+  while (current is XmlElement) {
+    final value = current.getAttribute(name)?.trim();
+    if (value != null && value.isNotEmpty) return value;
+    current = current.parent;
+  }
+  return null;
+}
+
+T? _firstOrNull<T>(Iterable<T> values) {
+  for (final value in values) {
+    return value;
+  }
+  return null;
+}
+
+int? _xmlInheritedInt(XmlElement element, String name) {
+  return int.tryParse(_xmlInheritedAttribute(element, name) ?? '');
+}
+
+double? _parseIsoDurationSeconds(String? value) {
+  if (value == null || value.trim().isEmpty) return null;
+  final match = RegExp(
+    r'^P(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$',
+  ).firstMatch(value.trim().toUpperCase());
+  if (match == null) return null;
+  final days = double.tryParse(match.group(1) ?? '') ?? 0;
+  final hours = double.tryParse(match.group(2) ?? '') ?? 0;
+  final minutes = double.tryParse(match.group(3) ?? '') ?? 0;
+  final seconds = double.tryParse(match.group(4) ?? '') ?? 0;
+  return days * 86400 + hours * 3600 + minutes * 60 + seconds;
+}
+
+class _AsyncLimiter {
+  _AsyncLimiter(this.limit) : assert(limit > 0);
+
+  final int limit;
+  var _active = 0;
+  final List<Completer<void>> _waiters = [];
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    if (_active >= limit) {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+    } else {
+      _active++;
+    }
+    try {
+      return await action();
+    } finally {
+      _release();
+    }
+  }
+
+  Future<T?> runIfAvailable<T>(Future<T> Function() action) async {
+    // Metadata is optional. Skipping enrichment when all slots are busy keeps
+    // a confirmed playable line inside the repository's lookup budget.
+    if (_active >= limit) return null;
+    _active++;
+    try {
+      return await action();
+    } finally {
+      _release();
+    }
+  }
+
+  void _release() {
+    if (_waiters.isNotEmpty) {
+      // Transfer the active slot directly to the oldest waiter so a newly
+      // arriving task cannot overtake it or briefly exceed the limit.
+      _waiters.removeAt(0).complete();
+      return;
+    }
+    _active--;
   }
 }
 
@@ -1110,16 +3317,23 @@ String _requestCacheKey(
 }
 
 Uri _ruleRequestUri(Uri target) {
-  if (!kIsWeb) return target;
-  final base = Uri.base;
-  if (!const {'http', 'https'}.contains(base.scheme.toLowerCase())) {
+  return _ruleRequestUriForPlatform(target, isWeb: kIsWeb, baseUri: Uri.base);
+}
+
+Uri _ruleRequestUriForPlatform(
+  Uri target, {
+  required bool isWeb,
+  required Uri baseUri,
+}) {
+  if (!isWeb) return target;
+  if (!const {'http', 'https'}.contains(baseUri.scheme.toLowerCase())) {
     return target;
   }
   final host = target.host.toLowerCase();
   if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
     return target;
   }
-  return base.resolve(
+  return baseUri.resolve(
     '/media-proxy?url=${Uri.encodeQueryComponent(target.toString())}',
   );
 }
@@ -1128,27 +3342,306 @@ Map<String, String> _ruleRequestHeaders(
   Uri target,
   Map<String, String> headers,
 ) {
-  if (!kIsWeb || identical(_ruleRequestUri(target), target)) return headers;
-  final result = <String, String>{...headers};
-  for (final entry in const {
-    'User-Agent': 'X-Upstream-User-Agent',
-    'Referer': 'X-Upstream-Referer',
-    'Authorization': 'X-Upstream-Authorization',
-    'Cookie': 'X-Upstream-Cookie',
-  }.entries) {
-    final value = result.remove(entry.key);
-    if (value != null && value.trim().isNotEmpty) {
-      result[entry.value] = value;
+  return _ruleRequestHeadersForPlatform(
+    target,
+    headers,
+    isWeb: kIsWeb,
+    baseUri: Uri.base,
+  );
+}
+
+Map<String, String> _ruleRequestHeadersForPlatform(
+  Uri target,
+  Map<String, String> headers, {
+  required bool isWeb,
+  required Uri baseUri,
+}) {
+  if (!isWeb) return headers;
+  final requestUri = _ruleRequestUriForPlatform(
+    target,
+    isWeb: true,
+    baseUri: baseUri,
+  );
+  final usesMediaProxy =
+      requestUri.path == '/media-proxy' && requestUri.origin == baseUri.origin;
+  if (!usesMediaProxy) return headers;
+  const upstreamNames = <String, String>{
+    'user-agent': 'X-Upstream-User-Agent',
+    'referer': 'X-Upstream-Referer',
+    'authorization': 'X-Upstream-Authorization',
+    'cookie': 'X-Upstream-Cookie',
+    'x-appid': 'X-Upstream-X-AppId',
+    'x-timestamp': 'X-Upstream-X-Timestamp',
+    'x-signature': 'X-Upstream-X-Signature',
+  };
+  final result = <String, String>{};
+  for (final entry in headers.entries) {
+    final upstreamName = upstreamNames[entry.key.toLowerCase()];
+    if (upstreamName != null && entry.value.trim().isNotEmpty) {
+      result[upstreamName] = entry.value;
+    } else {
+      result[entry.key] = entry.value;
     }
   }
   return result;
 }
 
+@visibleForTesting
+Uri ruleRequestUriForWebTest(Uri target, Uri baseUri) =>
+    _ruleRequestUriForPlatform(target, isWeb: true, baseUri: baseUri);
+
+@visibleForTesting
+Map<String, String> ruleRequestHeadersForWebTest(
+  Uri target,
+  Map<String, String> headers,
+  Uri baseUri,
+) => _ruleRequestHeadersForPlatform(
+  target,
+  headers,
+  isWeb: true,
+  baseUri: baseUri,
+);
+
 class _PlayableProbeResult {
-  const _PlayableProbeResult(this.available, this.message);
+  const _PlayableProbeResult(
+    this.available,
+    this.message, {
+    this.latency,
+    this.format,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
+  });
 
   final bool available;
   final String message;
+  final Duration? latency;
+  final String? format;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
+}
+
+PlaybackLine _copyPlaybackLineWithProbe(
+  PlaybackLine line,
+  _PlayableProbeResult probe,
+) {
+  final detectedFormat = probe.format?.trim() ?? '';
+  return PlaybackLine(
+    id: line.id,
+    episodeId: line.episodeId,
+    providerId: line.providerId,
+    providerName: line.providerName,
+    title: line.title,
+    quality: line.quality,
+    format: detectedFormat.isEmpty ? line.format : detectedFormat,
+    url: line.url,
+    headers: line.headers,
+    latency: probe.latency ?? line.latency,
+    sizeLabel: line.sizeLabel,
+    sizeBytes: probe.sizeBytes ?? line.sizeBytes,
+    sizeEstimated: probe.sizeBytes == null
+        ? line.sizeEstimated
+        : probe.sizeEstimated,
+    videoWidth: probe.videoWidth ?? line.videoWidth,
+    videoHeight: probe.videoHeight ?? line.videoHeight,
+    bitrate: probe.bitrate ?? line.bitrate,
+    codecs: probe.codecs ?? line.codecs,
+    isLive: probe.available ? probe.isLive || line.isLive : line.isLive,
+    adaptive: probe.available ? probe.adaptive || line.adaptive : line.adaptive,
+    publicHttpOnly: line.publicHttpOnly,
+    available: probe.available,
+    message: probe.available ? line.message : probe.message,
+  );
+}
+
+_PlayableProbeResult _validatePlayableSample(
+  Uri sourceUri,
+  _PlayableProbeResponse sample,
+) {
+  final bytes = sample.sample;
+  final rawContentType =
+      sample.response.headers['content-type']?.toLowerCase() ?? '';
+  final contentType = rawContentType.split(';').first.trim();
+  final text = utf8.decode(bytes, allowMalformed: true);
+  final trimmed = text.trimLeft();
+  if (bytes.isEmpty) {
+    return const _PlayableProbeResult(false, '视频地址返回了空内容。');
+  }
+  final lowerText = trimmed.toLowerCase();
+  final looksLikeHtml =
+      lowerText.startsWith('<!doctype html') ||
+      lowerText.startsWith('<html') ||
+      lowerText.startsWith('<head') ||
+      lowerText.startsWith('<body') ||
+      lowerText.contains('<html');
+  if (looksLikeHtml) {
+    return const _PlayableProbeResult(false, '视频地址返回的是网页或错误信息，不是媒体内容。');
+  }
+
+  final format = _detectedMediaFormat(sourceUri, rawContentType, text);
+  if (format == 'HLS') {
+    final manifestLines = trimmed
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .split('\n')
+        .map((line) => line.trim())
+        .toList(growable: false);
+    final hasHeader =
+        manifestLines.isNotEmpty && manifestLines.first == '#EXTM3U';
+    final hasMediaReference = manifestLines.any(
+      (line) => line.isNotEmpty && !line.startsWith('#'),
+    );
+    if (!hasHeader || !hasMediaReference) {
+      return const _PlayableProbeResult(false, '视频地址返回的 HLS 清单无效或没有媒体分片。');
+    }
+    return const _PlayableProbeResult(true, '');
+  }
+  if (format == 'DASH') {
+    try {
+      final document = XmlDocument.parse(trimmed);
+      if (document.rootElement.name.local != 'MPD') {
+        return const _PlayableProbeResult(false, '视频地址返回的 DASH 清单无效。');
+      }
+    } catch (_) {
+      return const _PlayableProbeResult(false, '视频地址返回的 DASH 清单无效。');
+    }
+    return const _PlayableProbeResult(true, '');
+  }
+
+  final hasMp4Signature = _hasIsoBmffSignature(bytes);
+  final hasEbmlSignature = _sampleStartsWith(bytes, const [
+    0x1A,
+    0x45,
+    0xDF,
+    0xA3,
+  ]);
+  final hasFlvSignature = _sampleStartsWith(bytes, const [0x46, 0x4C, 0x56]);
+  final hasTransportStreamSignature = _hasMpegTransportStreamSignature(bytes);
+  final binaryMediaSignature =
+      hasMp4Signature ||
+      hasEbmlSignature ||
+      hasFlvSignature ||
+      hasTransportStreamSignature;
+
+  if (format == 'MP4') {
+    return hasMp4Signature
+        ? const _PlayableProbeResult(true, '')
+        : const _PlayableProbeResult(false, '视频地址没有返回有效的 MP4 数据。');
+  }
+  if (format == 'WebM' || format == 'MKV') {
+    return hasEbmlSignature
+        ? const _PlayableProbeResult(true, '')
+        : const _PlayableProbeResult(false, '视频地址没有返回有效的视频容器数据。');
+  }
+  if (format == 'FLV') {
+    return hasFlvSignature
+        ? const _PlayableProbeResult(true, '')
+        : const _PlayableProbeResult(false, '视频地址没有返回有效的 FLV 数据。');
+  }
+  if (binaryMediaSignature) {
+    return const _PlayableProbeResult(true, '');
+  }
+
+  final looksLikeStructuredError =
+      contentType.contains('json') ||
+      contentType.contains('xml') ||
+      lowerText.startsWith('{') ||
+      lowerText.startsWith('[') ||
+      lowerText.startsWith('<?xml');
+  if (contentType.contains('text/html') || looksLikeStructuredError) {
+    return const _PlayableProbeResult(false, '视频地址返回的是网页或错误信息，不是媒体内容。');
+  }
+  return const _PlayableProbeResult(false, '视频地址没有返回可识别的媒体内容。');
+}
+
+bool _sampleStartsWith(List<int> bytes, List<int> signature) {
+  if (bytes.length < signature.length) return false;
+  for (var index = 0; index < signature.length; index++) {
+    if (bytes[index] != signature[index]) return false;
+  }
+  return true;
+}
+
+bool _isOpaqueEncryptedHlsSegment(_PlayableProbeResponse sample) {
+  final bytes = sample.sample;
+  if (bytes.length < 16) return false;
+  final contentType =
+      sample.response.headers['content-type']?.toLowerCase() ?? '';
+  if (contentType.contains('text/') ||
+      contentType.contains('json') ||
+      contentType.contains('xml')) {
+    return false;
+  }
+  final prefix = utf8
+      .decode(bytes.take(512).toList(growable: false), allowMalformed: true)
+      .trimLeft()
+      .toLowerCase();
+  if (prefix.startsWith('<!doctype') ||
+      prefix.startsWith('<html') ||
+      prefix.startsWith('{') ||
+      prefix.startsWith('[') ||
+      prefix.contains('access denied') ||
+      prefix.contains('not found')) {
+    return false;
+  }
+  final sampled = bytes.take(512).toList(growable: false);
+  final printable = sampled.where((value) {
+    return value == 9 ||
+        value == 10 ||
+        value == 13 ||
+        (value >= 32 && value <= 126);
+  }).length;
+  return printable / sampled.length < 0.85;
+}
+
+bool _hasIsoBmffSignature(List<int> bytes) {
+  var offset = 0;
+  final limit = bytes.length < 64 ? bytes.length : 64;
+  while (offset + 8 <= limit) {
+    final size =
+        (bytes[offset] << 24) |
+        (bytes[offset + 1] << 16) |
+        (bytes[offset + 2] << 8) |
+        bytes[offset + 3];
+    final type = String.fromCharCodes(bytes.skip(offset + 4).take(4));
+    final plausibleSize =
+        size == 0 || size == 1 || (size >= 8 && size <= 64 * 1024 * 1024);
+    if (plausibleSize && const {'ftyp', 'styp', 'moof'}.contains(type)) {
+      return true;
+    }
+    if (size < 8 || size > limit - offset) break;
+    offset += size;
+  }
+  return false;
+}
+
+bool _hasMpegTransportStreamSignature(List<int> bytes) {
+  for (final stride in const <int>[188, 192, 204]) {
+    final maxStart = stride < 32 ? stride : 32;
+    for (var start = 0; start < maxStart; start++) {
+      final second = start + stride;
+      if (second >= bytes.length ||
+          bytes[start] != 0x47 ||
+          bytes[second] != 0x47) {
+        continue;
+      }
+      final third = second + stride;
+      if (third < bytes.length && bytes[third] != 0x47) continue;
+      return true;
+    }
+  }
+  return false;
 }
 
 class HttpException implements Exception {
@@ -1173,12 +3666,17 @@ List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword) {
   return result.values.toList(growable: false);
 }
 
-Uri _tvBoxDetailUri(Uri endpoint, String vodId) {
-  final query = <String, String>{...endpoint.queryParameters}
-    ..remove('wd')
-    ..['ac'] = 'detail'
-    ..['ids'] = vodId;
-  return endpoint.replace(queryParameters: query);
+List<Uri> _tvBoxDetailUris(Uri endpoint, String vodId) {
+  final result = <String, Uri>{};
+  for (final action in const ['detail', 'videolist']) {
+    final query = <String, String>{...endpoint.queryParameters}
+      ..remove('wd')
+      ..['ac'] = action
+      ..['ids'] = vodId;
+    final uri = endpoint.replace(queryParameters: query);
+    result[uri.toString()] = uri;
+  }
+  return result.values.toList(growable: false);
 }
 
 List<Map<String, dynamic>> _tvBoxItems(Object? decoded) {
@@ -1192,6 +3690,45 @@ List<Map<String, dynamic>> _tvBoxItems(Object? decoded) {
       .whereType<Map>()
       .map((item) => item.cast<String, dynamic>())
       .toList(growable: false);
+}
+
+List<Map<String, dynamic>> _tvBoxXmlItems(String source) {
+  final document = XmlDocument.parse(source);
+  final videos = document.descendants.whereType<XmlElement>().where(
+    (element) => element.name.local.toLowerCase() == 'video',
+  );
+  return videos
+      .map((video) {
+        final playSources = <String>[];
+        final playGroups = <String>[];
+        final downloads = video.descendants.whereType<XmlElement>().where(
+          (element) => element.name.local.toLowerCase() == 'dd',
+        );
+        for (final download in downloads) {
+          final playText = download.innerText.trim();
+          if (playText.isEmpty) continue;
+          playGroups.add(playText);
+          final flag = download.getAttribute('flag')?.trim() ?? '';
+          playSources.add(flag.isEmpty ? '线路${playSources.length + 1}' : flag);
+        }
+        return <String, dynamic>{
+          'vod_id': _xmlChildText(video, const ['id', 'vod_id']),
+          'vod_name': _xmlChildText(video, const ['name', 'vod_name', 'title']),
+          'vod_play_from': playSources.join(r'$$$'),
+          'vod_play_url': playGroups.join(r'$$$'),
+        };
+      })
+      .toList(growable: false);
+}
+
+String _xmlChildText(XmlElement parent, List<String> names) {
+  final normalized = names.map((name) => name.toLowerCase()).toSet();
+  for (final child in parent.childElements) {
+    if (normalized.contains(child.name.local.toLowerCase())) {
+      return child.innerText.trim();
+    }
+  }
+  return '';
 }
 
 _RankedResult<Map<String, dynamic>>? _rankBestTvBoxItem(
@@ -1321,6 +3858,115 @@ class _RankedResult<T> {
   final int score;
   final int preference;
 }
+
+Future<List<PlaybackLine>> _collectPlaybackCandidates(
+  List<Future<PlaybackLine?> Function()> requests, {
+  required bool verifyPlayable,
+  Duration candidateTimeout = const Duration(seconds: 10),
+  bool Function(PlaybackLine line)? preferredQuickCandidate,
+  Duration preferredCandidateGrace = Duration.zero,
+}) async {
+  if (requests.isEmpty) return const [];
+  if (verifyPlayable) {
+    return (await Future.wait(
+      requests.map((start) async {
+        try {
+          return await start().timeout(candidateTimeout);
+        } catch (_) {
+          // Keep verified siblings when one playback road is slow or broken.
+          return null;
+        }
+      }),
+    )).whereType<PlaybackLine>().toList(growable: false);
+  }
+
+  // The startup lookup only needs one usable route. Waiting for every road in
+  // the same rule made one slow play page hold back faster siblings and often
+  // pushed the whole rule beyond the outer quick-lookup budget. Start at most
+  // three roads and stop dispatching new ones as soon as a playable line wins.
+  const concurrency = 3;
+  final completer = Completer<List<PlaybackLine>>();
+  PlaybackLine? firstUnavailable;
+  PlaybackLine? fallbackAvailable;
+  Timer? preferenceTimer;
+  var nextIndex = 0;
+  var active = 0;
+  var completed = 0;
+
+  void completeWith(PlaybackLine line) {
+    if (completer.isCompleted) return;
+    preferenceTimer?.cancel();
+    completer.complete(<PlaybackLine>[line]);
+  }
+
+  late void Function() dispatch;
+
+  Future<void> run(Future<PlaybackLine?> Function() start) async {
+    try {
+      final line = await start();
+      if (line != null && line.available && !completer.isCompleted) {
+        final prefers = preferredQuickCandidate;
+        if (prefers == null || prefers(line)) {
+          completeWith(line);
+        } else {
+          fallbackAvailable ??= line;
+          if (preferredCandidateGrace <= Duration.zero) {
+            completeWith(line);
+          } else {
+            preferenceTimer ??= Timer(preferredCandidateGrace, () {
+              final fallback = fallbackAvailable;
+              if (fallback != null) completeWith(fallback);
+            });
+          }
+        }
+      } else if (line != null) {
+        firstUnavailable ??= line;
+      }
+    } catch (_) {
+      // A failed road must not delay another road that is already playable.
+    } finally {
+      active--;
+      completed++;
+      if (!completer.isCompleted) {
+        final fallback = fallbackAvailable;
+        if (fallback != null) {
+          // Once a usable fallback exists, do not start more roads. Give only
+          // the already-running siblings a bounded chance to return the
+          // preferred streaming format, then avoid a fixed grace delay when
+          // every sibling has already completed.
+          if (active == 0) completeWith(fallback);
+        } else if (completed == requests.length) {
+          final unavailable = firstUnavailable;
+          completer.complete(
+            unavailable == null
+                ? const <PlaybackLine>[]
+                : <PlaybackLine>[unavailable],
+          );
+        } else {
+          dispatch();
+        }
+      }
+    }
+  }
+
+  dispatch = () {
+    while (!completer.isCompleted &&
+        fallbackAvailable == null &&
+        active < concurrency &&
+        nextIndex < requests.length) {
+      final start = requests[nextIndex++];
+      active++;
+      unawaited(run(start));
+    }
+  };
+
+  dispatch();
+  return completer.future;
+}
+
+bool _isHlsPlaybackLine(PlaybackLine line) =>
+    line.format.trim().toUpperCase() == 'HLS' ||
+    (line.url?.toLowerCase().contains('.m3u8') ?? false);
 
 Future<T?> _firstConfidentResult<T>(List<Future<_RankedResult<T>?>> requests) {
   if (requests.isEmpty) return Future<T?>.value();
@@ -1925,7 +4571,7 @@ String? _extractPlayableUrl(String html, String baseUrl) {
   }
 
   final directMatch = RegExp(
-    r'https?:\\?/\\?/[^\s"<>]+?\.(?:m3u8|mp4|flv|m4v)(?:\?[^\s"<>]*)?',
+    r'https?:\\?/\\?/[^\s"<>]+?\.(?:m3u8|mpd|mp4|webm|mkv|flv|m4v)(?:\?[^\s"<>]*)?',
     caseSensitive: false,
   ).firstMatch(html);
   if (directMatch == null) return null;
@@ -1995,7 +4641,7 @@ bool _looksPlayable(String url) {
 bool _isExplicitPlayableUrl(String url) {
   final lower = url.toLowerCase();
   return RegExp(
-        r'\.(?:m3u8|mp4|flv|m4v)(?:$|[?#])',
+        r'\.(?:m3u8|mpd|mp4|webm|mkv|flv|m4v)(?:$|[?#])',
         caseSensitive: false,
       ).hasMatch(lower) ||
       lower.contains('/m3u8') ||
@@ -2116,17 +4762,22 @@ int _matchScore(String title, AnimeSubject subject) {
   return score;
 }
 
+final RegExp _titleSeparatorPattern = RegExp(r'[\s·・:：!！?？,，.。_\-—]+');
+final RegExp _whitespacePattern = RegExp(r'\s+');
+
 String _normalizeTitle(String value) {
-  return value
-      .toLowerCase()
-      .replaceAll(RegExp(r'[\s·・:：!！?？,，.。_\-—]+'), '')
-      .trim();
+  return value.toLowerCase().replaceAll(_titleSeparatorPattern, '').trim();
 }
 
 String _cleanText(String value) {
+  // Only spin up the HTML parser when the string actually contains markup or
+  // entities; plain titles/channel names just need whitespace collapsing.
+  if (!value.contains('<') && !value.contains('&')) {
+    return value.replaceAll(_whitespacePattern, ' ').trim();
+  }
   final text = html_parser.parseFragment(value).text;
   return text
-          ?.replaceAll(RegExp(r'\s+'), ' ')
+          ?.replaceAll(_whitespacePattern, ' ')
           .replaceAll('&nbsp;', ' ')
           .trim() ??
       '';
@@ -2141,7 +4792,79 @@ String _friendlyError(Object error) {
 }
 
 Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
-  return {...headers, 'Accept': '*/*', 'Range': 'bytes=0-2048'};
+  final result = _withoutHeaderIgnoreCase(
+    _withoutHeaderIgnoreCase(headers, 'accept'),
+    'range',
+  );
+  result['Accept'] = '*/*';
+  result['Range'] = 'bytes=0-$_initialProbeRangeEnd';
+  return result;
+}
+
+Map<String, String> _manifestProbeHeaders(Map<String, String> headers) {
+  return _withoutHeaderIgnoreCase(headers, 'range')
+    ..['Range'] = 'bytes=0-${_maxManifestProbeSampleBytes - 1}';
+}
+
+Map<String, String> _withoutHeaderIgnoreCase(
+  Map<String, String> headers,
+  String name,
+) {
+  final normalized = name.toLowerCase();
+  return {
+    for (final entry in headers.entries)
+      if (entry.key.toLowerCase() != normalized) entry.key: entry.value,
+  };
+}
+
+const _originBoundMediaHeaders = <String>{
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'cookie2',
+  'api-key',
+  'x-api-key',
+  'access-token',
+  'x-auth-token',
+  'x-access-token',
+  'x-appid',
+  'x-timestamp',
+  'x-signature',
+  'x-upstream-authorization',
+  'x-upstream-cookie',
+  'x-upstream-x-appid',
+  'x-upstream-x-timestamp',
+  'x-upstream-x-signature',
+};
+
+Map<String, String> _withoutOriginBoundMediaHeaders(
+  Map<String, String> headers,
+) => {
+  for (final entry in headers.entries)
+    if (!_originBoundMediaHeaders.contains(entry.key.toLowerCase()))
+      entry.key: entry.value,
+};
+
+Map<String, String> _mediaChildHeaders(
+  Uri credentialSourceUri,
+  Uri childUri,
+  Map<String, String> headers,
+) {
+  if (_sameMediaOrigin(credentialSourceUri, childUri)) return headers;
+  return _withoutOriginBoundMediaHeaders(headers);
+}
+
+bool _sameMediaOrigin(Uri left, Uri right) {
+  final leftOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(left) ?? left);
+  final rightOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(right) ?? right);
+  return leftOrigin != null && leftOrigin == rightOrigin;
+}
+
+String? _normalizedMediaOrigin(Uri uri) {
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme != 'http' && scheme != 'https' || uri.host.isEmpty) return null;
+  final port = uri.hasPort ? uri.port : (scheme == 'https' ? 443 : 80);
+  return '$scheme://${uri.host.toLowerCase()}:$port';
 }
 
 String _shortError(Object error) {
@@ -2155,15 +4878,40 @@ String _shortError(Object error) {
 String _formatForUrl(String url, String fallback) {
   final lower = url.toLowerCase();
   if (lower.contains('.m3u8') || lower.contains('type=m3u8')) return 'HLS';
+  if (lower.contains('.mpd') || lower.contains('type=mpd')) return 'DASH';
   if (lower.contains('.mp4')) return 'MP4';
+  if (lower.contains('.webm')) return 'WebM';
+  if (lower.contains('.mkv')) return 'MKV';
   if (lower.contains('.flv')) return 'FLV';
-  return fallback;
+  final normalizedFallback = fallback.trim().toUpperCase();
+  return switch (normalizedFallback) {
+    'HLS' || 'M3U8' => 'HLS',
+    'DASH' || 'MPD' => 'DASH',
+    'MP4' => 'MP4',
+    'WEBM' => 'WebM',
+    'MKV' => 'MKV',
+    'FLV' => 'FLV',
+    _ => '',
+  };
 }
 
-String _sizeLabelForUrl(String url) {
-  final lower = url.toLowerCase();
-  if (lower.contains('4k') || lower.contains('2160')) return '4K';
-  if (lower.contains('1080')) return '1080P';
-  if (lower.contains('720')) return '720P';
-  return '--';
+String? _probeResolutionLabel(int? width, int? height) {
+  if (height != null && height > 0) return '${height}P';
+  if (width != null && width >= 3800) return '2160P';
+  return null;
+}
+
+String? _resolutionLabelForUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final dimensions = _resolutionDimensionsForUrl(uri);
+  return _probeResolutionLabel(dimensions?.width, dimensions?.height);
+}
+
+String? _probeSizeLabel(_PlayableProbeResult probe) {
+  if (probe.isLive) return '动态流';
+  final bytes = probe.sizeBytes;
+  if (bytes == null || bytes <= 0) return null;
+  final value = (bytes / 1024 / 1024).toStringAsFixed(1);
+  return '${probe.sizeEstimated ? '约 ' : ''}$value MB';
 }

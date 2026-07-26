@@ -1,3 +1,9 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+
+import 'csp_rule_support.dart';
 import 'rule_models.dart';
 
 class RulePluginRepository {
@@ -42,7 +48,12 @@ class RulePluginRepository {
     RuleContentType type,
   ) {
     return enabledRulesFor(state, type)
-        .where((rule) => rule.searchable && rule.canResolveNatively)
+        .where(
+          (rule) =>
+              rule.searchable &&
+              rule.canResolveNatively &&
+              _canExecuteOnCurrentPlatform(rule),
+        )
         .toList(growable: false);
   }
 
@@ -57,7 +68,10 @@ class RulePluginRepository {
     };
     final enabled = {
       for (final rule in allRules)
-        if (installed.contains(rule.id) && rule.canResolveNatively) rule.id,
+        if (installed.contains(rule.id) &&
+            rule.canResolveNatively &&
+            _canExecuteOnCurrentPlatform(rule))
+          rule.id,
     };
     return RulePluginState(
       installedIds: installed,
@@ -79,7 +93,12 @@ class RulePluginRepository {
     final installed = collection.canonicalizeIds(state.installedIds);
     final enabled = collection
         .canonicalizeIds(state.enabledIds)
-        .where(installed.contains)
+        .where(
+          (id) =>
+              installed.contains(id) &&
+              (collection.byCanonicalId[id]?.canResolveNatively ?? false) &&
+              _canExecuteOnCurrentPlatform(collection.byCanonicalId[id]!),
+        )
         .toSet();
     final customIds = extraRules.map((rule) => rule.id).toSet();
     final customRules = collection.rules
@@ -92,6 +111,13 @@ class RulePluginRepository {
       repositories: _deduplicateRepositories(state.repositories),
     );
   }
+}
+
+bool _canExecuteOnCurrentPlatform(RulePlugin rule) {
+  if (rule.engine.toLowerCase() != 'drpy-js') return true;
+  if (kIsWeb) return false;
+  return defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.windows;
 }
 
 class _RuleCollection {
@@ -178,7 +204,36 @@ String _semanticRuleKey(RulePlugin rule) {
   final search = _canonicalRuleEndpoint(rule.searchUrl);
   final name = _canonicalRuleName(rule.name, fallback: rule.id);
   final engine = rule.engine.trim().toLowerCase();
-  return '${rule.contentType.name}|$engine|$name|$base|$search';
+  final parser = switch (engine) {
+    'drpy-js' => _drpyRuleIdentity(rule),
+    'android-csp' => _androidCspRuleIdentity(rule),
+    _ => '',
+  };
+  return '${rule.contentType.name}|$engine|$name|$base|$search|$parser';
+}
+
+String _drpyRuleIdentity(RulePlugin rule) {
+  final extUrl = rule.rawConfig['extUrl']?.toString().trim() ?? '';
+  if (extUrl.isNotEmpty) return 'ext:${_canonicalRuleEndpoint(extUrl)}';
+
+  final inline = rule.rawConfig['inlineSource']?.toString().trim() ?? '';
+  if (inline.isNotEmpty) {
+    return 'inline:${sha256.convert(utf8.encode(inline))}';
+  }
+
+  // Incomplete imported rules still belong to the user's inventory. Keeping
+  // their ids distinct prevents unrelated same-name entries from disappearing
+  // before a future runtime/config update can make them executable.
+  return 'missing:${rule.id}';
+}
+
+String _androidCspRuleIdentity(RulePlugin rule) {
+  final md5 = androidCspSpiderMd5(rule.rawConfig);
+  final api = androidCspApi(rule.rawConfig);
+  if (md5 == null || api.isEmpty) return 'missing:${rule.id}';
+  final siteKey = androidCspSiteKey(rule.rawConfig, rule.id);
+  final ext = androidCspEncodedExt(rule.rawConfig);
+  return '$md5|$api|$siteKey|$ext';
 }
 
 String _canonicalRuleEndpoint(String value) {

@@ -278,7 +278,11 @@ void main() {
       final visible = visibleDanmakuComments(
         comments,
         position: const Duration(seconds: 2),
-        settings: const DanmakuSettings(blockTop: true, blockKeywords: ['剧透']),
+        settings: const DanmakuSettings(
+          enabled: true,
+          blockTop: true,
+          blockKeywords: ['剧透'],
+        ),
       );
 
       expect(visible.map((item) => item.text), ['保留']);

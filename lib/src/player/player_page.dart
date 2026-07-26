@@ -11,13 +11,16 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
+import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
+import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'danmaku_overlay.dart';
+import 'playback_line_display.dart';
 import 'web_stream_player.dart';
 
 class PlayerPage extends ConsumerStatefulWidget {
@@ -37,6 +40,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   late final FocusNode _shortcutFocusNode;
   final _anime4kShaders = Anime4KShaderManager();
   final _subscriptions = <StreamSubscription<dynamic>>[];
+  StreamSubscription<PlaybackLineLookupUpdate>? _lineLookupSubscription;
+  RulePlaybackCancellationToken? _lineLookupCancellationToken;
   final _failedLineIds = <String>{};
   PlaybackLine? _line;
   List<PlaybackLine> _lines = const [];
@@ -64,16 +69,26 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   var _buffering = false;
   var _loadingLine = false;
   var _lineLookupInProgress = false;
+  var _lineScanInProgress = false;
+  var _lineScanComplete = false;
+  var _lineScanCompletedRules = 0;
+  var _lineScanTotalRules = 0;
   var _playbackFailed = false;
   var _fullscreen = false;
   var _muted = false;
   var _autoSwitching = false;
+  var _autoSwitchRetryPending = false;
   var _leaving = false;
   var _lineLookupSerial = 0;
   var _openLineSerial = 0;
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
+  Timer? _webLoadTimer;
+  Timer? _nativeFirstFrameTimer;
+  Timer? _expandedLookupDelayTimer;
+  String? _preferredProviderId;
+  final _localDanmakuTimers = <Timer>[];
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -85,6 +100,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   final List<_LocalDanmakuEntry> _localDanmaku = [];
   List<DanmakuComment> _remoteDanmaku = const [];
   var _danmakuLoadSerial = 0;
+  int? _danmakuRequestedEpisodeId;
 
   @override
   void initState() {
@@ -95,20 +111,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
     _line = widget.request.initialLine;
-    _lines = widget.request.initialLine == null
-        ? const []
-        : [widget.request.initialLine!];
+    _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
     _bindPlayer();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _requestPlayerFocus();
       _applyPlaybackSettings(_currentSettings);
-      unawaited(_loadDanmakuForCurrentEpisode());
       if (_isPlayableLine(_line)) {
         unawaited(_openLine(_line!, force: true));
-        if (widget.request.subject.source != 'direct') {
+        if (!widget.request.offlineOnly &&
+            widget.request.subject.source != 'direct') {
           unawaited(_resolveLinesForCurrentEpisode(autoplay: false));
         }
-      } else {
+      } else if (!widget.request.offlineOnly) {
         unawaited(_resolveLinesForCurrentEpisode());
       }
     });
@@ -120,6 +134,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       subscription.cancel();
     }
     _controlsHideTimer?.cancel();
+    _webLoadTimer?.cancel();
+    _nativeFirstFrameTimer?.cancel();
+    _expandedLookupDelayTimer?.cancel();
+    _lineLookupCancellationToken?.cancel();
+    unawaited(_lineLookupSubscription?.cancel());
+    for (final timer in _localDanmakuTimers) {
+      timer.cancel();
+    }
+    _localDanmakuTimers.clear();
     unawaited(_restoreSystemUi());
     unawaited(_player.dispose());
     _danmakuInput.dispose();
@@ -239,11 +262,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                         title: '切换线路',
                         onClose: _closePanels,
                         child: _LinePanel(
-                          subject: widget.request.subject,
-                          episode: _episode,
                           selected: _line,
-                          initialLines: _lines,
-                          onLinesLoaded: _mergeLinesFromPanel,
+                          lines: _lines,
+                          failedLineIds: _failedLineIds,
+                          scanning: _lineScanInProgress,
+                          completedRules: _lineScanCompletedRules,
+                          totalRules: _lineScanTotalRules,
                           onSelected: _selectLine,
                         ),
                       ),
@@ -307,7 +331,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   bool get _usesWebPlayer {
-    final url = _line?.url?.trim() ?? '';
+    final loadedUrl = _loadedUrl?.trim() ?? '';
+    final url = loadedUrl.isNotEmpty ? loadedUrl : _line?.url?.trim() ?? '';
     return supportsWebStreamPlayer && shouldUseWebStreamPlayer(url);
   }
 
@@ -416,7 +441,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _subscriptions
       ..add(
         _player.stream.playing.listen((value) {
-          if (!mounted) return;
+          if (!mounted || _usesWebPlayer) return;
           setState(() => _playing = value);
           if (value) {
             _scheduleControlsHide();
@@ -428,27 +453,54 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       )
       ..add(
         _player.stream.position.listen((value) {
-          if (mounted) setState(() => _position = value);
+          if (!mounted || _usesWebPlayer) return;
+          final previousPosition = _position;
+          final reachedFirstFrame =
+              _nativeFirstFrameTimer != null &&
+              nativePlaybackReachedFirstFrame(
+                previousPosition: previousPosition,
+                currentPosition: value,
+              );
+          if (reachedFirstFrame) {
+            _nativeFirstFrameTimer?.cancel();
+            _nativeFirstFrameTimer = null;
+            final current = _line;
+            if (current != null) {
+              _failedLineIds.remove(current.id);
+              _preferredProviderId = current.providerId;
+            }
+          }
+          setState(() {
+            _position = value;
+            if (reachedFirstFrame) {
+              _loadingLine = false;
+              _playbackFailed = false;
+              _playerMessage = null;
+            }
+          });
+          if (reachedFirstFrame) {
+            _scheduleExpandedLineLookup();
+          }
         }),
       )
       ..add(
         _player.stream.duration.listen((value) {
-          if (mounted) setState(() => _duration = value);
+          if (mounted && !_usesWebPlayer) setState(() => _duration = value);
         }),
       )
       ..add(
         _player.stream.buffer.listen((value) {
-          if (mounted) setState(() => _buffer = value);
+          if (mounted && !_usesWebPlayer) setState(() => _buffer = value);
         }),
       )
       ..add(
         _player.stream.videoParams.listen((value) {
-          if (mounted) _refreshSuperResolutionShader();
+          if (mounted && !_usesWebPlayer) _refreshSuperResolutionShader();
         }),
       )
       ..add(
         _player.stream.buffering.listen((value) {
-          if (mounted) setState(() => _buffering = value);
+          if (mounted && !_usesWebPlayer) setState(() => _buffering = value);
         }),
       )
       ..add(
@@ -463,11 +515,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       )
       ..add(
         _player.stream.completed.listen((completed) {
+          if (_usesWebPlayer) return;
           if (completed && _currentSettings.autoNext) _playNextEpisode();
         }),
       )
       ..add(
         _player.stream.error.listen((error) {
+          if (_usesWebPlayer) return;
           _handlePlayerError(error);
         }),
       )
@@ -650,42 +704,72 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
     final serial = ++_lineLookupSerial;
+    _expandedLookupDelayTimer?.cancel();
+    _expandedLookupDelayTimer = null;
+    _lineLookupCancellationToken?.cancel();
+    final previousSubscription = _lineLookupSubscription;
+    _lineLookupSubscription = null;
+    if (previousSubscription != null) await previousSubscription.cancel();
+    if (!mounted || serial != _lineLookupSerial) return;
+    final cancellationToken = RulePlaybackCancellationToken();
+    _lineLookupCancellationToken = cancellationToken;
+    final usesProgressiveLookup = _usesProgressiveRuleLookup(
+      widget.request.subject,
+    );
     setState(() {
       _lineLookupInProgress = true;
+      _lineScanInProgress = false;
+      _lineScanComplete = !usesProgressiveLookup;
+      _lineScanCompletedRules = 0;
+      _lineScanTotalRules = 0;
       _lineLookupMessage = null;
       _playerMessage = null;
       _playbackFailed = false;
     });
     try {
-      final lines = await ref
+      final discoveredLines = await ref
           .read(animeControllerProvider.notifier)
-          .linesForEpisode(widget.request.subject, _episode);
-      if (!mounted || serial != _lineLookupSerial) return;
+          .linesForEpisode(
+            widget.request.subject,
+            _episode,
+            cancellationToken: cancellationToken,
+          );
+      if (!mounted ||
+          serial != _lineLookupSerial ||
+          cancellationToken.isCancelled) {
+        return;
+      }
+      final controller = ref.read(animeControllerProvider.notifier);
+      final lines = await verifyPlaybackLinesBeforeDisplay(
+        discoveredLines,
+        verify: (line) => controller.verifyPlaybackLine(
+          line,
+          enrichMetadata: false,
+          cancellationToken: cancellationToken,
+        ),
+      );
+      if (!mounted ||
+          serial != _lineLookupSerial ||
+          cancellationToken.isCancelled) {
+        return;
+      }
       final available = _availableLines(lines);
       PlaybackLine? nextLine = _line;
       if (!_isPlayableLine(nextLine) && available.isNotEmpty) {
-        nextLine = available.first;
+        nextLine = _preferredPlayableLine(available);
       }
       setState(() {
         _lines = lines;
         _line = nextLine;
-        _lineLookupInProgress = false;
+        _lineLookupInProgress = available.isEmpty && usesProgressiveLookup;
         _lineLookupMessage = available.isEmpty
             ? '快速查找暂未发现可用线路，正在后台继续扫描…'
             : null;
       });
-      unawaited(
-        _continueExpandedLineLookup(
-          serial: serial,
-          autoplay: autoplay,
-          initialLines: lines,
-          delay: available.isEmpty
-              ? Duration.zero
-              : const Duration(milliseconds: 700),
-        ),
-      );
       if (autoplay && _isPlayableLine(nextLine)) {
         await _openLine(nextLine!, force: true);
+      } else if (available.isEmpty && usesProgressiveLookup) {
+        _startExpandedLineLookup(autoplay: autoplay);
       } else if (available.isEmpty) {
         await _player.stop();
       }
@@ -700,69 +784,184 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     }
   }
 
-  Future<void> _continueExpandedLineLookup({
-    required int serial,
-    required bool autoplay,
-    required List<PlaybackLine> initialLines,
-    Duration delay = Duration.zero,
-  }) async {
-    try {
-      if (delay > Duration.zero) await Future<void>.delayed(delay);
-      if (!mounted || serial != _lineLookupSerial) return;
-      final expandedLines = await ref
-          .read(animeControllerProvider.notifier)
-          .linesForEpisodeMode(
-            widget.request.subject,
-            _episode,
-            expandAll: true,
-          );
-      if (!mounted || serial != _lineLookupSerial) return;
-      final lines = _mergeLineLists(initialLines, expandedLines);
-      final available = _availableLines(lines);
-      final currentLine = _line;
-      final currentFailed =
-          _playbackFailed ||
-          (currentLine != null && _failedLineIds.contains(currentLine.id));
-      PlaybackLine? nextLine = currentLine;
-      if (!currentFailed && currentLine != null) {
-        for (final candidate in available) {
-          if (candidate.id == currentLine.id) {
-            nextLine = candidate;
-            break;
-          }
-        }
-      }
-      if (currentFailed || !_isPlayableLine(nextLine)) {
-        nextLine = null;
-        for (final candidate in available) {
-          if (_failedLineIds.contains(candidate.id)) continue;
-          nextLine = candidate;
-          break;
-        }
-      }
-      final shouldOpen =
-          autoplay &&
-          _isPlayableLine(nextLine) &&
-          (currentFailed || !_isPlayableLine(currentLine));
-      setState(() {
-        _lines = lines;
-        _line = nextLine;
-        _lineLookupMessage = available.isEmpty
-            ? _emptyLineMessage(lines, subject: widget.request.subject)
-            : null;
-      });
-      if (shouldOpen) {
-        await _openLine(nextLine!, force: true);
-      }
-    } catch (error) {
-      if (!mounted || serial != _lineLookupSerial) return;
-      setState(() {
-        _lineLookupMessage = '线路解析失败：${_friendlyPlaybackError(error)}';
-      });
+  void _scheduleExpandedLineLookup() {
+    if (!_usesProgressiveRuleLookup(widget.request.subject) ||
+        _lineScanComplete ||
+        _lineScanInProgress ||
+        _lineLookupSubscription != null ||
+        widget.request.offlineOnly) {
+      return;
     }
+    if (_expandedLookupDelayTimer != null) return;
+    _expandedLookupDelayTimer = Timer(const Duration(milliseconds: 450), () {
+      _expandedLookupDelayTimer = null;
+      _startExpandedLineLookup();
+    });
   }
 
-  Future<void> _openLine(PlaybackLine line, {bool force = false}) async {
+  void _startExpandedLineLookup({bool autoplay = false}) {
+    if (!mounted ||
+        widget.request.offlineOnly ||
+        !_usesProgressiveRuleLookup(widget.request.subject) ||
+        _lineScanComplete ||
+        _lineScanInProgress ||
+        _lineLookupSubscription != null) {
+      return;
+    }
+    _expandedLookupDelayTimer?.cancel();
+    _expandedLookupDelayTimer = null;
+    final serial = _lineLookupSerial;
+    final episodeId = _episode.id;
+    final cancellationToken = _lineLookupCancellationToken ??=
+        RulePlaybackCancellationToken();
+    if (cancellationToken.isCancelled) return;
+    setState(() {
+      _lineScanInProgress = true;
+      _lineScanCompletedRules = 0;
+      _lineScanTotalRules = 0;
+      if (!_isPlayableLine(_line)) _lineLookupInProgress = true;
+    });
+
+    late final StreamSubscription<PlaybackLineLookupUpdate> subscription;
+    subscription = ref
+        .read(animeControllerProvider.notifier)
+        .lineUpdatesForEpisode(
+          widget.request.subject,
+          _episode,
+          cancellationToken: cancellationToken,
+        )
+        .listen(
+          (update) {
+            if (!mounted ||
+                serial != _lineLookupSerial ||
+                episodeId != _episode.id ||
+                cancellationToken.isCancelled) {
+              return;
+            }
+            var merged = mergePlaybackLineSnapshot(
+              currentLines: _lines,
+              snapshotLines: update.lines,
+              replacedProviderId:
+                  update.phase == PlaybackLineLookupPhase.verification
+                  ? update.resolvedProviderId
+                  : null,
+              authoritative: update.isComplete,
+            );
+            merged = _preserveLoadedLineIfProbeDisagrees(merged);
+            final available = _availableLines(merged);
+            PlaybackLine? selected = _line;
+            if (selected != null) {
+              final refreshed = _lineById(merged, selected.id);
+              if (refreshed != null &&
+                  (refreshed.available || _playbackFailed)) {
+                selected = refreshed;
+              }
+            }
+            final currentFailed =
+                _playbackFailed ||
+                (selected != null && _failedLineIds.contains(selected.id));
+            final target = currentFailed || !_isPlayableLine(selected)
+                ? _preferredPlayableLine(available)
+                : selected;
+            final shouldOpen =
+                target != null &&
+                !_failedLineIds.contains(target.id) &&
+                ((autoplay &&
+                        (!_isPlayableLine(_line) || _loadedUrl == null)) ||
+                    (currentFailed && _currentSettings.autoSwitchLine));
+            setState(() {
+              _lines = merged;
+              _line = shouldOpen ? target : selected;
+              _lineScanInProgress = !update.isComplete;
+              _lineScanComplete = update.isComplete;
+              _lineScanCompletedRules = update.completedRules;
+              _lineScanTotalRules = update.totalRules;
+              _lineLookupInProgress = available.isEmpty && !update.isComplete;
+              _lineLookupMessage = available.isEmpty
+                  ? update.isComplete
+                        ? _emptyLineMessage(
+                            merged,
+                            subject: widget.request.subject,
+                          )
+                        : _progressiveLookupMessage(update)
+                  : null;
+            });
+            if (shouldOpen) unawaited(_openLine(target, force: true));
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            if (!mounted ||
+                serial != _lineLookupSerial ||
+                episodeId != _episode.id) {
+              return;
+            }
+            setState(() {
+              _lineScanInProgress = false;
+              _lineLookupInProgress = false;
+              _lineLookupMessage = '线路解析失败：${_friendlyPlaybackError(error)}';
+            });
+          },
+          onDone: () {
+            if (identical(_lineLookupSubscription, subscription)) {
+              _lineLookupSubscription = null;
+            }
+            if (!mounted ||
+                serial != _lineLookupSerial ||
+                episodeId != _episode.id) {
+              return;
+            }
+            setState(() {
+              _lineScanInProgress = false;
+              _lineScanComplete = true;
+              _lineLookupInProgress = false;
+            });
+          },
+        );
+    _lineLookupSubscription = subscription;
+  }
+
+  List<PlaybackLine> _preserveLoadedLineIfProbeDisagrees(
+    List<PlaybackLine> lines,
+  ) {
+    final current = _line;
+    if (current == null) return lines;
+    final replacement = _lineById(lines, current.id);
+    if (!shouldPreserveLoadedPlaybackLine(
+      currentLine: current,
+      replacementLine: replacement,
+      loadedUrl: _loadedUrl,
+      failedLineIds: _failedLineIds,
+      playbackFailed: _playbackFailed,
+    )) {
+      return lines;
+    }
+    return <String, PlaybackLine>{
+      for (final line in lines) line.id: line,
+      current.id: current,
+    }.values.toList(growable: false);
+  }
+
+  PlaybackLine? _preferredPlayableLine(List<PlaybackLine> lines) {
+    if (lines.isEmpty) return null;
+    final preferredProviderId = _preferredProviderId;
+    if (preferredProviderId != null) {
+      for (final line in lines) {
+        if (line.providerId == preferredProviderId &&
+            !_failedLineIds.contains(line.id)) {
+          return line;
+        }
+      }
+    }
+    for (final line in lines) {
+      if (!_failedLineIds.contains(line.id)) return line;
+    }
+    return null;
+  }
+
+  Future<void> _openLine(
+    PlaybackLine requestedLine, {
+    bool force = false,
+  }) async {
+    var line = requestedLine;
     if (!_isPlayableLine(line)) {
       await _player.stop();
       if (!mounted) return;
@@ -774,38 +973,132 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       });
       return;
     }
-    final url = line.url!.trim();
-    if (!force && _loadedUrl == url && !_playbackFailed) return;
+    final requestedUrl = line.url!.trim();
+    if (!force && _loadedUrl == requestedUrl && !_playbackFailed) return;
     final serial = ++_openLineSerial;
+    _webLoadTimer?.cancel();
+    _nativeFirstFrameTimer?.cancel();
     _revealPlayerControls();
     setState(() {
       _line = line;
-      _loadedUrl = url;
       _loadingLine = true;
       _playbackFailed = false;
-      _playerMessage = null;
+      _playerMessage = '正在确认这条线路可以真实播放…';
       _position = Duration.zero;
       _duration = Duration.zero;
       _buffer = Duration.zero;
     });
+    line = await ref
+        .read(animeControllerProvider.notifier)
+        .verifyPlaybackLine(
+          line,
+          forceRefresh: true,
+          cancellationToken: _lineLookupCancellationToken,
+        );
+    if (!mounted || serial != _openLineSerial) return;
+    _lines = upsertPlaybackLine(_lines, line);
+    if (!_isPlayableLine(line)) {
+      _failedLineIds.add(line.id);
+      setState(() {
+        _line = line;
+        _loadingLine = false;
+        _playbackFailed = true;
+        _playerMessage = '这条线路验证失败，正在自动寻找可播放线路…';
+      });
+      _startExpandedLineLookup(autoplay: true);
+      unawaited(_tryAutoSwitchLine());
+      return;
+    }
+    final url = line.url!.trim();
+    setState(() {
+      _line = line;
+      _loadedUrl = url;
+      _playerMessage = null;
+    });
     if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
       if (!mounted || serial != _openLineSerial) return;
+      unawaited(_player.stop());
+      _webLoadTimer = Timer(const Duration(seconds: 7), () {
+        if (!mounted ||
+            serial != _openLineSerial ||
+            _loadedUrl != url ||
+            !webPlaybackStartupTimedOut(waitingForReady: _loadingLine)) {
+          return;
+        }
+        if (webPlaybackShouldSwitchAtSoftTimeout(
+          waitingForReady: _loadingLine,
+          hasAlternative: _nextPlayableLine() != null,
+        )) {
+          _handleWebError(message: '当前线路 7 秒内未出画面，已尝试切换备用线路。');
+          return;
+        }
+        _webLoadTimer = Timer(const Duration(seconds: 18), () {
+          if (!mounted ||
+              serial != _openLineSerial ||
+              _loadedUrl != url ||
+              !webPlaybackStartupTimedOut(waitingForReady: _loadingLine)) {
+            return;
+          }
+          _handleWebError(message: '当前线路长时间未能起播，已尝试切换其他线路。');
+        });
+      });
       setState(() {
-        _loadingLine = false;
+        _loadingLine = true;
         _playbackFailed = false;
+        // This is the desired state passed to WebStreamPlayer. The browser
+        // events below remain authoritative and will set it back to false if
+        // autoplay is blocked or the user pauses playback.
         _playing = true;
         _playerMessage = null;
       });
       return;
     }
     try {
-      await _player.stop();
-      await _player.setRate(
-        _currentSettings.speed <= 0 ? 1.0 : _currentSettings.speed,
-      );
-      await _player.setVolume(
-        _muted ? 0 : _volumeFromSettings(_currentSettings),
-      );
+      if (supportsWebStreamPlayer) _webPlayerController.pause();
+      const nativeSoftTimeout = Duration(seconds: 7);
+      const nativeHardTimeout = Duration(seconds: 25);
+      const nativeFallbackPollInterval = Duration(seconds: 1);
+      late void Function(Duration delay, Duration elapsed)
+      scheduleNativeStartupCheck;
+      scheduleNativeStartupCheck = (delay, elapsed) {
+        _nativeFirstFrameTimer = Timer(delay, () {
+          if (!mounted ||
+              serial != _openLineSerial ||
+              _loadedUrl != url ||
+              nativePlaybackHasFirstFrame(
+                playing: _playing,
+                position: _position,
+              )) {
+            return;
+          }
+          final hardTimedOut = elapsed >= nativeHardTimeout;
+          final hasAlternative = _nextPlayableLine() != null;
+          if (!hardTimedOut &&
+              !nativePlaybackShouldSwitchAtSoftTimeout(
+                position: _position,
+                hasAlternative: hasAlternative,
+              )) {
+            final remaining = nativeHardTimeout - elapsed;
+            final nextDelay = remaining < nativeFallbackPollInterval
+                ? remaining
+                : nativeFallbackPollInterval;
+            scheduleNativeStartupCheck(nextDelay, elapsed + nextDelay);
+            return;
+          }
+          _nativeFirstFrameTimer = null;
+          _failedLineIds.add(line.id);
+          setState(() {
+            _loadingLine = false;
+            _playbackFailed = true;
+            _playerMessage = hardTimedOut
+                ? '当前线路长时间未能起播，正在查找其他线路。'
+                : '当前线路 7 秒内未出画面，已切换备用线路。';
+          });
+          _startExpandedLineLookup(autoplay: true);
+          unawaited(_tryAutoSwitchLine());
+        });
+      };
+      scheduleNativeStartupCheck(nativeSoftTimeout, nativeSoftTimeout);
       final media = line.headers.isEmpty
           ? Media(url)
           : Media(url, httpHeaders: line.headers);
@@ -819,17 +1112,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       });
     } catch (error) {
       if (!mounted || serial != _openLineSerial) return;
+      _nativeFirstFrameTimer?.cancel();
       _failedLineIds.add(line.id);
       setState(() {
         _loadingLine = false;
         _playbackFailed = true;
-        _playerMessage = '当前线路无法播放：${_friendlyPlaybackError(error)}';
+        _playerMessage = _currentSettings.autoSwitchLine
+            ? '当前线路不可播放，正在自动切换备用线路…'
+            : '当前线路无法播放：${_friendlyPlaybackError(error)}';
       });
       unawaited(_tryAutoSwitchLine());
     }
   }
 
   void _handlePlayerError(Object error) {
+    _nativeFirstFrameTimer?.cancel();
     if (!_isPlayableLine(_line)) {
       if (!mounted) return;
       setState(() {
@@ -845,21 +1142,41 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     setState(() {
       _loadingLine = false;
       _playbackFailed = true;
-      _playerMessage = '当前线路无法播放：${_friendlyPlaybackError(error)}';
+      _playerMessage = _currentSettings.autoSwitchLine
+          ? '当前线路不可播放，正在自动切换备用线路…'
+          : '当前线路无法播放：${_friendlyPlaybackError(error)}';
     });
     unawaited(_tryAutoSwitchLine());
   }
 
   Future<void> _tryAutoSwitchLine() async {
-    if (_autoSwitching || !_currentSettings.autoSwitchLine) return;
+    if (!_currentSettings.autoSwitchLine) return;
+    if (_autoSwitching) {
+      _autoSwitchRetryPending = true;
+      return;
+    }
     _autoSwitching = true;
     try {
-      var next = _nextPlayableLine();
-      if (next == null && _lines.isEmpty) {
-        await _resolveLinesForCurrentEpisode(autoplay: false);
-        next = _nextPlayableLine();
+      final next = _nextPlayableLine();
+      if (next == null) {
+        if (!widget.request.offlineOnly && !_lineScanComplete) {
+          _startExpandedLineLookup(autoplay: true);
+          if (mounted) {
+            setState(() {
+              _playerMessage = '当前线路失败，正在后台搜索备用线路…';
+            });
+          }
+        } else if (mounted) {
+          setState(() {
+            _playerMessage = _emptyLineMessage(
+              _lines,
+              subject: widget.request.subject,
+            );
+          });
+        }
+        return;
       }
-      if (next == null || !mounted) return;
+      if (!mounted) return;
       final switchTarget = next;
       setState(() {
         _line = switchTarget;
@@ -868,6 +1185,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       await _openLine(switchTarget, force: true);
     } finally {
       _autoSwitching = false;
+      if (_autoSwitchRetryPending) {
+        _autoSwitchRetryPending = false;
+        scheduleMicrotask(_tryAutoSwitchLine);
+      }
     }
   }
 
@@ -972,6 +1293,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _selectEpisode(AnimeEpisode episode) {
     _revealPlayerControls();
+    if (widget.request.offlineOnly) {
+      if (episode.id != _episode.id) {
+        _showPlayerToast('离线播放只能打开已经下载的当前集。');
+      }
+      setState(() => _episodePanel = false);
+      return;
+    }
+    ++_danmakuLoadSerial;
+    final playbackSerial = ++_openLineSerial;
+    _danmakuRequestedEpisodeId = null;
+    _webLoadTimer?.cancel();
+    _nativeFirstFrameTimer?.cancel();
+    _failedLineIds.clear();
+    _autoSwitchRetryPending = false;
     setState(() {
       _episode = episode;
       _line = null;
@@ -979,18 +1314,43 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _loadedUrl = null;
       _playerMessage = null;
       _lineLookupMessage = null;
+      _lineScanInProgress = false;
+      _lineScanComplete = false;
+      _lineScanCompletedRules = 0;
+      _lineScanTotalRules = 0;
       _playbackFailed = false;
       _remoteDanmaku = const [];
       _episodePanel = false;
     });
-    unawaited(_player.stop());
-    unawaited(_loadDanmakuForCurrentEpisode());
-    unawaited(_resolveLinesForCurrentEpisode());
+    unawaited(
+      _stopAndResolveSelectedEpisode(
+        episodeId: episode.id,
+        playbackSerial: playbackSerial,
+      ),
+    );
+  }
+
+  Future<void> _stopAndResolveSelectedEpisode({
+    required int episodeId,
+    required int playbackSerial,
+  }) async {
+    try {
+      await _player.stop();
+    } catch (_) {
+      // A stale native open may already have torn down the previous media.
+    }
+    if (!mounted ||
+        playbackSerial != _openLineSerial ||
+        _episode.id != episodeId) {
+      return;
+    }
+    await _resolveLinesForCurrentEpisode();
   }
 
   void _selectLine(PlaybackLine line) {
     _revealPlayerControls();
     _failedLineIds.remove(line.id);
+    _preferredProviderId = line.providerId;
     setState(() {
       _line = line;
       _linePanel = false;
@@ -1000,22 +1360,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     unawaited(_openLine(line, force: true));
   }
 
-  void _mergeLinesFromPanel(List<PlaybackLine> lines) {
-    if (!mounted || lines.isEmpty) return;
-    final merged = <String, PlaybackLine>{
-      for (final line in _lines) line.id: line,
-      for (final line in lines) line.id: line,
-    };
-    setState(() {
-      _lines = merged.values.toList(growable: false);
-      if (!_isPlayableLine(_line)) {
-        final available = _availableLines(_lines);
-        if (available.isNotEmpty) _line = available.first;
-      }
-    });
-  }
-
   Future<void> _playNextEpisode() async {
+    if (widget.request.offlineOnly) return;
     final index = widget.request.episodes.indexWhere(
       (episode) => episode.id == _episode.id,
     );
@@ -1063,6 +1409,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     }
     if (_leaving) return;
     _leaving = true;
+    _lineLookupCancellationToken?.cancel();
+    _expandedLookupDelayTimer?.cancel();
+    await _lineLookupSubscription?.cancel();
     await _restoreSystemUi();
     await _player.stop();
     if (mounted) safeNavigateBack(context);
@@ -1100,13 +1449,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _toggleLinePanel() {
     _revealPlayerControls();
+    final opening = !_linePanel;
     setState(() {
-      _linePanel = !_linePanel;
+      _linePanel = opening;
       _episodePanel = false;
       _subtitlePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
     });
+    if (opening) _startExpandedLineLookup();
   }
 
   void _toggleSubtitlePanel() {
@@ -1122,13 +1473,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _toggleDanmakuPanel() {
     _revealPlayerControls();
+    final opening = !_danmakuPanel;
     setState(() {
-      _danmakuPanel = !_danmakuPanel;
+      _danmakuPanel = opening;
       _episodePanel = false;
       _linePanel = false;
       _subtitlePanel = false;
       _settingsPanel = false;
     });
+    // Danmaku is intentionally opt-in during playback. Fetching and parsing a
+    // full XML timeline competes with rule lookup and video startup, so only a
+    // deliberate visit to the danmaku panel starts this work.
+    if (opening) unawaited(_loadDanmakuForCurrentEpisode());
   }
 
   void _toggleSettingsPanel() {
@@ -1232,8 +1588,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   Future<void> _loadDanmakuForCurrentEpisode() async {
-    final serial = ++_danmakuLoadSerial;
     final episode = _episode;
+    if (_danmakuRequestedEpisodeId == episode.id) return;
+    _danmakuRequestedEpisodeId = episode.id;
+    final serial = ++_danmakuLoadSerial;
     try {
       final timeline = await ref
           .read(animeControllerProvider.notifier)
@@ -1250,6 +1608,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
           episode.id != _episode.id) {
         return;
       }
+      _danmakuRequestedEpisodeId = null;
       setState(() => _remoteDanmaku = const []);
     }
   }
@@ -1273,14 +1632,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _localDanmaku.add(entry);
       _danmakuInput.clear();
     });
-    Timer(const Duration(seconds: 9), () {
+    late final Timer timer;
+    timer = Timer(const Duration(seconds: 9), () {
+      _localDanmakuTimers.remove(timer);
       if (!mounted) return;
       setState(() => _localDanmaku.removeWhere((item) => item.id == entry.id));
     });
+    _localDanmakuTimers.add(timer);
   }
 
   void _handleWebReady() {
     if (!mounted) return;
+    _webLoadTimer?.cancel();
+    _webLoadTimer = null;
     setState(() {
       _loadingLine = false;
       _playbackFailed = false;
@@ -1288,14 +1652,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
   }
 
-  void _handleWebError() {
+  void _handleWebError({String? message}) {
     if (!mounted) return;
+    _webLoadTimer?.cancel();
+    final current = _line;
+    if (current != null) _failedLineIds.add(current.id);
     setState(() {
       _loadingLine = false;
       _playbackFailed = true;
       _playing = false;
-      _playerMessage = '网页播放器无法打开当前地址，可能被源站跨域或防盗链限制。';
+      _playerMessage = _currentSettings.autoSwitchLine
+          ? '当前线路不可播放，正在自动切换备用线路…'
+          : message ?? '网页播放器无法打开当前地址，可能被源站跨域或防盗链限制。';
     });
+    _startExpandedLineLookup(autoplay: true);
+    unawaited(_tryAutoSwitchLine());
   }
 
   void _handleWebPosition(Duration value) {
@@ -1309,8 +1680,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   }
 
   void _handleWebPlaying(bool value) {
-    if (!mounted || _playing == value) return;
+    if (!mounted ||
+        _playing == value ||
+        !webPlaybackShouldApplyPlayingUpdate(
+          loading: _loadingLine,
+          playing: value,
+        )) {
+      return;
+    }
     setState(() => _playing = value);
+    if (value) {
+      _webLoadTimer?.cancel();
+      _webLoadTimer = null;
+      if (_line != null) _preferredProviderId = _line!.providerId;
+      _scheduleExpandedLineLookup();
+    }
   }
 
   void _showPlayerToast(String message) {
@@ -1650,8 +2034,8 @@ class _PlayerCanvas extends StatelessWidget {
                                   onWebDuration: onWebDuration,
                                   onWebPlaying: onWebPlaying,
                                   poster: PosterArt(
-                                    coverUrl:
-                                        subject.bannerUrl ?? subject.coverUrl,
+                                    coverUrl: subject.bannerUrl,
+                                    fallbackCoverUrl: subject.coverUrl,
                                     title: subject.title,
                                   ),
                                 ),
@@ -1832,7 +2216,9 @@ class _StreamVideoSurface extends StatelessWidget {
         playing: playing,
         volume: volume.clamp(0.0, 1.0),
         position: position,
-        forceHls: url.toLowerCase().contains('.m3u8'),
+        rate: settings.speed,
+        headers: line?.headers ?? const {},
+        forceHls: _isHlsLine(line),
         onReady: onWebReady,
         onError: onWebError,
         onPosition: onWebPosition,
@@ -2757,20 +3143,47 @@ bool _isPlayableLine(PlaybackLine? line) {
   return line?.available == true && (line?.url?.trim().isNotEmpty ?? false);
 }
 
-List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
-  return lines.where(_isPlayableLine).toList(growable: false);
+PlaybackLine? _lineById(List<PlaybackLine> lines, String id) {
+  for (final line in lines) {
+    if (line.id == id) return line;
+  }
+  return null;
 }
 
-List<PlaybackLine> _mergeLineLists(
-  List<PlaybackLine> first,
-  List<PlaybackLine> second,
-) {
-  if (first.isEmpty) return second;
-  if (second.isEmpty) return first;
-  return <String, PlaybackLine>{
-    for (final line in first) line.id: line,
-    for (final line in second) line.id: line,
-  }.values.toList(growable: false);
+bool _usesProgressiveRuleLookup(AnimeSubject subject) {
+  final source = subject.source.toLowerCase();
+  return source != 'direct' &&
+      !source.startsWith('m3u-channel:') &&
+      !source.startsWith('peertube:') &&
+      !source.startsWith('archive:') &&
+      !source.startsWith('commons:');
+}
+
+String _progressiveLookupMessage(PlaybackLineLookupUpdate update) {
+  final progress = update.totalRules <= 0
+      ? ''
+      : ' ${update.completedRules}/${update.totalRules}';
+  return update.phase == PlaybackLineLookupPhase.verification
+      ? '正在后台测速并补全线路信息$progress…'
+      : '正在并行检索全部线路$progress…';
+}
+
+bool _isHlsLine(PlaybackLine? line) {
+  if (line == null) return false;
+  final format = line.format.trim().toLowerCase();
+  if (format.contains('hls') ||
+      format.contains('m3u8') ||
+      format.contains('mpegurl')) {
+    return true;
+  }
+  final url = line.url?.trim().toLowerCase() ?? '';
+  return RegExp(r'\.m3u8(?:$|[?#])').hasMatch(url) ||
+      url.contains('type=m3u8') ||
+      url.contains('format=m3u8');
+}
+
+List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
+  return playablePlaybackLinesInSourceOrder(lines);
 }
 
 String _emptyLineMessage(
@@ -2783,18 +3196,21 @@ String _emptyLineMessage(
       source.startsWith('tvmaze') ||
       source == 'wikidata';
   if (lines.isEmpty) {
+    if (source.startsWith('m3u-channel:')) {
+      return '这个直播频道暂时无法读取。请检查外部源是否启用，或稍后重试。';
+    }
     if (source.startsWith('archive:') ||
         source.startsWith('peertube:') ||
         source.startsWith('commons:')) {
       return '这个开放媒体暂时没有返回可播放文件，可能正在转码、已下架或源站暂时不可用。';
     }
     if (isMetadataOnly) {
-      return '这部作品目前仅有影视资料，暂无可直接播放线路。可到播放规则页添加或启用规则。';
+      return '这部作品目前仅有影视资料，聚合后端暂未找到可播放线路。';
     }
     return '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。';
   }
   if (isMetadataOnly) {
-    return '这部作品目前仅有影视资料；已尝试 ${lines.length} 条规则，但没有可直接播放的地址。可到播放规则页添加或启用规则。';
+    return '聚合后端已检查 ${lines.length} 条候选线路，但暂时没有可播放地址。';
   }
   final unavailableCount = lines.where((line) => !line.available).length;
   return _unavailableLinesMessage(lines, count: unavailableCount);
@@ -2810,15 +3226,6 @@ String _unavailableLinesMessage(List<PlaybackLine> lines, {int? count}) {
     return '找到 $total 条线路，但其中 $deadCount 条视频 CDN 已失效、拒绝访问或连接超时，暂时不会当作可播放线路。';
   }
   return '找到 $total 条规则，但它们需要验证码、WebView 或对应执行器，暂时无法直接播放。';
-}
-
-String _hiddenLinesMessage(List<PlaybackLine> lines) {
-  final unavailableLines = lines.where((line) => !line.available).toList();
-  final deadCount = unavailableLines
-      .where((line) => (line.message ?? '').contains('视频 CDN'))
-      .length;
-  if (deadCount > 0) return '已隐藏 $deadCount 条失效或被拒绝的 CDN 线路';
-  return '已隐藏 ${unavailableLines.length} 条不可直接播放的规则';
 }
 
 String _friendlyPlaybackError(Object error) {
@@ -2925,79 +3332,35 @@ class _EpisodePanel extends StatelessWidget {
   }
 }
 
-class _LinePanel extends ConsumerStatefulWidget {
+class _LinePanel extends StatelessWidget {
   const _LinePanel({
-    required this.subject,
-    required this.episode,
     required this.selected,
-    required this.initialLines,
-    required this.onLinesLoaded,
+    required this.lines,
+    required this.failedLineIds,
+    required this.scanning,
+    required this.completedRules,
+    required this.totalRules,
     required this.onSelected,
   });
 
-  final AnimeSubject subject;
-  final AnimeEpisode episode;
   final PlaybackLine? selected;
-  final List<PlaybackLine> initialLines;
-  final ValueChanged<List<PlaybackLine>> onLinesLoaded;
+  final List<PlaybackLine> lines;
+  final Set<String> failedLineIds;
+  final bool scanning;
+  final int completedRules;
+  final int totalRules;
   final ValueChanged<PlaybackLine> onSelected;
 
   @override
-  ConsumerState<_LinePanel> createState() => _LinePanelState();
-}
-
-class _LinePanelState extends ConsumerState<_LinePanel> {
-  Future<List<PlaybackLine>>? _future;
-  var _notifiedFutureResult = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _future = _futureForWidget();
-  }
-
-  @override
-  void didUpdateWidget(covariant _LinePanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.episode.id != widget.episode.id ||
-        oldWidget.subject.id != widget.subject.id) {
-      _notifiedFutureResult = false;
-      _future = _futureForWidget();
-    }
-  }
-
-  Future<List<PlaybackLine>> _futureForWidget() {
-    return ref
-        .read(animeControllerProvider.notifier)
-        .linesForEpisodeMode(widget.subject, widget.episode, expandAll: true);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final initialLines = widget.initialLines;
-    return FutureBuilder<List<PlaybackLine>>(
-      future: _future,
-      builder: (context, snapshot) {
-        final expandedLines = snapshot.data ?? const <PlaybackLine>[];
-        if (expandedLines.isNotEmpty && !_notifiedFutureResult) {
-          _notifiedFutureResult = true;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) widget.onLinesLoaded(expandedLines);
-          });
-        }
-        final lines = _mergeLineLists(initialLines, expandedLines);
-        return _LinePanelBody(
-          lines: lines,
-          selected: widget.selected,
-          loading:
-              snapshot.connectionState == ConnectionState.waiting &&
-              initialLines.isEmpty,
-          expanding:
-              snapshot.connectionState == ConnectionState.waiting &&
-              initialLines.isNotEmpty,
-          onSelected: widget.onSelected,
-        );
-      },
+    return _LinePanelBody(
+      lines: lines,
+      selected: selected,
+      failedLineIds: failedLineIds,
+      scanning: scanning,
+      completedRules: completedRules,
+      totalRules: totalRules,
+      onSelected: onSelected,
     );
   }
 }
@@ -3006,37 +3369,50 @@ class _LinePanelBody extends StatelessWidget {
   const _LinePanelBody({
     required this.lines,
     required this.selected,
-    required this.loading,
-    required this.expanding,
+    required this.failedLineIds,
+    required this.scanning,
+    required this.completedRules,
+    required this.totalRules,
     required this.onSelected,
   });
 
   final List<PlaybackLine> lines;
   final PlaybackLine? selected;
-  final bool loading;
-  final bool expanding;
+  final Set<String> failedLineIds;
+  final bool scanning;
+  final int completedRules;
+  final int totalRules;
   final ValueChanged<PlaybackLine> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    final availableLines = lines.where((line) => line.available).toList();
-    final unavailableCount = lines.length - availableLines.length;
+    final displayLines = selectablePlaybackLinesForDisplay(
+      lines,
+      failedLineIds: failedLineIds,
+    );
+    final excludedCount = lines.length - displayLines.length;
+    final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
     return ListView(
       padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
       children: [
         const _LineModeBar(),
         const SizedBox(height: 14),
-        if (expanding) ...[
-          _PanelInlineStatus(text: '正在继续扫描更多已启用规则，已找到的线路可以先用。'),
+        if (scanning || excludedCount > 0 || displayLines.isNotEmpty) ...[
+          _PanelInlineStatus(
+            loading: scanning,
+            text: scanning
+                ? '正在后台验证线路$progress · 已确认 ${displayLines.length} 条可播'
+                : '已确认 ${displayLines.length} 条可播${excludedCount > 0 ? ' · 自动跳过 $excludedCount 条失效或不兼容线路' : ''}',
+          ),
           const SizedBox(height: 12),
         ],
-        if (loading)
+        if (displayLines.isEmpty && scanning)
           const Center(child: CircularProgressIndicator())
-        else if (availableLines.isEmpty)
+        else if (displayLines.isEmpty)
           _PanelEmpty(
             title: '当前没有可播放线路',
             message: lines.isEmpty
-                ? '已安装规则里没有适合当前内容的可解析线路，可以到规则仓库安装同类型规则。'
+                ? '正在保留并尝试已启用规则，目前还没有找到真实可播地址。'
                 : _unavailableLinesMessage(lines),
           )
         else
@@ -3049,26 +3425,17 @@ class _LinePanelBody extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Column(
                 children: [
-                  if (unavailableCount > 0) ...[
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      child: Text(
-                        _hiddenLinesMessage(lines),
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.white54),
-                      ),
-                    ),
-                    const Divider(height: 1, color: Color(0xFF303030)),
-                  ],
-                  for (var i = 0; i < availableLines.length; i++) ...[
+                  for (var i = 0; i < displayLines.length; i++) ...[
                     _LineTile(
+                      key: ValueKey(displayLines[i].id),
                       index: i,
-                      line: availableLines[i],
-                      selected: selected?.id == availableLines[i].id,
-                      onTap: () => onSelected(availableLines[i]),
+                      line: displayLines[i],
+                      selected: selected?.id == displayLines[i].id,
+                      onTap: displayLines[i].available
+                          ? () => onSelected(displayLines[i])
+                          : null,
                     ),
-                    if (i != availableLines.length - 1)
+                    if (i != displayLines.length - 1)
                       const Divider(height: 1, color: Color(0xFF303030)),
                   ],
                 ],
@@ -3152,18 +3519,45 @@ class _SubtitlePanel extends ConsumerWidget {
   }
 }
 
-class _DanmakuPanel extends ConsumerWidget {
+class _DanmakuPanel extends ConsumerStatefulWidget {
   const _DanmakuPanel({required this.subject, required this.episode});
 
   final AnimeSubject subject;
   final AnimeEpisode episode;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DanmakuPanel> createState() => _DanmakuPanelState();
+}
+
+class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
+  late Future<List<DanmakuMatch>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DanmakuPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.subject.id != widget.subject.id ||
+        oldWidget.subject.source != widget.subject.source ||
+        oldWidget.episode.id != widget.episode.id) {
+      _future = _load();
+    }
+  }
+
+  Future<List<DanmakuMatch>> _load() {
+    return ref
+        .read(animeControllerProvider.notifier)
+        .danmakuForEpisode(widget.subject, widget.episode);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return FutureBuilder<List<DanmakuMatch>>(
-      future: ref
-          .read(animeControllerProvider.notifier)
-          .danmakuForEpisode(subject, episode),
+      future: _future,
       builder: (context, snapshot) {
         final items = snapshot.data ?? const <DanmakuMatch>[];
         if (snapshot.connectionState == ConnectionState.waiting) {
@@ -3188,9 +3582,9 @@ class _DanmakuPanel extends ConsumerWidget {
           itemBuilder: (context, index) {
             final item = items[index];
             return _PanelRow(
-              title: item.title.isEmpty ? subject.title : item.title,
+              title: item.title.isEmpty ? widget.subject.title : item.title,
               subtitle:
-                  '${item.provider} · ${item.episodeTitle.isEmpty ? episode.displayTitle : item.episodeTitle}',
+                  '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
               trailing: item.available
                   ? '${item.commentCount} 条'
                   : item.message ?? '待配置',
@@ -3314,9 +3708,10 @@ class _PanelEmpty extends StatelessWidget {
 }
 
 class _PanelInlineStatus extends StatelessWidget {
-  const _PanelInlineStatus({required this.text});
+  const _PanelInlineStatus({required this.text, this.loading = true});
 
   final String text;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
@@ -3330,11 +3725,18 @@ class _PanelInlineStatus extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         child: Row(
           children: [
-            const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            if (loading)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.verified_rounded,
+                size: 18,
+                color: Colors.greenAccent,
+              ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -3388,16 +3790,22 @@ class _ModeItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, color: Colors.white, size: 20),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white, fontSize: 16),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -3405,6 +3813,7 @@ class _ModeItem extends StatelessWidget {
 
 class _LineTile extends StatelessWidget {
   const _LineTile({
+    super.key,
     required this.index,
     required this.line,
     required this.selected,
@@ -3414,25 +3823,26 @@ class _LineTile extends StatelessWidget {
   final int index;
   final PlaybackLine line;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final status = line.available
-        ? '${line.latency?.inMilliseconds ?? 0}ms · ${line.sizeLabel ?? '--'}'
-        : line.message ?? '待接入';
+    final latency = line.available
+        ? playbackLineLatencyLabel(line)
+        : _playbackLineFailureLabel(line);
+    final metadata = playbackLineMediaLabel(line);
     return InkWell(
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Row(
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
                     '线路${index + 1} · ${line.providerName} · ${line.title}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -3443,32 +3853,53 @@ class _LineTile extends StatelessWidget {
                       fontWeight: FontWeight.w800,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    line.url ?? line.message ?? '后续从你自己的播放源接口返回 url',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  latency,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: line.available
+                        ? Colors.greenAccent
+                        : Colors.redAccent,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const SizedBox(width: 10),
+            const SizedBox(height: 4),
             Text(
-              status,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: line.available
-                    ? Colors.greenAccent
-                    : Colors.orangeAccent,
-              ),
+              line.url ?? line.message ?? '后续从你自己的播放源接口返回 url',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: Colors.white54),
             ),
+            if (line.available) ...[
+              const SizedBox(height: 5),
+              Text(
+                metadata,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: Colors.white70),
+              ),
+            ],
           ],
         ),
       ),
     );
   }
+}
+
+String _playbackLineFailureLabel(PlaybackLine line) {
+  final message = (line.message ?? '').toLowerCase();
+  if (message.contains('403') || message.contains('拒绝')) return '403';
+  if (message.contains('404') || message.contains('失效')) return '404';
+  if (message.contains('超时') || message.contains('timeout')) return '超时';
+  if (message.contains('验证码')) return '需验证';
+  if (message.contains('执行器')) return '不支持';
+  return '不可用';
 }
 
 class _SideSheet extends StatelessWidget {

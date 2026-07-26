@@ -6,8 +6,16 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
   final source = subject.source.trim().toLowerCase();
   final platform = subject.platform.trim().toLowerCase();
 
-  // Anime providers may legitimately label theatrical anime as "Movie".
-  // Source identity is therefore more reliable than platform for these items.
+  // Release format wins over provider identity. In particular, theatrical
+  // anime returned by an anime provider belongs to the movie catalogue rather
+  // than appearing in both the anime and movie catalogues.
+  if (platform.contains('movie') ||
+      platform.contains('film') ||
+      platform.contains('电影') ||
+      platform.contains('剧场版')) {
+    return SubjectContentType.movie;
+  }
+
   if (source == 'bangumi' ||
       source.startsWith('bangumi:') ||
       source == 'anilist' ||
@@ -19,11 +27,14 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
     return SubjectContentType.anime;
   }
 
-  if (source.startsWith('cinemeta:series:') || source.startsWith('tvmaze')) {
+  if (source.startsWith('cinemeta:series:') ||
+      source.startsWith('tmdb:series:') ||
+      source.startsWith('tvmaze')) {
     return SubjectContentType.series;
   }
 
   if (source.startsWith('cinemeta:movie:') ||
+      source.startsWith('tmdb:movie:') ||
       source == 'wikidata' ||
       source.startsWith('archive:') ||
       source.startsWith('peertube:') ||
@@ -34,11 +45,11 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
   if (platform.contains('series') ||
       platform.contains('scripted') ||
       platform.contains('show') ||
-      platform.contains('reality')) {
+      platform.contains('reality') ||
+      platform.contains('剧集') ||
+      platform.contains('连续剧') ||
+      platform.contains('电视剧')) {
     return SubjectContentType.series;
-  }
-  if (platform.contains('movie') || platform.contains('film')) {
-    return SubjectContentType.movie;
   }
   return SubjectContentType.anime;
 }

@@ -136,6 +136,11 @@ class AnimeSubject {
   }
 }
 
+bool sameSubjectIdentity(AnimeSubject first, AnimeSubject second) {
+  return first.id == second.id &&
+      first.source.trim().toLowerCase() == second.source.trim().toLowerCase();
+}
+
 class AnimeEpisode {
   const AnimeEpisode({
     required this.id,
@@ -198,6 +203,15 @@ class PlaybackLine {
     this.headers = const {},
     this.latency,
     this.sizeLabel,
+    this.sizeBytes,
+    this.sizeEstimated = false,
+    this.videoWidth,
+    this.videoHeight,
+    this.bitrate,
+    this.codecs,
+    this.isLive = false,
+    this.adaptive = false,
+    this.publicHttpOnly = false,
     this.available = false,
     this.message,
   });
@@ -213,6 +227,18 @@ class PlaybackLine {
   final Map<String, String> headers;
   final Duration? latency;
   final String? sizeLabel;
+  final int? sizeBytes;
+  final bool sizeEstimated;
+  final int? videoWidth;
+  final int? videoHeight;
+  final int? bitrate;
+  final String? codecs;
+  final bool isLive;
+  final bool adaptive;
+
+  /// Keeps untrusted rule output on public HTTP(S) addresses during every
+  /// resolver-side verification, including manifest child resources.
+  final bool publicHttpOnly;
   final bool available;
   final String? message;
 }
@@ -465,12 +491,14 @@ class PlaySessionRequest {
     required this.episodes,
     required this.episode,
     this.initialLine,
+    this.offlineOnly = false,
   });
 
   final AnimeSubject subject;
   final List<AnimeEpisode> episodes;
   final AnimeEpisode episode;
   final PlaybackLine? initialLine;
+  final bool offlineOnly;
 }
 
 class LibraryEntry {
@@ -531,10 +559,10 @@ class LibraryEntry {
 
 class UserProfileSettings {
   const UserProfileSettings({
-    this.nickname = 'fanyong',
-    this.uid = '31979',
-    this.density = 110,
-    this.coins = 22,
+    this.nickname = '游客',
+    this.uid = '',
+    this.density = 0,
+    this.coins = 0,
   });
 
   final String nickname;
@@ -572,10 +600,10 @@ class UserProfileSettings {
 
   factory UserProfileSettings.fromJson(Map<String, dynamic> json) {
     return UserProfileSettings(
-      nickname: json['nickname']?.toString() ?? 'fanyong',
-      uid: json['uid']?.toString() ?? '31979',
-      density: _intFromJson(json['density'], fallback: 110),
-      coins: _intFromJson(json['coins'], fallback: 22),
+      nickname: json['nickname']?.toString() ?? '游客',
+      uid: json['uid']?.toString() ?? '',
+      density: _intFromJson(json['density'], fallback: 0),
+      coins: _intFromJson(json['coins'], fallback: 0),
     );
   }
 }
@@ -647,7 +675,7 @@ class AppearanceSettings {
 
 class DanmakuSettings {
   const DanmakuSettings({
-    this.enabled = true,
+    this.enabled = false,
     this.opacity = 0.86,
     this.fontSize = 18,
     this.blockTop = false,
@@ -691,7 +719,7 @@ class DanmakuSettings {
 
   factory DanmakuSettings.fromJson(Map<String, dynamic> json) {
     return DanmakuSettings(
-      enabled: json['enabled'] as bool? ?? true,
+      enabled: json['enabled'] as bool? ?? false,
       opacity: (json['opacity'] as num?)?.toDouble() ?? 0.86,
       fontSize: (json['fontSize'] as num?)?.toDouble() ?? 18,
       blockTop: json['blockTop'] as bool? ?? false,
@@ -745,10 +773,19 @@ class MiscSettings {
   }
 }
 
+const _defaultPlaybackBackendEnabled = bool.fromEnvironment(
+  'ZELUNA_BACKEND_ENABLED',
+  defaultValue: false,
+);
+const _defaultPlaybackBackendEndpoint = String.fromEnvironment(
+  'ZELUNA_BACKEND_URL',
+);
+
 class ExternalServiceSettings {
   const ExternalServiceSettings({
     this.mediaMetadataEnabled = true,
-    this.mediaMetadataProvider = 'Cinemeta + TVMaze',
+    this.mediaMetadataProvider = 'TMDB + Cinemeta + TVMaze',
+    this.tmdbEnabled = true,
     this.cinemetaEnabled = true,
     this.watchHubEnabled = false,
     this.peerTubeEnabled = true,
@@ -769,10 +806,13 @@ class ExternalServiceSettings {
     this.customDanmakuEnabled = false,
     this.customDanmakuEndpoint = '',
     this.danmakuTimelineSync = true,
+    this.playbackBackendEnabled = _defaultPlaybackBackendEnabled,
+    this.playbackBackendEndpoint = _defaultPlaybackBackendEndpoint,
   });
 
   final bool mediaMetadataEnabled;
   final String mediaMetadataProvider;
+  final bool tmdbEnabled;
   final bool cinemetaEnabled;
   final bool watchHubEnabled;
   final bool peerTubeEnabled;
@@ -793,10 +833,13 @@ class ExternalServiceSettings {
   final bool customDanmakuEnabled;
   final String customDanmakuEndpoint;
   final bool danmakuTimelineSync;
+  final bool playbackBackendEnabled;
+  final String playbackBackendEndpoint;
 
   ExternalServiceSettings copyWith({
     bool? mediaMetadataEnabled,
     String? mediaMetadataProvider,
+    bool? tmdbEnabled,
     bool? cinemetaEnabled,
     bool? watchHubEnabled,
     bool? peerTubeEnabled,
@@ -817,11 +860,14 @@ class ExternalServiceSettings {
     bool? customDanmakuEnabled,
     String? customDanmakuEndpoint,
     bool? danmakuTimelineSync,
+    bool? playbackBackendEnabled,
+    String? playbackBackendEndpoint,
   }) {
     return ExternalServiceSettings(
       mediaMetadataEnabled: mediaMetadataEnabled ?? this.mediaMetadataEnabled,
       mediaMetadataProvider:
           mediaMetadataProvider ?? this.mediaMetadataProvider,
+      tmdbEnabled: tmdbEnabled ?? this.tmdbEnabled,
       cinemetaEnabled: cinemetaEnabled ?? this.cinemetaEnabled,
       watchHubEnabled: watchHubEnabled ?? this.watchHubEnabled,
       peerTubeEnabled: peerTubeEnabled ?? this.peerTubeEnabled,
@@ -848,12 +894,17 @@ class ExternalServiceSettings {
       customDanmakuEndpoint:
           customDanmakuEndpoint ?? this.customDanmakuEndpoint,
       danmakuTimelineSync: danmakuTimelineSync ?? this.danmakuTimelineSync,
+      playbackBackendEnabled:
+          playbackBackendEnabled ?? this.playbackBackendEnabled,
+      playbackBackendEndpoint:
+          playbackBackendEndpoint ?? this.playbackBackendEndpoint,
     );
   }
 
   Map<String, dynamic> toJson() => {
     'mediaMetadataEnabled': mediaMetadataEnabled,
     'mediaMetadataProvider': mediaMetadataProvider,
+    'tmdbEnabled': tmdbEnabled,
     'cinemetaEnabled': cinemetaEnabled,
     'watchHubEnabled': watchHubEnabled,
     'peerTubeEnabled': peerTubeEnabled,
@@ -874,13 +925,17 @@ class ExternalServiceSettings {
     'customDanmakuEnabled': customDanmakuEnabled,
     'customDanmakuEndpoint': customDanmakuEndpoint,
     'danmakuTimelineSync': danmakuTimelineSync,
+    'playbackBackendEnabled': playbackBackendEnabled,
+    'playbackBackendEndpoint': playbackBackendEndpoint,
   };
 
   factory ExternalServiceSettings.fromJson(Map<String, dynamic> json) {
     return ExternalServiceSettings(
       mediaMetadataEnabled: json['mediaMetadataEnabled'] as bool? ?? true,
       mediaMetadataProvider:
-          json['mediaMetadataProvider']?.toString() ?? 'Cinemeta + TVMaze',
+          json['mediaMetadataProvider']?.toString() ??
+          'TMDB + Cinemeta + TVMaze',
+      tmdbEnabled: json['tmdbEnabled'] as bool? ?? true,
       cinemetaEnabled: json['cinemetaEnabled'] as bool? ?? true,
       // Keep reading legacy settings JSON, but permanently migrate the
       // Retired external platform-link integration stays disabled.
@@ -905,6 +960,14 @@ class ExternalServiceSettings {
       customDanmakuEnabled: json['customDanmakuEnabled'] as bool? ?? false,
       customDanmakuEndpoint: json['customDanmakuEndpoint']?.toString() ?? '',
       danmakuTimelineSync: json['danmakuTimelineSync'] as bool? ?? true,
+      playbackBackendEnabled:
+          json['playbackBackendEnabled'] as bool? ??
+          _defaultPlaybackBackendEnabled,
+      playbackBackendEndpoint:
+          (json['playbackBackendEndpoint']?.toString().trim().isNotEmpty ??
+              false)
+          ? json['playbackBackendEndpoint'].toString().trim()
+          : _defaultPlaybackBackendEndpoint,
     );
   }
 }

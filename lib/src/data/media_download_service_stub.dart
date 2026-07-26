@@ -1,12 +1,26 @@
+import 'media_download_backend.dart';
 import 'media_download_result.dart';
 
-Future<MediaDownloadResult> downloadMedia({
-  required String url,
-  required String title,
-  required Map<String, String> headers,
-}) async {
-  return const MediaDownloadResult(
-    success: false,
-    message: '网页版暂不支持离线下载，请使用 Windows、Android、iOS、macOS 或 Linux 客户端。',
-  );
+bool get mediaDownloadsSupported => false;
+
+MediaDownloadBackend createMediaDownloadBackend() => _StubDownloadBackend();
+
+class _StubDownloadBackend implements MediaDownloadBackend {
+  @override
+  Future<MediaDownloadResult> download({
+    required MediaDownloadRequest request,
+    required MediaDownloadControl control,
+    required void Function(MediaDownloadProgress progress) onProgress,
+  }) async {
+    return const MediaDownloadResult(
+      outcome: MediaDownloadOutcome.unsupported,
+      message: '网页版暂不支持离线下载，请使用桌面或移动客户端。',
+    );
+  }
+
+  @override
+  Future<void> deleteFile(String path) async {}
+
+  @override
+  Future<bool> fileExists(String path) async => false;
 }

@@ -48,7 +48,7 @@ class SourceCatalogState {
   int get disabledCount => importedCount - enabledCount;
 
   int get searchableCount =>
-      sources.where((source) => source.supportsSearch).length;
+      sources.where((source) => source.canSearchAtRuntime).length;
 
   int get liveCount =>
       sources.where((source) => source.kind == VideoSourceKind.liveM3u).length;
@@ -200,7 +200,11 @@ class VideoSource {
 
   String get displayName => name.trim().isEmpty ? id : name.trim();
 
+  bool get canSearchAtRuntime =>
+      supportsSearch || kind == VideoSourceKind.liveM3u;
+
   String get healthLabel {
+    if (kind == VideoSourceKind.torrent && supportsSearch) return '外部客户端';
     if (executableUnsupported) return '当前不支持';
     if (antiCrawlerEnabled) return '需验证';
     return switch (health.trim().toLowerCase()) {

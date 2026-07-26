@@ -2,13 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../accounts/account_page.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/player_page.dart';
 import '../player/open_media_page.dart';
 import '../profile/profile_page.dart';
-import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
 import 'app_theme.dart';
@@ -41,13 +41,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     GoRoute(path: '/profile/history', redirect: (context, state) => '/history'),
     GoRoute(
       path: '/profile/offline',
-      builder: (context, state) => LibraryPage(
-        title: '离线缓存',
-        emptyTitle: '还没有缓存任务',
-        emptyMessage: '在详情页点下载后会加入队列，找到可下载播放线路后即可缓存。',
-        entriesOf: (state) => state.offlineTasks,
-        clearKey: 'offlineTasks',
-      ),
+      builder: (context, state) => const DownloadManagementPage(),
     ),
     GoRoute(
       path: '/profile/following',
@@ -56,6 +50,16 @@ final routerProvider = Provider<GoRouter>((ref) {
         emptyTitle: '还没有追番',
         emptyMessage: '在详情页点“追番”后会加入这里，也可以从“我的”页进入。',
         entriesOf: (state) => state.following,
+        active: ChromeDestination.favorite,
+      ),
+    ),
+    GoRoute(
+      path: '/profile/favorites',
+      builder: (context, state) => LibraryPage(
+        title: '全部收藏',
+        emptyTitle: '还没有收藏',
+        emptyMessage: '在详情页点击收藏后会显示在这里。',
+        entriesOf: (state) => state.favorites,
         active: ChromeDestination.favorite,
       ),
     ),
@@ -101,18 +105,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       },
     ),
     GoRoute(
-      path: '/profile/rules',
-      builder: (context, state) => const RuleManagementPage(),
-    ),
-    GoRoute(
-      path: '/profile/sources',
-      redirect: (context, state) => '/profile/rules',
-    ),
-    GoRoute(
-      path: '/profile/rules/repository',
-      builder: (context, state) => const RuleRepositoryPage(),
-    ),
-    GoRoute(
       path: '/settings',
       builder: (context, state) => const SettingsHubPage(),
     ),
@@ -138,6 +130,10 @@ final routerProvider = Provider<GoRouter>((ref) {
   routes.add(
     GoRoute(
       path: '/settings/services/:kind',
+      redirect: (context, state) {
+        final kind = state.pathParameters['kind'];
+        return kind == 'media' || kind == 'anime' ? '/settings' : null;
+      },
       builder: (context, state) =>
           ServiceSettingsPage(kind: state.pathParameters['kind'] ?? ''),
     ),
@@ -152,10 +148,12 @@ class AnimeApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
     final appearance =
-        ref.watch(animeControllerProvider).value?.appearance ??
+        ref.watch(
+          animeControllerProvider.select((state) => state.value?.appearance),
+        ) ??
         const AppearanceSettings();
     return MaterialApp.router(
-      title: 'anime',
+      title: 'Zeluna',
       debugShowCheckedModeBanner: false,
       theme: AnimeTheme.light(
         compact: appearance.compactMode,

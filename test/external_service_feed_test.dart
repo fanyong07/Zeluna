@@ -14,6 +14,7 @@ void main() {
       final repository = ExternalServiceRepository(
         client: MockClient((request) async {
           final body = jsonDecode(request.body) as Map<String, dynamic>;
+          expect(body['query']?.toString(), contains('format'));
           final variables = (body['variables'] as Map).cast<String, dynamic>();
           final page = variables['page'] as int;
           requestedPages.add(page);
@@ -25,6 +26,7 @@ void main() {
                   'media': [
                     {
                       'id': page,
+                      'format': page == 1 ? 'MOVIE' : 'TV',
                       'title': {
                         'romaji': 'Anime $page',
                         'english': 'Anime $page',
@@ -33,6 +35,8 @@ void main() {
                       'description': 'Page $page',
                       'coverImage': {
                         'large': 'https://images.example/anilist-$page.jpg',
+                        'extraLarge':
+                            'https://images.example/anilist-$page-extra.jpg',
                       },
                       'startDate': {'year': 2026, 'month': 1, 'day': page},
                       'episodes': 12,
@@ -58,8 +62,53 @@ void main() {
       expect(requestedPages..sort(), [1, 2, 3]);
       expect(requestedPageSizes, everyElement(50));
       expect(subjects, hasLength(3));
+      expect(subjects.first.platform, 'MOVIE');
+      expect(subjects.skip(1).map((item) => item.platform), everyElement('TV'));
+      expect(
+        subjects.map((item) => item.coverUrl),
+        everyElement(matches(RegExp(r'anilist-\d\.jpg$'))),
+      );
     },
   );
+
+  test('AniList search requests and preserves the release format', () async {
+    final repository = ExternalServiceRepository(
+      client: MockClient((request) async {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        expect(body['query']?.toString(), contains('format'));
+        return http.Response.bytes(
+          utf8.encode(
+            jsonEncode({
+              'data': {
+                'Page': {
+                  'media': [
+                    {
+                      'id': 99,
+                      'format': 'MOVIE',
+                      'title': {
+                        'romaji': 'Anime Movie',
+                        'english': 'Anime Movie',
+                        'native': 'アニメ映画',
+                      },
+                      'startDate': {'year': 2026, 'month': 7, 'day': 19},
+                      'genres': ['Drama'],
+                      'tags': <Object>[],
+                    },
+                  ],
+                },
+              },
+            }),
+          ),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+
+    final subjects = await repository.anilistSearch('Anime Movie');
+
+    expect(subjects.single.platform, 'MOVIE');
+  });
 
   test('Jikan discovery feed combines airing and popularity pages', () async {
     final requested = <String>[];
@@ -82,6 +131,13 @@ void main() {
                 'type': 'TV',
                 'status': 'Finished Airing',
                 'aired': {'from': '202$id-01-01'},
+                'images': {
+                  'jpg': {
+                    'image_url': 'https://images.example/jikan-$id.jpg',
+                    'large_image_url':
+                        'https://images.example/jikan-$id-large.jpg',
+                  },
+                },
                 'genres': <Object>[],
                 'themes': <Object>[],
                 'studios': <Object>[],
@@ -97,6 +153,10 @@ void main() {
 
     expect(requested.toSet(), {'airing:1', 'bypopularity:1', 'bypopularity:2'});
     expect(subjects, hasLength(3));
+    expect(
+      subjects.map((item) => item.coverUrl),
+      everyElement(matches(RegExp(r'jikan-\d\.jpg$'))),
+    );
   });
 
   test('Kitsu trending feed advances offsets by page size', () async {
@@ -126,6 +186,8 @@ void main() {
                   'userCount': offset + 100,
                   'posterImage': {
                     'large': 'https://images.example/kitsu-$offset.jpg',
+                    'original':
+                        'https://images.example/kitsu-$offset-original.jpg',
                   },
                 },
               },
@@ -140,5 +202,9 @@ void main() {
 
     expect(requestedOffsets..sort(), [0, 20, 40]);
     expect(subjects, hasLength(3));
+    expect(
+      subjects.map((item) => item.coverUrl),
+      everyElement(matches(RegExp(r'kitsu-\d+\.jpg$'))),
+    );
   });
 }

@@ -1,12 +1,11 @@
 {
-    "name": "anime",
-    "short_name": "anime",
+    "name": "Zeluna",
+    "short_name": "Zeluna",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#050505",
+    "theme_color": "#171717",
+    "description": "跨平台动漫、剧集和电影资料聚合与播放客户端。",
     "prefer_related_applications": false,
     "icons": [
         {

@@ -43,6 +43,10 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/key.properties
+/android/keystore-password.txt
+*.jks
+*.keystore
 
 # Local agent, browser and verification artifacts
 .claude/
@@ -52,6 +56,10 @@ artifacts/
 dist/
 output/
 
+# Local brand concept iterations; only the selected anime_logo_* assets ship.
+assets/brand/zeluna_anime_logo_app_icon_v*.png
+assets/brand/zeluna_logo_*.png
+
 # Local Android/Gradle caches
 android/.gradle/
 android/build/
@@ -60,3 +68,6 @@ android/build/
 server/**/__pycache__/
 server/**/*.pyc
 server/**/*.db
+server/.env
+server/.env.*
+!server/.env.example

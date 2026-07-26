@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../accounts/local_account_repository.dart';
 import '../app/anime_app.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
+import '../data/media_download_task.dart';
 import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
@@ -70,7 +72,8 @@ class _ProfileBanner extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               PosterArt(
-                coverUrl: hero.bannerUrl ?? hero.coverUrl,
+                coverUrl: hero.bannerUrl,
+                fallbackCoverUrl: hero.coverUrl,
                 title: state.profile.nickname,
               ),
               const DecoratedBox(
@@ -130,13 +133,20 @@ class _ProfileBanner extends StatelessWidget {
                               ),
                               if (!compact) ...[
                                 const SizedBox(width: 10),
-                                const SmallBadge(label: '年度大会员', active: true),
+                                SmallBadge(
+                                  label: state.accountSession.isSignedIn
+                                      ? '本机账号'
+                                      : '游客',
+                                  active: state.accountSession.isSignedIn,
+                                ),
                               ],
                             ],
                           ),
                           SizedBox(height: compact ? 4 : 8),
                           Text(
-                            'UID ${state.profile.uid} · 浓度 ${state.profile.density} · 硬币 ${state.profile.coins}',
+                            state.accountSession.isSignedIn
+                                ? 'UID ${state.profile.uid} · ${state.accountSession.current!.email}'
+                                : '游客空间 · 登录后可使用独立收藏和历史',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.titleSmall
@@ -160,16 +170,16 @@ class _ProfileBanner extends StatelessWidget {
                     ),
                     if (!compact) ...[
                       _BannerMetric(
-                        label: '片单',
-                        value: '${state.favorites.length + 24}',
+                        label: '追番',
+                        value: '${state.following.length}',
                       ),
                       _BannerMetric(
                         label: '收藏',
-                        value: '${state.favorites.length + 156}',
+                        value: '${state.favorites.length}',
                       ),
                       _BannerMetric(
-                        label: '关注',
-                        value: '${state.following.length + 36}',
+                        label: '历史',
+                        value: '${state.history.length}',
                       ),
                     ],
                   ],
@@ -224,95 +234,40 @@ class _ProfilePlaylistSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 760;
-    final subjects = [
-      state.homeFeed.hero,
-      ...state.homeFeed.recommended,
-      ...state.homeFeed.recent,
-    ];
+    final entries = state.following.take(8).toList(growable: false);
     return AppPanel(
       child: Column(
         children: [
           SectionTitle(
-            title: '我的片单',
-            action: TextButton(
-              onPressed: () => context.push('/profile/following'),
-              child: Text('全部 ${state.following.length} ›'),
-            ),
+            title: '我的追番',
+            action: entries.isEmpty
+                ? null
+                : TextButton(
+                    onPressed: () => context.push('/profile/following'),
+                    child: Text('全部 ${state.following.length} ›'),
+                  ),
           ),
           SizedBox(height: compact ? 10 : 14),
-          SizedBox(
-            height: compact ? 124 : 150,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return _CreatePlaylistCard(
-                    onTap: () => context.push('/profile/home-settings'),
+          if (entries.isEmpty)
+            const _InlineEmpty('还没有追番，在详情页点击“追番”后会显示在这里')
+          else
+            SizedBox(
+              height: compact ? 124 : 150,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemBuilder: (context, index) {
+                  final subject = entries[index].subject;
+                  return _PlaylistCard(
+                    title: subject.title,
+                    subject: subject,
+                    onTap: () => _openDetail(context, subject),
                   );
-                }
-                final subject = subjects[index % subjects.length];
-                final labels = ['年度必看', '治愈系动画', '科幻电影精选', '异世界冒险', '悬疑推理'];
-                return _PlaylistCard(
-                  title: labels[(index - 1) % labels.length],
-                  count: 12 + index * 3,
-                  subject: subject,
-                  onTap: () => _openDetail(context, subject),
-                );
-              },
-              separatorBuilder: (context, index) => const SizedBox(width: 12),
-              itemCount: subjects.isEmpty ? 1 : 6,
+                },
+                separatorBuilder: (context, index) => const SizedBox(width: 12),
+                itemCount: entries.length,
+              ),
             ),
-          ),
         ],
-      ),
-    );
-  }
-}
-
-class _CreatePlaylistCard extends StatelessWidget {
-  const _CreatePlaylistCard({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: compact ? 132 : 150,
-        child: AppPanel(
-          padding: EdgeInsets.all(compact ? 10 : 14),
-          color: AppColors.panelHigh,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.add,
-                color: AppColors.primary,
-                size: compact ? 28 : 34,
-              ),
-              SizedBox(height: compact ? 8 : 12),
-              Text(
-                '新建片单',
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: AppColors.text,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              if (!compact) ...[
-                const SizedBox(height: 4),
-                Text(
-                  '打开片单管理',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
-                ),
-              ],
-            ],
-          ),
-        ),
       ),
     );
   }
@@ -321,13 +276,11 @@ class _CreatePlaylistCard extends StatelessWidget {
 class _PlaylistCard extends StatelessWidget {
   const _PlaylistCard({
     required this.title,
-    required this.count,
     required this.subject,
     required this.onTap,
   });
 
   final String title;
-  final int count;
   final AnimeSubject subject;
   final VoidCallback onTap;
 
@@ -347,7 +300,8 @@ class _PlaylistCard extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 PosterArt(
-                  coverUrl: subject.bannerUrl ?? subject.coverUrl,
+                  coverUrl: subject.bannerUrl,
+                  fallbackCoverUrl: subject.coverUrl,
                   title: title,
                 ),
                 const DecoratedBox(
@@ -377,7 +331,7 @@ class _PlaylistCard extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        '$count 部 · 打开',
+                        '已加入追番 · 打开详情',
                         style: Theme.of(
                           context,
                         ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -415,6 +369,14 @@ class _ProfileShortcutSection extends StatelessWidget {
                   : (constraints.maxWidth / 168).floor().clamp(3, 6);
               final shortcuts = [
                 _ShortcutTile(
+                  icon: state.accountSession.isSignedIn
+                      ? Icons.account_circle
+                      : Icons.login_rounded,
+                  title: '账号管理',
+                  value: state.accountSession.isSignedIn ? '已登录' : '登录 / 注册',
+                  onTap: () => context.push('/profile/account'),
+                ),
+                _ShortcutTile(
                   icon: Icons.bookmark_border,
                   title: '追番列表',
                   value: '${state.following.length}',
@@ -424,7 +386,7 @@ class _ProfileShortcutSection extends StatelessWidget {
                   icon: Icons.favorite,
                   title: '全部收藏',
                   value: '${state.favorites.length}',
-                  onTap: () => context.push('/profile/images'),
+                  onTap: () => context.push('/profile/favorites'),
                 ),
                 _ShortcutTile(
                   icon: Icons.history,
@@ -437,14 +399,6 @@ class _ProfileShortcutSection extends StatelessWidget {
                   title: '下载管理',
                   value: '${state.offlineTasks.length}',
                   onTap: () => context.push('/profile/offline'),
-                ),
-                _ShortcutTile(
-                  icon: Icons.extension_outlined,
-                  title: '播放规则',
-                  value:
-                      '${state.rulePlugins.enabledIds.length + state.sourceCatalog.activePlaybackRuleCount}/'
-                      '${state.rulePlugins.installedIds.length + state.sourceCatalog.availablePlaybackRuleCount}',
-                  onTap: () => context.push('/profile/rules'),
                 ),
                 _ShortcutTile(
                   icon: Icons.subtitles,
@@ -628,6 +582,7 @@ class _HistoryCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
     return SizedBox(
       width: 190,
       child: InkWell(
@@ -641,7 +596,8 @@ class _HistoryCard extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 PosterArt(
-                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
                   title: entry.title,
                 ),
                 const DecoratedBox(
@@ -680,14 +636,16 @@ class _HistoryCard extends StatelessWidget {
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(height: 5),
-                      LinearProgressIndicator(
-                        value: _entryProgress(entry),
-                        minHeight: 3,
-                        borderRadius: BorderRadius.circular(3),
-                        backgroundColor: AppColors.border,
-                        color: AppColors.primary,
-                      ),
+                      if (progress != null) ...[
+                        const SizedBox(height: 5),
+                        LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 3,
+                          borderRadius: BorderRadius.circular(3),
+                          backgroundColor: AppColors.border,
+                          color: AppColors.primary,
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -703,7 +661,7 @@ class _HistoryCard extends StatelessWidget {
 class _DownloadStrip extends StatelessWidget {
   const _DownloadStrip({required this.entries});
 
-  final List<LibraryEntry> entries;
+  final List<MediaDownloadTask> entries;
 
   @override
   Widget build(BuildContext context) {
@@ -728,13 +686,16 @@ class _DownloadStrip extends StatelessWidget {
   }
 }
 
-class _DownloadRow extends StatelessWidget {
+class _DownloadRow extends ConsumerWidget {
   const _DownloadRow({required this.entry});
 
-  final LibraryEntry entry;
+  final MediaDownloadTask entry;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = entry.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : entry.progress;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
@@ -745,7 +706,8 @@ class _DownloadRow extends StatelessWidget {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(6),
               child: PosterArt(
-                coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                coverUrl: entry.subject.bannerUrl,
+                fallbackCoverUrl: entry.subject.coverUrl,
                 title: entry.title,
               ),
             ),
@@ -764,9 +726,19 @@ class _DownloadRow extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
+                const SizedBox(height: 3),
+                Text(
+                  '${entry.statusLabel} · ${_downloadSizeText(entry)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.muted,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
                 const SizedBox(height: 7),
                 LinearProgressIndicator(
-                  value: 0.42,
+                  value: progress,
                   minHeight: 4,
                   borderRadius: BorderRadius.circular(4),
                   backgroundColor: AppColors.border,
@@ -776,18 +748,217 @@ class _DownloadRow extends StatelessWidget {
             ),
           ),
           IconButton(
-            tooltip: '继续播放',
-            onPressed: entry.episode == null
-                ? () => _openDetail(context, entry.subject)
-                : () => _playEntry(context, entry),
+            tooltip: entry.isPlayable ? '播放本地文件' : '查看下载任务',
+            onPressed: entry.isPlayable
+                ? () => _playDownloadTask(context, ref, entry)
+                : () => context.push('/profile/offline'),
             icon: Icon(
-              entry.episode == null
-                  ? Icons.chevron_right_rounded
-                  : Icons.play_arrow_rounded,
+              entry.isPlayable
+                  ? Icons.play_arrow_rounded
+                  : Icons.chevron_right_rounded,
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class DownloadManagementPage extends ConsumerWidget {
+  const DownloadManagementPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final tasks = state.offlineTasks;
+        final compact = MediaQuery.sizeOf(context).width < 760;
+        return AppChrome(
+          active: ChromeDestination.download,
+          showSearch: false,
+          title: '离线缓存',
+          onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 24,
+              120,
+            ),
+            child: tasks.isEmpty
+                ? const _ProfileEmptyState(
+                    title: '还没有下载任务',
+                    message: '在详情页点击下载后，任务会显示在这里。',
+                  )
+                : ListView.separated(
+                    itemCount: tasks.length + 1,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return AppPanel(
+                          child: SectionTitle(
+                            title: '全部下载',
+                            subtitle: '${tasks.length} 个离线任务，可在这里暂停、继续或删除',
+                            icon: Icons.download_for_offline_outlined,
+                          ),
+                        );
+                      }
+                      return _DownloadTaskCard(task: tasks[index - 1]);
+                    },
+                  ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DownloadTaskCard extends ConsumerWidget {
+  const _DownloadTaskCard({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = task.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : task.progress;
+    final statusColor = switch (task.status) {
+      MediaDownloadTaskStatus.completed => Colors.greenAccent,
+      MediaDownloadTaskStatus.failed => Colors.redAccent,
+      MediaDownloadTaskStatus.cancelled => AppColors.muted,
+      MediaDownloadTaskStatus.paused => Colors.orangeAccent,
+      _ => AppColors.primary,
+    };
+    return AppPanel(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(7),
+            child: SizedBox(
+              width: 116,
+              height: 68,
+              child: PosterArt(
+                coverUrl: task.subject.bannerUrl,
+                fallbackCoverUrl: task.subject.coverUrl,
+                title: task.title,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        task.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: AppColors.text,
+                              fontWeight: FontWeight.w900,
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      task.statusLabel,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: statusColor,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  [
+                    if (task.providerName?.trim().isNotEmpty == true)
+                      task.providerName!,
+                    _downloadSizeText(task),
+                    if (task.message.trim().isNotEmpty) task.message.trim(),
+                  ].join(' · '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.muted,
+                    height: 1.35,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 5,
+                  borderRadius: BorderRadius.circular(4),
+                  backgroundColor: AppColors.border,
+                  color: statusColor,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          _DownloadTaskActions(task: task),
+        ],
+      ),
+    );
+  }
+}
+
+class _DownloadTaskActions extends ConsumerWidget {
+  const _DownloadTaskActions({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.read(animeControllerProvider.notifier);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (task.isPlayable)
+          IconButton(
+            tooltip: '播放本地文件',
+            onPressed: () => _playDownloadTask(context, ref, task),
+            icon: const Icon(Icons.play_arrow_rounded),
+          ),
+        if (task.isActive)
+          IconButton(
+            tooltip: '暂停',
+            onPressed: () => controller.pauseDownload(task.id),
+            icon: const Icon(Icons.pause_rounded),
+          ),
+        if (task.status == MediaDownloadTaskStatus.paused ||
+            task.status == MediaDownloadTaskStatus.failed ||
+            task.status == MediaDownloadTaskStatus.cancelled)
+          IconButton(
+            tooltip: task.downloadedBytes > 0 ? '继续下载' : '重新下载',
+            onPressed: () => controller.resumeDownload(task.id),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        if (task.isActive || task.status == MediaDownloadTaskStatus.paused)
+          IconButton(
+            tooltip: '取消下载',
+            onPressed: () => controller.cancelDownload(task.id),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        IconButton(
+          tooltip: task.isPlayable ? '删除下载文件' : '移除任务',
+          onPressed: () async {
+            final confirmed = await _confirmRemoveDownload(context, task);
+            if (!confirmed) return;
+            await controller.removeDownload(task.id);
+          },
+          icon: const Icon(Icons.delete_outline_rounded),
+        ),
+      ],
     );
   }
 }
@@ -799,59 +970,22 @@ class _ProfileRightRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final finished = state.history.where(_isFinishedEntry).length;
+    final latest = state.history.isEmpty ? null : state.history.first;
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
       children: [
         AppPanel(
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '观看时长统计'),
-              const SizedBox(height: 18),
-              SizedBox(
-                width: 136,
-                height: 136,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    CircularProgressIndicator(
-                      value: 0.72,
-                      strokeWidth: 12,
-                      backgroundColor: AppColors.border,
-                      color: AppColors.primary,
-                    ),
-                    Center(
-                      child: Text(
-                        '${32 + state.history.length}\n小时',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          color: AppColors.text,
-                          fontWeight: FontWeight.w900,
-                          height: 1.15,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  for (var i = 0; i < 16; i++) ...[
-                    Expanded(
-                      child: Container(
-                        height: 18.0 + (i % 7) * 8,
-                        decoration: BoxDecoration(
-                          color: i == 13
-                              ? AppColors.primary
-                              : AppColors.primary.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
-                    if (i != 15) const SizedBox(width: 4),
-                  ],
-                ],
+              const SectionTitle(title: '观看概览'),
+              const SizedBox(height: 14),
+              _HistoryStatRow(label: '观看记录', value: '${state.history.length}'),
+              _HistoryStatRow(label: '已看完', value: '$finished'),
+              _HistoryStatRow(
+                label: '最近观看',
+                value: latest == null ? '暂无' : latest.subject.title,
               ),
             ],
           ),
@@ -864,33 +998,27 @@ class _ProfileRightRail extends StatelessWidget {
               const SizedBox(height: 12),
               _RailAction(
                 icon: Icons.schedule,
-                title: '稍后观看',
+                title: '观看记录',
                 value: '${state.history.length}',
                 onTap: () => _scrollToHistory(context),
               ),
               _RailAction(
                 icon: Icons.bookmark_border,
-                title: '想看列表',
+                title: '追番列表',
                 value: '${state.following.length}',
                 onTap: () => context.push('/profile/following'),
               ),
               _RailAction(
-                icon: Icons.check_circle_outline,
-                title: '已看完',
-                value: '${state.history.where(_isFinishedEntry).length}',
-                onTap: () => _scrollToHistory(context),
+                icon: Icons.favorite_border,
+                title: '收藏列表',
+                value: '${state.favorites.length}',
+                onTap: () => context.push('/profile/favorites'),
               ),
               _RailAction(
-                icon: Icons.star_border,
-                title: '评分记录',
-                value: '36',
+                icon: Icons.feedback_outlined,
+                title: '反馈记录',
+                value: '${state.feedbacks.length}',
                 onTap: () => context.push('/profile/feedback'),
-              ),
-              _RailAction(
-                icon: Icons.extension_outlined,
-                title: '播放规则',
-                value: '${state.rulePlugins.installedIds.length}',
-                onTap: () => context.push('/profile/rules'),
               ),
             ],
           ),
@@ -900,16 +1028,18 @@ class _ProfileRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '设备同步'),
+              const SectionTitle(title: '本机账号数据'),
               const SizedBox(height: 12),
-              const _DeviceRow(
+              _DeviceRow(
                 icon: Icons.devices_rounded,
                 title: '当前设备',
-                status: '本地保存',
+                status: state.accountSession.isSignedIn ? '仅本机' : '游客空间',
               ),
               const SizedBox(height: 8),
               Text(
-                '尚未登录云端账号，历史、收藏和设置不会跨设备同步。',
+                state.accountSession.isSignedIn
+                    ? '当前账号的数据已与其他本机账号隔离；暂不支持跨设备同步。'
+                    : '登录或创建本机账号后，可将收藏、追番、历史和偏好与其他使用者分开。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
@@ -1002,7 +1132,9 @@ class _DeviceRow extends StatelessWidget {
           Text(
             status,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: status == '在线' ? Colors.greenAccent : AppColors.muted,
+              color: status == '在线' || status == '已登录'
+                  ? Colors.greenAccent
+                  : AppColors.muted,
             ),
           ),
         ],
@@ -1164,6 +1296,7 @@ class _HistoryListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
     return InkWell(
       onTap: () => _playEntry(context, entry),
       borderRadius: BorderRadius.circular(8),
@@ -1177,7 +1310,8 @@ class _HistoryListTile extends StatelessWidget {
                 width: 116,
                 height: 68,
                 child: PosterArt(
-                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
                   title: entry.title,
                 ),
               ),
@@ -1210,14 +1344,16 @@ class _HistoryListTile extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  LinearProgressIndicator(
-                    value: _entryProgress(entry),
-                    minHeight: 4,
-                    borderRadius: BorderRadius.circular(4),
-                    backgroundColor: AppColors.border,
-                    color: AppColors.primary,
-                  ),
+                  if (progress != null) ...[
+                    const SizedBox(height: 10),
+                    LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(4),
+                      backgroundColor: AppColors.border,
+                      color: AppColors.primary,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1296,80 +1432,6 @@ class _HistoryStatRow extends StatelessWidget {
         ],
       ),
     );
-  }
-}
-
-class AccountSettingsPage extends ConsumerStatefulWidget {
-  const AccountSettingsPage({super.key});
-
-  @override
-  ConsumerState<AccountSettingsPage> createState() =>
-      _AccountSettingsPageState();
-}
-
-class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
-  late final TextEditingController _nickname;
-
-  @override
-  void initState() {
-    super.initState();
-    _nickname = TextEditingController();
-  }
-
-  @override
-  void dispose() {
-    _nickname.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AsyncAnimeGate(
-      builder: (context, state) {
-        if (_nickname.text.isEmpty) _nickname.text = state.profile.nickname;
-        return _ProfileScaffold(
-          title: '账号管理',
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
-            children: [
-              _SettingsCard(
-                children: [
-                  _ReadonlyRow(title: 'UID', value: state.profile.uid),
-                  _ReadonlyRow(title: '浓度', value: '${state.profile.density}'),
-                  _ReadonlyRow(title: '硬币', value: '${state.profile.coins}'),
-                ],
-              ),
-              const SizedBox(height: 12),
-              _SettingsCard(
-                children: [
-                  SizedBox(
-                    height: 78,
-                    child: TextField(
-                      controller: _nickname,
-                      decoration: const InputDecoration(labelText: '本地昵称'),
-                      onSubmitted: (_) => _saveProfile(state.profile),
-                    ),
-                  ),
-                  _ActionRow(
-                    icon: Icons.save_outlined,
-                    title: '保存本地资料',
-                    subtitle: '仅保存在本机，不接入登录账号',
-                    onTap: () => _saveProfile(state.profile),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _saveProfile(UserProfileSettings profile) {
-    ref
-        .read(animeControllerProvider.notifier)
-        .updateProfile(profile.copyWith(nickname: _nickname.text.trim()));
-    _showToast(context, '账号资料已保存');
   }
 }
 
@@ -1555,7 +1617,7 @@ class MiscSettingsPage extends ConsumerWidget {
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
-                  const _ReadonlyRow(title: '离线下载', value: '支持 MP4/WebM 等单文件'),
+                  const _ReadonlyRow(title: '离线下载', value: '支持单文件与未加密 HLS VOD'),
                   const _ReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
                   const _ReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
@@ -1584,7 +1646,7 @@ class VersionInfoPage extends StatelessWidget {
             children: [
               _SettingsCard(
                 children: [
-                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'anime'),
+                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'Zeluna'),
                   _ReadonlyRow(
                     title: '版本',
                     value: info == null
@@ -1597,7 +1659,7 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                   const _ReadonlyRow(
                     title: '播放能力',
-                    value: '播放规则 / 网络直链 / 本地文件',
+                    value: '统一聚合后端 / 网络直链 / 本地文件',
                   ),
                   const _ReadonlyRow(
                     title: '播放器',
@@ -2205,37 +2267,10 @@ class _PosterThumb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = subject.coverUrl;
-    if (url != null && url.startsWith('http')) {
-      return Image.network(
-        url,
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) =>
-            _FallbackThumb(title: subject.title),
-      );
-    }
-    return _FallbackThumb(title: subject.title);
-  }
-}
-
-class _FallbackThumb extends StatelessWidget {
-  const _FallbackThumb({required this.title});
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(color: Color(0xFF30374D)),
-      child: Center(
-        child: Text(
-          String.fromCharCodes(title.runes.take(2)),
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-      ),
+    return PosterArt(
+      coverUrl: subject.coverUrl,
+      title: subject.title,
+      fit: BoxFit.cover,
     );
   }
 }
@@ -2397,26 +2432,129 @@ String _formatDateTime(DateTime date) {
   return '${date.year}-${two(date.month)}-${two(date.day)} ${two(date.hour)}:${two(date.minute)}';
 }
 
+Future<void> _playDownloadTask(
+  BuildContext context,
+  WidgetRef ref,
+  MediaDownloadTask task,
+) async {
+  final line = task.localPlaybackLine;
+  if (line == null) {
+    _showToast(context, '本地文件尚不可播放');
+    return;
+  }
+  final controller = ref.read(animeControllerProvider.notifier);
+  final accountContextVersion = controller.accountContextVersion;
+  final recorded = await controller.addHistory(
+    task.subject,
+    task.episode,
+    expectedAccountContextVersion: accountContextVersion,
+  );
+  if (!context.mounted ||
+      !recorded ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
+  context.push(
+    '/player',
+    extra: PlaySessionRequest(
+      subject: task.subject,
+      episodes: [task.episode],
+      episode: task.episode,
+      initialLine: line,
+      offlineOnly: true,
+    ),
+  );
+}
+
+Future<bool> _confirmRemoveDownload(
+  BuildContext context,
+  MediaDownloadTask task,
+) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(task.isPlayable ? '删除本地文件？' : '移除下载任务？'),
+      content: Text(
+        task.isPlayable
+            ? '将删除“${task.title}”的本地视频文件，此操作无法撤销。'
+            : '将移除“${task.title}”并清理未完成的临时文件。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('保留'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认删除'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+String _downloadSizeText(MediaDownloadTask task) {
+  final downloaded = _downloadBytesLabel(task.downloadedBytes);
+  final units = task.totalUnits > 0
+      ? '${task.completedUnits}/${task.totalUnits} 分片'
+      : null;
+  if (task.totalBytes <= 0) {
+    return units == null ? downloaded : '$units · $downloaded';
+  }
+  final bytes = '$downloaded / ${_downloadBytesLabel(task.totalBytes)}';
+  if (units != null && task.status != MediaDownloadTaskStatus.completed) {
+    return '$units · $bytes';
+  }
+  return bytes;
+}
+
+String _downloadBytesLabel(int bytes) {
+  if (bytes <= 0) return '0 KB';
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).toStringAsFixed(1)} KB';
+}
+
 Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
   final ref = ProviderScope.containerOf(context, listen: false);
   final controller = ref.read(animeControllerProvider.notifier);
+  final accountContextVersion = controller.accountContextVersion;
   var episode = entry.episode;
   var episodes = <AnimeEpisode>[];
   try {
     final detail = await controller.detail(entry.subject);
     episodes = detail.episodes;
     episode ??= episodes.firstOrNull;
+  } on AccountException {
+    return;
   } catch (_) {
+    if (!controller.isAccountContextCurrent(accountContextVersion)) return;
     episode ??= entry.episode;
   }
-  if (!context.mounted) return;
+  if (!context.mounted ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
   if (episode == null) {
     _showToast(context, '这条记录没有可继续播放的集数');
     _openDetail(context, entry.subject);
     return;
   }
-  await controller.addHistory(entry.subject, episode);
-  if (!context.mounted) return;
+  final recorded = await controller.addHistory(
+    entry.subject,
+    episode,
+    expectedAccountContextVersion: accountContextVersion,
+  );
+  if (!context.mounted ||
+      !recorded ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
   context.push(
     '/player',
     extra: PlaySessionRequest(
@@ -2447,10 +2585,10 @@ void _scrollToHistory(BuildContext context) {
   );
 }
 
-double _entryProgress(LibraryEntry entry) {
+double? _entryProgress(LibraryEntry entry) {
   final total = entry.subject.totalEpisodes;
   final number = entry.episode?.number ?? 1;
-  if (total <= 0) return 0.35;
+  if (total <= 0) return null;
   return (number / total).clamp(0.05, 1.0);
 }
 

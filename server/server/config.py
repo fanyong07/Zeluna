@@ -1,11 +1,4 @@
-"""
-AniCh API 复刻 — FastAPI 后端
-
-协议兼容：
-  - 大部分接口返回 protobuf 二进制（ResponseType.bytes）
-  - 部分接口使用 JSON（/bangumi/detail/:id, /bangumi/character/:id 等）
-  - 认证：Token 通过 _ header 传递
-"""
+"""Zeluna 后端配置。生产凭据只从环境变量读取。"""
 
 import os
 from pathlib import Path
@@ -22,3 +15,34 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 # CORS 允许所有来源（客户端可以是任意设备）
 CORS_ORIGINS = ["*"]
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Public source quality varies by network location. Keep speculative background
+# crawling off by default; on-demand playback still verifies and caches lines.
+PRECACHE_ENABLED = _env_bool("PRECACHE_ENABLED", False)
+PRECACHE_INTERVAL_HOURS = max(1, int(os.getenv("PRECACHE_INTERVAL_HOURS", "4")))
+PRECACHE_MAX_SUBJECTS = max(1, int(os.getenv("PRECACHE_MAX_SUBJECTS", "24")))
+
+# 元数据凭据只从服务端环境读取。不要把个人 Token 写进 Flutter 构建、
+# 数据库、仓库或日志。Bangumi 的公开接口可在未配置 Token 时降级使用，
+# TMDB 则必须配置 v4 Read Access Token。
+BANGUMI_ACCESS_TOKEN = os.getenv("BANGUMI_ACCESS_TOKEN", "").strip()
+TMDB_READ_ACCESS_TOKEN = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
+
+CATALOG_CACHE_HOURS = max(1, int(os.getenv("CATALOG_CACHE_HOURS", "24")))
+PLAYBACK_CACHE_HOURS = max(1, int(os.getenv("PLAYBACK_CACHE_HOURS", "6")))
+PLAYBACK_NEGATIVE_CACHE_MINUTES = max(
+    1, int(os.getenv("PLAYBACK_NEGATIVE_CACHE_MINUTES", "5"))
+)
+SOURCE_BINDING_HOURS = max(1, int(os.getenv("SOURCE_BINDING_HOURS", "24")))
+SOURCE_MAX_CONCURRENCY = max(1, min(4, int(os.getenv("SOURCE_MAX_CONCURRENCY", "2"))))
+
+# 生产环境必须设置。管理端点在未配置时直接不可用，而不是公开暴露。
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()

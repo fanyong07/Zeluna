@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:anime/src/data/external_service_repository.dart';
@@ -101,12 +102,13 @@ void main() {
     },
   );
 
-  test('external service settings no longer require third-party keys', () {
+  test('external service settings keep third-party tokens out of JSON', () {
     const settings = ExternalServiceSettings();
     final json = settings.toJson();
 
     expect(settings.mediaMetadataEnabled, isTrue);
-    expect(settings.mediaMetadataProvider, 'Cinemeta + TVMaze');
+    expect(settings.mediaMetadataProvider, 'TMDB + Cinemeta + TVMaze');
+    expect(settings.tmdbEnabled, isTrue);
     expect(settings.cinemetaEnabled, isTrue);
     expect(settings.watchHubEnabled, isFalse);
     expect(settings.peerTubeEnabled, isTrue);
@@ -123,8 +125,10 @@ void main() {
     expect(json['watchHubEnabled'], isFalse);
     expect(json, contains('peerTubeEnabled'));
     expect(json, contains('wikimediaCommonsEnabled'));
-    expect(json, isNot(contains('tmdbEnabled')));
+    expect(json['tmdbEnabled'], isTrue);
     expect(json, isNot(contains('tmdbLanguage')));
+    expect(json, isNot(contains('tmdbToken')));
+    expect(json, isNot(contains('tmdbApiKey')));
     expect(json, isNot(contains('traktEnabled')));
     expect(json, isNot(contains('openSubtitlesEnabled')));
     expect(json, isNot(contains('dandanplayEnabled')));
@@ -134,6 +138,12 @@ void main() {
       'watchHubEnabled': true,
     });
     expect(migrated.watchHubEnabled, isFalse);
+  });
+
+  test('danmaku stays off until the user opts in', () {
+    expect(const DanmakuSettings().enabled, isFalse);
+    expect(DanmakuSettings.fromJson(const {}).enabled, isFalse);
+    expect(DanmakuSettings.fromJson(const {'enabled': true}).enabled, isTrue);
   });
 
   test('playback settings persist shortcut configuration', () {
@@ -267,7 +277,12 @@ void main() {
       );
       expect(
         animeLines.map((line) => line.providerId),
-        contains('kazumi:omofun03'),
+        contains('kazumi:enlie'),
+      );
+      expect(state.enabledIds, isNot(contains('kazumi:omofun03')));
+      expect(
+        repository.byId('kazumi:omofun03')?.executionStatus,
+        RuleExecutionStatus.needsWebView,
       );
       expect(
         animeLines.map((line) => line.providerName),
@@ -398,6 +413,39 @@ void main() {
   });
 
   test(
+    'rule playback source preserves public-only safety through latency copy and cache',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rule = _animekoLookupRule(
+        id: 'custom:public-only-copy',
+        name: 'Public only copy',
+        host: 'public-only.example',
+        groupId: 'test:public-only-copy',
+        priority: 0,
+      );
+      final repository = RulePluginRepository(extraRules: [rule]);
+      final source = RulePlaybackSourceRepository(
+        repository: repository,
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: _PublicOnlyLineResolver(),
+        cacheNamespace: 'test:public-only-copy',
+      );
+
+      final first = await source.linesForEpisode(_animeSubject, _episode);
+      final cached = await source.linesForEpisode(_animeSubject, _episode);
+
+      expect(first.single.latency, isNotNull);
+      expect(first.single.publicHttpOnly, isTrue);
+      expect(cached.single.publicHttpOnly, isTrue);
+    },
+  );
+
+  test(
     'quick rule lookup returns a fast playable line without waiting for slow rules',
     () async {
       final rules = List.generate(
@@ -497,8 +545,104 @@ void main() {
     },
   );
 
+  test('rule lookup caches isolate accounts and skip private rules', () async {
+    RulePlaybackSourceRepository.clearRuntimeCaches();
+    addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+    final baseRule = _animekoLookupRule(
+      id: 'custom:animeko:account-cache',
+      name: 'Account cache',
+      host: 'account-cache.example',
+      groupId: 'account-cache',
+      priority: 0,
+    );
+    final resolver = _DelayedRulePlaybackResolver(
+      delays: {baseRule.id: Duration.zero},
+      availableRuleIds: {baseRule.id},
+    );
+
+    RulePlaybackSourceRepository sourceFor(
+      RulePlugin rule,
+      String cacheNamespace,
+    ) {
+      return RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: resolver,
+        cacheNamespace: cacheNamespace,
+      );
+    }
+
+    final accountA = sourceFor(baseRule, 'account-a:1');
+    await accountA.linesForEpisode(_animeSubject, _episode);
+    await accountA.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id]);
+
+    final accountB = sourceFor(baseRule, 'account-b:1');
+    await accountB.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id, baseRule.id]);
+
+    final changedConfig = baseRule.copyWith(
+      requestHeaders: const {'X-Variant': 'new-config'},
+    );
+    await sourceFor(
+      changedConfig,
+      'account-a:1',
+    ).linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [baseRule.id, baseRule.id, baseRule.id]);
+
+    final privateRule = baseRule.copyWith(
+      requestHeaders: const {'Cookie': 'session=private'},
+    );
+    final privateSource = sourceFor(privateRule, 'account-private:1');
+    await privateSource.linesForEpisode(_animeSubject, _episode);
+    await privateSource.linesForEpisode(_animeSubject, _episode);
+    expect(resolver.calls, [
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+      baseRule.id,
+    ]);
+  });
+
+  test('successful episode cache survives Chinese title enrichment', () async {
+    final rule = _animekoLookupRule(
+      id: 'custom:animeko:title-enrichment-cache',
+      name: 'Title enrichment cache',
+      host: 'title-enrichment-cache.example',
+      groupId: 'title-enrichment-cache',
+      priority: 0,
+    );
+    final resolver = _DelayedRulePlaybackResolver(
+      delays: {rule.id: Duration.zero},
+      availableRuleIds: {rule.id},
+    );
+    final source = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(extraRules: [rule]),
+      ruleState: RulePluginState(
+        installedIds: {rule.id},
+        enabledIds: {rule.id},
+        customRules: [rule],
+      ),
+      resolver: resolver,
+      cacheNamespace: 'title-enrichment-cache-test',
+    );
+
+    await source.linesForEpisode(_animeSubject, _episode);
+    await source.linesForEpisode(
+      AnimeSubject.fromJson({..._animeSubject.toJson(), 'title': '测试番剧（中文增强）'}),
+      _episode,
+    );
+
+    expect(resolver.calls, [rule.id]);
+  });
+
   test(
-    'quick lookup total budget does not accumulate across rule waves',
+    'quick lookup budget cancels unfinished rule waves instead of caching them',
     () async {
       final rules = List.generate(
         8,
@@ -514,7 +658,7 @@ void main() {
         delays: {
           for (var index = 0; index < rules.length; index++)
             rules[index].id: index < 4
-                ? const Duration(milliseconds: 30)
+                ? Duration.zero
                 : const Duration(milliseconds: 500),
         },
       );
@@ -541,7 +685,12 @@ void main() {
       resolver.calls.clear();
       resolver.verifyPlayableCalls.clear();
       await source.linesForEpisode(_animeSubject, _episode);
-      expect(resolver.calls, isEmpty);
+      expect(resolver.calls, [
+        rules[4].id,
+        rules[5].id,
+        rules[6].id,
+        rules[7].id,
+      ]);
     },
   );
 
@@ -585,6 +734,328 @@ void main() {
       expect(lines.last.providerId, rules.last.id);
     },
   );
+
+  test(
+    'progressive lookup emits a fast line before slower sources and completes the inventory',
+    () async {
+      final rules = List.generate(
+        3,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:progressive-$index',
+          name: 'Progressive $index',
+          host: 'progressive-$index.example',
+          groupId: 'progressive-group:$index',
+          priority: index,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          rules[0].id: const Duration(milliseconds: 15),
+          rules[1].id: const Duration(milliseconds: 90),
+          rules[2].id: const Duration(milliseconds: 150),
+        },
+        availableRuleIds: rules.map((rule) => rule.id).toSet(),
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+        cacheNamespace: 'progressive-test',
+      );
+      final updates = <PlaybackLineLookupUpdate>[];
+      final stopwatch = Stopwatch()..start();
+      Duration? firstUpdateAt;
+
+      await source.lineUpdatesForEpisode(_animeSubject, _episode).listen((
+        update,
+      ) {
+        updates.add(update);
+        firstUpdateAt ??= stopwatch.elapsed;
+      }).asFuture<void>();
+      stopwatch.stop();
+
+      expect(firstUpdateAt, isNotNull);
+      expect(firstUpdateAt!, lessThan(const Duration(milliseconds: 80)));
+      expect(updates.first.phase, PlaybackLineLookupPhase.discovery);
+      expect(updates.first.lines.where((line) => line.available), hasLength(1));
+      expect(updates.first.lines.single.latency, isNotNull);
+      expect(updates.last.isComplete, isTrue);
+      expect(updates.last.lines.where((line) => line.available), hasLength(3));
+      expect(resolver.calls, hasLength(6));
+      expect(
+        resolver.verifyPlayableCalls.where((value) => value),
+        hasLength(3),
+      );
+    },
+  );
+
+  test(
+    'progressive verification removes an optimistic provider result',
+    () async {
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:progressive-removed',
+        name: 'Progressive removed',
+        host: 'progressive-removed.example',
+        groupId: 'progressive-removed',
+        priority: 0,
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {rule.id: Duration.zero},
+        availableRuleIds: {rule.id},
+        emptyVerifiedRuleIds: {rule.id},
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: resolver,
+        cacheNamespace: 'progressive-removal-test',
+      );
+      final updates = await source
+          .lineUpdatesForEpisode(_animeSubject, _episode)
+          .toList();
+
+      expect(updates.first.lines.single.providerId, rule.id);
+      final verified = updates.firstWhere(
+        (update) => update.phase == PlaybackLineLookupPhase.verification,
+      );
+      expect(verified.resolvedProviderId, rule.id);
+      expect(verified.lines, isEmpty);
+      expect(updates.last.isComplete, isTrue);
+      expect(updates.last.lines, isEmpty);
+    },
+  );
+
+  test(
+    'progressive discovery resumes after short time slices and scans every rule',
+    () async {
+      final rules = List.generate(
+        14,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:progressive-slice-$index',
+          name: 'Progressive slice $index',
+          host: 'progressive-slice-$index.example',
+          groupId: 'progressive-slice-group:$index',
+          priority: index,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          for (final rule in rules) rule.id: const Duration(milliseconds: 20),
+        },
+        availableRuleIds: {rules.last.id},
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+        progressiveDiscoveryTimeSlice: const Duration(milliseconds: 3),
+        progressiveVerificationTimeSlice: const Duration(milliseconds: 3),
+        progressiveDiscoveryRuleTimeout: const Duration(milliseconds: 200),
+        progressiveVerificationRuleTimeout: const Duration(milliseconds: 200),
+        cacheNamespace: 'progressive-slice-test',
+      );
+
+      final updates = await source
+          .lineUpdatesForEpisode(_animeSubject, _episode)
+          .toList();
+      final discoveryUpdates = updates
+          .where((update) => update.phase == PlaybackLineLookupPhase.discovery)
+          .toList(growable: false);
+      final discoveryRuleIds = <String>[
+        for (var index = 0; index < resolver.calls.length; index++)
+          if (!resolver.verifyPlayableCalls[index]) resolver.calls[index],
+      ];
+      final verifiedRuleIds = <String>[
+        for (var index = 0; index < resolver.calls.length; index++)
+          if (resolver.verifyPlayableCalls[index]) resolver.calls[index],
+      ];
+
+      expect(discoveryUpdates, hasLength(rules.length));
+      expect(discoveryUpdates.last.completedRules, rules.length);
+      expect(
+        discoveryUpdates.map((update) => update.totalRules),
+        everyElement(rules.length),
+      );
+      expect(discoveryRuleIds.toSet(), rules.map((rule) => rule.id).toSet());
+      expect(verifiedRuleIds, [rules.last.id]);
+      expect(resolver.maxActive, 6);
+      expect(updates.last.isComplete, isTrue);
+      expect(updates.last.completedRules, rules.length);
+      expect(updates.last.totalRules, rules.length);
+      expect(
+        updates.last.lines
+            .singleWhere((line) => line.providerId == rules.last.id)
+            .available,
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'progressive verification only revisits providers with available candidates',
+    () async {
+      final rules = List.generate(
+        4,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:progressive-candidates-$index',
+          name: 'Progressive candidates $index',
+          host: 'progressive-candidates-$index.example',
+          groupId: 'progressive-candidates-group:$index',
+          priority: index,
+        ),
+      );
+      final candidateIds = {rules[0].id, rules[2].id};
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {for (final rule in rules) rule.id: Duration.zero},
+        availableRuleIds: candidateIds,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: RulePluginState(
+          installedIds: rules.map((rule) => rule.id).toSet(),
+          enabledIds: rules.map((rule) => rule.id).toSet(),
+          customRules: rules,
+        ),
+        resolver: resolver,
+        cacheNamespace: 'progressive-candidates-test',
+      );
+
+      final updates = await source
+          .lineUpdatesForEpisode(_animeSubject, _episode)
+          .toList();
+      final verificationUpdates = updates
+          .where(
+            (update) => update.phase == PlaybackLineLookupPhase.verification,
+          )
+          .toList(growable: false);
+      final verifiedRuleIds = <String>[
+        for (var index = 0; index < resolver.calls.length; index++)
+          if (resolver.verifyPlayableCalls[index]) resolver.calls[index],
+      ];
+
+      expect(verifiedRuleIds.toSet(), candidateIds);
+      expect(verifiedRuleIds, hasLength(candidateIds.length));
+      expect(verificationUpdates, hasLength(candidateIds.length));
+      expect(
+        verificationUpdates.map((update) => update.totalRules),
+        everyElement(candidateIds.length),
+      );
+      expect(verificationUpdates.last.completedRules, candidateIds.length);
+      expect(updates.last.isComplete, isTrue);
+    },
+  );
+
+  test(
+    'progressive rule timeout stays visible as an unavailable line',
+    () async {
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:progressive-timeout',
+        name: 'Progressive timeout',
+        host: 'progressive-timeout.example',
+        groupId: 'progressive-timeout',
+        priority: 0,
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {rule.id: const Duration(milliseconds: 60)},
+        availableRuleIds: {rule.id},
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: RulePluginState(
+          installedIds: {rule.id},
+          enabledIds: {rule.id},
+          customRules: [rule],
+        ),
+        resolver: resolver,
+        progressiveDiscoveryTimeSlice: const Duration(milliseconds: 2),
+        progressiveDiscoveryRuleTimeout: const Duration(milliseconds: 8),
+        cacheNamespace: 'progressive-timeout-test',
+      );
+
+      final updates = await source
+          .lineUpdatesForEpisode(_animeSubject, _episode)
+          .toList();
+      final timeoutUpdate = updates.firstWhere(
+        (update) => update.phase == PlaybackLineLookupPhase.discovery,
+      );
+      final timeoutLine = updates.last.lines.single;
+
+      expect(timeoutUpdate.completedRules, 1);
+      expect(timeoutUpdate.totalRules, 1);
+      expect(timeoutUpdate.timedOut, isTrue);
+      expect(timeoutLine.providerId, rule.id);
+      expect(timeoutLine.available, isFalse);
+      expect(timeoutLine.url, isNull);
+      expect(timeoutLine.message, contains('检索超时'));
+      expect(updates.last.isComplete, isTrue);
+      expect(updates.last.timedOut, isTrue);
+      expect(resolver.verifyPlayableCalls, everyElement(isFalse));
+    },
+  );
+
+  test('cancelling progressive lookup stops dispatching new rules', () async {
+    final rules = List.generate(
+      10,
+      (index) => _animekoLookupRule(
+        id: 'custom:animeko:cancel-$index',
+        name: 'Cancel $index',
+        host: 'cancel-$index.example',
+        groupId: 'cancel-group:$index',
+        priority: index,
+      ),
+    );
+    final resolver = _DelayedRulePlaybackResolver(
+      delays: {
+        rules.first.id: const Duration(milliseconds: 10),
+        for (final rule in rules.skip(1))
+          rule.id: const Duration(milliseconds: 120),
+      },
+      availableRuleIds: rules.map((rule) => rule.id).toSet(),
+    );
+    final source = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(extraRules: rules),
+      ruleState: RulePluginState(
+        installedIds: rules.map((rule) => rule.id).toSet(),
+        enabledIds: rules.map((rule) => rule.id).toSet(),
+        customRules: rules,
+      ),
+      resolver: resolver,
+      cacheNamespace: 'progressive-cancel-test',
+    );
+    final firstUpdate = Completer<void>();
+    final cancellationToken = RulePlaybackCancellationToken();
+    final subscription = source
+        .lineUpdatesForEpisode(
+          _animeSubject,
+          _episode,
+          cancellationToken: cancellationToken,
+        )
+        .listen((_) {
+          if (!firstUpdate.isCompleted) firstUpdate.complete();
+        });
+
+    await firstUpdate.future;
+    await subscription.cancel();
+    final callsAtCancellation = resolver.calls.length;
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+
+    expect(cancellationToken.isCancelled, isTrue);
+    expect(callsAtCancellation, lessThan(rules.length));
+    expect(resolver.calls, hasLength(callsAtCancellation));
+    expect(resolver.verifyPlayableCalls, everyElement(isFalse));
+  });
 }
 
 const _animeSubject = AnimeSubject(
@@ -702,10 +1173,12 @@ class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
   _DelayedRulePlaybackResolver({
     required this.delays,
     this.availableRuleIds = const {},
+    this.emptyVerifiedRuleIds = const {},
   });
 
   final Map<String, Duration> delays;
   final Set<String> availableRuleIds;
+  final Set<String> emptyVerifiedRuleIds;
   final List<String> calls = <String>[];
   final List<bool> verifyPlayableCalls = <bool>[];
   int active = 0;
@@ -717,6 +1190,7 @@ class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
     required AnimeSubject subject,
     required AnimeEpisode episode,
     bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async {
     calls.add(rule.id);
     verifyPlayableCalls.add(verifyPlayable);
@@ -724,6 +1198,9 @@ class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
     if (active > maxActive) maxActive = active;
     try {
       await Future<void>.delayed(delays[rule.id] ?? Duration.zero);
+      if (verifyPlayable && emptyVerifiedRuleIds.contains(rule.id)) {
+        return const [];
+      }
       final available = availableRuleIds.contains(rule.id);
       return [
         PlaybackLine(
@@ -744,5 +1221,31 @@ class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
     } finally {
       active--;
     }
+  }
+}
+
+class _PublicOnlyLineResolver extends RulePlaybackResolver {
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    return [
+      PlaybackLine(
+        id: '${rule.id}:${episode.id}',
+        episodeId: episode.id,
+        providerId: rule.id,
+        providerName: rule.name,
+        title: episode.displayTitle,
+        quality: '1080P',
+        format: 'MP4',
+        url: 'https://media.example/video.mp4',
+        publicHttpOnly: true,
+        available: true,
+      ),
+    ];
   }
 }
