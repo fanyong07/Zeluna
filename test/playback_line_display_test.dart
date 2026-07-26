@@ -421,6 +421,57 @@ void main() {
     expect(playbackLineLatencyLabel(_line('unknown')), '延迟未知');
     expect(playbackLineMediaLabel(_line('unknown')), contains('大小未知'));
   });
+  group('playbackProviderLabel', () {
+    test('内部规则 ID 不会出现在界面，映射为稳定别名', () {
+      final label = playbackProviderLabel(
+        providerId: 'xfdmneo',
+        providerName: 'xfdmneo',
+      );
+      expect(label, isNot(contains('xfdmneo')));
+      expect(label, endsWith('线路'));
+      expect(
+        playbackProviderLabel(providerId: 'xfdmneo', providerName: 'xfdmneo'),
+        label,
+      );
+    });
+
+    test('人类可读名称原样保留', () {
+      expect(
+        playbackProviderLabel(providerId: 'a1', providerName: '低端影视'),
+        '低端影视',
+      );
+      expect(
+        playbackProviderLabel(
+          providerId: 'archive',
+          providerName: 'Internet Archive',
+        ),
+        'Internet Archive',
+      );
+    });
+
+    test('不同 ID 映射保持确定性且来自别名池', () {
+      final label = playbackProviderLabel(
+        providerId: 'custom:abc-1',
+        providerName: '',
+      );
+      final alias = label.replaceAll('线路', '');
+      expect(playbackProviderAliasPool, contains(alias));
+    });
+  });
+
+  group('playbackQualityChipLabel', () {
+    test('未知分辨率不显示 chip', () {
+      expect(playbackQualityChipLabel(null), isNull);
+      expect(playbackQualityChipLabel(_line('a')), isNull);
+    });
+
+    test('真实分辨率正常显示', () {
+      expect(
+        playbackQualityChipLabel(_line('b', width: 1920, height: 1080)),
+        '1080P',
+      );
+    });
+  });
 }
 
 PlaybackLine _line(

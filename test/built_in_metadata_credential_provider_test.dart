@@ -41,7 +41,7 @@ void main() {
 
       await container
           .read(externalServiceRepositoryProvider)
-          .tmdbMovieFeed(pages: 1);
+          .tmdbDetail(_tmdbProbeSubject());
     });
 
     test('prefers the build-time token over an older stored token', () async {
@@ -60,7 +60,7 @@ void main() {
 
       await container
           .read(externalServiceRepositoryProvider)
-          .tmdbMovieFeed(pages: 1);
+          .tmdbDetail(_tmdbProbeSubject());
 
       expect(
         requests.single.headers['authorization'],
@@ -86,7 +86,7 @@ void main() {
 
         await container
             .read(externalServiceRepositoryProvider)
-            .tmdbMovieFeed(pages: 1);
+            .tmdbDetail(_tmdbProbeSubject());
 
         expect((await store.readStatus()).health, TmdbCredentialHealth.ready);
         expect(await store.readAccessToken(), _storedTmdbToken);
@@ -109,7 +109,7 @@ void main() {
 
       await container
           .read(externalServiceRepositoryProvider)
-          .tmdbMovieFeed(pages: 1);
+          .tmdbDetail(_tmdbProbeSubject());
 
       expect(
         requests.single.headers['authorization'],
@@ -340,7 +340,8 @@ void _expectClientMetadataDisabled(ExternalServiceSettings services) {
   expect(services.tmdbEnabled, isFalse);
   expect(services.bangumiEnabled, isFalse);
   expect(services.preferBangumiChinese, isTrue);
-  expect(services.playbackBackendEnabled, isFalse);
+  expect(services.playbackBackendEnabled, isTrue);
+  expect(services.playbackBackendEndpoint, 'https://api.zeluna.top');
 }
 
 ProviderContainer _tmdbContainer({
@@ -414,6 +415,24 @@ http.Response _bangumiDetailResponse(
     headers: const {'content-type': 'application/json; charset=utf-8'},
   );
 }
+
+AnimeSubject _tmdbProbeSubject() => const AnimeSubject(
+  id: 603,
+  title: '凭证探针',
+  originalTitle: '',
+  summary: '',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-01-01',
+  platform: '电影',
+  language: '',
+  region: '',
+  status: '',
+  categories: [],
+  tags: [],
+  totalEpisodes: 1,
+  source: 'tmdb:movie',
+);
 
 class _MemoryCredentialBackend
     implements BangumiCredentialBackend, TmdbCredentialBackend {

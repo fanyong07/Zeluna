@@ -89,7 +89,7 @@ class _SourceHeader extends StatelessWidget {
               '目录生成于 ${_formatDate(catalog.generatedAt!)}，版本 ${catalog.version}',
               style: Theme.of(
                 context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
             ),
           ],
         ],
@@ -109,7 +109,7 @@ class _SourceMetric extends StatelessWidget {
     return Expanded(
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: AppColors.panelHigh,
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: AppColors.border),
         ),
@@ -120,7 +120,7 @@ class _SourceMetric extends StatelessWidget {
               Text(
                 value,
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  color: AppColors.text,
+                  color: context.ink,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -129,7 +129,7 @@ class _SourceMetric extends StatelessWidget {
                 label,
                 style: Theme.of(
                   context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
               ),
             ],
           ),
@@ -203,7 +203,7 @@ class _SourceCard extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: AppColors.text,
+                  color: context.ink,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -239,7 +239,7 @@ class _SourceIcon extends StatelessWidget {
       decoration: BoxDecoration(
         color: source.enabled
             ? AppColors.primary.withValues(alpha: 0.18)
-            : AppColors.panelHigh,
+            : Theme.of(context).colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
           color: source.enabled ? AppColors.primary : AppColors.border,
@@ -254,7 +254,7 @@ class _SourceIcon extends StatelessWidget {
               : source.kind == VideoSourceKind.torrent
               ? Icons.cloud_download_outlined
               : Icons.account_tree_outlined,
-          color: source.enabled ? AppColors.primary : AppColors.muted,
+          color: source.enabled ? AppColors.primary : context.inkMuted,
         ),
       ),
     );
@@ -286,7 +286,7 @@ class _SourceText extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: AppColors.text,
+                    color: context.ink,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -325,7 +325,7 @@ class _SourceText extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,
-          ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
         ),
         const SizedBox(height: 5),
         Text(
@@ -334,7 +334,7 @@ class _SourceText extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: Theme.of(
             context,
-          ).textTheme.bodySmall?.copyWith(color: AppColors.faint),
+          ).textTheme.bodySmall?.copyWith(color: context.inkFaint),
         ),
       ],
     );
@@ -365,7 +365,7 @@ class _HealthBadge extends StatelessWidget {
             Text(
               source.healthLabel,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: context.ink,
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -464,7 +464,7 @@ class _RailSourceLine extends StatelessWidget {
             child: Text(
               label,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: context.ink,
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -499,7 +499,7 @@ class _RailNote extends StatelessWidget {
               text,
               style: Theme.of(
                 context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
             ),
           ),
         ],
@@ -523,7 +523,7 @@ class _SourceLoadError extends StatelessWidget {
           Text(
             '源目录读取失败',
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.text,
+              color: context.ink,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -533,7 +533,7 @@ class _SourceLoadError extends StatelessWidget {
             textAlign: TextAlign.center,
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+            ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
           ),
         ],
       ),
@@ -554,7 +554,7 @@ class _SourceEmpty extends StatelessWidget {
           Text(
             '还没有导入源',
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: AppColors.text,
+              color: context.ink,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -564,7 +564,7 @@ class _SourceEmpty extends StatelessWidget {
             textAlign: TextAlign.center,
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+            ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
           ),
         ],
       ),
@@ -579,7 +579,7 @@ Color _healthColor(VideoSource source) {
     'ok' || 'healthy' || 'pass' || 'available' => const Color(0xFF4DD7A5),
     'warning' || 'degraded' || 'limited' => const Color(0xFFFFD166),
     'error' || 'failed' || 'unhealthy' || 'offline' => const Color(0xFFFF7A90),
-    _ => AppColors.muted,
+    _ => const Color(0xFF9A968A),
   };
 }
 

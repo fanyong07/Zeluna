@@ -12,6 +12,8 @@ import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
+import '../shared_ui/section_scaffold.dart';
+import '../shared_ui/settings_ui.dart';
 
 class ProfilePage extends ConsumerWidget {
   const ProfilePage({super.key});
@@ -65,7 +67,7 @@ class _ProfileBanner extends StatelessWidget {
       height: compact ? 128 : 176,
       child: AppPanel(
         padding: EdgeInsets.zero,
-        borderColor: AppColors.borderBright,
+        borderColor: Theme.of(context).colorScheme.outline,
         child: ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Stack(
@@ -79,7 +81,7 @@ class _ProfileBanner extends StatelessWidget {
               const DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Color(0xEE060912), Color(0x66060912)],
+                    colors: [Color(0xEE1B1A18), Color(0x661B1A18)],
                     begin: Alignment.centerLeft,
                     end: Alignment.centerRight,
                   ),
@@ -99,7 +101,7 @@ class _ProfileBanner extends StatelessWidget {
                                     ? Theme.of(context).textTheme.headlineMedium
                                     : Theme.of(context).textTheme.displaySmall)
                                 ?.copyWith(
-                                  color: Colors.white,
+                                  color: AppColors.theaterInk,
                                   fontWeight: FontWeight.w900,
                                 ),
                       ),
@@ -126,7 +128,7 @@ class _ProfileBanner extends StatelessWidget {
                                                   context,
                                                 ).textTheme.headlineMedium)
                                           ?.copyWith(
-                                            color: AppColors.text,
+                                            color: AppColors.theaterInk,
                                             fontWeight: FontWeight.w900,
                                           ),
                                 ),
@@ -151,7 +153,7 @@ class _ProfileBanner extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.titleSmall
                                 ?.copyWith(
-                                  color: AppColors.muted,
+                                  color: AppColors.theaterMuted,
                                   fontWeight: FontWeight.w700,
                                 ),
                           ),
@@ -162,7 +164,7 @@ class _ProfileBanner extends StatelessWidget {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(color: AppColors.text),
+                                  ?.copyWith(color: AppColors.theaterInk),
                             ),
                           ],
                         ],
@@ -209,8 +211,7 @@ class _BannerMetric extends StatelessWidget {
           Text(
             value,
             style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: AppColors.text,
-              fontWeight: FontWeight.w900,
+              color: context.ink,
             ),
           ),
           const SizedBox(height: 4),
@@ -218,7 +219,7 @@ class _BannerMetric extends StatelessWidget {
             label,
             style: Theme.of(
               context,
-            ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+            ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
           ),
         ],
       ),
@@ -309,7 +310,7 @@ class _PlaylistCard extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0xEE060912)],
+                      colors: [Colors.transparent, Color(0xEE1B1A18)],
                     ),
                   ),
                 ),
@@ -325,7 +326,7 @@ class _PlaylistCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: AppColors.text,
+                          color: AppColors.theaterInk,
                           fontWeight: FontWeight.w900,
                         ),
                       ),
@@ -334,7 +335,7 @@ class _PlaylistCard extends StatelessWidget {
                         '已加入追番 · 打开详情',
                         style: Theme.of(
                           context,
-                        ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                        ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
                       ),
                     ],
                   ),
@@ -412,6 +413,12 @@ class _ProfileShortcutSection extends StatelessWidget {
                   value: '偏好',
                   onTap: () => context.push('/settings/playback'),
                 ),
+                _ShortcutTile(
+                  icon: Icons.rss_feed,
+                  title: '订阅源',
+                  value: '${state.rulePlugins.customRules.length}',
+                  onTap: () => context.push('/profile/rules'),
+                ),
               ];
               return GridView.count(
                 crossAxisCount: columns,
@@ -451,9 +458,9 @@ class _ShortcutTile extends StatelessWidget {
       borderRadius: BorderRadius.circular(8),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: AppColors.panelHigh,
+          color: Theme.of(context).colorScheme.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: AppColors.border),
+          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
         ),
         child: Padding(
           padding: EdgeInsets.symmetric(
@@ -478,7 +485,7 @@ class _ShortcutTile extends StatelessWidget {
                                   ? Theme.of(context).textTheme.labelLarge
                                   : Theme.of(context).textTheme.labelSmall)
                               ?.copyWith(
-                                color: AppColors.text,
+                                color: context.ink,
                                 fontWeight: FontWeight.w900,
                                 height: 1.0,
                               ),
@@ -488,7 +495,7 @@ class _ShortcutTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: AppColors.muted,
+                        color: context.inkMuted,
                         height: 1.0,
                       ),
                     ),
@@ -605,7 +612,7 @@ class _HistoryCard extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0xEE060912)],
+                      colors: [Colors.transparent, Color(0xEE1B1A18)],
                     ),
                   ),
                 ),
@@ -621,7 +628,7 @@ class _HistoryCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: AppColors.text,
+                          color: AppColors.theaterInk,
                           fontWeight: FontWeight.w900,
                         ),
                       ),
@@ -632,7 +639,7 @@ class _HistoryCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.muted,
+                          color: AppColors.theaterMuted,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -642,7 +649,7 @@ class _HistoryCard extends StatelessWidget {
                           value: progress,
                           minHeight: 3,
                           borderRadius: BorderRadius.circular(3),
-                          backgroundColor: AppColors.border,
+                          backgroundColor: AppColors.theaterFaint,
                           color: AppColors.primary,
                         ),
                       ],
@@ -722,7 +729,7 @@ class _DownloadRow extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: AppColors.text,
+                    color: context.ink,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -732,7 +739,7 @@ class _DownloadRow extends ConsumerWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.muted,
+                    color: context.inkMuted,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -741,7 +748,7 @@ class _DownloadRow extends ConsumerWidget {
                   value: progress,
                   minHeight: 4,
                   borderRadius: BorderRadius.circular(4),
-                  backgroundColor: AppColors.border,
+                  backgroundColor: Theme.of(context).colorScheme.outlineVariant,
                   color: AppColors.primary,
                 ),
               ],
@@ -786,7 +793,7 @@ class DownloadManagementPage extends ConsumerWidget {
               120,
             ),
             child: tasks.isEmpty
-                ? const _ProfileEmptyState(
+                ? const EmptyState(icon: Icons.inbox_outlined, compact: true,
                     title: '还没有下载任务',
                     message: '在详情页点击下载后，任务会显示在这里。',
                   )
@@ -825,9 +832,9 @@ class _DownloadTaskCard extends ConsumerWidget {
         ? 1.0
         : task.progress;
     final statusColor = switch (task.status) {
-      MediaDownloadTaskStatus.completed => Colors.greenAccent,
+      MediaDownloadTaskStatus.completed => AppColors.success,
       MediaDownloadTaskStatus.failed => Colors.redAccent,
-      MediaDownloadTaskStatus.cancelled => AppColors.muted,
+      MediaDownloadTaskStatus.cancelled => context.inkMuted,
       MediaDownloadTaskStatus.paused => Colors.orangeAccent,
       _ => AppColors.primary,
     };
@@ -862,7 +869,7 @@ class _DownloadTaskCard extends ConsumerWidget {
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.titleMedium
                             ?.copyWith(
-                              color: AppColors.text,
+                              color: context.ink,
                               fontWeight: FontWeight.w900,
                             ),
                       ),
@@ -888,7 +895,7 @@ class _DownloadTaskCard extends ConsumerWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.muted,
+                    color: context.inkMuted,
                     height: 1.35,
                     fontWeight: FontWeight.w700,
                   ),
@@ -898,7 +905,7 @@ class _DownloadTaskCard extends ConsumerWidget {
                   value: progress,
                   minHeight: 5,
                   borderRadius: BorderRadius.circular(4),
-                  backgroundColor: AppColors.border,
+                  backgroundColor: Theme.of(context).colorScheme.outlineVariant,
                   color: statusColor,
                 ),
               ],
@@ -1042,7 +1049,7 @@ class _ProfileRightRail extends StatelessWidget {
                     : '登录或创建本机账号后，可将收藏、追番、历史和偏好与其他使用者分开。',
                 style: Theme.of(
                   context,
-                ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
               ),
             ],
           ),
@@ -1080,7 +1087,7 @@ class _RailAction extends StatelessWidget {
               child: Text(
                 title,
                 style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                  color: AppColors.text,
+                  color: context.ink,
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -1088,7 +1095,7 @@ class _RailAction extends StatelessWidget {
             Text(
               value,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.muted,
+                color: context.inkMuted,
                 fontWeight: FontWeight.w900,
               ),
             ),
@@ -1116,7 +1123,7 @@ class _DeviceRow extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
         children: [
-          Icon(icon, color: AppColors.muted),
+          Icon(icon, color: context.inkMuted),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
@@ -1124,7 +1131,7 @@ class _DeviceRow extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: context.ink,
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -1133,8 +1140,8 @@ class _DeviceRow extends StatelessWidget {
             status,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: status == '在线' || status == '已登录'
-                  ? Colors.greenAccent
-                  : AppColors.muted,
+                  ? AppColors.success
+                  : context.inkMuted,
             ),
           ),
         ],
@@ -1157,7 +1164,7 @@ class _InlineEmpty extends StatelessWidget {
           text,
           style: Theme.of(
             context,
-          ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+          ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
         ),
       ),
     );
@@ -1202,7 +1209,7 @@ class LibraryPage extends ConsumerWidget {
                   icon: const Icon(Icons.delete_outline),
                 ),
           child: entries.isEmpty
-              ? _ProfileEmptyState(title: emptyTitle, message: emptyMessage)
+              ? EmptyState(icon: Icons.inbox_outlined, compact: true, title: emptyTitle, message: emptyMessage)
               : ListView.separated(
                   padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
                   itemCount: entries.length,
@@ -1250,7 +1257,7 @@ class HistoryPage extends ConsumerWidget {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
             child: entries.isEmpty
-                ? const _ProfileEmptyState(
+                ? const EmptyState(icon: Icons.inbox_outlined, compact: true,
                     title: '还没有观看记录',
                     message: '从详情页播放任意一集后，这里会记录番剧和集数。',
                   )
@@ -1326,7 +1333,7 @@ class _HistoryListTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: AppColors.text,
+                      color: context.ink,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
@@ -1340,7 +1347,7 @@ class _HistoryListTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppColors.muted,
+                      color: context.inkMuted,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -1350,7 +1357,7 @@ class _HistoryListTile extends StatelessWidget {
                       value: progress,
                       minHeight: 4,
                       borderRadius: BorderRadius.circular(4),
-                      backgroundColor: AppColors.border,
+                      backgroundColor: Theme.of(context).colorScheme.outlineVariant,
                       color: AppColors.primary,
                     ),
                   ],
@@ -1414,7 +1421,7 @@ class _HistoryStatRow extends StatelessWidget {
             label,
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: AppColors.muted),
+            ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1424,7 +1431,7 @@ class _HistoryStatRow extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.right,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: context.ink,
                 fontWeight: FontWeight.w900,
               ),
             ),
@@ -1446,7 +1453,7 @@ class HomeSettingsPage extends ConsumerWidget {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
           children: [
-            _SettingsCard(
+            SettingsCard(
               children: [
                 for (final tab in AnimeHomeTab.values)
                   _RadioRow<AnimeHomeTab>(
@@ -1482,9 +1489,9 @@ class AppearanceSettingsPage extends ConsumerWidget {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              _SettingsCard(
+              SettingsCard(
                 children: [
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '跟随系统',
                     subtitle: '后续接浅色主题时会优先使用系统设置',
                     value: settings.followSystem,
@@ -1492,7 +1499,7 @@ class AppearanceSettingsPage extends ConsumerWidget {
                       settings.copyWith(followSystem: value),
                     ),
                   ),
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '深色模式',
                     subtitle: '当前 AniCh 风格以暗色观影环境为主',
                     value: settings.darkMode,
@@ -1500,14 +1507,14 @@ class AppearanceSettingsPage extends ConsumerWidget {
                       settings.copyWith(darkMode: value),
                     ),
                   ),
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '紧凑列表',
                     value: settings.compactMode,
                     onChanged: (value) => controller.updateAppearance(
                       settings.copyWith(compactMode: value),
                     ),
                   ),
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '减少动效',
                     value: settings.reduceMotion,
                     onChanged: (value) => controller.updateAppearance(
@@ -1538,9 +1545,9 @@ class DanmakuSettingsPage extends ConsumerWidget {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              _SettingsCard(
+              SettingsCard(
                 children: [
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '启用弹幕',
                     value: settings.enabled,
                     onChanged: (value) => controller.updateDanmaku(
@@ -1567,14 +1574,14 @@ class DanmakuSettingsPage extends ConsumerWidget {
                       settings.copyWith(fontSize: value),
                     ),
                   ),
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '屏蔽顶部弹幕',
                     value: settings.blockTop,
                     onChanged: (value) => controller.updateDanmaku(
                       settings.copyWith(blockTop: value),
                     ),
                   ),
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '屏蔽滚动弹幕',
                     value: settings.blockScroll,
                     onChanged: (value) => controller.updateDanmaku(
@@ -1607,9 +1614,9 @@ class MiscSettingsPage extends ConsumerWidget {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              _SettingsCard(
+              SettingsCard(
                 children: [
-                  _SwitchRow(
+                  SettingsSwitchRow(
                     title: '播放时保持屏幕常亮',
                     subtitle: '已连接系统唤醒锁，播放和长视频观看时生效',
                     value: settings.keepScreenOn,
@@ -1617,9 +1624,9 @@ class MiscSettingsPage extends ConsumerWidget {
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
-                  const _ReadonlyRow(title: '离线下载', value: '支持单文件与未加密 HLS VOD'),
-                  const _ReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
-                  const _ReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
+                  const SettingsReadonlyRow(title: '离线下载', value: '支持单文件与未加密 HLS VOD'),
+                  const SettingsReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
+                  const SettingsReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
               ),
             ],
@@ -1644,24 +1651,24 @@ class VersionInfoPage extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              _SettingsCard(
+              SettingsCard(
                 children: [
-                  _ReadonlyRow(title: '应用', value: info?.appName ?? 'Zeluna'),
-                  _ReadonlyRow(
+                  SettingsReadonlyRow(title: '应用', value: info?.appName ?? 'Zeluna'),
+                  SettingsReadonlyRow(
                     title: '版本',
                     value: info == null
                         ? '读取中…'
                         : '${info.version}+${info.buildNumber}',
                   ),
-                  const _ReadonlyRow(
+                  const SettingsReadonlyRow(
                     title: '内容资料',
                     value: '番剧 / 剧集 / 电影 / 中文资料增强',
                   ),
-                  const _ReadonlyRow(
+                  const SettingsReadonlyRow(
                     title: '播放能力',
                     value: '统一聚合后端 / 网络直链 / 本地文件',
                   ),
-                  const _ReadonlyRow(
+                  const SettingsReadonlyRow(
                     title: '播放器',
                     value: 'media_kit · YouTube/B站式控制层',
                   ),
@@ -1712,7 +1719,7 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
           children: [
-            _SettingsCard(
+            SettingsCard(
               children: [
                 SizedBox(
                   height: 74,
@@ -1729,7 +1736,7 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
                     decoration: const InputDecoration(labelText: '反馈内容'),
                   ),
                 ),
-                _ActionRow(
+                SettingsActionRow(
                   icon: Icons.archive_outlined,
                   title: '保存到本地反馈箱',
                   subtitle: widget.subject == null
@@ -1741,7 +1748,7 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
             ),
             const SizedBox(height: 14),
             if (state.feedbacks.isEmpty)
-              const _ProfileEmptyState(
+              const EmptyState(icon: Icons.inbox_outlined, compact: true,
                 title: '还没有反馈记录',
                 message: '提交后会保存在本地，方便你后续整理问题。',
               )
@@ -1771,43 +1778,6 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
   }
 }
 
-class _BackPill extends StatelessWidget {
-  const _BackPill({required this.onBack});
-
-  final VoidCallback onBack;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(30),
-      onTap: onBack,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: const Color(0xE6252525),
-          borderRadius: BorderRadius.circular(30),
-          boxShadow: const [
-            BoxShadow(color: Colors.black54, blurRadius: 26, spreadRadius: 5),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.arrow_back, color: Colors.white70, size: 28),
-              Text(
-                '返回',
-                style: Theme.of(
-                  context,
-                ).textTheme.labelMedium?.copyWith(color: Colors.white70),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _ProfileScaffold extends StatelessWidget {
   const _ProfileScaffold({
@@ -1826,7 +1796,6 @@ class _ProfileScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     final desktop = MediaQuery.sizeOf(context).width >= 980;
     return Scaffold(
-      backgroundColor: Colors.black,
       body: SafeArea(
         child: Row(
           children: [
@@ -1854,7 +1823,7 @@ class _ProfileScaffold extends StatelessWidget {
                                 overflow: TextOverflow.ellipsis,
                                 style: Theme.of(context).textTheme.titleLarge
                                     ?.copyWith(
-                                      color: Colors.white,
+                                      color: context.ink,
                                       fontWeight: FontWeight.w700,
                                     ),
                               ),
@@ -1872,7 +1841,7 @@ class _ProfileScaffold extends StatelessWidget {
                     right: 0,
                     bottom: 28,
                     child: Center(
-                      child: _BackPill(
+                      child: BackPill(
                         onBack: () => safeNavigateBack(
                           context,
                           fallbackRoute: '/profile',
@@ -1905,9 +1874,9 @@ class _ProfileMiniRail extends StatelessWidget {
     ];
     return Container(
       width: 72,
-      decoration: const BoxDecoration(
-        color: Color(0xFF080808),
-        border: Border(right: BorderSide(color: Color(0xFF202020))),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: Border(right: BorderSide(color: Theme.of(context).colorScheme.outlineVariant)),
       ),
       child: Column(
         children: [
@@ -1920,7 +1889,7 @@ class _ProfileMiniRail extends StatelessWidget {
                 onPressed: () => context.go(item.route),
                 icon: Icon(
                   item.icon,
-                  color: item == active ? AppColors.primary : Colors.white54,
+                  color: item == active ? AppColors.primary : context.inkMuted,
                 ),
               ),
             ),
@@ -1930,179 +1899,9 @@ class _ProfileMiniRail extends StatelessWidget {
   }
 }
 
-class _SettingsCard extends StatelessWidget {
-  const _SettingsCard({required this.children});
 
-  final List<Widget> children;
 
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xFF202020),
-        borderRadius: BorderRadius.circular(7),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Column(
-          children: [
-            for (var i = 0; i < children.length; i++) ...[
-              children[i],
-              if (i != children.length - 1)
-                const Divider(height: 1, color: Color(0xFF303030)),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
 
-class _ReadonlyRow extends StatelessWidget {
-  const _ReadonlyRow({required this.title, required this.value});
-
-  final String title;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 62,
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              title,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          Text(
-            value,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(color: Colors.white70),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActionRow extends StatelessWidget {
-  const _ActionRow({
-    required this.icon,
-    required this.title,
-    required this.onTap,
-    this.subtitle,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: SizedBox(
-        height: subtitle == null ? 62 : 78,
-        child: Row(
-          children: [
-            Icon(icon, color: Colors.white70),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right, color: Colors.white54),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SwitchRow extends StatelessWidget {
-  const _SwitchRow({
-    required this.title,
-    required this.value,
-    required this.onChanged,
-    this.subtitle,
-  });
-
-  final String title;
-  final String? subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: subtitle == null ? 68 : 82,
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle!,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          Switch(value: value, onChanged: onChanged),
-        ],
-      ),
-    );
-  }
-}
 
 class _SliderRow extends StatelessWidget {
   const _SliderRow({
@@ -2132,7 +1931,7 @@ class _SliderRow extends StatelessWidget {
             child: Text(
               title,
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: Colors.white,
+                color: context.ink,
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -2152,7 +1951,7 @@ class _SliderRow extends StatelessWidget {
               textAlign: TextAlign.end,
               style: Theme.of(
                 context,
-              ).textTheme.titleMedium?.copyWith(color: Colors.white70),
+              ).textTheme.titleMedium?.copyWith(color: context.inkMuted),
             ),
           ),
         ],
@@ -2191,7 +1990,7 @@ class _RadioRow<T> extends StatelessWidget {
                 child: Text(
                   title,
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: Colors.white,
+                    color: context.ink,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -2223,7 +2022,7 @@ class _LibraryTile extends StatelessWidget {
       borderRadius: BorderRadius.circular(7),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: const Color(0xFF202020),
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
           borderRadius: BorderRadius.circular(7),
         ),
         child: ListTile(
@@ -2240,8 +2039,8 @@ class _LibraryTile extends StatelessWidget {
             entry.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
+            style: TextStyle(
+              color: context.ink,
               fontWeight: FontWeight.w800,
             ),
           ),
@@ -2251,7 +2050,7 @@ class _LibraryTile extends StatelessWidget {
                 : '${entry.note} · ${_formatDateTime(entry.updatedAt)}',
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Colors.white60),
+            style: TextStyle(color: context.inkMuted),
           ),
           trailing: Icon(trailingIcon, color: AppColors.primary),
         ),
@@ -2275,52 +2074,6 @@ class _PosterThumb extends StatelessWidget {
   }
 }
 
-class _ProfileEmptyState extends StatelessWidget {
-  const _ProfileEmptyState({required this.title, required this.message});
-
-  final String title;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 360),
-        child: Padding(
-          padding: const EdgeInsets.all(28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.inbox_outlined,
-                size: 42,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(height: 14),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                message,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Colors.white60,
-                  height: 1.4,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _KeywordEditor extends ConsumerStatefulWidget {
   const _KeywordEditor({required this.settings});
@@ -2350,7 +2103,7 @@ class _KeywordEditorState extends ConsumerState<_KeywordEditor> {
 
   @override
   Widget build(BuildContext context) {
-    return _SettingsCard(
+    return SettingsCard(
       children: [
         SizedBox(
           height: 78,
@@ -2359,7 +2112,7 @@ class _KeywordEditorState extends ConsumerState<_KeywordEditor> {
             decoration: const InputDecoration(labelText: '屏蔽词，用逗号分隔'),
           ),
         ),
-        _ActionRow(icon: Icons.save_outlined, title: '保存屏蔽词', onTap: _save),
+        SettingsActionRow(icon: Icons.save_outlined, title: '保存屏蔽词', onTap: _save),
       ],
     );
   }
@@ -2388,7 +2141,7 @@ class _FeedbackTile extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 10),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: const Color(0xFF202020),
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
           borderRadius: BorderRadius.circular(7),
         ),
         child: Padding(
@@ -2399,7 +2152,7 @@ class _FeedbackTile extends StatelessWidget {
               Text(
                 item.title,
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: Colors.white,
+                  color: context.ink,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -2408,7 +2161,7 @@ class _FeedbackTile extends StatelessWidget {
                 item.content,
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white70),
+                style: TextStyle(color: context.inkMuted),
               ),
               const SizedBox(height: 6),
               Text(
@@ -2416,7 +2169,7 @@ class _FeedbackTile extends StatelessWidget {
                   if (item.subject != null) item.subject!.title,
                   _formatDateTime(item.createdAt),
                 ].join(' · '),
-                style: const TextStyle(color: Colors.white54),
+                style: TextStyle(color: context.inkMuted),
               ),
             ],
           ),

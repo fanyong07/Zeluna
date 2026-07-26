@@ -24,6 +24,10 @@ from .scrapers.maccms import MacCmsScraper
 from .scrapers.maccms_sites import site_priority
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
 from .scrapers.series.vod_common import CommonVodScraper
+from .scrapers.anime.agefans import AgeFansScraper
+from .scrapers.anime.girigiri import GiriGiriScraper
+from .scrapers.anime.yhdm import YhdmScraper
+from .scrapers.base import BaseScraper
 from .config import SOURCE_MAX_CONCURRENCY
 
 logger = logging.getLogger(__name__)
@@ -167,10 +171,24 @@ class ContentAggregator:
       - movie:  TMDB + TVBox + M3U8解析
     """
 
-    def __init__(self, *, line_http_transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        *,
+        line_http_transport: httpx.AsyncBaseTransport | None = None,
+        crawler_scrapers: dict[str, BaseScraper] | None = None,
+    ):
         self._maccms = MacCmsScraper()
         self._tvbox = TvBoxAdapterScraper()
         self._vod = CommonVodScraper()
+        self._crawler_scrapers = (
+            {
+                "agefans": AgeFansScraper(),
+                "girigiri": GiriGiriScraper(),
+                "yhdm": YhdmScraper(),
+            }
+            if crawler_scrapers is None
+            else dict(crawler_scrapers)
+        )
         self._anich_client = None  # lazy init (可选外部 AniCh 客户端)
         self._line_http_transport = line_http_transport
 
@@ -205,8 +223,128 @@ class ContentAggregator:
             self._maccms.aclose(),
             self._tvbox.aclose(),
             self._vod.aclose(),
+            *(scraper.aclose() for scraper in self._crawler_scrapers.values()),
             return_exceptions=True,
         )
+
+    async def _discover_scraper_matches(
+        self,
+        provider: str,
+        scraper: BaseScraper,
+        aliases: list[str],
+        *,
+        content_type: str,
+        year: int,
+    ) -> list[SourceMatch]:
+        expected_type = "series" if content_type == "tv" else content_type
+        if expected_type and expected_type not in scraper.content_types:
+            return []
+
+        matches: dict[str, SourceMatch] = {}
+        if provider == "maccms":
+            result_groups = await asyncio.gather(
+                *(scraper.search(alias) for alias in aliases[:3]),
+                return_exceptions=True,
+            )
+        else:
+            result_groups = []
+            for alias in aliases[:3]:
+                try:
+                    result_groups.append(await scraper.search(alias))
+                except Exception as error:
+                    result_groups.append(error)
+        for results in result_groups:
+            if isinstance(results, BaseException):
+                logger.debug(
+                    "Source discovery failed [%s]: %s",
+                    provider,
+                    type(results).__name__,
+                )
+                continue
+            for result in results:
+                score = _source_match_score(
+                    result.title,
+                    aliases,
+                    candidate_type=result.type,
+                    expected_type=content_type,
+                    candidate_year=result.year,
+                    expected_year=year,
+                )
+                if score < 65:
+                    continue
+                parts = result.source_id.split(":", 2)
+                if provider in {"maccms", "tvbox"} and len(parts) == 3:
+                    source_name = parts[1]
+                    source_id = result.source_id
+                else:
+                    source_name = provider
+                    source_id = f"crawler:{provider}:{result.source_id}"
+                candidate = SourceMatch(
+                    source_id=source_id,
+                    source_name=source_name,
+                    title=result.title,
+                    content_type=result.type,
+                    year=result.year,
+                    episode_count=result.episode_count,
+                    score=(
+                        score + site_priority(source_name) // 10
+                        if provider == "maccms"
+                        else score
+                    ),
+                )
+                previous = matches.get(source_id)
+                if previous is None or candidate.score > previous.score:
+                    matches[source_id] = candidate
+        return list(matches.values())
+
+    async def _discover_anich_matches(
+        self,
+        aliases: list[str],
+        *,
+        content_type: str,
+        year: int,
+    ) -> list[SourceMatch]:
+        if content_type not in {"", "anime"}:
+            return []
+        client = await self._get_anich_client()
+        if not client:
+            return []
+
+        def search() -> list[SourceMatch]:
+            matches: dict[str, SourceMatch] = {}
+            for alias in aliases[:3]:
+                for item in client.search(alias) or []:
+                    item_id = str(item.get("id", "")).strip()
+                    title = str(item.get("title", "")).strip()
+                    if not item_id or not title:
+                        continue
+                    score = _source_match_score(
+                        title,
+                        aliases,
+                        candidate_type="anime",
+                        expected_type=content_type,
+                        candidate_year=int(item.get("year") or 0),
+                        expected_year=year,
+                    )
+                    if score < 65:
+                        continue
+                    source_id = f"anich:{item_id}"
+                    matches[source_id] = SourceMatch(
+                        source_id=source_id,
+                        source_name="AniCh",
+                        title=title,
+                        content_type="anime",
+                        year=int(item.get("year") or 0),
+                        episode_count=int(item.get("episodes_total") or 0),
+                        score=score,
+                    )
+            return list(matches.values())
+
+        try:
+            return await asyncio.to_thread(search)
+        except Exception as error:
+            logger.debug("AniCh discovery failed: %s", type(error).__name__)
+            return []
 
     async def discover_source_matches(
         self,
@@ -228,38 +366,43 @@ class ContentAggregator:
         if not clean_aliases:
             return []
 
-        matches: dict[str, SourceMatch] = {}
-        # 中文标题、原名、常见别名最多取三个；逐个查询可控制 1C2G VPS 峰值。
-        for alias in clean_aliases[:3]:
-            try:
-                results = await self._maccms.search(alias)
-            except Exception as error:
-                logger.warning("Source discovery failed: %s", type(error).__name__)
-                continue
-            for result in results:
-                score = _source_match_score(
-                    result.title,
+        providers: list[tuple[str, BaseScraper, float]] = [
+            ("maccms", self._maccms, 8),
+            ("tvbox", self._tvbox, 2),
+            *((name, scraper, 2) for name, scraper in self._crawler_scrapers.items()),
+        ]
+        jobs = [
+            asyncio.wait_for(
+                self._discover_scraper_matches(
+                    name,
+                    scraper,
                     clean_aliases,
-                    candidate_type=result.type,
-                    expected_type=content_type,
-                    candidate_year=result.year,
-                    expected_year=year,
-                )
-                if score < 65:
-                    continue
-                parts = result.source_id.split(":", 2)
-                source_name = parts[1] if len(parts) == 3 else "maccms"
-                candidate = SourceMatch(
-                    source_id=result.source_id,
-                    source_name=source_name,
-                    title=result.title,
-                    content_type=result.type,
-                    year=result.year,
-                    score=score + site_priority(source_name) // 10,
-                )
-                previous = matches.get(result.source_id)
+                    content_type=content_type,
+                    year=year,
+                ),
+                timeout=timeout,
+            )
+            for name, scraper, timeout in providers
+        ]
+        jobs.append(
+            asyncio.wait_for(
+                self._discover_anich_matches(
+                    clean_aliases,
+                    content_type=content_type,
+                    year=year,
+                ),
+                timeout=2,
+            )
+        )
+        groups = await asyncio.gather(*jobs, return_exceptions=True)
+        matches: dict[str, SourceMatch] = {}
+        for group in groups:
+            if isinstance(group, BaseException):
+                continue
+            for candidate in group:
+                previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:
-                    matches[result.source_id] = candidate
+                    matches[candidate.source_id] = candidate
 
         # 同一站点只保留匹配度最高的一项，避免错季或同名版本刷屏。
         by_site: dict[str, SourceMatch] = {}
@@ -551,6 +694,20 @@ class ContentAggregator:
                     for ep in detail.episodes
                 ]
 
+        elif source == "crawler":
+            parts = subject_id.split(":", 2)
+            if len(parts) != 3:
+                return []
+            scraper = self._crawler_scrapers.get(parts[1])
+            if scraper is None:
+                return []
+            detail = await scraper.get_detail(parts[2])
+            if detail:
+                return [
+                    AggregatedEpisode(number=ep.number, title=ep.title)
+                    for ep in detail.episodes
+                ]
+
         return []
 
     async def get_video_urls(
@@ -615,6 +772,22 @@ class ContentAggregator:
                     format=l.format, source=f"intl:{l.source_name}",
                 ))
 
+        elif subject_id.startswith("crawler:"):
+            parts = subject_id.split(":", 2)
+            if len(parts) == 3:
+                scraper = self._crawler_scrapers.get(parts[1])
+                if scraper is not None:
+                    lines = await scraper.get_video_urls(parts[2], episode)
+                    for line in lines:
+                        all_lines.append(AggregatedVideoLine(
+                            url=line.url,
+                            title=line.title,
+                            quality=line.quality,
+                            format=line.format,
+                            source=f"crawler:{parts[1]}",
+                            headers=line.headers,
+                        ))
+
         # M3U8 fallback for under-served results
         if len(all_lines) < 3 and title_hint:
             try:
@@ -641,7 +814,7 @@ class ContentAggregator:
     async def _line_reachable(self, line: "AggregatedVideoLine") -> bool:
         """
         校验一条线路是否真能播:
-          - m3u8: GET 前若干字节, 必须是 #EXTM3U 或 mpegurl content-type
+          - m3u8: 清单有效，并且首个媒体分片可读取
           - mp4/其它: HEAD 或 GET, 状态码 < 400 且非 HTML
         """
         url = line.url
@@ -659,41 +832,89 @@ class ContentAggregator:
                 headers=headers,
                 transport=self._line_http_transport,
             ) as c:
+                async def fetch(target: str):
+                    current = target
+                    for _ in range(6):
+                        if not await _is_public_http_url(current):
+                            return None
+                        async with c.stream("GET", current) as resp:
+                            if resp.status_code in (301, 302, 303, 307, 308):
+                                location = resp.headers.get("location", "").strip()
+                                if not location:
+                                    return None
+                                current = urljoin(str(resp.url), location)
+                                continue
+                            body = bytearray()
+                            async for chunk in resp.aiter_bytes():
+                                remaining = 65536 - len(body)
+                                if remaining <= 0:
+                                    break
+                                body.extend(chunk[:remaining])
+                                if len(body) >= 65536:
+                                    break
+                            return (
+                                str(resp.url),
+                                resp.status_code,
+                                resp.headers.get("content-type", "").lower(),
+                                bytes(body),
+                            )
+                    return None
+
                 current = url
-                for _ in range(6):
-                    if not await _is_public_http_url(current):
+                for depth in range(4):
+                    response = await fetch(current)
+                    if response is None:
                         return False
-                    async with c.stream("GET", current) as resp:
-                        if resp.status_code in (301, 302, 303, 307, 308):
-                            location = resp.headers.get("location", "").strip()
-                            if not location:
-                                return False
-                            current = urljoin(str(resp.url), location)
-                            continue
-                        if resp.status_code >= 400:
+                    response_url, status, content_type, body = response
+                    if status >= 400:
+                        return False
+                    body_head = body[:512].decode("utf-8", errors="ignore").lstrip()
+                    looks_html = (
+                        "text/html" in content_type
+                        or body_head.lower().startswith(("<html", "<!doctype html"))
+                    )
+                    if looks_html:
+                        return False
+                    is_hls = (
+                        "m3u8" in current.lower()
+                        or line.format.lower() == "hls"
+                        or body_head.startswith("#EXTM3U")
+                        or "mpegurl" in content_type
+                    )
+                    if not is_hls:
+                        return status in (200, 206) and bool(body)
+                    if not body_head.startswith("#EXTM3U"):
+                        return False
+                    media_reference = next(
+                        (
+                            item.strip()
+                            for item in body.decode("utf-8", errors="ignore").splitlines()
+                            if item.strip() and not item.lstrip().startswith("#")
+                        ),
+                        "",
+                    )
+                    if not media_reference:
+                        return False
+                    media_url = urljoin(response_url, media_reference)
+                    if media_reference.lower().split("?", 1)[0].endswith(".m3u8"):
+                        if depth == 3:
                             return False
-                        ct = resp.headers.get("content-type", "").lower()
-                        body = bytearray()
-                        async for chunk in resp.aiter_bytes():
-                            remaining = 65536 - len(body)
-                            if remaining <= 0:
-                                break
-                            body.extend(chunk[:remaining])
-                            if len(body) >= 65536:
-                                break
-                        body_head = bytes(body[:512]).decode(
-                            "utf-8", errors="ignore"
-                        ).lstrip()
-                        is_hls = "m3u8" in current.lower() or line.format == "hls"
-                        if is_hls:
-                            if body_head.startswith("#EXTM3U"):
-                                return True
-                            if "text/html" in ct or body_head.lower().startswith("<html"):
-                                return False
-                            return "mpegurl" in ct or "octet-stream" in ct
-                        if "text/html" in ct or body_head.lower().startswith("<html"):
-                            return False
-                        return resp.status_code in (200, 206)
+                        current = media_url
+                        continue
+                    sample = await fetch(media_url)
+                    if sample is None:
+                        return False
+                    _, sample_status, sample_type, sample_body = sample
+                    if sample_status >= 400 or len(sample_body) < 188:
+                        return False
+                    sample_head = sample_body[:512].decode(
+                        "utf-8", errors="ignore"
+                    ).lstrip().lower()
+                    if "text/html" in sample_type or sample_head.startswith(
+                        ("<html", "<!doctype html")
+                    ):
+                        return False
+                    return True
                 return False
         except Exception:
             return False

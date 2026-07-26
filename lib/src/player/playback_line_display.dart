@@ -276,6 +276,83 @@ List<PlaybackLine> sortPlaybackLinesForDisplay(Iterable<PlaybackLine> lines) {
   return List<PlaybackLine>.unmodifiable(sorted.map((item) => item.$2));
 }
 
+/// Curated alias pool for playback lines whose provider name is an internal
+/// rule id. Names stay stable per provider because the pick is a pure hash.
+const playbackProviderAliasPool = <String>[
+  '晨风',
+  '疏影',
+  '栖云',
+  '观澜',
+  '听雨',
+  '春汀',
+  '月泉',
+  '松声',
+  '竹里',
+  '澄江',
+  '空山',
+  '白露',
+  '青崖',
+  '半夏',
+  '临溪',
+  '望舒',
+  '拂晓',
+  '汀兰',
+  '折柳',
+  '灯前',
+];
+
+/// Quality chip text for the player chrome, or null when the source carries
+/// no real information ("未知" placeholders never earn chrome space).
+String? playbackQualityChipLabel(PlaybackLine? line) {
+  if (line == null) return null;
+  final quality = line.quality.trim();
+  if (quality.isEmpty ||
+      quality == '--' ||
+      quality.toLowerCase() == 'unknown' ||
+      quality.contains('未知')) {
+    return null;
+  }
+  return quality;
+}
+
+/// A user-facing name for the line's provider. Internal rule ids such as
+/// `xfdmneo` never reach the UI; they map to a stable friendly alias instead.
+String playbackLineProviderLabel(PlaybackLine line) {
+  return playbackProviderLabel(
+    providerId: line.providerId,
+    providerName: line.providerName,
+  );
+}
+
+String playbackProviderLabel({
+  required String providerId,
+  required String providerName,
+}) {
+  final name = providerName.trim();
+  if (name.isNotEmpty && !_looksLikeInternalProviderId(name)) return name;
+  final key = providerId.trim().isNotEmpty ? providerId.trim() : name;
+  if (key.isEmpty) return '线路';
+  final alias =
+      playbackProviderAliasPool[_stableHash(key.toLowerCase()) %
+          playbackProviderAliasPool.length];
+  return '$alias线路';
+}
+
+/// Internal ids read as lowercase ascii tokens ("xfdmneo", "custom:abc-1").
+/// Anything with CJK, uppercase letters or spaces is treated as a real name.
+bool _looksLikeInternalProviderId(String value) {
+  return RegExp(r'^[a-z0-9]+([-_.:][a-z0-9]+)*$').hasMatch(value);
+}
+
+int _stableHash(String value) {
+  var hash = 0x811c9dc5;
+  for (final unit in value.codeUnits) {
+    hash ^= unit;
+    hash = (hash * 0x01000193) & 0x7fffffff;
+  }
+  return hash;
+}
+
 String playbackLineLatencyLabel(PlaybackLine line) {
   final latency = line.latency;
   return latency == null ? '延迟未知' : '${latency.inMilliseconds}ms';

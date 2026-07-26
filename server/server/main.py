@@ -1709,7 +1709,7 @@ async def catalog_search(
 @app.get("/api/v3/catalog/home/{content_type}")
 async def catalog_home(
     content_type: str,
-    limit: int = Query(60, ge=1, le=100),
+    limit: int = Query(60, ge=1, le=300),
     session: AsyncSession = Depends(get_session),
 ):
     if content_type not in {"anime", "tv", "movie"}:

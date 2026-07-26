@@ -7,9 +7,9 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
-import 'package:anime/src/shared_ui/poster_card.dart';
 import 'package:anime/src/sources/external_source_adapters.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
+import 'package:anime/src/shared_ui/poster_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -162,7 +162,7 @@ void main() {
     await tester.tap(find.text('查看详情'));
     await tester.pumpAndSettle();
 
-    expect(find.text('查找自定义线路'), findsOneWidget);
+    expect(find.text('立即播放'), findsOneWidget);
     expect(find.text('Inception'), findsWidgets);
   });
 
@@ -357,23 +357,18 @@ void main() {
     expect(find.text('剧场版测试片'), findsNothing);
     expect(find.text('公版测试短片'), findsWidgets);
     expect(find.text('本地化电影'), findsWidgets);
-    expect(find.text('直连播放'), findsWidgets);
-    expect(find.text('规则查源'), findsWidgets);
+    expect(find.text('可播放'), findsWidgets);
+    expect(find.text('规则查源'), findsNothing);
     expect(find.text('2013年'), findsOneWidget);
 
     await tester.tap(find.text('电影').last);
     await tester.pumpAndSettle();
     expect(find.text('本地化电影'), findsWidgets);
 
-    await tester.tap(find.widgetWithText(FilterChip, '直连播放'));
+    await tester.tap(find.widgetWithText(FilterChip, '可播放'));
     await tester.pumpAndSettle();
     expect(find.text('公版测试短片'), findsWidgets);
     expect(find.text('Inception'), findsNothing);
-
-    await tester.tap(find.widgetWithText(FilterChip, '规则查源'));
-    await tester.pumpAndSettle();
-    expect(find.text('Inception'), findsWidgets);
-    expect(find.text('公版测试短片'), findsNothing);
 
     await tester.tap(find.widgetWithText(FilterChip, '全部').last);
     await tester.pumpAndSettle();
@@ -675,8 +670,14 @@ void main() {
 
     expect(find.text('影视与资料'), findsOneWidget);
     expect(find.text('直播频道'), findsOneWidget);
-    expect(find.text('BT / 磁力资源'), findsOneWidget);
     expect(find.text('测试直播频道'), findsWidgets);
+
+    await tester.drag(
+      find.byType(CustomScrollView).last,
+      const Offset(0, -400),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('BT / 磁力资源'), findsOneWidget);
     expect(find.text('测试字幕组资源'), findsOneWidget);
 
     final openButton = find.widgetWithText(FilledButton, '外部客户端打开');

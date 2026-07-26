@@ -71,6 +71,129 @@ class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.aclose()
             await engine.dispose()
 
+    async def test_lightweight_catalog_cache_is_enriched_for_detail(self):
+        requests: list[str] = []
+
+        def handler(request: httpx.Request):
+            requests.append(request.url.path)
+            if request.url.path == "/v0/subjects/123":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 123,
+                        "name": "Test Anime",
+                        "name_cn": "测试动画",
+                        "summary": "完整简介",
+                        "eps": 2,
+                        "tags": [{"name": "冒险"}],
+                    },
+                )
+            if request.url.path == "/v0/episodes":
+                return httpx.Response(
+                    200,
+                    json={
+                        "data": [
+                            {"sort": 1, "name_cn": "第一集"},
+                            {"sort": 2, "name_cn": "第二集"},
+                        ]
+                    },
+                )
+            return httpx.Response(404)
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            lightweight = service._subject_from_bangumi(
+                {"id": 123, "name": "Test Anime", "name_cn": "测试动画"}
+            )
+            self.assertIsNotNone(lightweight)
+            self.assertNotIn("detail_complete", lightweight)
+            async with sessions() as session:
+                await service._persist_many(session, [lightweight])
+            async with sessions() as session:
+                first = await service.get_subject("bangumi:123", session)
+
+            self.assertTrue(first["detail_complete"])
+            self.assertEqual(first["summary"], "完整简介")
+            self.assertEqual(len(first["episodes"]), 2)
+            self.assertEqual(len(requests), 2)
+
+            async with sessions() as session:
+                second = await service.get_subject("bangumi:123", session)
+            self.assertEqual(second, first)
+            self.assertEqual(len(requests), 2)
+        finally:
+            await service.aclose()
+            await engine.dispose()
+
+    async def test_bangumi_ranked_home_fetches_all_requested_pages(self):
+        requests: list[tuple[int, int]] = []
+
+        def handler(request: httpx.Request):
+            offset = int(request.url.params["offset"])
+            limit = int(request.url.params["limit"])
+            requests.append((offset, limit))
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": offset + 1,
+                            "name": f"Anime {offset + 1}",
+                            "name_cn": f"动画 {offset + 1}",
+                        }
+                    ]
+                },
+            )
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        try:
+            items = await service._bangumi_ranked(240)
+            self.assertEqual(requests, [(0, 100), (100, 100), (200, 40)])
+            self.assertEqual(len(items), 3)
+        finally:
+            await service.aclose()
+
+    async def test_tmdb_home_combines_multiple_rankings(self):
+        requested_paths: set[str] = set()
+
+        def handler(request: httpx.Request):
+            requested_paths.add(request.url.path)
+            media_id = {
+                "/3/trending/tv/week": 10,
+                "/3/tv/popular": 20,
+                "/3/tv/top_rated": 30,
+                "/3/tv/on_the_air": 40,
+            }[request.url.path]
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"id": media_id, "name": f"Series {media_id}"},
+                        {"id": media_id + 1, "name": f"Series {media_id + 1}"},
+                    ]
+                },
+            )
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        try:
+            items = await service._tmdb_home("tv", 6)
+            self.assertEqual(len(items), 6)
+            self.assertEqual(
+                requested_paths,
+                {
+                    "/3/trending/tv/week",
+                    "/3/tv/popular",
+                    "/3/tv/top_rated",
+                    "/3/tv/on_the_air",
+                },
+            )
+        finally:
+            await service.aclose()
+
 
 class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

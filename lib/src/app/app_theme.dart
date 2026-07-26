@@ -28,34 +28,35 @@ class AnimeTheme {
   }) {
     final dark = brightness == Brightness.dark;
     final colors = _ThemeColors(dark: dark);
-    final primary = dark ? const Color(0xFFF2F2F2) : const Color(0xFF171717);
-    final onPrimary = dark ? const Color(0xFF111111) : Colors.white;
-    final secondary = dark ? const Color(0xFFC4C4C4) : const Color(0xFF4F4F4F);
-    final onSecondary = dark ? const Color(0xFF141414) : Colors.white;
+    // The accent fill stays mist blue in both themes; only the readable
+    // text-accent shifts (deep on paper, lightened on charcoal).
+    const primary = AppColors.primary;
+    const onPrimary = Colors.white;
+    final textAccent = dark ? AppColors.primary2 : AppColors.accentDeep;
     final scheme =
         ColorScheme.fromSeed(
-          seedColor: const Color(0xFF777777),
+          seedColor: AppColors.primary,
           brightness: brightness,
           surface: colors.surface,
         ).copyWith(
           primary: primary,
           onPrimary: onPrimary,
-          secondary: secondary,
-          onSecondary: onSecondary,
-          tertiary: dark ? const Color(0xFF9A9A9A) : const Color(0xFF666666),
-          onTertiary: dark ? const Color(0xFF111111) : Colors.white,
+          secondary: AppColors.cyan,
+          onSecondary: Colors.white,
+          tertiary: AppColors.rose,
+          onTertiary: Colors.white,
           primaryContainer: dark
-              ? const Color(0xFF2A2A2A)
-              : const Color(0xFFE4E4E4),
+              ? AppColors.primarySurface
+              : const Color(0xFFDFE9F3),
           onPrimaryContainer: dark
-              ? const Color(0xFFF1F1F1)
-              : const Color(0xFF1C1C1C),
+              ? const Color(0xFFC3D8EC)
+              : const Color(0xFF2C4A66),
           secondaryContainer: dark
-              ? const Color(0xFF242424)
-              : const Color(0xFFE9E9E9),
+              ? AppColors.secondarySurface
+              : AppColors.lightPanel,
           onSecondaryContainer: dark
-              ? const Color(0xFFDADADA)
-              : const Color(0xFF303030),
+              ? const Color(0xFFD6D3C8)
+              : const Color(0xFF3C3A33),
           surface: colors.surface,
           surfaceContainerLowest: colors.background,
           surfaceContainerLow: colors.surfaceLow,
@@ -68,7 +69,7 @@ class AnimeTheme {
           outlineVariant: colors.border,
           error: AppColors.danger,
           onError: Colors.white,
-          shadow: Colors.black,
+          shadow: const Color(0xFF141413),
           scrim: Colors.black,
         );
 
@@ -92,20 +93,20 @@ class AnimeTheme {
       cardColor: colors.panel,
       disabledColor: colors.muted.withValues(alpha: 0.42),
       dividerColor: colors.border,
-      focusColor: scheme.primary.withValues(alpha: 0.16),
-      hoverColor: scheme.primary.withValues(alpha: 0.07),
-      highlightColor: scheme.primary.withValues(alpha: 0.09),
-      splashColor: scheme.primary.withValues(alpha: 0.11),
-      fontFamily: 'Microsoft YaHei UI',
+      focusColor: primary.withValues(alpha: 0.18),
+      hoverColor: primary.withValues(alpha: 0.06),
+      highlightColor: primary.withValues(alpha: 0.08),
+      splashColor: primary.withValues(alpha: 0.10),
+      fontFamily: AppTypography.sansFamily,
       textTheme: textTheme,
       primaryTextTheme: textTheme,
       iconTheme: IconThemeData(color: colors.muted, size: 21),
-      primaryIconTheme: IconThemeData(color: scheme.onPrimary, size: 21),
+      primaryIconTheme: const IconThemeData(color: onPrimary, size: 21),
       cardTheme: CardThemeData(
         elevation: 0,
         color: colors.panel,
         surfaceTintColor: Colors.transparent,
-        shadowColor: Colors.black.withValues(alpha: 0.34),
+        shadowColor: const Color(0xFF141413).withValues(alpha: 0.18),
         margin: EdgeInsets.zero,
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
@@ -124,7 +125,7 @@ class AnimeTheme {
         hintStyle: textTheme.bodyMedium?.copyWith(color: colors.faint),
         labelStyle: textTheme.bodyMedium?.copyWith(color: colors.muted),
         floatingLabelStyle: textTheme.bodyMedium?.copyWith(
-          color: scheme.primary,
+          color: textAccent,
           fontWeight: FontWeight.w700,
         ),
         prefixIconColor: colors.muted,
@@ -139,7 +140,7 @@ class AnimeTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
-          borderSide: BorderSide(color: scheme.primary, width: 1.4),
+          borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -162,14 +163,16 @@ class AnimeTheme {
           elevation: const WidgetStatePropertyAll(0),
           backgroundColor: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.disabled)) {
-              return scheme.primary.withValues(alpha: 0.30);
+              return primary.withValues(alpha: 0.30);
             }
-            if (states.contains(WidgetState.hovered)) return AppColors.rose;
-            return scheme.primary;
+            if (states.contains(WidgetState.hovered)) {
+              return const Color(0xFF5B88B8);
+            }
+            return primary;
           }),
-          foregroundColor: WidgetStatePropertyAll(scheme.onPrimary),
+          foregroundColor: const WidgetStatePropertyAll(onPrimary),
           overlayColor: WidgetStatePropertyAll(
-            scheme.onPrimary.withValues(alpha: 0.10),
+            Colors.white.withValues(alpha: 0.10),
           ),
           shape: WidgetStatePropertyAll(controlShape),
           textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
@@ -186,11 +189,11 @@ class AnimeTheme {
           }),
           backgroundColor: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.hovered)) return colors.panelHover;
-            return colors.panelHigh;
+            return colors.surfaceLow;
           }),
           side: WidgetStateProperty.resolveWith((states) {
             final color = states.contains(WidgetState.focused)
-                ? scheme.primary
+                ? primary
                 : colors.border;
             return BorderSide(color: color);
           }),
@@ -202,7 +205,7 @@ class AnimeTheme {
         style: ButtonStyle(
           minimumSize: WidgetStatePropertyAll(Size(0, controlHeight)),
           padding: WidgetStatePropertyAll(controlPadding),
-          foregroundColor: WidgetStatePropertyAll(scheme.primary),
+          foregroundColor: WidgetStatePropertyAll(textAccent),
           shape: WidgetStatePropertyAll(controlShape),
           textStyle: WidgetStatePropertyAll(textTheme.labelLarge),
         ),
@@ -228,18 +231,18 @@ class AnimeTheme {
           padding: WidgetStatePropertyAll(controlPadding),
           foregroundColor: WidgetStateProperty.resolveWith((states) {
             return states.contains(WidgetState.selected)
-                ? scheme.onPrimary
+                ? colors.selectedInk
                 : colors.muted;
           }),
           backgroundColor: WidgetStateProperty.resolveWith((states) {
             return states.contains(WidgetState.selected)
-                ? scheme.primary
-                : colors.panelHigh;
+                ? colors.selectedFill
+                : colors.surfaceLow;
           }),
           side: WidgetStateProperty.resolveWith((states) {
             return BorderSide(
               color: states.contains(WidgetState.selected)
-                  ? scheme.primary
+                  ? colors.selectedFill
                   : colors.border,
             );
           }),
@@ -248,8 +251,8 @@ class AnimeTheme {
         ),
       ),
       chipTheme: ChipThemeData(
-        backgroundColor: colors.panelHigh,
-        selectedColor: scheme.primary.withValues(alpha: 0.16),
+        backgroundColor: colors.surfaceLow,
+        selectedColor: primary.withValues(alpha: dark ? 0.24 : 0.14),
         disabledColor: colors.panelHigh.withValues(alpha: 0.5),
         side: BorderSide(color: colors.border),
         shape: RoundedRectangleBorder(
@@ -264,13 +267,13 @@ class AnimeTheme {
       switchTheme: SwitchThemeData(
         trackColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return scheme.primary.withValues(alpha: 0.78);
+            return primary;
           }
           return colors.panelHighest;
         }),
         thumbColor: WidgetStateProperty.resolveWith((states) {
           return states.contains(WidgetState.selected)
-              ? scheme.onPrimary
+              ? Colors.white
               : colors.muted;
         }),
         trackOutlineColor: WidgetStatePropertyAll(colors.border),
@@ -278,25 +281,27 @@ class AnimeTheme {
       checkboxTheme: CheckboxThemeData(
         fillColor: WidgetStateProperty.resolveWith((states) {
           return states.contains(WidgetState.selected)
-              ? scheme.primary
+              ? primary
               : Colors.transparent;
         }),
-        checkColor: WidgetStatePropertyAll(scheme.onPrimary),
+        checkColor: const WidgetStatePropertyAll(Colors.white),
         side: BorderSide(color: colors.borderBright),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.xs),
         ),
       ),
       progressIndicatorTheme: ProgressIndicatorThemeData(
-        color: scheme.primary,
+        color: primary,
         linearTrackColor: colors.border,
         circularTrackColor: colors.border,
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: dark ? AppColors.panelHigh : AppColors.lightText,
-        contentTextStyle: textTheme.bodyMedium?.copyWith(color: Colors.white),
-        actionTextColor: dark ? Colors.white : const Color(0xFFD8D8D8),
+        contentTextStyle: textTheme.bodyMedium?.copyWith(
+          color: AppColors.lightBg,
+        ),
+        actionTextColor: AppColors.primary2,
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -309,7 +314,7 @@ class AnimeTheme {
         elevation: 0,
         backgroundColor: colors.panel,
         surfaceTintColor: Colors.transparent,
-        shadowColor: Colors.black.withValues(alpha: 0.45),
+        shadowColor: const Color(0xFF141413).withValues(alpha: 0.30),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.xl),
           side: BorderSide(color: colors.border),
@@ -355,20 +360,20 @@ class AnimeTheme {
           ),
           boxShadow: AppShadows.panel,
         ),
-        textStyle: textTheme.labelMedium?.copyWith(color: Colors.white),
+        textStyle: textTheme.labelMedium?.copyWith(color: AppColors.lightBg),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
         waitDuration: const Duration(milliseconds: 450),
       ),
       navigationBarTheme: NavigationBarThemeData(
         height: AppLayout.mobileNavigationHeight,
         elevation: 0,
-        backgroundColor: colors.panel,
+        backgroundColor: colors.surfaceLow,
         surfaceTintColor: Colors.transparent,
-        indicatorColor: scheme.primary.withValues(alpha: 0.14),
+        indicatorColor: primary.withValues(alpha: dark ? 0.22 : 0.13),
         iconTheme: WidgetStateProperty.resolveWith((states) {
           return IconThemeData(
             color: states.contains(WidgetState.selected)
-                ? scheme.primary
+                ? textAccent
                 : colors.muted,
             size: 23,
           );
@@ -376,10 +381,10 @@ class AnimeTheme {
         labelTextStyle: WidgetStateProperty.resolveWith((states) {
           return textTheme.labelSmall?.copyWith(
             color: states.contains(WidgetState.selected)
-                ? colors.text
+                ? textAccent
                 : colors.muted,
             fontWeight: states.contains(WidgetState.selected)
-                ? FontWeight.w800
+                ? FontWeight.w700
                 : FontWeight.w600,
           );
         }),
@@ -404,20 +409,24 @@ class AnimeTheme {
                 TargetPlatform.windows: _NoAnimationPageTransitionsBuilder(),
               },
             )
-          : const PageTransitionsTheme(),
+          : const PageTransitionsTheme(
+              builders: {
+                TargetPlatform.android: _GentlePageTransitionsBuilder(),
+                TargetPlatform.iOS: _GentlePageTransitionsBuilder(),
+                TargetPlatform.fuchsia: _GentlePageTransitionsBuilder(),
+                TargetPlatform.linux: _GentlePageTransitionsBuilder(),
+                TargetPlatform.macOS: _GentlePageTransitionsBuilder(),
+                TargetPlatform.windows: _GentlePageTransitionsBuilder(),
+              },
+            ),
     );
   }
 
   static TextTheme _textTheme({required bool dark}) {
     final text = dark ? AppColors.text : AppColors.lightText;
     final muted = dark ? AppColors.muted : AppColors.lightMuted;
-    const fallback = <String>[
-      'Microsoft YaHei',
-      'PingFang SC',
-      'Noto Sans CJK SC',
-    ];
 
-    TextStyle style({
+    TextStyle sans({
       required double size,
       required FontWeight weight,
       required double height,
@@ -426,8 +435,8 @@ class AnimeTheme {
     }) {
       return TextStyle(
         color: color ?? text,
-        fontFamily: 'Microsoft YaHei UI',
-        fontFamilyFallback: fallback,
+        fontFamily: AppTypography.sansFamily,
+        fontFamilyFallback: AppTypography.sansFallback,
         fontSize: size,
         fontWeight: weight,
         height: height,
@@ -435,27 +444,51 @@ class AnimeTheme {
       );
     }
 
+    // Display roles carry the bundled serif; it ships in SemiBold only, so
+    // every serif style pins w600 to avoid faux-bolding.
+    TextStyle serif({
+      required double size,
+      required double height,
+      double spacing = 0.2,
+      Color? color,
+    }) {
+      return TextStyle(
+        color: color ?? text,
+        fontFamily: AppTypography.serifFamily,
+        fontFamilyFallback: AppTypography.serifFallback,
+        fontSize: size,
+        fontWeight: FontWeight.w600,
+        height: height,
+        letterSpacing: spacing,
+      );
+    }
+
     return TextTheme(
-      displayLarge: style(size: 48, weight: FontWeight.w900, height: 1.08),
-      displayMedium: style(size: 40, weight: FontWeight.w900, height: 1.10),
-      displaySmall: style(size: 34, weight: FontWeight.w900, height: 1.12),
-      headlineLarge: style(size: 30, weight: FontWeight.w800, height: 1.16),
-      headlineMedium: style(size: 26, weight: FontWeight.w800, height: 1.20),
-      headlineSmall: style(size: 22, weight: FontWeight.w800, height: 1.22),
-      titleLarge: style(size: 20, weight: FontWeight.w800, height: 1.28),
-      titleMedium: style(size: 16, weight: FontWeight.w700, height: 1.35),
-      titleSmall: style(size: 14, weight: FontWeight.w700, height: 1.35),
-      bodyLarge: style(size: 16, weight: FontWeight.w400, height: 1.55),
-      bodyMedium: style(size: 14, weight: FontWeight.w400, height: 1.52),
-      bodySmall: style(
+      displayLarge: serif(size: 44, height: 1.18),
+      displayMedium: serif(size: 36, height: 1.20),
+      displaySmall: serif(size: 32, height: 1.22),
+      headlineLarge: serif(size: 28, height: 1.25),
+      headlineMedium: serif(size: 24, height: 1.28),
+      headlineSmall: serif(size: 21, height: 1.30),
+      titleLarge: serif(size: 19, height: 1.35),
+      titleMedium: sans(size: 16, weight: FontWeight.w600, height: 1.35),
+      titleSmall: sans(size: 14, weight: FontWeight.w600, height: 1.35),
+      bodyLarge: sans(size: 16, weight: FontWeight.w400, height: 1.6),
+      bodyMedium: sans(size: 14, weight: FontWeight.w400, height: 1.55),
+      bodySmall: sans(
         size: 12,
         weight: FontWeight.w400,
         height: 1.45,
         color: muted,
       ),
-      labelLarge: style(size: 14, weight: FontWeight.w700, height: 1.20),
-      labelMedium: style(size: 12, weight: FontWeight.w700, height: 1.20),
-      labelSmall: style(size: 11, weight: FontWeight.w700, height: 1.20),
+      labelLarge: sans(size: 14, weight: FontWeight.w600, height: 1.20),
+      labelMedium: sans(size: 12, weight: FontWeight.w600, height: 1.20),
+      labelSmall: sans(
+        size: 11,
+        weight: FontWeight.w600,
+        height: 1.20,
+        spacing: 0.6,
+      ),
     );
   }
 }
@@ -467,19 +500,55 @@ class _ThemeColors {
 
   Color get background => dark ? AppColors.bg : AppColors.lightBg;
   Color get surface => dark ? AppColors.bg2 : AppColors.lightBg;
-  Color get surfaceLow =>
-      dark ? const Color(0xFF0F131D) : const Color(0xFFF9FAFD);
-  Color get panel => dark ? AppColors.panel : AppColors.lightPanel;
-  Color get panelHigh => dark ? AppColors.panelHigh : AppColors.lightPanelHigh;
+  Color get surfaceLow => dark ? AppColors.panel : AppColors.lightCard;
+  Color get panel => dark ? AppColors.panel : AppColors.lightCard;
+  Color get panelHigh => dark ? AppColors.panelHigh : AppColors.lightPanel;
   Color get panelHighest =>
-      dark ? AppColors.panelHover : const Color(0xFFE8EBF3);
-  Color get panelHover => dark ? AppColors.panelHover : const Color(0xFFEAEDF5);
+      dark ? AppColors.panelHover : AppColors.lightPanelHigh;
+  Color get panelHover => dark ? AppColors.panelHover : AppColors.lightPanel;
   Color get border => dark ? AppColors.border : AppColors.lightBorder;
   Color get borderBright =>
-      dark ? AppColors.borderBright : const Color(0xFFC4CAD8);
+      dark ? AppColors.borderBright : const Color(0xFFCFCBBD);
   Color get text => dark ? AppColors.text : AppColors.lightText;
   Color get muted => dark ? AppColors.muted : AppColors.lightMuted;
-  Color get faint => dark ? AppColors.faint : const Color(0xFF8B93A5);
+  Color get faint => dark ? AppColors.faint : AppColors.lightFaint;
+
+  // Selected segmented controls read as ink-on-paper: the fill flips to the
+  // opposite ink and the label flips to the page color.
+  Color get selectedFill => dark ? AppColors.text : AppColors.lightText;
+  Color get selectedInk => dark ? AppColors.bg : AppColors.lightBg;
+}
+
+/// The calm paper transition: the incoming page fades in and settles with a
+/// barely-there upward drift. No scaling — the Material 3 zoom default reads
+/// as aggressive against static paper surfaces.
+class _GentlePageTransitionsBuilder extends PageTransitionsBuilder {
+  const _GentlePageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    final curved = CurvedAnimation(
+      parent: animation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 0.015),
+          end: Offset.zero,
+        ).animate(curved),
+        child: child,
+      ),
+    );
+  }
 }
 
 class _NoAnimationPageTransitionsBuilder extends PageTransitionsBuilder {

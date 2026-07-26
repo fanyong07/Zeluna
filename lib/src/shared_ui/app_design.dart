@@ -2,45 +2,97 @@ import 'package:flutter/material.dart';
 
 /// Shared visual tokens for the media experience.
 ///
-/// Keep these values small and intentional. Business pages can import
-/// `app_chrome.dart`, which re-exports this file for backwards compatibility.
+/// Design language: "gallery + theater". Browsing surfaces use a warm paper
+/// palette (light) or warm charcoal (dark); the player always runs on the
+/// dedicated theater tokens. Mist blue is the single global accent, with
+/// celadon and wisteria reserved for content-type coding. Keep these values
+/// small and intentional. Business pages can import `app_chrome.dart`, which
+/// re-exports this file for backwards compatibility.
 class AppColors {
   const AppColors._();
 
-  // Neutral grayscale tokens keep the light theme truly white and the dark
-  // theme free of colored tint. Legacy aliases stay available for older page
-  // code, but should resolve to neutral surfaces only.
-  static const bg = Color(0xFF050505);
-  static const bg2 = Color(0xFF0A0A0A);
-  static const panel = Color(0xFF121212);
-  static const panelHigh = Color(0xFF1A1A1A);
-  static const panelHover = Color(0xFF232323);
-  static const overlay = Color(0xE6080808);
+  // Warm charcoal surfaces for the dark theme. Never pure black: the dark
+  // theme shares the paper temperature of the light theme.
+  static const bg = Color(0xFF1F1E1C);
+  static const bg2 = Color(0xFF242220);
+  static const panel = Color(0xFF282624);
+  static const panelHigh = Color(0xFF302D2A);
+  static const panelHover = Color(0xFF373431);
+  static const overlay = Color(0xE61B1A18);
 
-  static const border = Color(0xFF2B2B2B);
-  static const borderBright = Color(0xFF484848);
+  static const border = Color(0xFF3B3833);
+  static const borderBright = Color(0xFF4E4A44);
 
-  static const primary = Color(0xFF707070);
-  static const primary2 = Color(0xFF9A9A9A);
-  static const cyan = Color(0xFFB8B8B8);
-  static const rose = Color(0xFF888888);
-  static const primarySurface = Color(0xFF242424);
-  static const secondarySurface = Color(0xFF2A2A2A);
+  // Mist blue accent family. `primary2` doubles as the readable accent for
+  // text on dark surfaces; `accentDeep` is the readable accent on paper.
+  static const primary = Color(0xFF6A9BCC);
+  static const primary2 = Color(0xFF8FB3D9);
+  static const accentDeep = Color(0xFF46759F);
 
-  static const text = Color(0xFFF5F5F5);
-  static const muted = Color(0xFFB2B2B2);
-  static const faint = Color(0xFF777777);
+  // Content-type coding colors. The legacy `cyan`/`rose` aliases now resolve
+  // to celadon (series) and wisteria (movies); anime uses the accent itself.
+  static const cyan = Color(0xFF6FA39B);
+  static const rose = Color(0xFF9C90C4);
+  static const celadonDeep = Color(0xFF4E7F77);
+  static const wisteriaDeep = Color(0xFF746699);
 
-  static const success = Color(0xFF4ED6A0);
-  static const warning = Color(0xFFFFB45E);
-  static const danger = Color(0xFFFF7087);
+  static const primarySurface = Color(0xFF333A41);
+  static const secondarySurface = Color(0xFF35322E);
 
-  static const lightBg = Color(0xFFFFFFFF);
-  static const lightPanel = Color(0xFFF5F5F5);
-  static const lightPanelHigh = Color(0xFFEDEDED);
-  static const lightBorder = Color(0xFFD8D8D8);
-  static const lightText = Color(0xFF111111);
-  static const lightMuted = Color(0xFF5E5E5E);
+  static const text = Color(0xFFF0EFE9);
+  static const muted = Color(0xFFB8B5AA);
+  static const faint = Color(0xFF8A877C);
+
+  // Semantic colors sit apart from the accent family and are tuned to stay
+  // legible on both paper and charcoal.
+  static const success = Color(0xFF7C9159);
+  static const warning = Color(0xFFC9963F);
+  static const danger = Color(0xFFC05B50);
+
+  // Warm paper surfaces for the light theme.
+  static const lightBg = Color(0xFFFAF9F5);
+  static const lightCard = Color(0xFFFFFEFB);
+  static const lightPanel = Color(0xFFF0EEE6);
+  static const lightPanelHigh = Color(0xFFE9E6DA);
+  static const lightBorder = Color(0xFFE4E1D5);
+  static const lightText = Color(0xFF141413);
+  static const lightMuted = Color(0xFF57564F);
+  static const lightFaint = Color(0xFF8F8C80);
+
+  // Theater tokens are theme-independent: playback always happens in the
+  // same warm dark room regardless of the browsing theme.
+  static const theaterBg = Color(0xFF171614);
+  static const theaterPanel = Color(0xFF211F1D);
+  static const theaterInk = Color(0xFFEFEDE6);
+  static const theaterMuted = Color(0xB3EFEDE6);
+  static const theaterFaint = Color(0x66EFEDE6);
+}
+
+/// Typography roles that pages may reference directly. The serif family is
+/// bundled (Source Han Serif via NotoSerifSC) and reserved for display-sized
+/// text; body text stays on the system sans stack.
+class AppTypography {
+  const AppTypography._();
+
+  static const serifFamily = 'NotoSerifSC';
+  static const serifFallback = <String>[
+    'Source Han Serif SC',
+    'Noto Serif SC',
+    'Songti SC',
+    'SimSun',
+    'Georgia',
+  ];
+
+  // The bundled NotoSansSC leads the fallback chain so the web and non-CJK
+  // desktops never depend on a runtime font download; Windows still resolves
+  // the primary YaHei UI family first.
+  static const sansFamily = 'Microsoft YaHei UI';
+  static const sansFallback = <String>[
+    'NotoSansSC',
+    'Microsoft YaHei',
+    'PingFang SC',
+    'Noto Sans CJK SC',
+  ];
 }
 
 class AppSpacing {
@@ -62,9 +114,9 @@ class AppRadius {
 
   static const xs = 6.0;
   static const sm = 8.0;
-  static const md = 12.0;
-  static const lg = 16.0;
-  static const xl = 22.0;
+  static const md = 10.0;
+  static const lg = 14.0;
+  static const xl = 20.0;
   static const pill = 999.0;
 }
 
@@ -120,16 +172,20 @@ class AppMotion {
 class AppShadows {
   const AppShadows._();
 
+  // Warm ink shadows: a tight contact layer plus a soft diffuse layer, kept
+  // faint so cards read as paper resting on paper rather than floating.
   static const panel = <BoxShadow>[
-    BoxShadow(color: Color(0x26000000), blurRadius: 26, offset: Offset(0, 12)),
+    BoxShadow(color: Color(0x0A141413), blurRadius: 2, offset: Offset(0, 1)),
+    BoxShadow(color: Color(0x0F141413), blurRadius: 16, offset: Offset(0, 4)),
   ];
 
   static const elevated = <BoxShadow>[
-    BoxShadow(color: Color(0x52000000), blurRadius: 34, offset: Offset(0, 18)),
+    BoxShadow(color: Color(0x0F141413), blurRadius: 4, offset: Offset(0, 2)),
+    BoxShadow(color: Color(0x1F141413), blurRadius: 32, offset: Offset(0, 12)),
   ];
 
   static const primaryGlow = <BoxShadow>[
-    BoxShadow(color: Color(0x38000000), blurRadius: 28, offset: Offset(0, 10)),
+    BoxShadow(color: Color(0x2E6A9BCC), blurRadius: 24, offset: Offset(0, 8)),
   ];
 }
 
@@ -145,14 +201,14 @@ class AppGradients {
   static const page = LinearGradient(
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
-    colors: [Color(0xFF111111), AppColors.bg, Color(0xFF090909)],
+    colors: [Color(0xFF232120), AppColors.bg, Color(0xFF1A1918)],
     stops: [0, 0.52, 1],
   );
 
   static const accent = LinearGradient(
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
-    colors: [AppColors.primary, AppColors.primary2],
+    colors: [AppColors.primary, Color(0xFF5B88B8)],
   );
 
   static const coolAccent = LinearGradient(
@@ -164,13 +220,19 @@ class AppGradients {
   static const mediaScrim = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x08000000), Color(0x24050505), Color(0xE6050505)],
+    colors: [Color(0x08000000), Color(0x24151412), Color(0xE6171614)],
     stops: [0, 0.58, 1],
   );
 }
 
 extension AppContextDesign on BuildContext {
   bool get isDarkMode => Theme.of(this).brightness == Brightness.dark;
+
+  /// Theme-resolved ink shortcuts used when migrating legacy hardcoded
+  /// white-on-black page code to the paper design.
+  Color get ink => Theme.of(this).colorScheme.onSurface;
+  Color get inkMuted => Theme.of(this).colorScheme.onSurfaceVariant;
+  Color get inkFaint => Theme.of(this).colorScheme.outline;
 
   bool get isMobileLayout =>
       MediaQuery.sizeOf(this).width < AppBreakpoints.mobile;

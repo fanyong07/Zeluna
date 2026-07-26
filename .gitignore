@@ -52,6 +52,7 @@ app.*.map.json
 .claude/
 .codex/
 .playwright-cli/
+scratchpad/
 artifacts/
 dist/
 output/

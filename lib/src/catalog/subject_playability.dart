@@ -8,6 +8,8 @@ bool hasKnownDirectPlayback(AnimeSubject subject) {
       source.startsWith('commons:');
 }
 
+/// User-facing playback hint. Rule-based lookup is an implementation detail;
+/// cards either promise playback or stay quiet.
 String subjectPlaybackLabel(AnimeSubject subject) {
-  return hasKnownDirectPlayback(subject) ? '直连播放' : '规则查源';
+  return hasKnownDirectPlayback(subject) ? '可播放' : '';
 }

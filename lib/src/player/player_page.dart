@@ -162,7 +162,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
             if (!didPop) unawaited(_handleBack());
           },
           child: Scaffold(
-            backgroundColor: AppColors.bg,
+            backgroundColor: AppColors.theaterBg,
             body: Focus(
               focusNode: _shortcutFocusNode,
               autofocus: true,
@@ -218,6 +218,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                       ),
                       onSeek: _seekTo,
                       onMute: _toggleMute,
+                      onVolumeChanged: _setVolume,
+                      onSpeedSelected: _selectSpeed,
                       onFullscreen: () => _setFullscreen(!_fullscreen),
                       onEpisodePanel: _toggleEpisodePanel,
                       onEpisodeSelected: _selectEpisode,
@@ -321,7 +323,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   String? get _surfaceMessage {
     if (_lineLookupInProgress) return '正在查找可播放线路...';
-    if (_loadingLine) return '正在连接 ${_line?.providerName ?? '播放源'}...';
+    if (_loadingLine) {
+      return '正在连接 ${_line == null ? '播放源' : playbackLineProviderLabel(_line!)}...';
+    }
     if (_playbackFailed) return _playerMessage ?? '当前线路无法播放，请切换线路。';
     if (!_isPlayableLine(_line)) {
       return _lineLookupMessage ?? '当前集还没有选中可播放线路。';
@@ -1180,7 +1184,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       final switchTarget = next;
       setState(() {
         _line = switchTarget;
-        _playerMessage = '当前线路失败，已切换到 ${switchTarget.providerName}。';
+        _playerMessage =
+            '当前线路失败，已切换到 ${playbackLineProviderLabel(switchTarget)}。';
       });
       await _openLine(switchTarget, force: true);
     } finally {
@@ -1239,6 +1244,26 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       return;
     }
     await _player.seek(position);
+  }
+
+  Future<void> _setVolume(double value) async {
+    _revealPlayerControls();
+    final clamped = value.clamp(0, 200).toDouble();
+    setState(() {
+      _muted = clamped <= 0;
+      _volume = clamped;
+      if (clamped > 0) _lastNonZeroVolume = clamped;
+    });
+    _appliedVolume = clamped;
+    if (!_usesWebPlayer) await _player.setVolume(clamped);
+  }
+
+  Future<void> _selectSpeed(double value) async {
+    final settings = ref.read(animeControllerProvider).value?.settings;
+    if (settings == null || settings.speed == value) return;
+    await ref
+        .read(animeControllerProvider.notifier)
+        .updateSettings(settings.copyWith(speed: value));
   }
 
   Future<void> _adjustVolume(double delta) async {
@@ -1824,7 +1849,7 @@ class MissingPlayerPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Scaffold(
-      backgroundColor: AppColors.bg,
+      backgroundColor: AppColors.theaterBg,
       body: Center(child: Text('没有可播放内容')),
     );
   }
@@ -1867,6 +1892,8 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onForward,
     required this.onSeek,
     required this.onMute,
+    required this.onVolumeChanged,
+    required this.onSpeedSelected,
     required this.onFullscreen,
     required this.onEpisodePanel,
     required this.onEpisodeSelected,
@@ -1924,6 +1951,8 @@ class _PlayerCanvas extends StatelessWidget {
   final Future<void> Function() onForward;
   final Future<void> Function(Duration) onSeek;
   final Future<void> Function() onMute;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSpeedSelected;
   final Future<void> Function() onFullscreen;
   final VoidCallback onEpisodePanel;
   final ValueChanged<AnimeEpisode> onEpisodeSelected;
@@ -1943,8 +1972,6 @@ class _PlayerCanvas extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final showSideList =
-        MediaQuery.sizeOf(context).width >= 1120 && !theaterMode;
     final chromeVisible = controlsVisible || !autoHideChrome;
     final compact = MediaQuery.sizeOf(context).width < 640;
     final horizontalInset = compact ? 14.0 : (fullscreen ? 28.0 : 18.0);
@@ -2090,9 +2117,6 @@ class _PlayerCanvas extends StatelessWidget {
                                                       'SR · ${superResolutionProfile!.label}',
                                                   active: true,
                                                 ),
-                                              SmallBadge(
-                                                label: line?.quality ?? '高清',
-                                              ),
                                             ],
                                           ),
                                         ),
@@ -2117,6 +2141,8 @@ class _PlayerCanvas extends StatelessWidget {
                                           onForward: onForward,
                                           onSeek: onSeek,
                                           onMute: onMute,
+                                          onVolumeChanged: onVolumeChanged,
+                                          onSpeedSelected: onSpeedSelected,
                                           onFullscreen: onFullscreen,
                                           onSubtitlePanel: onSubtitlePanel,
                                           onDanmakuPanel: onDanmakuPanel,
@@ -2138,20 +2164,6 @@ class _PlayerCanvas extends StatelessWidget {
                   ),
                 ),
               ),
-              if (showSideList && !fullscreen) ...[
-                const SizedBox(width: 18),
-                SizedBox(
-                  width: 340,
-                  child: _PlayerEpisodeRail(
-                    subject: subject,
-                    episodes: episodes,
-                    selected: episode,
-                    onEpisodePanel: onEpisodePanel,
-                    onEpisodeSelected: onEpisodeSelected,
-                    onLinePanel: onLinePanel,
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -2245,9 +2257,9 @@ class _StreamVideoSurface extends StatelessWidget {
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                const Color(0x33060912),
-                const Color(0x11060912),
-                const Color(0xDD060912),
+                const Color(0x331B1A18),
+                const Color(0x111B1A18),
+                const Color(0xDD1B1A18),
               ],
             ),
           ),
@@ -2383,7 +2395,11 @@ class _PlayerHeader extends StatelessWidget {
                 runSpacing: 6,
                 children: [
                   SmallBadge(label: '第${episode.number}集', active: true),
-                  SmallBadge(label: line?.providerName ?? '找线路'),
+                  SmallBadge(
+                    label: line == null
+                        ? '找线路'
+                        : playbackLineProviderLabel(line!),
+                  ),
                 ],
               ),
             ),
@@ -2428,7 +2444,8 @@ class _PlayerHeader extends StatelessWidget {
                 const SizedBox(width: 10),
                 SmallBadge(label: '第${episode.number}集'),
                 const SizedBox(width: 8),
-                SmallBadge(label: line?.quality ?? '观看中'),
+                if (playbackQualityChipLabel(line) != null)
+                  SmallBadge(label: playbackQualityChipLabel(line)!),
               ],
             ),
           ),
@@ -2475,6 +2492,8 @@ class _PlayerBottomBar extends StatelessWidget {
     required this.onForward,
     required this.onSeek,
     required this.onMute,
+    required this.onVolumeChanged,
+    required this.onSpeedSelected,
     required this.onFullscreen,
     required this.onSubtitlePanel,
     required this.onDanmakuPanel,
@@ -2502,6 +2521,8 @@ class _PlayerBottomBar extends StatelessWidget {
   final Future<void> Function() onForward;
   final Future<void> Function(Duration) onSeek;
   final Future<void> Function() onMute;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSpeedSelected;
   final Future<void> Function() onFullscreen;
   final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
@@ -2526,19 +2547,21 @@ class _PlayerBottomBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '${_durationLabel(position)} / ${_durationLabel(duration)}',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: AppColors.text,
-              fontWeight: FontWeight.w700,
+          if (compact)
+            Text(
+              '${_durationLabel(position)} / ${_durationLabel(duration)}',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                color: AppColors.theaterInk,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-          ),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.symmetric(vertical: 6),
             child: _BufferedSeekBar(
               progress: progress,
               buffered: bufferProgress,
               enabled: canSeek,
+              duration: duration,
               onSeek: (value) => onSeek(
                 Duration(
                   milliseconds: (duration.inMilliseconds * value).round(),
@@ -2568,29 +2591,133 @@ class _PlayerBottomBar extends StatelessWidget {
                 : Row(
                     children: [
                       _ControlIconButton(
-                        icon: Icons.replay_10_rounded,
-                        tooltip: '快退 ${settings.rewindSeconds} 秒',
-                        onPressed: onRewind,
-                      ),
-                      const SizedBox(width: 10),
-                      _ControlIconButton(
                         icon: playing
                             ? Icons.pause_rounded
                             : Icons.play_arrow_rounded,
                         tooltip: playing ? '暂停' : '播放',
-                        size: 34,
+                        size: 32,
                         busy: loadingLine || buffering,
                         onPressed: onPlayPause,
                       ),
-                      const SizedBox(width: 10),
-                      _ControlIconButton(
-                        icon: Icons.forward_10_rounded,
-                        tooltip: '快进 ${settings.forwardSeconds} 秒',
-                        onPressed: onForward,
-                      ),
-                      const SizedBox(width: 16),
-                      SmallBadge(label: _speedLabel(settings.speed)),
                       const SizedBox(width: 12),
+                      Text(
+                        '${_durationLabel(position)} / ${_durationLabel(duration)}',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppColors.theaterMuted,
+                          fontWeight: FontWeight.w600,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                      const SizedBox(width: 18),
+                      Tooltip(
+                        message:
+                            services.dandanplayDanmakuEnabled ||
+                                services.bilibiliDanmakuEnabled
+                            ? '弹幕源与显示设置'
+                            : '弹幕源已关闭',
+                        child: IconButton(
+                          onPressed: onDanmakuPanel,
+                          padding: EdgeInsets.zero,
+                          icon: Icon(
+                            Icons.comment_outlined,
+                            color:
+                                services.dandanplayDanmakuEnabled ||
+                                    services.bilibiliDanmakuEnabled
+                                ? Colors.white
+                                : Colors.white38,
+                          ),
+                          iconSize: 23,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 520),
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: AppColors.theaterBg.withValues(
+                                  alpha: 0.72,
+                                ),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.white12),
+                              ),
+                              child: SizedBox(
+                                height: 36,
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: TextField(
+                                        controller: danmakuInput,
+                                        enabled: danmaku.enabled,
+                                        textInputAction: TextInputAction.send,
+                                        onSubmitted: onSendDanmaku,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 13,
+                                        ),
+                                        decoration: InputDecoration(
+                                          isDense: true,
+                                          filled: false,
+                                          border: InputBorder.none,
+                                          enabledBorder: InputBorder.none,
+                                          focusedBorder: InputBorder.none,
+                                          hintText: danmaku.enabled
+                                              ? '发条弹幕吧…'
+                                              : '弹幕已关闭',
+                                          contentPadding:
+                                              const EdgeInsets.symmetric(
+                                                horizontal: 14,
+                                                vertical: 9,
+                                              ),
+                                        ),
+                                      ),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 4),
+                                      child: TextButton(
+                                        onPressed: danmaku.enabled
+                                            ? () => onSendDanmaku(
+                                                danmakuInput.text,
+                                              )
+                                            : null,
+                                        style: TextButton.styleFrom(
+                                          minimumSize: const Size(0, 30),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                          ),
+                                          foregroundColor: AppColors.primary2,
+                                        ),
+                                        child: const Text('发送'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      TextButton.icon(
+                        onPressed: onEpisodePanel,
+                        icon: const Icon(
+                          Icons.video_library_outlined,
+                          size: 18,
+                          color: Colors.white,
+                        ),
+                        label: const Text(
+                          '选集',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      _SpeedMenuButton(
+                        current: settings.speed,
+                        onSelected: onSpeedSelected,
+                      ),
+                      const SizedBox(width: 10),
                       Tooltip(
                         message: services.bilibiliSubtitleEnabled
                             ? 'Bilibili 字幕 · ${services.subtitleLanguage}'
@@ -2604,102 +2731,27 @@ class _PlayerBottomBar extends StatelessWidget {
                                 ? Colors.white
                                 : Colors.white38,
                           ),
-                          iconSize: 26,
+                          iconSize: 23,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Tooltip(
-                        message:
-                            services.dandanplayDanmakuEnabled ||
-                                services.bilibiliDanmakuEnabled
-                            ? '弹幕源'
-                            : '弹幕源已关闭',
-                        child: IconButton(
-                          onPressed: onDanmakuPanel,
-                          padding: EdgeInsets.zero,
-                          icon: Icon(
-                            Icons.sports_esports_outlined,
-                            color:
-                                services.dandanplayDanmakuEnabled ||
-                                    services.bilibiliDanmakuEnabled
-                                ? Colors.white
-                                : Colors.white38,
-                          ),
-                          iconSize: 26,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            color: AppColors.bg.withValues(alpha: 0.72),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: Colors.white12),
-                          ),
-                          child: SizedBox(
-                            height: 40,
-                            child: TextField(
-                              controller: danmakuInput,
-                              enabled: danmaku.enabled,
-                              textInputAction: TextInputAction.send,
-                              onSubmitted: onSendDanmaku,
-                              style: const TextStyle(color: Colors.white),
-                              decoration: InputDecoration(
-                                isDense: true,
-                                filled: false,
-                                border: InputBorder.none,
-                                enabledBorder: InputBorder.none,
-                                focusedBorder: InputBorder.none,
-                                hintText: danmaku.enabled
-                                    ? '发送本地弹幕，按 Enter 发送'
-                                    : '弹幕已关闭',
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 11,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      Tooltip(
-                        message: muted
-                            ? '已静音，点击恢复'
-                            : '音量 ${volume.round()}%，点击静音',
-                        child: IconButton(
-                          onPressed: onMute,
-                          padding: EdgeInsets.zero,
-                          icon: Icon(
-                            muted || volume <= 0
-                                ? Icons.volume_off_rounded
-                                : Icons.volume_up_rounded,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      TextButton.icon(
-                        onPressed: onEpisodePanel,
-                        icon: const Icon(
-                          Icons.video_library_outlined,
-                          size: 18,
-                          color: Colors.white,
-                        ),
-                        label: const Text(
-                          '选集',
-                          style: TextStyle(color: Colors.white),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
                       TextButton(
                         onPressed: onLinePanel,
                         child: Text(
-                          line?.providerName ?? '线路',
+                          line == null
+                              ? '线路'
+                              : playbackLineProviderLabel(line!),
                           style: const TextStyle(color: Colors.white),
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
+                      _VolumeButton(
+                        volume: volume,
+                        muted: muted,
+                        onMute: onMute,
+                        onVolumeChanged: onVolumeChanged,
+                      ),
+                      const SizedBox(width: 6),
                       _ControlIconButton(
                         icon: fullscreen
                             ? Icons.fullscreen_exit_rounded
@@ -2712,6 +2764,148 @@ class _PlayerBottomBar extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _SpeedMenuButton extends StatelessWidget {
+  const _SpeedMenuButton({required this.current, required this.onSelected});
+
+  static const _speeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+
+  final double current;
+  final ValueChanged<double> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return MenuAnchor(
+      alignmentOffset: const Offset(0, -8),
+      style: const MenuStyle(alignment: Alignment.topLeft),
+      menuChildren: [
+        for (final speed in _speeds.reversed)
+          MenuItemButton(
+            onPressed: () => onSelected(speed),
+            trailingIcon: (speed - current).abs() < 0.001
+                ? Icon(
+                    Icons.check_rounded,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.primary,
+                  )
+                : null,
+            child: Text(_speedLabel(speed)),
+          ),
+      ],
+      builder: (context, controller, child) {
+        return Tooltip(
+          message: '播放速度',
+          child: InkWell(
+            borderRadius: BorderRadius.circular(999),
+            onTap: () =>
+                controller.isOpen ? controller.close() : controller.open(),
+            child: SmallBadge(label: _speedLabel(current)),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _VolumeButton extends StatefulWidget {
+  const _VolumeButton({
+    required this.volume,
+    required this.muted,
+    required this.onMute,
+    required this.onVolumeChanged,
+  });
+
+  final double volume;
+  final bool muted;
+  final Future<void> Function() onMute;
+  final ValueChanged<double> onVolumeChanged;
+
+  @override
+  State<_VolumeButton> createState() => _VolumeButtonState();
+}
+
+class _VolumeButtonState extends State<_VolumeButton> {
+  final MenuController _menu = MenuController();
+  Timer? _closeTimer;
+
+  void _scheduleClose() {
+    _closeTimer?.cancel();
+    _closeTimer = Timer(const Duration(milliseconds: 160), () {
+      if (mounted && _menu.isOpen) _menu.close();
+    });
+  }
+
+  void _cancelClose() => _closeTimer?.cancel();
+
+  @override
+  void dispose() {
+    _closeTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final effective = widget.muted ? 0.0 : widget.volume;
+    return MenuAnchor(
+      controller: _menu,
+      alignmentOffset: const Offset(-6, -8),
+      menuChildren: [
+        MouseRegion(
+          onEnter: (_) => _cancelClose(),
+          onExit: (_) => _scheduleClose(),
+          child: SizedBox(
+            height: 148,
+            width: 44,
+            child: Column(
+              children: [
+                const SizedBox(height: 6),
+                Text(
+                  '${effective.round()}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+                Expanded(
+                  child: RotatedBox(
+                    quarterTurns: -1,
+                    child: Slider(
+                      value: effective.clamp(0, 200),
+                      max: 200,
+                      onChanged: widget.onVolumeChanged,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+              ],
+            ),
+          ),
+        ),
+      ],
+      builder: (context, controller, child) {
+        return MouseRegion(
+          onEnter: (_) {
+            _cancelClose();
+            if (!controller.isOpen) controller.open();
+          },
+          onExit: (_) => _scheduleClose(),
+          child: Tooltip(
+            message: widget.muted
+                ? '已静音，点击恢复'
+                : '音量 ${widget.volume.round()}%，点击静音',
+            child: IconButton(
+              onPressed: widget.onMute,
+              padding: EdgeInsets.zero,
+              icon: Icon(
+                widget.muted || widget.volume <= 0
+                    ? Icons.volume_off_rounded
+                    : Icons.volume_up_rounded,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2797,7 +2991,7 @@ class _MobilePlayerControls extends StatelessWidget {
                 onPressed: onLinePanel,
                 icon: const Icon(Icons.alt_route_rounded, size: 18),
                 label: Text(
-                  line?.providerName ?? '线路',
+                  line == null ? '线路' : playbackLineProviderLabel(line!),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -2818,18 +3012,37 @@ class _MobilePlayerControls extends StatelessWidget {
   }
 }
 
-class _BufferedSeekBar extends StatelessWidget {
+class _BufferedSeekBar extends StatefulWidget {
   const _BufferedSeekBar({
     required this.progress,
     required this.buffered,
     required this.enabled,
+    required this.duration,
     required this.onSeek,
   });
 
   final double progress;
   final double buffered;
   final bool enabled;
+  final Duration duration;
   final ValueChanged<double> onSeek;
+
+  @override
+  State<_BufferedSeekBar> createState() => _BufferedSeekBarState();
+}
+
+class _BufferedSeekBarState extends State<_BufferedSeekBar> {
+  double? _hoverX;
+
+  double get progress => widget.progress;
+  double get buffered => widget.buffered;
+  bool get enabled => widget.enabled;
+  ValueChanged<double> get onSeek => widget.onSeek;
+
+  void _updateHover(double dx, double width) {
+    if (!enabled || widget.duration <= Duration.zero) return;
+    setState(() => _hoverX = dx.clamp(0.0, width));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2839,23 +3052,69 @@ class _BufferedSeekBar extends StatelessWidget {
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final thumbX = width * played;
+        final hoverX = _hoverX;
+        final hoverLabel = hoverX == null || width <= 0
+            ? null
+            : _durationLabel(
+                Duration(
+                  milliseconds:
+                      (widget.duration.inMilliseconds * (hoverX / width))
+                          .round(),
+                ),
+              );
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: enabled
               ? (details) => _seekFromDx(details.localPosition.dx, width)
               : null,
           onHorizontalDragUpdate: enabled
-              ? (details) => _seekFromDx(details.localPosition.dx, width)
+              ? (details) {
+                  _updateHover(details.localPosition.dx, width);
+                  _seekFromDx(details.localPosition.dx, width);
+                }
               : null,
+          onHorizontalDragEnd: (_) => setState(() => _hoverX = null),
           child: MouseRegion(
             cursor: enabled
                 ? SystemMouseCursors.click
                 : SystemMouseCursors.basic,
+            onHover: (event) => _updateHover(event.localPosition.dx, width),
+            onExit: (_) => setState(() => _hoverX = null),
             child: SizedBox(
               height: 28,
               child: Stack(
                 alignment: Alignment.centerLeft,
+                clipBehavior: Clip.none,
                 children: [
+                  if (hoverLabel != null)
+                    Positioned(
+                      left: (hoverX! - 26).clamp(0.0, width - 52),
+                      top: -26,
+                      child: IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: AppColors.theaterBg.withValues(alpha: 0.92),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Colors.white12),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            child: Text(
+                              hoverLabel,
+                              style: const TextStyle(
+                                color: AppColors.theaterInk,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w600,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   Positioned.fill(
                     child: CustomPaint(
                       painter: _BufferedSeekBarPainter(
@@ -2989,131 +3248,6 @@ class _ControlIconButton extends StatelessWidget {
   }
 }
 
-class _PlayerEpisodeRail extends StatelessWidget {
-  const _PlayerEpisodeRail({
-    required this.subject,
-    required this.episodes,
-    required this.selected,
-    required this.onEpisodePanel,
-    required this.onEpisodeSelected,
-    required this.onLinePanel,
-  });
-
-  final AnimeSubject subject;
-  final List<AnimeEpisode> episodes;
-  final AnimeEpisode selected;
-  final VoidCallback onEpisodePanel;
-  final ValueChanged<AnimeEpisode> onEpisodeSelected;
-  final VoidCallback onLinePanel;
-
-  @override
-  Widget build(BuildContext context) {
-    return AppPanel(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          SectionTitle(
-            title: '选集',
-            subtitle: '当前第 ${selected.number} 集',
-            action: TextButton.icon(
-              onPressed: onEpisodePanel,
-              icon: const Icon(Icons.sort, size: 16),
-              label: const Text('全部'),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: ListView.separated(
-              itemCount: episodes.length,
-              separatorBuilder: (context, index) => const SizedBox(height: 10),
-              itemBuilder: (context, index) {
-                final episode = episodes[index];
-                final active = episode.id == selected.id;
-                return InkWell(
-                  onTap: active ? null : () => onEpisodeSelected(episode),
-                  borderRadius: BorderRadius.circular(8),
-                  child: AppPanel(
-                    padding: const EdgeInsets.all(8),
-                    color: active
-                        ? Theme.of(context).colorScheme.primaryContainer
-                        : AppColors.bg2,
-                    borderColor: active
-                        ? Theme.of(context).colorScheme.primary
-                        : AppColors.border,
-                    child: Row(
-                      children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
-                          child: SizedBox(
-                            width: 76,
-                            height: 46,
-                            child: PosterArt(
-                              coverUrl:
-                                  selected.thumbnailUrl ?? subject.coverUrl,
-                              title: subject.title,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                episode.displayTitle,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.labelLarge
-                                    ?.copyWith(
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.onSurface,
-                                      fontWeight: FontWeight.w900,
-                                    ),
-                              ),
-                              Text(
-                                active ? '正在播放' : '23:40 · 待播放',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: Theme.of(
-                                        context,
-                                      ).colorScheme.onSurfaceVariant,
-                                    ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: '线路',
-                          onPressed: onLinePanel,
-                          icon: Icon(
-                            active ? Icons.graphic_eq : Icons.download_outlined,
-                            color: active ? AppColors.primary : AppColors.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              onPressed: onEpisodePanel,
-              child: const Text('展开全部剧集'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 String _speedLabel(double value) {
   if (value == 1) return '1.0x';
   var text = value.toStringAsFixed(2);
@@ -3219,6 +3353,12 @@ String _emptyLineMessage(
 String _unavailableLinesMessage(List<PlaybackLine> lines, {int? count}) {
   final unavailableLines = lines.where((line) => !line.available).toList();
   final total = count ?? unavailableLines.length;
+  final backendCount = unavailableLines
+      .where((line) => line.providerId.startsWith('zeluna:'))
+      .length;
+  if (backendCount > 0) {
+    return '聚合后端找到了 $backendCount 条候选线路，但客户端未能读取视频清单或分片。请检查代理/CDN 连接后重试。';
+  }
   final deadCount = unavailableLines
       .where((line) => (line.message ?? '').contains('视频 CDN'))
       .length;
@@ -3436,7 +3576,7 @@ class _LinePanelBody extends StatelessWidget {
                           : null,
                     ),
                     if (i != displayLines.length - 1)
-                      const Divider(height: 1, color: Color(0xFF303030)),
+                      const Divider(height: 1, color: Color(0xFF35322E)),
                   ],
                 ],
               ),
@@ -3719,7 +3859,7 @@ class _PanelInlineStatus extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.panelHigh,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF303030)),
+        border: Border.all(color: const Color(0xFF35322E)),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -3770,9 +3910,9 @@ class _LineModeBar extends StatelessWidget {
         child: Row(
           children: const [
             Expanded(child: _ModeItem(Icons.folder, '本地视频')),
-            VerticalDivider(width: 1, color: Color(0xFF383838)),
+            VerticalDivider(width: 1, color: Color(0xFF3B3833)),
             Expanded(child: _ModeItem(Icons.link, '网络视频')),
-            VerticalDivider(width: 1, color: Color(0xFF383838)),
+            VerticalDivider(width: 1, color: Color(0xFF3B3833)),
             Expanded(child: _ModeItem(Icons.search, '搜索视频')),
           ],
         ),
@@ -3843,7 +3983,7 @@ class _LineTile extends StatelessWidget {
               children: [
                 Expanded(
                   child: Text(
-                    '线路${index + 1} · ${line.providerName} · ${line.title}',
+                    '线路${index + 1} · ${playbackLineProviderLabel(line)} · ${line.title}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(

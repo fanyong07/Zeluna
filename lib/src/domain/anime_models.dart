@@ -57,8 +57,16 @@ class AnimeSubject {
   }
 
   String get subtitle {
-    final tagText = categories.map((item) => item.name).take(3).join('/');
-    return '$year/$tagText';
+    final tags = categories
+        .map((item) => tmdbGenreLabel(item.name))
+        .where((name) => name.isNotEmpty)
+        .take(3)
+        .toList(growable: false);
+    final normalizedYear = year.trim();
+    return [
+      if (normalizedYear.isNotEmpty && normalizedYear != '未知') normalizedYear,
+      ...tags,
+    ].join('/');
   }
 
   AnimeSubject copyWith({
@@ -355,6 +363,49 @@ class AnimeRecommendation {
   final String relation;
 }
 
+/// TMDB genre ids in Chinese. Aggregated feeds occasionally deliver raw
+/// genre ids as category names; those must never surface in the UI.
+const _tmdbGenreNames = <String, String>{
+  '12': '冒险',
+  '14': '奇幻',
+  '16': '动画',
+  '18': '剧情',
+  '27': '恐怖',
+  '28': '动作',
+  '35': '喜剧',
+  '36': '历史',
+  '37': '西部',
+  '53': '惊悚',
+  '80': '犯罪',
+  '99': '纪录',
+  '878': '科幻',
+  '9648': '悬疑',
+  '10402': '音乐',
+  '10749': '爱情',
+  '10751': '家庭',
+  '10752': '战争',
+  '10759': '动作冒险',
+  '10762': '儿童',
+  '10763': '新闻',
+  '10764': '真人秀',
+  '10765': '科幻奇幻',
+  '10766': '肥皂剧',
+  '10767': '脱口秀',
+  '10768': '战争政治',
+  '10770': '电视电影',
+};
+
+/// Human label for a category name. Numeric TMDB genre ids translate to
+/// Chinese; unknown numeric ids resolve to empty so callers can drop them.
+String tmdbGenreLabel(String raw) {
+  final name = raw.trim();
+  if (name.isEmpty) return '';
+  if (RegExp(r'^\d+$').hasMatch(name)) {
+    return _tmdbGenreNames[name] ?? '';
+  }
+  return name;
+}
+
 class AnimeCategory {
   const AnimeCategory({required this.name, this.count = 0, this.imageUrl});
 
@@ -492,6 +543,7 @@ class PlaySessionRequest {
     required this.episode,
     this.initialLine,
     this.offlineOnly = false,
+    this.resumePosition,
   });
 
   final AnimeSubject subject;
@@ -499,6 +551,9 @@ class PlaySessionRequest {
   final AnimeEpisode episode;
   final PlaybackLine? initialLine;
   final bool offlineOnly;
+
+  /// Position to seek to once the opening episode renders its first frame.
+  final Duration? resumePosition;
 }
 
 class LibraryEntry {
@@ -507,6 +562,8 @@ class LibraryEntry {
     required this.updatedAt,
     this.episode,
     this.note = '',
+    this.positionSeconds = 0,
+    this.durationSeconds = 0,
   });
 
   final AnimeSubject subject;
@@ -514,21 +571,47 @@ class LibraryEntry {
   final DateTime updatedAt;
   final String note;
 
+  /// Last playback position within [episode]; 0 means "never played" or
+  /// "finished" (near-complete positions are dropped on save).
+  final int positionSeconds;
+  final int durationSeconds;
+
   String get title => episode == null
       ? subject.title
       : '${subject.title} · ${episode!.displayTitle}';
+
+  /// 0..1 progress through the recorded episode, null without a usable pair.
+  double? get playbackProgress {
+    if (positionSeconds <= 0 || durationSeconds <= 0) return null;
+    return (positionSeconds / durationSeconds).clamp(0.0, 1.0);
+  }
+
+  String get positionLabel {
+    final total = Duration(seconds: positionSeconds);
+    final hours = total.inHours;
+    final minutes = total.inMinutes % 60;
+    final seconds = total.inSeconds % 60;
+    String pad(int value) => value.toString().padLeft(2, '0');
+    return hours > 0
+        ? '$hours:${pad(minutes)}:${pad(seconds)}'
+        : '${pad(minutes)}:${pad(seconds)}';
+  }
 
   LibraryEntry copyWith({
     AnimeSubject? subject,
     AnimeEpisode? episode,
     DateTime? updatedAt,
     String? note,
+    int? positionSeconds,
+    int? durationSeconds,
   }) {
     return LibraryEntry(
       subject: subject ?? this.subject,
       episode: episode ?? this.episode,
       updatedAt: updatedAt ?? this.updatedAt,
       note: note ?? this.note,
+      positionSeconds: positionSeconds ?? this.positionSeconds,
+      durationSeconds: durationSeconds ?? this.durationSeconds,
     );
   }
 
@@ -537,6 +620,8 @@ class LibraryEntry {
     'episode': episode?.toJson(),
     'updatedAt': updatedAt.toIso8601String(),
     'note': note,
+    if (positionSeconds > 0) 'positionSeconds': positionSeconds,
+    if (durationSeconds > 0) 'durationSeconds': durationSeconds,
   };
 
   factory LibraryEntry.fromJson(Map<String, dynamic> json) {
@@ -553,6 +638,8 @@ class LibraryEntry {
           DateTime.tryParse(json['updatedAt']?.toString() ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
       note: json['note']?.toString() ?? '',
+      positionSeconds: (json['positionSeconds'] as num?)?.toInt() ?? 0,
+      durationSeconds: (json['durationSeconds'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -775,10 +862,11 @@ class MiscSettings {
 
 const _defaultPlaybackBackendEnabled = bool.fromEnvironment(
   'ZELUNA_BACKEND_ENABLED',
-  defaultValue: false,
+  defaultValue: true,
 );
 const _defaultPlaybackBackendEndpoint = String.fromEnvironment(
   'ZELUNA_BACKEND_URL',
+  defaultValue: 'https://api.zeluna.top',
 );
 
 class ExternalServiceSettings {

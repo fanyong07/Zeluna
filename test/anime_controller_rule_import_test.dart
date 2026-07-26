@@ -1877,13 +1877,13 @@ class _ContentExternalServiceRepository extends ExternalServiceRepository {
   final List<AnimeSubject> movieResults;
   var anilistTrendingCalls = 0;
 
-  @override
+  // v3 拆掉了直连元数据 API，这些方法在基类里已不存在；保留桩实现只为让
+  // 被跳过的旧测试继续编译并断言“不再发生调用”。
   Future<List<AnimeSubject>> anilistSearch(
     String keyword, {
     int perPage = 24,
   }) async => anilistSearchResults;
 
-  @override
   Future<List<AnimeSubject>> anilistTrending({
     int perPage = 24,
     int page = 1,
@@ -1894,14 +1894,12 @@ class _ContentExternalServiceRepository extends ExternalServiceRepository {
     return anilistTrendingResults;
   }
 
-  @override
   Future<List<AnimeSubject>> cinemetaFeed({
     required String type,
     int pages = 6,
     String genre = '',
   }) async => type == 'series' ? seriesResults : movieResults;
 
-  @override
   Future<List<AnimeSubject>> movieMetadataFeed({
     String keyword = '',
     bool includeCinemeta = true,
@@ -1929,7 +1927,7 @@ class _TmdbDetailRecordingRepository extends ExternalServiceRepository {
     );
   }
 
-  @override
+  // externalDetail 已随直连聚合链路从基类删除；桩保留给跳过的旧测试编译用。
   Future<AnimeDetailBundle> externalDetail(AnimeSubject subject) async {
     fallbackDetailCalls++;
     return AnimeDetailBundle(

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:anime/src/data/zeluna_backend_playback_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -83,10 +84,45 @@ void main() {
     );
     expect(
       lines,
-      everyElement(predicate<PlaybackLine>((line) => line.publicHttpOnly)),
+      everyElement(predicate<PlaybackLine>((line) => !line.publicHttpOnly)),
     );
     expect(lines.first.headers['Referer'], 'https://player.example.com/');
     expect(lines.first.message, '聚合后端缓存线路');
+  });
+
+  test('后端线路不会被 Clash Fake-IP 的 drpy 防护误杀', () async {
+    final backendClient = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'http://198.18.0.8/video.mp4',
+          'title': 'Fake-IP CDN',
+          'format': 'mp4',
+          'source': 'maccms:iKun',
+        },
+      ]);
+    });
+    final mediaClient = MockClient((request) async {
+      expect(request.url.host, '198.18.0.8');
+      return http.Response.bytes(
+        <int>[0, 0, 0, 24, ...ascii.encode('ftyp'), ...List<int>.filled(16, 0)],
+        206,
+        headers: const {'content-type': 'video/mp4'},
+      );
+    });
+    addTearDown(backendClient.close);
+    addTearDown(mediaClient.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: backendClient,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+    final verified = await RulePlaybackResolver(
+      client: mediaClient,
+    ).verifyPlaybackLine(line: lines.single, enrichMetadata: false);
+
+    expect(lines.single.publicHttpOnly, isFalse);
+    expect(verified.available, isTrue);
   });
 
   test('不受支持的旧来源不会再触发后端或本地规则查源', () async {

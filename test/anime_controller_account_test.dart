@@ -8,7 +8,6 @@ import 'package:anime/src/data/media_download_backend.dart';
 import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_task.dart';
-import 'package:anime/src/data/peertube_repository.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
@@ -672,7 +671,7 @@ void main() {
       );
 
       final repository = container.read(externalServiceRepositoryProvider);
-      final staleRequest = repository.tmdbMovieFeed(pages: 1);
+      final staleRequest = repository.tmdbDetail(_tmdbProbeSubject());
       await oldRequestStarted.future;
       await controller.loginAccount(
         email: 'tmdb-account-b@example.com',
@@ -680,7 +679,7 @@ void main() {
       );
       oldResponse.complete(http.Response('', 401));
 
-      expect(await staleRequest, isEmpty);
+      expect(await staleRequest, isNull);
       expect(
         (await tmdbStore.readStatus(accountId: firstAccountId)).health,
         TmdbCredentialHealth.ready,
@@ -689,213 +688,9 @@ void main() {
         (await tmdbStore.readStatus(accountId: secondAccountId)).health,
         TmdbCredentialHealth.ready,
       );
-      expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+      expect(await repository.tmdbDetail(_tmdbProbeSubject()), isNull);
       expect(authorizationHeaders.last, 'Bearer $secondToken');
     },
-  );
-
-  test(
-    'wrong account password does not interrupt active downloads',
-    () async {
-      final root = await Directory.systemTemp.createTemp(
-        'anime-controller-account-auth-side-effects-',
-      );
-      Hive.init(root.path);
-      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-      await settings.put('services', _downloadServices.toJson());
-      await settings.close();
-
-      final backend = _BlockingDownloadBackend();
-      final service = MediaDownloadService(backend: backend);
-      final container = ProviderContainer(
-        overrides: [
-          bangumiCredentialStoreProvider.overrideWithValue(
-            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
-          ),
-          tmdbCredentialStoreProvider.overrideWithValue(
-            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
-          ),
-          mediaDownloadServiceProvider.overrideWithValue(service),
-          peerTubeRepositoryProvider.overrideWithValue(
-            _SingleLinePeerTubeRepository(),
-          ),
-          sourceCatalogRepositoryProvider.overrideWithValue(
-            const _EmptySourceCatalogRepository(),
-          ),
-        ],
-      );
-      addTearDown(() async {
-        if (!backend.release.isCompleted) backend.release.complete();
-        await backend.finished.future.timeout(
-          const Duration(seconds: 2),
-          onTimeout: () {},
-        );
-        container.dispose();
-        service.dispose();
-        await Hive.close();
-        if (await root.exists()) await root.delete(recursive: true);
-      });
-
-      await container.read(animeControllerProvider.future);
-      final controller = container.read(animeControllerProvider.notifier);
-      await controller.registerAccount(
-        email: 'downloader@example.com',
-        nickname: '下载用户',
-        password: 'download-password',
-      );
-      await controller.registerAccount(
-        email: 'other@example.com',
-        nickname: '其他用户',
-        password: 'other-password',
-      );
-      await controller.loginAccount(
-        email: 'downloader@example.com',
-        password: 'download-password',
-      );
-
-      await controller.queueOffline(_downloadSubject, _downloadEpisode);
-      await backend.started.future;
-      var state = container.read(animeControllerProvider).requireValue;
-      final taskId = state.offlineTasks.single.id;
-      expect(
-        state.offlineTasks.single.status,
-        MediaDownloadTaskStatus.downloading,
-      );
-      expect(service.isActive(taskId), isTrue);
-
-      await expectLater(
-        controller.loginAccount(
-          email: 'other@example.com',
-          password: 'wrong-password',
-        ),
-        throwsA(isA<AccountException>()),
-      );
-      state = container.read(animeControllerProvider).requireValue;
-      expect(state.accountSession.current?.email, 'downloader@example.com');
-      expect(
-        state.offlineTasks.single.status,
-        MediaDownloadTaskStatus.downloading,
-      );
-      expect(service.isActive(taskId), isTrue);
-
-      await expectLater(
-        controller.deleteCurrentAccount(password: 'wrong-password'),
-        throwsA(isA<AccountException>()),
-      );
-      state = container.read(animeControllerProvider).requireValue;
-      expect(state.accountSession.current?.email, 'downloader@example.com');
-      expect(
-        state.offlineTasks.single.status,
-        MediaDownloadTaskStatus.downloading,
-      );
-      expect(service.isActive(taskId), isTrue);
-
-      await controller.pauseDownload(taskId);
-    },
-    skip: '旧 PeerTube 下载链路已退出运行时，等待后端下载流程接入后重写',
-  );
-
-  test(
-    'playback results from the previous account are discarded',
-    () async {
-      final root = await Directory.systemTemp.createTemp(
-        'anime-controller-account-stale-playback-',
-      );
-      Hive.init(root.path);
-      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-      await settings.put('services', _downloadServices.toJson());
-      await settings.close();
-
-      final repository = _BlockingLinePeerTubeRepository();
-      final container = ProviderContainer(
-        overrides: [
-          bangumiCredentialStoreProvider.overrideWithValue(
-            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
-          ),
-          tmdbCredentialStoreProvider.overrideWithValue(
-            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
-          ),
-          peerTubeRepositoryProvider.overrideWithValue(repository),
-          sourceCatalogRepositoryProvider.overrideWithValue(
-            const _EmptySourceCatalogRepository(),
-          ),
-        ],
-      );
-      addTearDown(() async {
-        if (!repository.lines.isCompleted) {
-          repository.lines.complete(const <PlaybackLine>[]);
-        }
-        container.dispose();
-        await Hive.close();
-        if (await root.exists()) await root.delete(recursive: true);
-      });
-
-      await container.read(animeControllerProvider.future);
-      final controller = container.read(animeControllerProvider.notifier);
-      await controller.registerAccount(
-        email: 'playback-a@example.com',
-        nickname: '线路用户甲',
-        password: 'playback-password-a',
-      );
-      await controller.registerAccount(
-        email: 'playback-b@example.com',
-        nickname: '线路用户乙',
-        password: 'playback-password-b',
-      );
-      await controller.loginAccount(
-        email: 'playback-a@example.com',
-        password: 'playback-password-a',
-      );
-
-      final accountAContext = controller.accountContextVersion;
-      final staleResult = controller.linesForEpisode(
-        _downloadSubject,
-        _downloadEpisode,
-      );
-      await repository.requested.future;
-      await controller.loginAccount(
-        email: 'playback-b@example.com',
-        password: 'playback-password-b',
-      );
-      repository.lines.complete(const [
-        PlaybackLine(
-          id: 'private-line',
-          episodeId: 303,
-          providerId: 'private',
-          providerName: 'Private source',
-          title: 'Private line',
-          quality: '1080p',
-          format: 'MP4',
-          url: 'https://private.example/video.mp4',
-          headers: {'Cookie': 'session=account-a'},
-          available: true,
-        ),
-      ]);
-
-      expect(await staleResult, isEmpty);
-      expect(
-        await controller.addHistory(
-          _downloadSubject,
-          _downloadEpisode,
-          expectedAccountContextVersion: accountAContext,
-        ),
-        isFalse,
-      );
-      expect(
-        container.read(animeControllerProvider).requireValue.history,
-        isEmpty,
-      );
-      expect(
-        container
-            .read(animeControllerProvider)
-            .requireValue
-            .accountSession
-            .current
-            ?.email,
-        'playback-b@example.com',
-      );
-    },
-    skip: '旧 PeerTube 播放链路已退出运行时，后端线路隔离由 v3 仓库测试覆盖',
   );
 
   test('interrupted account deletion resumes on next startup', () async {
@@ -1061,80 +856,6 @@ class _EmptySourceCatalogRepository extends SourceCatalogRepository {
   }) async => const SourceCatalogState();
 }
 
-class _SingleLinePeerTubeRepository extends PeerTubeRepository {
-  @override
-  Future<List<AnimeSubject>> trending({int page = 1, int limit = 24}) async =>
-      const [];
-
-  @override
-  Future<List<PlaybackLine>> linesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async => const [
-    PlaybackLine(
-      id: 'account-test-line',
-      episodeId: 303,
-      providerId: 'account-test',
-      providerName: 'Account test',
-      title: 'MP4',
-      quality: '720p',
-      format: 'MP4',
-      url: 'https://cdn.example/account-test.mp4',
-      available: true,
-    ),
-  ];
-}
-
-class _BlockingLinePeerTubeRepository extends PeerTubeRepository {
-  final requested = Completer<void>();
-  final lines = Completer<List<PlaybackLine>>();
-
-  @override
-  Future<List<AnimeSubject>> trending({int page = 1, int limit = 24}) async =>
-      const [];
-
-  @override
-  Future<List<PlaybackLine>> linesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
-    if (!requested.isCompleted) requested.complete();
-    return lines.future;
-  }
-}
-
-class _BlockingDownloadBackend implements MediaDownloadBackend {
-  final started = Completer<void>();
-  final release = Completer<void>();
-  final finished = Completer<void>();
-
-  @override
-  Future<MediaDownloadResult> download({
-    required MediaDownloadRequest request,
-    required MediaDownloadControl control,
-    required void Function(MediaDownloadProgress progress) onProgress,
-  }) async {
-    if (!started.isCompleted) started.complete();
-    try {
-      await Future.any([release.future, control.whenStopped]);
-      return MediaDownloadResult(
-        outcome: control.reason == MediaDownloadStopReason.pause
-            ? MediaDownloadOutcome.paused
-            : MediaDownloadOutcome.cancelled,
-        message: '测试下载已停止',
-      );
-    } finally {
-      if (!finished.isCompleted) finished.complete();
-    }
-  }
-
-  @override
-  Future<void> deleteFile(String path) async {}
-
-  @override
-  Future<bool> fileExists(String path) async => false;
-}
-
 class _FileDeleteBackend implements MediaDownloadBackend {
   _FileDeleteBackend({this.failFirstDelete = false});
 
@@ -1167,22 +888,6 @@ const _offlineServices = ExternalServiceSettings(
   tmdbEnabled: false,
   cinemetaEnabled: false,
   peerTubeEnabled: false,
-  wikimediaCommonsEnabled: false,
-  anilistEnabled: false,
-  jikanEnabled: false,
-  kitsuEnabled: false,
-  bangumiEnabled: false,
-  publicCollectionSyncEnabled: false,
-  bilibiliSubtitleEnabled: false,
-  dandanplayDanmakuEnabled: false,
-  bilibiliDanmakuEnabled: false,
-);
-
-const _downloadServices = ExternalServiceSettings(
-  mediaMetadataEnabled: false,
-  tmdbEnabled: false,
-  cinemetaEnabled: false,
-  peerTubeEnabled: true,
   wikimediaCommonsEnabled: false,
   anilistEnabled: false,
   jikanEnabled: false,
@@ -1240,34 +945,6 @@ const _episode = AnimeEpisode(
   description: '',
 );
 
-const _downloadSubject = AnimeSubject(
-  id: 303,
-  title: '下载中的动画',
-  originalTitle: 'Downloading Anime',
-  summary: '用于验证错误密码不会暂停下载',
-  coverUrl: null,
-  bannerUrl: null,
-  date: '2026-01-01',
-  platform: '测试',
-  language: '中文',
-  region: '中国',
-  status: '连载',
-  categories: [],
-  tags: [],
-  totalEpisodes: 1,
-  source: 'peertube:test',
-);
-
-const _downloadEpisode = AnimeEpisode(
-  id: 303,
-  subjectId: 303,
-  number: 1,
-  title: '第一集',
-  airdate: '2026-01-01',
-  duration: '24:00',
-  description: '',
-);
-
 final _privateRuleState = RulePluginState(
   installedIds: const {'private-rule'},
   enabledIds: const {'private-rule'},
@@ -1291,4 +968,22 @@ final _privateRuleState = RulePluginState(
       rawConfig: const {'Cookie': 'session=private'},
     ),
   ],
+);
+
+AnimeSubject _tmdbProbeSubject() => const AnimeSubject(
+  id: 603,
+  title: '凭证探针',
+  originalTitle: '',
+  summary: '',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-01-01',
+  platform: '电影',
+  language: '',
+  region: '',
+  status: '',
+  categories: [],
+  tags: [],
+  totalEpisodes: 1,
+  source: 'tmdb:movie',
 );

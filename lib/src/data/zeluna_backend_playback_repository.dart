@@ -161,7 +161,11 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             format: json['format']?.toString().trim() ?? 'auto',
             url: url,
             headers: Map<String, String>.unmodifiable(headers),
-            publicHttpOnly: true,
+            // Zeluna is the trusted backend boundary and already validates
+            // every media URL before returning it. Reusing the drpy-only DNS
+            // guard here breaks legitimate CDN hosts on Clash/TUN clients,
+            // where public domains resolve to 198.18.0.0/15 fake IPs.
+            publicHttpOnly: false,
             available: true,
             message: cached ? '聚合后端缓存线路' : '聚合后端已验证线路',
           ),
