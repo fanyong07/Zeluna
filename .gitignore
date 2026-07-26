@@ -44,6 +44,7 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 /android/key.properties
+/android/keystore-password.txt
 *.jks
 *.keystore
 
@@ -67,3 +68,6 @@ android/build/
 server/**/__pycache__/
 server/**/*.pyc
 server/**/*.db
+server/.env
+server/.env.*
+!server/.env.example

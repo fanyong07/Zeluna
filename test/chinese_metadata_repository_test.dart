@@ -219,6 +219,139 @@ void main() {
     });
 
     test(
+      'does not treat Japanese Kanji and kana as Chinese metadata',
+      () async {
+        final bangumi = BangumiMetadataRepository(
+          client: MockClient(
+            (_) async => _jsonResponse({
+              'data': [
+                {
+                  'id': 400602,
+                  'name_cn': '',
+                  'name': '葬送のフリーレン',
+                  'summary': '勇者一行と共に魔王を倒した魔法使いの旅が始まる。',
+                  'date': '2023-09-29',
+                  'platform': 'TV',
+                  'total_episodes': 28,
+                  'meta_tags': ['动画'],
+                  'tags': const [],
+                  'rating': const {},
+                },
+              ],
+            }),
+          ),
+        );
+        final repository = ChineseMetadataRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected request'),
+          ),
+          bangumiRepository: bangumi,
+        );
+        final subject = _subject(
+          id: 13,
+          title: 'Frieren: Beyond Journey\'s End',
+          originalTitle: '葬送のフリーレン',
+          summary: 'An elf mage reflects on her long life.',
+          source: 'anilist',
+          date: '2023-09-29',
+        );
+
+        final result = await repository.enrichSubject(subject);
+
+        expect(identical(result, subject), isTrue);
+      },
+    );
+
+    test(
+      'does not promote an untranslated pure-Kanji original title',
+      () async {
+        final bangumi = BangumiMetadataRepository(
+          client: MockClient(
+            (_) async => _jsonResponse({
+              'data': [
+                {
+                  'id': 1671,
+                  'name_cn': '',
+                  'name': '東京喰種',
+                  'summary': '人を喰らう怪人たちの物語。',
+                  'date': '2014-07-04',
+                  'platform': 'TV',
+                  'total_episodes': 12,
+                  'meta_tags': ['动画'],
+                  'tags': const [],
+                  'rating': const {},
+                },
+              ],
+            }),
+          ),
+        );
+        final repository = ChineseMetadataRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected request'),
+          ),
+          bangumiRepository: bangumi,
+        );
+        final subject = _subject(
+          id: 15,
+          title: 'Tokyo Ghoul',
+          originalTitle: '東京喰種',
+          summary: 'A college student is transformed after a deadly encounter.',
+          source: 'anilist',
+          date: '2014-07-04',
+        );
+
+        final result = await repository.enrichSubject(subject);
+
+        expect(identical(result, subject), isTrue);
+      },
+    );
+
+    test(
+      'replaces a Chinese placeholder with a real Chinese summary',
+      () async {
+        final bangumi = BangumiMetadataRepository(
+          client: MockClient(
+            (_) async => _jsonResponse({
+              'data': [
+                {
+                  'id': 55770,
+                  'name_cn': '进击的巨人',
+                  'name': '進撃の巨人',
+                  'summary': '人类为夺回墙外世界而战的故事。',
+                  'date': '2013-04-07',
+                  'platform': 'TV',
+                  'total_episodes': 25,
+                  'meta_tags': ['动画'],
+                  'tags': const [],
+                  'rating': const {},
+                },
+              ],
+            }),
+          ),
+        );
+        final repository = ChineseMetadataRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected request'),
+          ),
+          bangumiRepository: bangumi,
+        );
+        final subject = _subject(
+          id: 14,
+          title: '进击的巨人',
+          originalTitle: '進撃の巨人',
+          summary: '暂无简介。',
+          source: 'jikan',
+          date: '2013-04-07',
+        );
+
+        final result = await repository.enrichSubject(subject);
+
+        expect(result.title, '进击的巨人');
+        expect(result.summary, '人类为夺回墙外世界而战的故事。');
+      },
+    );
+
+    test(
       'skips network lookup when title and summary are already Chinese',
       () async {
         final repository = ChineseMetadataRepository(
@@ -245,7 +378,6 @@ void main() {
       },
     );
   });
-
 }
 
 AnimeSubject _subject({

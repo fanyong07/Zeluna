@@ -3,11 +3,13 @@ import 'dart:io';
 
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/data/anime_controller.dart';
+import 'package:anime/src/data/bangumi_credential_store.dart';
 import 'package:anime/src/data/media_download_backend.dart';
 import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_task.dart';
 import 'package:anime/src/data/peertube_repository.dart';
+import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
@@ -15,6 +17,8 @@ import 'package:anime/src/sources/source_catalog_repository.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -113,6 +117,12 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(
+            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
           sourceCatalogRepositoryProvider.overrideWithValue(
             const _EmptySourceCatalogRepository(),
           ),
@@ -152,10 +162,7 @@ void main() {
       expect(state.danmaku.opacity, 0.4);
       expect(state.misc.keepScreenOn, isFalse);
       expect(state.services.bangumiEnabled, isFalse);
-      expect(
-        state.rulePlugins.customRules.single.rawConfig['Cookie'],
-        'session=private',
-      );
+      expect(state.rulePlugins.customRules, isEmpty);
       final firstAccountId = state.accountSession.current!.id;
       final migratedSettings = await Hive.openBox<dynamic>('anime.settings.v2');
       final migratedLibrary = await Hive.openBox<dynamic>('anime.library.v2');
@@ -179,7 +186,7 @@ void main() {
       );
       expect(
         migratedSettings.containsKey('account.$firstAccountId.sourceEnabled'),
-        isTrue,
+        isFalse,
       );
       expect(
         migratedLibrary.containsKey('account.$firstAccountId.offlineTasks'),
@@ -202,9 +209,9 @@ void main() {
       expect(state.settings.speed, const PlaybackSettings().speed);
       expect(state.homePreferences.defaultTab, AnimeHomeTab.recommended);
       expect(state.appearance.compactMode, isFalse);
-      expect(state.danmaku.enabled, isTrue);
+      expect(state.danmaku.enabled, isFalse);
       expect(state.misc.keepScreenOn, isTrue);
-      expect(state.services.bangumiEnabled, isTrue);
+      expect(state.services.bangumiEnabled, isFalse);
       expect(state.rulePlugins.customRules, isEmpty);
       await controller.toggleFavorite(_otherSubject);
       expect(
@@ -235,10 +242,7 @@ void main() {
       expect(state.danmaku.enabled, isFalse);
       expect(state.misc.keepScreenOn, isFalse);
       expect(state.services.bangumiEnabled, isFalse);
-      expect(
-        state.rulePlugins.customRules.single.rawConfig['Cookie'],
-        'session=private',
-      );
+      expect(state.rulePlugins.customRules, isEmpty);
 
       await controller.signOutAccount();
       state = container.read(animeControllerProvider).requireValue;
@@ -318,6 +322,12 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(
+            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
           sourceCatalogRepositoryProvider.overrideWithValue(
             const _EmptySourceCatalogRepository(),
           ),
@@ -349,189 +359,544 @@ void main() {
     },
   );
 
-  test('wrong account password does not interrupt active downloads', () async {
+  test('failed guest credential migration retries on next startup', () async {
+    const token = 'controller_migration_test_token_abcdefghijklmnopqrstuvwxyz';
     final root = await Directory.systemTemp.createTemp(
-      'anime-controller-account-auth-side-effects-',
+      'anime-controller-credential-migration-',
     );
     Hive.init(root.path);
     final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-    await settings.put('services', _downloadServices.toJson());
+    await settings.put('services', _offlineServices.toJson());
     await settings.close();
 
-    final backend = _BlockingDownloadBackend();
-    final service = MediaDownloadService(backend: backend);
-    final container = ProviderContainer(
+    final backend = _FaultingCredentialBackend();
+    final credentialStore = BangumiCredentialStore(backend: backend);
+    await credentialStore.saveToken(token: token);
+    backend.failNextWrite = true;
+    final firstContainer = ProviderContainer(
       overrides: [
-        mediaDownloadServiceProvider.overrideWithValue(service),
-        peerTubeRepositoryProvider.overrideWithValue(
-          _SingleLinePeerTubeRepository(),
+        bangumiCredentialStoreProvider.overrideWithValue(credentialStore),
+        tmdbCredentialStoreProvider.overrideWithValue(
+          TmdbCredentialStore(backend: _MemoryCredentialBackend()),
         ),
         sourceCatalogRepositoryProvider.overrideWithValue(
           const _EmptySourceCatalogRepository(),
         ),
       ],
     );
+    ProviderContainer? secondContainer;
     addTearDown(() async {
-      if (!backend.release.isCompleted) backend.release.complete();
-      await backend.finished.future.timeout(
-        const Duration(seconds: 2),
-        onTimeout: () {},
-      );
-      container.dispose();
-      service.dispose();
+      secondContainer?.dispose();
+      firstContainer.dispose();
       await Hive.close();
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    await container.read(animeControllerProvider.future);
-    final controller = container.read(animeControllerProvider.notifier);
+    await firstContainer.read(animeControllerProvider.future);
+    final controller = firstContainer.read(animeControllerProvider.notifier);
     await controller.registerAccount(
-      email: 'downloader@example.com',
-      nickname: '下载用户',
-      password: 'download-password',
+      email: 'credential-retry@example.com',
+      nickname: '凭据迁移用户',
+      password: 'credential-password',
     );
-    await controller.registerAccount(
-      email: 'other@example.com',
-      nickname: '其他用户',
-      password: 'other-password',
-    );
-    await controller.loginAccount(
-      email: 'downloader@example.com',
-      password: 'download-password',
-    );
+    final accountId = firstContainer
+        .read(animeControllerProvider)
+        .requireValue
+        .accountSession
+        .current!
+        .id;
+    expect(await credentialStore.readAccessToken(), token);
+    expect(await credentialStore.readAccessToken(accountId: accountId), isNull);
+    final firstSettings = await Hive.openBox<dynamic>('anime.settings.v2');
+    expect(firstSettings.get('credentials.pending.bangumi.v1'), accountId);
 
-    await controller.queueOffline(_downloadSubject, _downloadEpisode);
-    await backend.started.future;
-    var state = container.read(animeControllerProvider).requireValue;
-    final taskId = state.offlineTasks.single.id;
-    expect(
-      state.offlineTasks.single.status,
-      MediaDownloadTaskStatus.downloading,
-    );
-    expect(service.isActive(taskId), isTrue);
-
-    await expectLater(
-      controller.loginAccount(
-        email: 'other@example.com',
-        password: 'wrong-password',
-      ),
-      throwsA(isA<AccountException>()),
-    );
-    state = container.read(animeControllerProvider).requireValue;
-    expect(state.accountSession.current?.email, 'downloader@example.com');
-    expect(
-      state.offlineTasks.single.status,
-      MediaDownloadTaskStatus.downloading,
-    );
-    expect(service.isActive(taskId), isTrue);
-
-    await expectLater(
-      controller.deleteCurrentAccount(password: 'wrong-password'),
-      throwsA(isA<AccountException>()),
-    );
-    state = container.read(animeControllerProvider).requireValue;
-    expect(state.accountSession.current?.email, 'downloader@example.com');
-    expect(
-      state.offlineTasks.single.status,
-      MediaDownloadTaskStatus.downloading,
-    );
-    expect(service.isActive(taskId), isTrue);
-
-    await controller.pauseDownload(taskId);
-  });
-
-  test('playback results from the previous account are discarded', () async {
-    final root = await Directory.systemTemp.createTemp(
-      'anime-controller-account-stale-playback-',
-    );
+    firstContainer.dispose();
+    await Hive.close();
     Hive.init(root.path);
-    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-    await settings.put('services', _downloadServices.toJson());
-    await settings.close();
-
-    final repository = _BlockingLinePeerTubeRepository();
-    final container = ProviderContainer(
+    secondContainer = ProviderContainer(
       overrides: [
-        peerTubeRepositoryProvider.overrideWithValue(repository),
+        bangumiCredentialStoreProvider.overrideWithValue(credentialStore),
+        tmdbCredentialStoreProvider.overrideWithValue(
+          TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
         sourceCatalogRepositoryProvider.overrideWithValue(
           const _EmptySourceCatalogRepository(),
         ),
       ],
     );
-    addTearDown(() async {
-      if (!repository.lines.isCompleted) {
-        repository.lines.complete(const <PlaybackLine>[]);
-      }
-      container.dispose();
-      await Hive.close();
-      if (await root.exists()) await root.delete(recursive: true);
-    });
+    await secondContainer.read(animeControllerProvider.future);
 
-    await container.read(animeControllerProvider.future);
-    final controller = container.read(animeControllerProvider.notifier);
-    await controller.registerAccount(
-      email: 'playback-a@example.com',
-      nickname: '线路用户甲',
-      password: 'playback-password-a',
-    );
-    await controller.registerAccount(
-      email: 'playback-b@example.com',
-      nickname: '线路用户乙',
-      password: 'playback-password-b',
-    );
-    await controller.loginAccount(
-      email: 'playback-a@example.com',
-      password: 'playback-password-a',
-    );
-
-    final accountAContext = controller.accountContextVersion;
-    final staleResult = controller.linesForEpisode(
-      _downloadSubject,
-      _downloadEpisode,
-    );
-    await repository.requested.future;
-    await controller.loginAccount(
-      email: 'playback-b@example.com',
-      password: 'playback-password-b',
-    );
-    repository.lines.complete(const [
-      PlaybackLine(
-        id: 'private-line',
-        episodeId: 303,
-        providerId: 'private',
-        providerName: 'Private source',
-        title: 'Private line',
-        quality: '1080p',
-        format: 'MP4',
-        url: 'https://private.example/video.mp4',
-        headers: {'Cookie': 'session=account-a'},
-        available: true,
-      ),
-    ]);
-
-    expect(await staleResult, isEmpty);
+    expect(await credentialStore.readAccessToken(), isNull);
+    expect(await credentialStore.readAccessToken(accountId: accountId), token);
+    final recoveredSettings = await Hive.openBox<dynamic>('anime.settings.v2');
     expect(
-      await controller.addHistory(
-        _downloadSubject,
-        _downloadEpisode,
-        expectedAccountContextVersion: accountAContext,
-      ),
+      recoveredSettings.containsKey('credentials.pending.bangumi.v1'),
       isFalse,
     );
-    expect(
-      container.read(animeControllerProvider).requireValue.history,
-      isEmpty,
-    );
-    expect(
-      container
+  });
+
+  test(
+    'TMDB guest credential follows the first account and is cleared with it',
+    () async {
+      const token = 'tmdb_controller_guest_token_not_a_real_secret_1234567890';
+      final root = await Directory.systemTemp.createTemp(
+        'anime-controller-tmdb-credential-lifecycle-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
+
+      final tmdbStore = TmdbCredentialStore(
+        backend: _MemoryCredentialBackend(),
+      );
+      await tmdbStore.saveToken(token: token);
+      final container = ProviderContainer(
+        overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(tmdbStore),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      await controller.registerAccount(
+        email: 'tmdb-first@example.com',
+        nickname: 'TMDB User',
+        password: 'tmdb-password',
+      );
+      final accountId = container
           .read(animeControllerProvider)
           .requireValue
           .accountSession
-          .current
-          ?.email,
-      'playback-b@example.com',
+          .current!
+          .id;
+
+      expect(await tmdbStore.readAccessToken(), isNull);
+      expect(await tmdbStore.readAccessToken(accountId: accountId), token);
+      final migratedSettings = await Hive.openBox<dynamic>('anime.settings.v2');
+      expect(
+        migratedSettings.containsKey('credentials.pending.tmdb.v1'),
+        isFalse,
+      );
+
+      await controller.deleteCurrentAccount(password: 'tmdb-password');
+
+      expect(await tmdbStore.readAccessToken(accountId: accountId), isNull);
+      expect(
+        container
+            .read(animeControllerProvider)
+            .requireValue
+            .accountSession
+            .current,
+        isNull,
+      );
+    },
+  );
+
+  test('failed TMDB guest migration retries on the next startup', () async {
+    const token = 'tmdb_controller_retry_token_not_a_real_secret_1234567890';
+    final root = await Directory.systemTemp.createTemp(
+      'anime-controller-tmdb-credential-retry-',
+    );
+    Hive.init(root.path);
+    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+    await settings.put('services', _offlineServices.toJson());
+    await settings.close();
+
+    final backend = _FaultingCredentialBackend();
+    final tmdbStore = TmdbCredentialStore(backend: backend);
+    await tmdbStore.saveToken(token: token);
+    backend.failNextWrite = true;
+    final firstContainer = ProviderContainer(
+      overrides: [
+        bangumiCredentialStoreProvider.overrideWithValue(
+          BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
+        tmdbCredentialStoreProvider.overrideWithValue(tmdbStore),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _EmptySourceCatalogRepository(),
+        ),
+      ],
+    );
+    ProviderContainer? secondContainer;
+    addTearDown(() async {
+      secondContainer?.dispose();
+      firstContainer.dispose();
+      await Hive.close();
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+
+    await firstContainer.read(animeControllerProvider.future);
+    final controller = firstContainer.read(animeControllerProvider.notifier);
+    await controller.registerAccount(
+      email: 'tmdb-retry@example.com',
+      nickname: 'TMDB Retry',
+      password: 'tmdb-password',
+    );
+    final accountId = firstContainer
+        .read(animeControllerProvider)
+        .requireValue
+        .accountSession
+        .current!
+        .id;
+    expect(await tmdbStore.readAccessToken(), token);
+    expect(await tmdbStore.readAccessToken(accountId: accountId), isNull);
+    final firstSettings = await Hive.openBox<dynamic>('anime.settings.v2');
+    expect(firstSettings.get('credentials.pending.tmdb.v1'), accountId);
+
+    firstContainer.dispose();
+    await Hive.close();
+    Hive.init(root.path);
+    secondContainer = ProviderContainer(
+      overrides: [
+        bangumiCredentialStoreProvider.overrideWithValue(
+          BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
+        tmdbCredentialStoreProvider.overrideWithValue(tmdbStore),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _EmptySourceCatalogRepository(),
+        ),
+      ],
+    );
+    await secondContainer.read(animeControllerProvider.future);
+
+    expect(await tmdbStore.readAccessToken(), isNull);
+    expect(await tmdbStore.readAccessToken(accountId: accountId), token);
+    final recoveredSettings = await Hive.openBox<dynamic>('anime.settings.v2');
+    expect(
+      recoveredSettings.containsKey('credentials.pending.tmdb.v1'),
+      isFalse,
     );
   });
+
+  test(
+    'late TMDB rejection from the previous account cannot affect the new one',
+    () async {
+      const firstToken =
+          'tmdb_controller_account_a_token_not_a_real_secret_123456';
+      const secondToken =
+          'tmdb_controller_account_b_token_not_a_real_secret_654321';
+      final root = await Directory.systemTemp.createTemp(
+        'anime-controller-tmdb-account-switch-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
+
+      final oldRequestStarted = Completer<void>();
+      final oldResponse = Completer<http.Response>();
+      final authorizationHeaders = <String>[];
+      final client = MockClient((request) async {
+        final authorization =
+            request.headers['authorization'] ??
+            request.headers['Authorization'] ??
+            '';
+        authorizationHeaders.add(authorization);
+        if (authorization == 'Bearer $firstToken') {
+          if (!oldRequestStarted.isCompleted) oldRequestStarted.complete();
+          return oldResponse.future;
+        }
+        return http.Response(
+          '{"results":[]}',
+          200,
+          headers: const {'content-type': 'application/json'},
+        );
+      });
+      final tmdbStore = TmdbCredentialStore(
+        backend: _MemoryCredentialBackend(),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(tmdbStore),
+          externalServiceHttpClientProvider.overrideWithValue(client),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        if (!oldResponse.isCompleted) {
+          oldResponse.complete(http.Response('', 401));
+        }
+        container.dispose();
+        client.close();
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      await controller.registerAccount(
+        email: 'tmdb-account-a@example.com',
+        nickname: 'TMDB Account A',
+        password: 'tmdb-password-a',
+      );
+      final firstAccountId = container
+          .read(animeControllerProvider)
+          .requireValue
+          .accountSession
+          .current!
+          .id;
+      await tmdbStore.saveToken(accountId: firstAccountId, token: firstToken);
+
+      await controller.registerAccount(
+        email: 'tmdb-account-b@example.com',
+        nickname: 'TMDB Account B',
+        password: 'tmdb-password-b',
+      );
+      final secondAccountId = container
+          .read(animeControllerProvider)
+          .requireValue
+          .accountSession
+          .current!
+          .id;
+      await tmdbStore.saveToken(accountId: secondAccountId, token: secondToken);
+      await controller.loginAccount(
+        email: 'tmdb-account-a@example.com',
+        password: 'tmdb-password-a',
+      );
+
+      final repository = container.read(externalServiceRepositoryProvider);
+      final staleRequest = repository.tmdbMovieFeed(pages: 1);
+      await oldRequestStarted.future;
+      await controller.loginAccount(
+        email: 'tmdb-account-b@example.com',
+        password: 'tmdb-password-b',
+      );
+      oldResponse.complete(http.Response('', 401));
+
+      expect(await staleRequest, isEmpty);
+      expect(
+        (await tmdbStore.readStatus(accountId: firstAccountId)).health,
+        TmdbCredentialHealth.ready,
+      );
+      expect(
+        (await tmdbStore.readStatus(accountId: secondAccountId)).health,
+        TmdbCredentialHealth.ready,
+      );
+      expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+      expect(authorizationHeaders.last, 'Bearer $secondToken');
+    },
+  );
+
+  test(
+    'wrong account password does not interrupt active downloads',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'anime-controller-account-auth-side-effects-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _downloadServices.toJson());
+      await settings.close();
+
+      final backend = _BlockingDownloadBackend();
+      final service = MediaDownloadService(backend: backend);
+      final container = ProviderContainer(
+        overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(
+            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          mediaDownloadServiceProvider.overrideWithValue(service),
+          peerTubeRepositoryProvider.overrideWithValue(
+            _SingleLinePeerTubeRepository(),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        if (!backend.release.isCompleted) backend.release.complete();
+        await backend.finished.future.timeout(
+          const Duration(seconds: 2),
+          onTimeout: () {},
+        );
+        container.dispose();
+        service.dispose();
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      await controller.registerAccount(
+        email: 'downloader@example.com',
+        nickname: '下载用户',
+        password: 'download-password',
+      );
+      await controller.registerAccount(
+        email: 'other@example.com',
+        nickname: '其他用户',
+        password: 'other-password',
+      );
+      await controller.loginAccount(
+        email: 'downloader@example.com',
+        password: 'download-password',
+      );
+
+      await controller.queueOffline(_downloadSubject, _downloadEpisode);
+      await backend.started.future;
+      var state = container.read(animeControllerProvider).requireValue;
+      final taskId = state.offlineTasks.single.id;
+      expect(
+        state.offlineTasks.single.status,
+        MediaDownloadTaskStatus.downloading,
+      );
+      expect(service.isActive(taskId), isTrue);
+
+      await expectLater(
+        controller.loginAccount(
+          email: 'other@example.com',
+          password: 'wrong-password',
+        ),
+        throwsA(isA<AccountException>()),
+      );
+      state = container.read(animeControllerProvider).requireValue;
+      expect(state.accountSession.current?.email, 'downloader@example.com');
+      expect(
+        state.offlineTasks.single.status,
+        MediaDownloadTaskStatus.downloading,
+      );
+      expect(service.isActive(taskId), isTrue);
+
+      await expectLater(
+        controller.deleteCurrentAccount(password: 'wrong-password'),
+        throwsA(isA<AccountException>()),
+      );
+      state = container.read(animeControllerProvider).requireValue;
+      expect(state.accountSession.current?.email, 'downloader@example.com');
+      expect(
+        state.offlineTasks.single.status,
+        MediaDownloadTaskStatus.downloading,
+      );
+      expect(service.isActive(taskId), isTrue);
+
+      await controller.pauseDownload(taskId);
+    },
+    skip: '旧 PeerTube 下载链路已退出运行时，等待后端下载流程接入后重写',
+  );
+
+  test(
+    'playback results from the previous account are discarded',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'anime-controller-account-stale-playback-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _downloadServices.toJson());
+      await settings.close();
+
+      final repository = _BlockingLinePeerTubeRepository();
+      final container = ProviderContainer(
+        overrides: [
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(
+            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          peerTubeRepositoryProvider.overrideWithValue(repository),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        if (!repository.lines.isCompleted) {
+          repository.lines.complete(const <PlaybackLine>[]);
+        }
+        container.dispose();
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+      await controller.registerAccount(
+        email: 'playback-a@example.com',
+        nickname: '线路用户甲',
+        password: 'playback-password-a',
+      );
+      await controller.registerAccount(
+        email: 'playback-b@example.com',
+        nickname: '线路用户乙',
+        password: 'playback-password-b',
+      );
+      await controller.loginAccount(
+        email: 'playback-a@example.com',
+        password: 'playback-password-a',
+      );
+
+      final accountAContext = controller.accountContextVersion;
+      final staleResult = controller.linesForEpisode(
+        _downloadSubject,
+        _downloadEpisode,
+      );
+      await repository.requested.future;
+      await controller.loginAccount(
+        email: 'playback-b@example.com',
+        password: 'playback-password-b',
+      );
+      repository.lines.complete(const [
+        PlaybackLine(
+          id: 'private-line',
+          episodeId: 303,
+          providerId: 'private',
+          providerName: 'Private source',
+          title: 'Private line',
+          quality: '1080p',
+          format: 'MP4',
+          url: 'https://private.example/video.mp4',
+          headers: {'Cookie': 'session=account-a'},
+          available: true,
+        ),
+      ]);
+
+      expect(await staleResult, isEmpty);
+      expect(
+        await controller.addHistory(
+          _downloadSubject,
+          _downloadEpisode,
+          expectedAccountContextVersion: accountAContext,
+        ),
+        isFalse,
+      );
+      expect(
+        container.read(animeControllerProvider).requireValue.history,
+        isEmpty,
+      );
+      expect(
+        container
+            .read(animeControllerProvider)
+            .requireValue
+            .accountSession
+            .current
+            ?.email,
+        'playback-b@example.com',
+      );
+    },
+    skip: '旧 PeerTube 播放链路已退出运行时，后端线路隔离由 v3 仓库测试覆盖',
+  );
 
   test('interrupted account deletion resumes on next startup', () async {
     final root = await Directory.systemTemp.createTemp(
@@ -563,6 +928,12 @@ void main() {
     );
     final firstContainer = ProviderContainer(
       overrides: [
+        bangumiCredentialStoreProvider.overrideWithValue(
+          BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
+        tmdbCredentialStoreProvider.overrideWithValue(
+          TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
         mediaDownloadServiceProvider.overrideWithValue(failingService),
         sourceCatalogRepositoryProvider.overrideWithValue(
           const _EmptySourceCatalogRepository(),
@@ -624,6 +995,12 @@ void main() {
     recoveryService = MediaDownloadService(backend: _FileDeleteBackend());
     secondContainer = ProviderContainer(
       overrides: [
+        bangumiCredentialStoreProvider.overrideWithValue(
+          BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
+        tmdbCredentialStoreProvider.overrideWithValue(
+          TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+        ),
         mediaDownloadServiceProvider.overrideWithValue(recoveryService),
         sourceCatalogRepositoryProvider.overrideWithValue(
           const _EmptySourceCatalogRepository(),
@@ -642,6 +1019,37 @@ void main() {
     );
     expect(LocalAccountRepository(recoveredAccounts).pendingDeletion(), isNull);
   });
+}
+
+class _MemoryCredentialBackend
+    implements BangumiCredentialBackend, TmdbCredentialBackend {
+  final values = <String, String>{};
+
+  @override
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
+}
+
+class _FaultingCredentialBackend extends _MemoryCredentialBackend {
+  bool failNextWrite = false;
+
+  @override
+  Future<void> write(String key, String value) async {
+    if (failNextWrite) {
+      failNextWrite = false;
+      throw StateError('simulated secure write failure');
+    }
+    await super.write(key, value);
+  }
 }
 
 class _EmptySourceCatalogRepository extends SourceCatalogRepository {
@@ -756,6 +1164,7 @@ class _FileDeleteBackend implements MediaDownloadBackend {
 
 const _offlineServices = ExternalServiceSettings(
   mediaMetadataEnabled: false,
+  tmdbEnabled: false,
   cinemetaEnabled: false,
   peerTubeEnabled: false,
   wikimediaCommonsEnabled: false,
@@ -771,6 +1180,7 @@ const _offlineServices = ExternalServiceSettings(
 
 const _downloadServices = ExternalServiceSettings(
   mediaMetadataEnabled: false,
+  tmdbEnabled: false,
   cinemetaEnabled: false,
   peerTubeEnabled: true,
   wikimediaCommonsEnabled: false,

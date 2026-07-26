@@ -6,7 +6,9 @@ AniCh API 复刻 — FastAPI 后端入口
 """
 
 import json
+import logging
 import math
+import secrets
 import time
 from typing import Optional
 
@@ -17,7 +19,7 @@ from sqlalchemy import select, func, delete, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import CORS_ORIGINS
+from .config import ADMIN_TOKEN, CORS_ORIGINS
 from .database import (
     async_session, init_db,
     User, UserToken, VerifyCode,
@@ -26,20 +28,29 @@ from .database import (
     Danmaku,
     Thread, ThreadImage, ThreadCollection, ThreadLike,
     Comment, CommentLike,
-    PlayHistory,
+    PlayHistory, PlaybackCache, upsert_playback_cache,
 )
 from .auth import (
     hash_password, verify_password, create_jwt, decode_jwt,
     generate_verify_code, parse_protobuf_token, get_current_user,
 )
 from . import protobuf_encoder as pb
+from .scheduler import scheduler
+from .scrapers import registry as scraper_registry
+from .metadata_sync import sync_all_pending, sync_service
+from .aggregator import aggregator
+from .m3u8_resolver import resolver as m3u8_resolver
+from .catalog import catalog_service, parse_stable_id
+from .playback import playback_service
 
-app = FastAPI(title="AniCh API", version="1.0.0")
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Zeluna API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_credentials=True,
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,12 +59,28 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await init_db()
+    # 启动爬虫调度器
+    await scheduler.start()
     await _seed_data()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await scheduler.stop()
+    await aggregator.aclose()
+    await catalog_service.aclose()
 
 
 async def get_session():
     async with async_session() as session:
         yield session
+
+
+async def require_admin(request: Request):
+    """管理端点默认关闭；生产环境必须通过环境变量显式配置。"""
+    supplied = request.headers.get("X-Zeluna-Admin", "").strip()
+    if not ADMIN_TOKEN or not secrets.compare_digest(supplied, ADMIN_TOKEN):
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 # ────────────────────────────────────────────────────────────
@@ -1330,3 +1357,410 @@ async def _seed_data():
 
         await session.commit()
         print("[seed] 已插入示例数据")
+
+
+# ────────────────────────────────────────────────────────────
+# 爬虫管理端点
+# ────────────────────────────────────────────────────────────
+
+@app.get("/admin/scrapers", dependencies=[Depends(require_admin)])
+async def list_scrapers():
+    """列出所有爬虫"""
+    scrapers = []
+    for s in scraper_registry.all_scrapers:
+        scrapers.append({
+            "name": s.name,
+            "content_types": s.content_types,
+            "base_url": s.base_url,
+        })
+    return JSONResponse(scrapers)
+
+
+@app.get("/admin/scrapers/search", dependencies=[Depends(require_admin)])
+async def scraper_search(
+    keyword: str = Query(""),
+    content_type: str = Query(None),
+):
+    """通过爬虫搜索内容"""
+    types = [content_type] if content_type else None
+    results = await scraper_registry.search_all(keyword, types)
+    return JSONResponse([
+        {
+            "scraper": name,
+            "count": len(items),
+            "items": [
+                {
+                    "source_id": item.source_id,
+                    "title": item.title,
+                    "cover_url": item.cover_url,
+                    "type": item.type,
+                    "lang": item.lang,
+                    "year": item.year,
+                    "episode_count": item.episode_count,
+                }
+                for item in items[:10]
+            ],
+        }
+        for name, items in results
+    ])
+
+
+@app.post("/admin/scan", dependencies=[Depends(require_admin)])
+async def trigger_scan(
+    content_types: str = Query(None),
+):
+    """手动触发内容扫描"""
+    types = content_types.split(",") if content_types else None
+    await scheduler.scan_new_content(types)
+    return JSONResponse({"message": "Scan triggered", "types": types})
+
+
+@app.post("/admin/sync/metadata", dependencies=[Depends(require_admin)])
+async def trigger_metadata_sync(
+    content_types: str = Query(None),
+):
+    """手动触发元数据同步"""
+    types = content_types.split(",") if content_types else None
+    await sync_all_pending(types)
+    return JSONResponse({"message": "Metadata sync triggered", "types": types})
+
+
+@app.get("/admin/stats", dependencies=[Depends(require_admin)])
+async def scheduler_stats():
+    """调度器统计信息"""
+    return JSONResponse({
+        "scheduler": scheduler.stats,
+        "scrapers": {
+            name: {
+                "subjects_found": s.subjects_found,
+                "subjects_new": s.subjects_new,
+                "duration_seconds": s.duration_seconds,
+                "errors": s.errors,
+                "finished_at": s.finished_at.isoformat() if s.finished_at else None,
+            }
+            for name, s in scraper_registry.stats.items()
+        },
+    })
+
+
+@app.get("/check/api")
+async def check_api():
+    """API 配置检查 (兼容 AniCh 客户端)"""
+    import os
+    public = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+    return JSONResponse({
+        "baseUrl": public,
+        "bilibiliApiUrl": "https://bili-dm.emmmm.eu.org",
+        "qqVideoApiUrl": "https://dm.video.qq.com",
+        "dandanApiUrl": "https://dandan.emmmm.eu.org",
+        "updateUrl": "https://api.github.com/repos/Sle2p/AniCh/releases/latest",
+        "githubProxyUrl": "https://gh.llkk.cc",
+        "apis": [public],
+        "ghproxy": ["https://gh.llkk.cc"],
+    })
+
+
+@app.get("/vod/{id}/{episode}")
+async def vod_from_scrapers(
+    id: int,
+    episode: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """从爬虫获取视频源 (覆盖原 VOD 端点)"""
+    # 先从数据库获取番剧信息
+    result = await session.execute(
+        select(Bangumi).where(Bangumi.id == id)
+    )
+    bangumi = result.scalar_one_or_none()
+    if not bangumi:
+        raise HTTPException(404, "番剧不存在")
+
+    # 从爬虫获取视频源
+    source_id = bangumi.bangumi_id
+    if not source_id:
+        # 没有外部 ID, 返回数据库中的 vod_url
+        result = await session.execute(
+            select(BangumiEpisode).where(
+                BangumiEpisode.bangumi_id == id,
+                BangumiEpisode.number == episode,
+            )
+        )
+        ep = result.scalar_one_or_none()
+        vod_data = []
+        if ep and ep.vod_url:
+            try:
+                vod_data = json.loads(ep.vod_url)
+            except (json.JSONDecodeError, TypeError):
+                vod_data = [{"url": ep.vod_url, "type": "auto", "caption": f"EP{ep.number}"}]
+
+        return JSONResponse({
+            "id": ep.id if ep else 0,
+            "bangumi_id": id,
+            "number": episode,
+            "title": ep.title if ep else "",
+            "vod": vod_data,
+        })
+
+    # 从爬虫获取
+    lines = await scraper_registry.get_video_sources_all(
+        source_id, episode,
+    )
+
+    vod_data = [
+        {
+            "url": line.url,
+            "type": line.format or "auto",
+            "caption": line.title or f"线路{i+1}",
+        }
+        for i, line in enumerate(lines)
+    ]
+
+    return JSONResponse({
+        "id": 0,
+        "bangumi_id": id,
+        "number": episode,
+        "title": "",
+        "vod": vod_data,
+    })
+
+
+# ────────────────────────────────────────────────────────────
+# 统一聚合 API (核心)
+# ────────────────────────────────────────────────────────────
+
+@app.get("/api/v2/search")
+async def unified_search(
+    keyword: str = Query(""),
+    content_type: str = Query(None),
+    max_results: int = Query(30),
+):
+    """
+    统一搜索 - 聚合所有源。
+
+    content_type: anime, tv, movie (逗号分隔)
+    """
+    types = content_type.split(",") if content_type else None
+    results = await aggregator.search(keyword, types, max_results)
+
+    return JSONResponse([
+        {
+            "id": r.id,
+            "title": r.title,
+            "original_title": r.original_title,
+            "cover_url": r.cover_url,
+            "banner_url": r.banner_url,
+            "summary": r.summary,
+            "content_type": r.content_type,
+            "language": r.language,
+            "year": r.year,
+            "regions": r.regions,
+            "genres": r.genres,
+            "rating": r.rating,
+            "rating_count": r.rating_count,
+            "total_episodes": r.total_episodes,
+            "status": r.status,
+            "sources": r.sources,
+        }
+        for r in results
+    ])
+
+
+@app.get("/api/v2/episodes/{subject_id:path}")
+async def unified_episodes(subject_id: str):
+    """统一剧集列表"""
+    episodes = await aggregator.get_episodes(subject_id)
+    return JSONResponse([
+        {"number": ep.number, "title": ep.title,
+         "thumbnail": ep.thumbnail, "duration": ep.duration}
+        for ep in episodes
+    ])
+
+
+@app.get("/api/v2/vod/{subject_id:path}")
+async def unified_vod(
+    subject_id: str,
+    episode: int = Query(1),
+    title: str = Query(""),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    统一视频源获取 - 返回所有可用播放线路。
+
+    先查预爬缓存 (PlaybackCache): 命中且未过期则秒回验证过的活链;
+    未命中再实时解析+可达性验证, 并回填缓存。
+    """
+    import time as _time
+    CACHE_TTL = 6 * 3600  # 缓存 6 小时有效
+
+    # 1. 查缓存
+    result = await session.execute(
+        select(PlaybackCache).where(
+            PlaybackCache.subject_id == subject_id,
+            PlaybackCache.episode == episode,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row and row.line_count > 0 and (_time.time() - row.verified_at) < CACHE_TTL:
+        try:
+            cached_lines = json.loads(row.lines_json)
+            return JSONResponse([
+                {"url": l.get("url", ""), "title": l.get("title", ""),
+                 "quality": l.get("quality", ""),
+                 "format": l.get("format", ""),
+                 "source": l.get("source", ""),
+                 "headers": l.get("headers", {}),
+                 "cached": True}
+                for l in cached_lines
+            ])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 2. 未命中: 实时解析 + 可达性验证
+    lines = await aggregator.resolve_verified_lines(
+        subject_id, episode, title, verify=True
+    )
+    lines_data = [
+        {"url": l.url, "title": l.title, "quality": l.quality,
+         "format": l.format, "source": l.source, "headers": l.headers}
+        for l in lines
+    ]
+
+    # 3. 回填缓存
+    if lines_data:
+        try:
+            now = _time.time()
+            await upsert_playback_cache(
+                session,
+                subject_id=subject_id,
+                episode=episode,
+                title=title,
+                lines_json=json.dumps(lines_data, ensure_ascii=False),
+                line_count=len(lines_data),
+                verified_at=now,
+            )
+        except Exception as error:
+            logger.warning("Playback cache write failed: %s", error)
+
+    return JSONResponse([{**d, "cached": False} for d in lines_data])
+
+
+@app.get("/api/v2/home")
+async def unified_home():
+    """统一首页推荐"""
+    feed = await aggregator.get_home_feed()
+    return JSONResponse(feed)
+
+
+@app.get("/api/v2/resolve")
+async def resolve_m3u8(
+    url: str = Query(""),
+    keyword: str = Query(""),
+):
+    """
+    M3U8 解析端点
+
+    给定一个视频站 URL 或关键词，返回解析出的 m3u8/mp4 地址。
+    """
+    if url:
+        results = await m3u8_resolver.resolve_via_parse_services(url)
+    elif keyword:
+        results = await m3u8_resolver.search_and_resolve(keyword)
+    else:
+        results = []
+
+    return JSONResponse([
+        {"url": r["url"], "format": r.get("format", "hls"),
+         "source": r.get("source", "unknown")}
+        for r in results
+    ])
+
+
+# ────────────────────────────────────────────────────────────
+# Zeluna v3：稳定作品 ID + 服务端元数据 + 服务端播放聚合
+# ────────────────────────────────────────────────────────────
+
+@app.get("/api/v3/status")
+async def unified_status():
+    return JSONResponse({
+        "service": "zeluna",
+        "version": 3,
+        "providers": catalog_service.provider_status,
+        "playback": "server-only",
+    })
+
+
+@app.get("/api/v3/catalog/search")
+async def catalog_search(
+    query: str = Query(""),
+    content_type: str = Query("anime,tv,movie"),
+    limit: int = Query(40, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+):
+    requested = [
+        value.strip()
+        for value in content_type.split(",")
+        if value.strip() in {"anime", "tv", "movie"}
+    ]
+    return JSONResponse(
+        await catalog_service.search(query, requested, session, limit=limit)
+    )
+
+
+@app.get("/api/v3/catalog/home/{content_type}")
+async def catalog_home(
+    content_type: str,
+    limit: int = Query(60, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+):
+    if content_type not in {"anime", "tv", "movie"}:
+        raise HTTPException(400, "不支持的内容类型")
+    return JSONResponse(
+        await catalog_service.home(content_type, session, limit=limit)
+    )
+
+
+@app.get("/api/v3/catalog/subject/{stable_id:path}")
+async def catalog_subject(
+    stable_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    if parse_stable_id(stable_id) is None:
+        raise HTTPException(400, "作品 ID 格式不正确")
+    item = await catalog_service.get_subject(stable_id, session)
+    if item is None:
+        raise HTTPException(404, "作品信息暂不可用")
+    return JSONResponse(item)
+
+
+@app.get("/api/v3/playback/{stable_id:path}")
+async def stable_playback(
+    stable_id: str,
+    episode: int = Query(1, ge=1),
+    title: str = Query("", max_length=500),
+    original_title: str = Query("", max_length=500),
+    content_type: str = Query("", max_length=20),
+    year: int = Query(0, ge=0, le=9999),
+    session: AsyncSession = Depends(get_session),
+):
+    if parse_stable_id(stable_id) is None:
+        raise HTTPException(400, "作品 ID 格式不正确")
+    lines = await playback_service.lines(
+        stable_id,
+        episode,
+        session,
+        title=title,
+        original_title=original_title,
+        content_type=content_type,
+        year=year,
+    )
+    return JSONResponse(lines)
+
+
+@app.post(
+    "/admin/v3/playback/refresh",
+    dependencies=[Depends(require_admin)],
+)
+async def refresh_playback_cache(
+    limit: int = Query(12, ge=1, le=50),
+):
+    return JSONResponse(await playback_service.refresh_due(limit=limit))

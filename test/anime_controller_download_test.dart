@@ -17,233 +17,240 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test(
-    'controller skips HLS and switches to the next single-file line',
-    () async {
-      final root = await Directory.systemTemp.createTemp(
-        'anime-controller-download-',
-      );
-      Hive.init(root.path);
-      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-      await settings.put('services', _offlineServices.toJson());
-      await settings.close();
+  group('旧外部源离线下载链路', () {
+    test(
+      'controller skips HLS and switches to the next single-file line',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'anime-controller-download-',
+        );
+        Hive.init(root.path);
+        final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+        await settings.put('services', _offlineServices.toJson());
+        await settings.close();
 
-      final backend = _FallbackDownloadBackend(root);
-      final service = MediaDownloadService(backend: backend);
-      final container = ProviderContainer(
-        overrides: [
-          mediaDownloadServiceProvider.overrideWithValue(service),
-          peerTubeRepositoryProvider.overrideWithValue(
-            _DownloadPeerTubeRepository(),
-          ),
-          sourceCatalogRepositoryProvider.overrideWithValue(
-            const _EmptySourceCatalogRepository(),
-          ),
-        ],
-      );
-      addTearDown(() async {
-        container.dispose();
-        service.dispose();
-        await Hive.close();
-        if (await root.exists()) await root.delete(recursive: true);
-      });
+        final backend = _FallbackDownloadBackend(root);
+        final service = MediaDownloadService(backend: backend);
+        final container = ProviderContainer(
+          overrides: [
+            mediaDownloadServiceProvider.overrideWithValue(service),
+            peerTubeRepositoryProvider.overrideWithValue(
+              _DownloadPeerTubeRepository(),
+            ),
+            sourceCatalogRepositoryProvider.overrideWithValue(
+              const _EmptySourceCatalogRepository(),
+            ),
+          ],
+        );
+        addTearDown(() async {
+          container.dispose();
+          service.dispose();
+          await Hive.close();
+          if (await root.exists()) await root.delete(recursive: true);
+        });
 
-      await container.read(animeControllerProvider.future);
-      final controller = container.read(animeControllerProvider.notifier);
-      expect(await controller.queueOffline(_subject, _episode), '已加入下载队列');
+        await container.read(animeControllerProvider.future);
+        final controller = container.read(animeControllerProvider.notifier);
+        expect(await controller.queueOffline(_subject, _episode), '已加入下载队列');
 
-      MediaDownloadTask? task;
-      for (var i = 0; i < 100; i++) {
-        task = container
+        MediaDownloadTask? task;
+        for (var i = 0; i < 100; i++) {
+          task = container
+              .read(animeControllerProvider)
+              .value
+              ?.offlineTasks
+              .firstOrNull;
+          if (task?.status == MediaDownloadTaskStatus.completed) break;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+
+        expect(task?.status, MediaDownloadTaskStatus.completed);
+        expect(backend.urls, [
+          'https://cdn.example/failing.mp4',
+          'https://cdn.example/fallback?id=1',
+        ]);
+        expect(task?.providerName, 'Fallback API');
+        expect(task?.downloadedBytes, 4096);
+        expect(task?.localPlaybackLine?.url, startsWith('file:'));
+      },
+    );
+
+    test(
+      'removing a resolving task never starts the eventual download',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'anime-controller-remove-',
+        );
+        Hive.init(root.path);
+        final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+        await settings.put('services', _offlineServices.toJson());
+        await settings.close();
+
+        final repository = _BlockingPeerTubeRepository();
+        final backend = _FallbackDownloadBackend(root);
+        final service = MediaDownloadService(backend: backend);
+        final container = ProviderContainer(
+          overrides: [
+            mediaDownloadServiceProvider.overrideWithValue(service),
+            peerTubeRepositoryProvider.overrideWithValue(repository),
+            sourceCatalogRepositoryProvider.overrideWithValue(
+              const _EmptySourceCatalogRepository(),
+            ),
+          ],
+        );
+        addTearDown(() async {
+          if (!repository.lines.isCompleted) {
+            repository.lines.complete(const []);
+          }
+          container.dispose();
+          service.dispose();
+          await Hive.close();
+          if (await root.exists()) await root.delete(recursive: true);
+        });
+
+        await container.read(animeControllerProvider.future);
+        final controller = container.read(animeControllerProvider.notifier);
+        await controller.queueOffline(_subject, _episode);
+        final taskId = container
             .read(animeControllerProvider)
-            .value
-            ?.offlineTasks
-            .firstOrNull;
-        if (task?.status == MediaDownloadTaskStatus.completed) break;
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-      }
+            .value!
+            .offlineTasks
+            .single
+            .id;
 
-      expect(task?.status, MediaDownloadTaskStatus.completed);
-      expect(backend.urls, [
-        'https://cdn.example/failing.mp4',
-        'https://cdn.example/fallback?id=1',
-      ]);
-      expect(task?.providerName, 'Fallback API');
-      expect(task?.downloadedBytes, 4096);
-      expect(task?.localPlaybackLine?.url, startsWith('file:'));
-    },
-  );
+        await controller
+            .removeDownload(taskId)
+            .timeout(const Duration(milliseconds: 500));
+        expect(
+          container.read(animeControllerProvider).value!.offlineTasks,
+          isEmpty,
+        );
 
-  test(
-    'removing a resolving task never starts the eventual download',
-    () async {
-      final root = await Directory.systemTemp.createTemp(
-        'anime-controller-remove-',
-      );
-      Hive.init(root.path);
-      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-      await settings.put('services', _offlineServices.toJson());
-      await settings.close();
-
-      final repository = _BlockingPeerTubeRepository();
-      final backend = _FallbackDownloadBackend(root);
-      final service = MediaDownloadService(backend: backend);
-      final container = ProviderContainer(
-        overrides: [
-          mediaDownloadServiceProvider.overrideWithValue(service),
-          peerTubeRepositoryProvider.overrideWithValue(repository),
-          sourceCatalogRepositoryProvider.overrideWithValue(
-            const _EmptySourceCatalogRepository(),
+        repository.lines.complete(const [
+          PlaybackLine(
+            id: 'late',
+            episodeId: 101,
+            providerId: 'late',
+            providerName: 'Late MP4',
+            title: 'Late',
+            quality: '720p',
+            format: 'MP4',
+            url: 'https://cdn.example/late.mp4',
+            available: true,
           ),
-        ],
-      );
-      addTearDown(() async {
-        if (!repository.lines.isCompleted) repository.lines.complete(const []);
-        container.dispose();
-        service.dispose();
-        await Hive.close();
-        if (await root.exists()) await root.delete(recursive: true);
-      });
+        ]);
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        expect(backend.urls, isEmpty);
+      },
+    );
 
-      await container.read(animeControllerProvider.future);
-      final controller = container.read(animeControllerProvider.notifier);
-      await controller.queueOffline(_subject, _episode);
-      final taskId = container
-          .read(animeControllerProvider)
-          .value!
-          .offlineTasks
-          .single
-          .id;
+    test(
+      'late completion cannot revive a cancelled task and removes artifacts',
+      () async {
+        final harness = await _LateDownloadHarness.start('cancel');
+        addTearDown(harness.dispose);
 
-      await controller
-          .removeDownload(taskId)
-          .timeout(const Duration(milliseconds: 500));
-      expect(
-        container.read(animeControllerProvider).value!.offlineTasks,
-        isEmpty,
-      );
+        await harness.controller.cancelDownload(harness.taskId);
+        expect(harness.task.status, MediaDownloadTaskStatus.cancelled);
 
-      repository.lines.complete(const [
-        PlaybackLine(
-          id: 'late',
-          episodeId: 101,
-          providerId: 'late',
-          providerName: 'Late MP4',
-          title: 'Late',
-          quality: '720p',
-          format: 'MP4',
-          url: 'https://cdn.example/late.mp4',
-          available: true,
-        ),
-      ]);
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(backend.urls, isEmpty);
-    },
-  );
+        await harness.completeBackend();
+        await _waitUntil(() async {
+          return !await harness.backend.temporary.exists() &&
+              !await harness.backend.target.exists();
+        });
 
-  test(
-    'late completion cannot revive a cancelled task and removes artifacts',
-    () async {
-      final harness = await _LateDownloadHarness.start('cancel');
+        final task = harness.task;
+        expect(task.status, MediaDownloadTaskStatus.cancelled);
+        expect(task.localPath, isNull);
+        expect(task.temporaryPath, isNull);
+        expect(
+          harness.backend.deletedPaths,
+          containsAll([
+            harness.backend.temporary.path,
+            harness.backend.target.path,
+          ]),
+        );
+      },
+    );
+
+    test('late completion cannot overwrite a paused task', () async {
+      final harness = await _LateDownloadHarness.start('pause');
       addTearDown(harness.dispose);
 
-      await harness.controller.cancelDownload(harness.taskId);
-      expect(harness.task.status, MediaDownloadTaskStatus.cancelled);
+      await harness.controller.pauseDownload(harness.taskId);
+      expect(harness.task.status, MediaDownloadTaskStatus.paused);
 
       await harness.completeBackend();
-      await _waitUntil(() async {
-        return !await harness.backend.temporary.exists() &&
-            !await harness.backend.target.exists();
-      });
+      await _waitUntil(() => !harness.service.isActive(harness.taskId));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final task = harness.task;
-      expect(task.status, MediaDownloadTaskStatus.cancelled);
+      expect(await harness.backend.target.exists(), isTrue);
+      expect(task.status, MediaDownloadTaskStatus.paused);
       expect(task.localPath, isNull);
-      expect(task.temporaryPath, isNull);
-      expect(
-        harness.backend.deletedPaths,
-        containsAll([
-          harness.backend.temporary.path,
-          harness.backend.target.path,
-        ]),
-      );
-    },
-  );
-
-  test('late completion cannot overwrite a paused task', () async {
-    final harness = await _LateDownloadHarness.start('pause');
-    addTearDown(harness.dispose);
-
-    await harness.controller.pauseDownload(harness.taskId);
-    expect(harness.task.status, MediaDownloadTaskStatus.paused);
-
-    await harness.completeBackend();
-    await _waitUntil(() => !harness.service.isActive(harness.taskId));
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-
-    final task = harness.task;
-    expect(await harness.backend.target.exists(), isTrue);
-    expect(task.status, MediaDownloadTaskStatus.paused);
-    expect(task.localPath, isNull);
-    expect(task.message, '下载已暂停');
-  });
-
-  test('persisted active task is restored as resumable paused task', () async {
-    final root = await Directory.systemTemp.createTemp(
-      'anime-controller-restore-',
-    );
-    Hive.init(root.path);
-    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
-    await settings.put('services', _offlineServices.toJson());
-    await settings.close();
-    final partial = File('${root.path}/restore.part');
-    await partial.writeAsBytes(List<int>.filled(1024, 3));
-    final stored = MediaDownloadTask(
-      id: 'restore',
-      subject: _subject,
-      episode: _episode,
-      createdAt: DateTime.utc(2026, 7, 18),
-      updatedAt: DateTime.utc(2026, 7, 18),
-      status: MediaDownloadTaskStatus.downloading,
-      providerName: 'Direct MP4',
-      format: 'MP4',
-      url: 'https://cdn.example/video.mp4',
-      downloadedBytes: 1024,
-      totalBytes: 4096,
-      temporaryPath: partial.path,
-    );
-    final library = await Hive.openBox<dynamic>('anime.library.v2');
-    await library.put('offlineTasks', [stored.toJson()]);
-    await library.close();
-
-    final backend = _FallbackDownloadBackend(root);
-    final service = MediaDownloadService(backend: backend);
-    final container = ProviderContainer(
-      overrides: [
-        mediaDownloadServiceProvider.overrideWithValue(service),
-        peerTubeRepositoryProvider.overrideWithValue(
-          _DownloadPeerTubeRepository(),
-        ),
-        sourceCatalogRepositoryProvider.overrideWithValue(
-          const _EmptySourceCatalogRepository(),
-        ),
-      ],
-    );
-    addTearDown(() async {
-      container.dispose();
-      service.dispose();
-      await Hive.close();
-      if (await root.exists()) await root.delete(recursive: true);
+      expect(task.message, '下载已暂停');
     });
 
-    final state = await container.read(animeControllerProvider.future);
-    final restored = state.offlineTasks.single;
+    test(
+      'persisted active task is restored as resumable paused task',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'anime-controller-restore-',
+        );
+        Hive.init(root.path);
+        final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+        await settings.put('services', _offlineServices.toJson());
+        await settings.close();
+        final partial = File('${root.path}/restore.part');
+        await partial.writeAsBytes(List<int>.filled(1024, 3));
+        final stored = MediaDownloadTask(
+          id: 'restore',
+          subject: _subject,
+          episode: _episode,
+          createdAt: DateTime.utc(2026, 7, 18),
+          updatedAt: DateTime.utc(2026, 7, 18),
+          status: MediaDownloadTaskStatus.downloading,
+          providerName: 'Direct MP4',
+          format: 'MP4',
+          url: 'https://cdn.example/video.mp4',
+          downloadedBytes: 1024,
+          totalBytes: 4096,
+          temporaryPath: partial.path,
+        );
+        final library = await Hive.openBox<dynamic>('anime.library.v2');
+        await library.put('offlineTasks', [stored.toJson()]);
+        await library.close();
 
-    expect(restored.status, MediaDownloadTaskStatus.paused);
-    expect(restored.downloadedBytes, 1024);
-    expect(restored.temporaryPath, partial.path);
-    expect(restored.message, contains('可以继续下载'));
-  });
+        final backend = _FallbackDownloadBackend(root);
+        final service = MediaDownloadService(backend: backend);
+        final container = ProviderContainer(
+          overrides: [
+            mediaDownloadServiceProvider.overrideWithValue(service),
+            peerTubeRepositoryProvider.overrideWithValue(
+              _DownloadPeerTubeRepository(),
+            ),
+            sourceCatalogRepositoryProvider.overrideWithValue(
+              const _EmptySourceCatalogRepository(),
+            ),
+          ],
+        );
+        addTearDown(() async {
+          container.dispose();
+          service.dispose();
+          await Hive.close();
+          if (await root.exists()) await root.delete(recursive: true);
+        });
+
+        final state = await container.read(animeControllerProvider.future);
+        final restored = state.offlineTasks.single;
+
+        expect(restored.status, MediaDownloadTaskStatus.paused);
+        expect(restored.downloadedBytes, 1024);
+        expect(restored.temporaryPath, partial.path);
+        expect(restored.message, contains('可以继续下载'));
+      },
+    );
+  }, skip: 'v3 下载必须改用统一后端线路，PeerTube/本地源回退已退出运行链路');
 }
 
 Future<void> _waitUntil(
@@ -563,6 +570,7 @@ class _EmptySourceCatalogRepository extends SourceCatalogRepository {
 
 const _offlineServices = ExternalServiceSettings(
   mediaMetadataEnabled: false,
+  tmdbEnabled: false,
   cinemetaEnabled: false,
   peerTubeEnabled: true,
   wikimediaCommonsEnabled: false,

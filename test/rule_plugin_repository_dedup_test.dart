@@ -133,6 +133,41 @@ void main() {
     },
   );
 
+  test('same-name drpy rules with different scripts remain separate', () {
+    final first = _rule(
+      id: 'drpy:first',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 23),
+      engine: 'drpy-js',
+      includeKazumi: false,
+      baseUrl: '',
+      searchUrl: '',
+      rawConfig: const {'extUrl': 'https://rules-a.example/lib/site.js'},
+    );
+    final second = _rule(
+      id: 'drpy:second',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 23),
+      engine: 'drpy-js',
+      includeKazumi: false,
+      baseUrl: '',
+      searchUrl: '',
+      rawConfig: const {'extUrl': 'https://rules-b.example/lib/site.js'},
+    );
+
+    final repository = RulePluginRepository(extraRules: [first, second]);
+
+    expect(repository.byId(first.id)?.id, first.id);
+    expect(repository.byId(second.id)?.id, second.id);
+    expect(
+      repository.allRules
+          .where((rule) => {first.id, second.id}.contains(rule.id))
+          .map((rule) => rule.id)
+          .toSet(),
+      {first.id, second.id},
+    );
+  });
+
   test('ports, queries and non-Latin names are not collapsed accidentally', () {
     final portA = _rule(
       id: 'user:port-a',
@@ -256,7 +291,7 @@ void main() {
     expect(incompleteXbpq.executionStatus, RuleExecutionStatus.missingConfig);
     expect(
       unsupportedEngine.executionStatus,
-      RuleExecutionStatus.unsupportedEngine,
+      RuleExecutionStatus.missingConfig,
     );
     expect(executable.canResolveNatively, isTrue);
     expect(webView.canResolveNatively, isFalse);
@@ -344,6 +379,7 @@ RulePlugin _rule({
   bool requiresPrivateAuth = false,
   bool includeKazumi = true,
   String? unsupportedReason,
+  Map<String, dynamic> rawConfig = const {},
 }) {
   return RulePlugin(
     id: id,
@@ -372,5 +408,6 @@ RulePlugin _rule({
           )
         : null,
     unsupportedReason: unsupportedReason,
+    rawConfig: rawConfig,
   );
 }

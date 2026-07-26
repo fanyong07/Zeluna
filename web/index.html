@@ -32,6 +32,7 @@
 
   <title>Zeluna</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="preload" href="vendor/hls-1.5.18.min.js" as="script">
 </head>
 <body>
   <!--
@@ -42,6 +43,7 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <script src="vendor/hls-1.5.18.min.js" defer data-anime-hls="true"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

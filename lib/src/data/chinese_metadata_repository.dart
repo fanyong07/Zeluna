@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../domain/anime_models.dart';
 import 'bangumi_metadata_repository.dart';
+import 'chinese_text.dart';
 
 /// A verified Chinese title/summary returned by a public metadata provider.
 class ChineseMetadata {
@@ -39,13 +40,6 @@ class ChineseMetadataRepository {
   static const _defaultAnimeLookupLimit = 36;
   static const _animeLookupConcurrency = 4;
   static final _imdbPattern = RegExp(r'\btt\d{5,12}\b', caseSensitive: false);
-  static final _hanPattern = RegExp(r'[\u3400-\u9fff]');
-  static final _kanaPattern = RegExp(
-    r'[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fd-\u30ff\u31f0-\u31ff\uff66-\uff9d]',
-  );
-  static final _hangulPattern = RegExp(
-    r'[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]',
-  );
   static final _separatorPattern = RegExp(
     r'[^a-z0-9\u3040-\u30ff\u3400-\u9fff]+',
   );
@@ -301,7 +295,12 @@ GROUP BY ?imdb
         (item) => subjectYear != null && _year(item.date) == subjectYear,
         orElse: () => exactMatches.first,
       );
-      final title = _verifiedChinese(candidate.title);
+      final hasDistinctLocalizedTitle =
+          candidate.title.trim() != candidate.originalTitle.trim() ||
+          candidate.language.trim() != '日语';
+      final title = hasDistinctLocalizedTitle
+          ? _verifiedChinese(candidate.title, title: true)
+          : null;
       final summary = _verifiedChinese(candidate.summary);
       final metadata = ChineseMetadata(
         title: title,
@@ -318,7 +317,7 @@ GROUP BY ?imdb
     if (metadata == null || metadata.isEmpty) return subject;
     final fetchedTitle = metadata.title?.trim();
     final fetchedSummary = metadata.summary?.trim();
-    final title = _needsChineseText(subject.title) && fetchedTitle != null
+    final title = _needsChineseTitle(subject.title) && fetchedTitle != null
         ? fetchedTitle
         : subject.title;
     final summary = _needsChineseText(subject.summary) && fetchedSummary != null
@@ -377,23 +376,18 @@ GROUP BY ?imdb
   }
 
   static bool _needsChineseMetadata(AnimeSubject subject) {
-    return _needsChineseText(subject.title) ||
+    return _needsChineseTitle(subject.title) ||
         _needsChineseText(subject.summary);
   }
 
+  static bool _needsChineseTitle(String value) => !isLikelyChineseTitle(value);
+
   static bool _needsChineseText(String value) {
-    final text = value.trim();
-    if (text.isEmpty) return true;
-    if (_kanaPattern.hasMatch(text) || _hangulPattern.hasMatch(text)) {
-      return true;
-    }
-    return !_hanPattern.hasMatch(text);
+    return !isLikelyChineseText(value);
   }
 
-  static String? _verifiedChinese(String? value) {
-    final text = value?.trim() ?? '';
-    return text.isNotEmpty && _hanPattern.hasMatch(text) ? text : null;
-  }
+  static String? _verifiedChinese(String? value, {bool title = false}) =>
+      verifiedChineseText(value, title: title);
 
   static String _animeCacheKey(AnimeSubject subject) {
     if (!_isExternalAnime(subject)) return '';

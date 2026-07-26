@@ -9,6 +9,7 @@ import '../accounts/local_account_repository.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
+import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
@@ -17,8 +18,10 @@ import '../sources/external_source_adapters.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
 import '../sources/source_rule_bridge.dart';
+import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
 import 'chinese_metadata_repository.dart';
+import 'chinese_text.dart';
 import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
 import 'media_download_line_selector.dart';
@@ -27,11 +30,116 @@ import 'media_download_service.dart';
 import 'media_download_task.dart';
 import 'peertube_repository.dart';
 import 'playback_source_repository.dart';
+import 'tmdb_credential_store.dart';
 import 'wikimedia_commons_repository.dart';
+import 'zeluna_backend_catalog_repository.dart';
+import 'zeluna_backend_playback_repository.dart';
 
-final bangumiMetadataRepositoryProvider = Provider<BangumiMetadataRepository>(
-  (ref) => BangumiMetadataRepository(),
+class _CredentialAccountContext {
+  String? _accountId;
+  int _revision = 0;
+
+  ({String? accountId, int revision}) get snapshot =>
+      (accountId: _accountId, revision: _revision);
+
+  void selectAccount(String? accountId) {
+    if (_accountId == accountId) return;
+    _accountId = accountId;
+    _revision++;
+  }
+
+  bool isCurrent(({String? accountId, int revision}) value) =>
+      value.accountId == _accountId && value.revision == _revision;
+}
+
+final _bangumiCredentialAccountContextProvider =
+    Provider<_CredentialAccountContext>((ref) => _CredentialAccountContext());
+
+final _tmdbCredentialAccountContextProvider =
+    Provider<_CredentialAccountContext>((ref) => _CredentialAccountContext());
+
+final bangumiCredentialStoreProvider = Provider<BangumiCredentialStore>(
+  (ref) => BangumiCredentialStore(),
 );
+
+final bangumiBuiltInAccessTokenProvider = Provider<String?>((ref) {
+  return _normalizeBangumiAccessToken(
+    const String.fromEnvironment('BANGUMI_ACCESS_TOKEN'),
+  );
+});
+
+final bangumiMetadataHttpClientProvider = Provider<http.Client>(
+  (ref) => http.Client(),
+);
+
+final tmdbCredentialStoreProvider = Provider<TmdbCredentialStore>(
+  (ref) => TmdbCredentialStore(),
+);
+
+final tmdbBuiltInAccessTokenProvider = Provider<String?>((ref) {
+  return _normalizeTmdbAccessToken(
+    const String.fromEnvironment('TMDB_READ_ACCESS_TOKEN'),
+  );
+});
+
+String? _normalizeTmdbAccessToken(String? value) {
+  final token = value?.trim() ?? '';
+  if (token.length < 32 ||
+      token.length > 2048 ||
+      RegExp(r'[\r\n\s]').hasMatch(token)) {
+    return null;
+  }
+  return token;
+}
+
+String? _normalizeBangumiAccessToken(String? value) {
+  final token = value?.trim() ?? '';
+  if (token.length < 16 ||
+      token.length > 512 ||
+      RegExp(r'\s').hasMatch(token)) {
+    return null;
+  }
+  return token;
+}
+
+final bangumiMetadataRepositoryProvider = Provider<BangumiMetadataRepository>((
+  ref,
+) {
+  final client = ref.read(bangumiMetadataHttpClientProvider);
+  final credentials = ref.read(bangumiCredentialStoreProvider);
+  final accountContext = ref.read(_bangumiCredentialAccountContextProvider);
+  final builtInToken = _normalizeBangumiAccessToken(
+    ref.read(bangumiBuiltInAccessTokenProvider),
+  );
+  final repository = BangumiMetadataRepository(
+    client: client,
+    accessCredentialProvider: () async {
+      if (builtInToken != null) {
+        return BangumiAccessCredential(token: builtInToken);
+      }
+      final snapshot = accountContext.snapshot;
+      final token = await credentials.readAccessToken(
+        accountId: snapshot.accountId,
+      );
+      if (token == null || !accountContext.isCurrent(snapshot)) return null;
+      return BangumiAccessCredential(
+        token: token,
+        accountId: snapshot.accountId,
+      );
+    },
+    onAccessTokenRejected: (credential) {
+      // A build-time credential is application configuration, not account
+      // data. Its rejection must never mutate an account's secure storage.
+      if (builtInToken != null) return Future<void>.value();
+      return credentials.markRejectedToken(
+        accountId: credential.accountId,
+        rejectedToken: credential.token,
+      );
+    },
+  );
+  ref.onDispose(repository.close);
+  return repository;
+});
 
 final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
   (ref) => const EmptyPlaybackSourceRepository(),
@@ -39,18 +147,58 @@ final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
 
 final rulePlaybackResolverProvider = Provider<RulePlaybackResolver>((ref) {
   final client = http.Client();
+  final drpyPublicClient = createDrpyPublicHttpClient();
   ref.onDispose(client.close);
-  return RulePlaybackResolver(client: client);
+  ref.onDispose(drpyPublicClient.close);
+  return RulePlaybackResolver(
+    client: client,
+    drpyPublicClient: drpyPublicClient,
+  );
 });
 
-final internetArchivePlaybackProvider =
-    Provider<InternetArchivePlaybackSourceRepository>(
-      (ref) => InternetArchivePlaybackSourceRepository(),
-    );
+final zelunaBackendHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
 
-final externalServiceRepositoryProvider = Provider<ExternalServiceRepository>(
-  (ref) => ExternalServiceRepository(),
-);
+final externalServiceHttpClientProvider = Provider<http.Client>((ref) {
+  final client = http.Client();
+  ref.onDispose(client.close);
+  return client;
+});
+
+final externalServiceRepositoryProvider = Provider<ExternalServiceRepository>((
+  ref,
+) {
+  final client = ref.read(externalServiceHttpClientProvider);
+  final credentials = ref.read(tmdbCredentialStoreProvider);
+  final accountContext = ref.read(_tmdbCredentialAccountContextProvider);
+  final builtInToken = _normalizeTmdbAccessToken(
+    ref.read(tmdbBuiltInAccessTokenProvider),
+  );
+  return ExternalServiceRepository(
+    client: client,
+    tmdbAccessTokenProvider: () async {
+      if (builtInToken != null) return builtInToken;
+      final snapshot = accountContext.snapshot;
+      final token = await credentials.readAccessToken(
+        accountId: snapshot.accountId,
+      );
+      return token != null && accountContext.isCurrent(snapshot) ? token : null;
+    },
+    onTmdbAccessTokenRejected: (rejectedToken) {
+      // A build-time credential is application configuration, not account
+      // data. Its rejection must never mutate an account's secure storage.
+      if (builtInToken != null) return Future<void>.value();
+      final snapshot = accountContext.snapshot;
+      return credentials.markRejectedToken(
+        accountId: snapshot.accountId,
+        rejectedToken: rejectedToken,
+      );
+    },
+  );
+});
 
 final danmakuRepositoryProvider = Provider<DanmakuRepository>((ref) {
   final repository = DanmakuRepository();
@@ -190,6 +338,10 @@ class AnimeState {
 class AnimeController extends AsyncNotifier<AnimeState> {
   static const _settingsBox = 'anime.settings.v2';
   static const _libraryBox = 'anime.library.v2';
+  static const _pendingBangumiCredentialMigrationKey =
+      'credentials.pending.bangumi.v1';
+  static const _pendingTmdbCredentialMigrationKey =
+      'credentials.pending.tmdb.v1';
   static const _accountSettingKeys = [
     'playback',
     'profile',
@@ -213,26 +365,27 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   static const _seriesMetadataCacheKey = 'metadata.cache.series';
   static const _movieMetadataCacheKey = 'metadata.cache.movie';
   static const _homeFeedCacheKey = 'metadata.cache.home';
-  static const _homeFeedCacheVersion = 2;
-  static const _legacyHomeFeedCacheVersion = 1;
+  static const _homeFeedCacheVersion = 4;
   static const _homeFeedCacheTtl = Duration(hours: 1);
-  static const _metadataCacheVersion = 9;
+  static const _metadataCacheVersion = 10;
   static const _metadataCacheLimit = 1200;
   static const _metadataCacheTtl = Duration(hours: 8);
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
-  static const _sourceCatalogHydrationDelay = Duration(seconds: 1);
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
   late LocalAccountRepository _accountRepository;
   LocalAccount? _activeAccount;
-  List<RulePlugin> _sourceCatalogRules = const [];
   int _homeRefreshVersion = 0;
   int _sourceCatalogRefreshVersion = 0;
   int _accountContextVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
+  final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _playbackPrefetches = <String, Future<void>>{};
+  final _playbackPrefetchCancellationTokens =
+      <String, RulePlaybackCancellationToken>{};
   final _downloadRuns = <String, Future<void>>{};
   final _downloadPersistedAt = <String, DateTime>{};
+  Future<void> _metadataWriteQueue = Future<void>.value();
   Future<void> _downloadWriteQueue = Future<void>.value();
   Future<void> _accountOperationQueue = Future<void>.value();
   Timer? _downloadPersistTimer;
@@ -256,6 +409,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (pendingDeletion != null) {
       await _resumePendingDeletion(pendingDeletion).onError((_, _) {});
     }
+    await _resumePendingBangumiCredentialMigration().onError((_, _) {});
+    await _resumePendingTmdbCredentialMigration().onError((_, _) {});
     final pendingRegistration = _accountRepository.pendingRegistration();
     LocalAccount? recoveredRegistration;
     if (pendingRegistration != null) {
@@ -264,6 +419,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     _activeAccount =
         recoveredRegistration ?? _accountRepository.currentAccount();
+    ref
+        .read(_bangumiCredentialAccountContextProvider)
+        .selectAccount(_activeAccount?.id);
+    ref
+        .read(_tmdbCredentialAccountContextProvider)
+        .selectAccount(_activeAccount?.id);
     final accountSession = LocalAccountSession(
       current: _activeAccount,
       available: _accountRepository.listAccounts(),
@@ -279,39 +440,23 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final danmakuJson = _settings.get(_accountSettingsKey('danmaku'));
     final miscJson = _settings.get(_accountSettingsKey('misc'));
     final servicesJson = _settings.get(_accountSettingsKey('services'));
-    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
-    final sourceEnabledJson = _settings.get(
-      _accountSettingsKey('sourceEnabled'),
+    // v3 统一后端接管全部内容与播放，迁移时清除旧的本地规则/源状态。
+    await Future.wait([
+      _settings.delete(_accountSettingsKey('rulePlugins')),
+      _settings.delete(_accountSettingsKey('sourceEnabled')),
+    ]);
+    final services = _normalizeServices(
+      servicesJson is Map
+          ? ExternalServiceSettings.fromJson(
+              servicesJson.cast<String, dynamic>(),
+            )
+          : const ExternalServiceSettings(),
     );
-    final services = servicesJson is Map
-        ? ExternalServiceSettings.fromJson(servicesJson.cast<String, dynamic>())
-        : const ExternalServiceSettings();
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
-    final cachedHomeFeed = _readHomeFeedCache();
+    final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
     final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
-    final defaultRulePlugins = const RulePluginRepository().defaultState();
-    final rulePlugins = rulePluginsJson is Map
-        ? _mergeDefaultNativeRules(
-            _normalizeRulePlugins(
-              RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>()),
-            ),
-            defaultRulePlugins,
-          )
-        : defaultRulePlugins;
-    if (rulePluginsJson is Map) {
-      await _settings.put(
-        _accountSettingsKey('rulePlugins'),
-        rulePlugins.toJson(),
-      );
-    }
-    final loadedSourceCatalog = await _loadSourceCatalog(
-      _enabledOverridesFromJson(sourceEnabledJson),
-    );
-    final sourceBridge = ref
-        .read(sourceRuleBridgeProvider)
-        .build(loadedSourceCatalog);
-    _sourceCatalogRules = sourceBridge.rules;
-    final sourceCatalog = sourceBridge.attachTo(loadedSourceCatalog);
+    const rulePlugins = RulePluginState();
+    const sourceCatalog = SourceCatalogState();
     final misc = miscJson is Map
         ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
         : const MiscSettings();
@@ -356,78 +501,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         ).onError((_, _) {}),
       );
     }
-    _scheduleSourceCatalogHydration(loadedSourceCatalog);
     ref.onDispose(() {
       _downloadPersistTimer?.cancel();
+      _cancelPlaybackPrefetches();
     });
     return initialState;
   }
 
   Future<List<AnimeSubject>> search(String keyword) async {
     if (keyword.trim().isEmpty) return Future.value(const []);
-    final query = keyword.trim();
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    final sourceCatalog =
-        state.value?.sourceCatalog ?? const SourceCatalogState();
-    final external = ref.read(externalServiceRepositoryProvider);
-    final liveSearch = ref
-        .read(m3uSourceAdapterProvider)
-        .search(sources: sourceCatalog.sources, query: query, limit: 60)
-        .onError((_, _) => const SourceAdapterBatch<M3uChannel>());
-    final groups = await Future.wait([
-      if (services.bangumiEnabled)
-        ref
-            .read(bangumiMetadataRepositoryProvider)
-            .searchSubjects(keyword: query, limit: 48)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.anilistEnabled)
-        external
-            .anilistSearch(query, perPage: 24)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.jikanEnabled)
-        external
-            .jikanSearch(query, limit: 24)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.kitsuEnabled)
-        external
-            .kitsuSearch(query, limit: 20)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.mediaMetadataEnabled && services.cinemetaEnabled)
-        external
-            .cinemetaSearch(query)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.mediaMetadataEnabled)
-        external.tvMazeSearch(query).onError((_, _) => const <AnimeSubject>[]),
-      if (services.mediaMetadataEnabled)
-        external
-            .wikidataMovieSearch(query)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.publicCollectionSyncEnabled)
-        external
-            .internetArchiveSearch(query, limit: 24)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.peerTubeEnabled)
-        ref
-            .read(peerTubeRepositoryProvider)
-            .search(query, limit: 24)
-            .onError((_, _) => const <AnimeSubject>[]),
-      if (services.wikimediaCommonsEnabled)
-        ref
-            .read(wikimediaCommonsRepositoryProvider)
-            .search(query, limit: 24)
-            .onError((_, _) => const <AnimeSubject>[]),
-    ]);
-    final merged = _uniqueSubjects(groups.expand((items) => items));
-    final enriched = await _enrichSubjects(
-      merged,
-      services,
-      animeLookupLimit: 24,
-    );
-    final liveChannels = (await liveSearch).items;
-    return List<AnimeSubject>.unmodifiable([
-      ...enriched,
-      ...liveChannels.map((channel) => channel.toSubject()),
-    ]);
+    final repository = _backendCatalogRepository();
+    if (repository == null) return const [];
+    return repository.search(keyword).onError((_, _) => const []);
   }
 
   Future<SourceAdapterBatch<TorrentResource>> searchTorrentResources(
@@ -444,12 +529,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .search(sources: sourceCatalog.sources, query: query, limit: 36);
   }
 
-  Future<List<AnimeSubject>> categorySubjects(String name) {
-    return ref.read(bangumiMetadataRepositoryProvider).subjectsByCategory(name);
+  Future<List<AnimeSubject>> categorySubjects(String name) async {
+    final subjects = await discoverSubjects(waitForRefresh: true);
+    return subjects
+        .where((item) => item.categories.any((value) => value.name == name))
+        .toList(growable: false);
   }
 
-  Future<List<AnimeSubject>> tagSubjects(String name) {
-    return ref.read(bangumiMetadataRepositoryProvider).subjectsByTag(name);
+  Future<List<AnimeSubject>> tagSubjects(String name) async {
+    final subjects = await discoverSubjects(waitForRefresh: true);
+    return subjects
+        .where((item) => item.tags.any((value) => value.name == name))
+        .toList(growable: false);
   }
 
   Future<List<AnimeSubject>> discoverSubjects({
@@ -469,41 +560,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       fallback: subjects,
       waitForRefresh: waitForRefresh,
       load: () async {
-        final external = ref.read(externalServiceRepositoryProvider);
-        final groups = await Future.wait([
-          if (services.bangumiEnabled)
-            ref
-                .read(bangumiMetadataRepositoryProvider)
-                .discoverySubjects()
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.anilistEnabled)
-            external
-                .anilistTrendingFeed(pages: 3, perPage: 50)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.jikanEnabled)
-            external
-                .jikanDiscoveryFeed(pages: 2)
-                .onError((_, _) => const <AnimeSubject>[]),
-          if (services.kitsuEnabled)
-            external
-                .kitsuTrendingFeed(pages: 4)
-                .onError((_, _) => const <AnimeSubject>[]),
-        ]);
-        final merged =
-            _uniqueSubjects([
-                  ..._interleaveSubjectGroups(groups, limitPerRound: 12),
-                  ...groups.expand((items) => items),
-                  ...subjects,
-                ])
-                .where(
-                  (subject) => subjectMatchesContentType(
-                    subject,
-                    SubjectContentType.anime,
-                  ),
-                )
-                .toList(growable: false);
-        merged.sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
-        return _enrichSubjects(merged, services, animeLookupLimit: 36);
+        final repository = _backendCatalogRepository();
+        return repository == null
+            ? const <AnimeSubject>[]
+            : repository.home(SubjectContentType.anime);
       },
     );
   }
@@ -525,18 +585,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       fallback: _fallbackExternalSeries,
       waitForRefresh: waitForRefresh,
       load: () async {
-        final subjects = await ref
-            .read(externalServiceRepositoryProvider)
-            .seriesMetadataFeed(
-              includeCinemeta: services.cinemetaEnabled,
-              cinemetaPages: 6,
-              tvMazePages: 3,
-            );
-        return _enrichSubjects(
-          _subjectsOfType(subjects, SubjectContentType.series),
-          services,
-          animeLookupLimit: 0,
-        );
+        final repository = _backendCatalogRepository();
+        return repository == null
+            ? const <AnimeSubject>[]
+            : repository.home(SubjectContentType.series);
       },
     );
   }
@@ -555,87 +607,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       fallback: _fallbackExternalMovies,
       waitForRefresh: waitForRefresh,
       load: () async {
-        final groups = await Future.wait([
-          ref
-              .read(externalServiceRepositoryProvider)
-              .movieMetadataFeed(
-                includeCinemeta:
-                    services.mediaMetadataEnabled && services.cinemetaEnabled,
-                includeArchive: false,
-                cinemetaPages: 6,
-              ),
-        ]);
-        final subjects =
-            _uniqueSubjects([
-                  ..._interleaveSubjectGroups(groups, limitPerRound: 10),
-                  ...groups.expand((items) => items),
-                ])
-                .where(
-                  (subject) => subjectMatchesContentType(
-                    subject,
-                    SubjectContentType.movie,
-                  ),
-                )
-                .toList(growable: false);
-        return _enrichSubjects(subjects, services, animeLookupLimit: 0);
+        final repository = _backendCatalogRepository();
+        return repository == null
+            ? const <AnimeSubject>[]
+            : repository.home(SubjectContentType.movie);
       },
     );
   }
 
-  Future<Map<int, List<AnimeSubject>>> weeklySchedule() {
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    return _weeklyScheduleWithBudget(services);
-  }
-
-  Future<Map<int, List<AnimeSubject>>> _weeklyScheduleWithBudget(
-    ExternalServiceSettings services,
-  ) async {
-    const sourceBudget = Duration(seconds: 5);
-    final bangumi = ref.read(bangumiMetadataRepositoryProvider);
-    final primary = services.bangumiEnabled
-        ? await bangumi
-              .weeklySchedule()
-              .timeout(
-                sourceBudget,
-                onTimeout: () => <int, List<AnimeSubject>>{},
-              )
-              .onError((_, _) => <int, List<AnimeSubject>>{})
-        : <int, List<AnimeSubject>>{};
-    final schedule = {
-      for (var day = 0; day < 7; day++)
-        day: _uniqueSubjects(
-          (primary[day] ?? const <AnimeSubject>[]).where(
-            (subject) =>
-                subjectMatchesContentType(subject, SubjectContentType.anime),
-          ),
-        ).take(36).toList(growable: false),
-    };
-    if (schedule.values.any((items) => items.isNotEmpty)) return schedule;
-
-    final homeFallback = _scheduleChineseAnime(_homeSubjects);
-    if (homeFallback.isNotEmpty) {
-      return _groupScheduleSubjects(homeFallback);
-    }
-    final feed = bangumi.fallbackHomeFeed();
-    return _groupScheduleSubjects(
-      _scheduleChineseAnime([
-        feed.hero,
-        ...feed.index,
-        ...feed.recommended,
-        ...feed.recent,
-      ]),
-    );
-  }
-
-  List<AnimeSubject> _scheduleChineseAnime(Iterable<AnimeSubject> subjects) {
-    return _uniqueSubjects(
-      subjects.where(
-        (subject) =>
-            subjectMatchesContentType(subject, SubjectContentType.anime) &&
-            _containsChinese(subject.title) &&
-            _containsChinese(subject.summary),
-      ),
-    );
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
+    final subjects = await discoverSubjects(waitForRefresh: true);
+    return _groupScheduleSubjects(subjects);
   }
 
   Map<int, List<AnimeSubject>> _groupScheduleSubjects(
@@ -659,64 +641,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final cacheKey = _subjectCacheKey(subject);
     final cached = current?.selectedSubjects[cacheKey];
     if (cached != null) {
-      _prefetchDetailPlayback(cached);
+      _prefetchPlayback(cached.subject, cached.episodes);
       return cached;
     }
-    if (subject.source.startsWith('m3u-channel:')) {
-      final channel = await ref
-          .read(m3uSourceAdapterProvider)
-          .resolveSubject(
-            sources:
-                state.value?.sourceCatalog.sources ?? const <VideoSource>[],
-            subject: subject,
-          );
-      final detail =
-          channel?.toDetailBundle() ??
-          AnimeDetailBundle(
-            subject: subject,
-            episodes: const [],
-            characters: const [],
-            staff: const [],
-            recommendations: const [],
-          );
-      _ensureAccountContext(accountContextVersion);
-      final previous = state.value;
-      if (previous != null && accountContextVersion == _accountContextVersion) {
-        state = AsyncData(
-          previous.copyWith(
-            selectedSubjects: {...previous.selectedSubjects, cacheKey: detail},
-          ),
-        );
-      }
-      return detail;
-    }
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    final rawDetail = subject.source == 'bangumi'
-        ? await ref.read(bangumiMetadataRepositoryProvider).detail(subject.id)
-        : await ref
-              .read(externalServiceRepositoryProvider)
-              .externalDetail(subject);
-    final detailSubjects = await _enrichSubjects(
-      [
-        rawDetail.subject,
-        ...rawDetail.recommendations.map((item) => item.subject),
-      ],
-      services,
-      animeLookupLimit: 12,
-    );
-    final detail = AnimeDetailBundle(
-      subject: detailSubjects.first,
-      episodes: rawDetail.episodes,
-      characters: rawDetail.characters,
-      staff: rawDetail.staff,
-      recommendations: [
-        for (var i = 0; i < rawDetail.recommendations.length; i++)
-          AnimeRecommendation(
-            subject: detailSubjects[i + 1],
-            relation: rawDetail.recommendations[i].relation,
-          ),
-      ],
-    );
+    final repository = _backendCatalogRepository();
+    final detail =
+        await repository?.detail(subject) ?? _fallbackDetail(subject);
     _ensureAccountContext(accountContextVersion);
     final previous = state.value;
     if (previous != null && accountContextVersion == _accountContextVersion) {
@@ -726,123 +656,190 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         ),
       );
     }
-    _prefetchDetailPlayback(detail);
+    _prefetchPlayback(detail.subject, detail.episodes);
     return detail;
   }
 
-  void _prefetchDetailPlayback(AnimeDetailBundle detail) {
-    if (detail.episodes.isEmpty || !_usesRulePlayback(detail.subject)) return;
+  void _prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {
+    if (episodes.isEmpty || !_usesBackendPlayback(subject)) return;
     final historyEpisode = state.value?.history
-        .where((item) => sameSubjectIdentity(item.subject, detail.subject))
+        .where((item) => sameSubjectIdentity(item.subject, subject))
         .map((item) => item.episode)
         .whereType<AnimeEpisode>()
         .firstOrNull;
     final episode =
         historyEpisode != null &&
-            detail.episodes.any((item) => item.id == historyEpisode.id)
+            episodes.any((item) => item.id == historyEpisode.id)
         ? historyEpisode
-        : detail.episodes.first;
+        : episodes.first;
     final key =
-        '${detail.subject.source}|${detail.subject.id}|'
-        '${detail.subject.title}|${episode.id}|${episode.number}';
+        '${subject.source}|${subject.id}|'
+        '${subject.title}|${episode.id}|${episode.number}';
     if (_playbackPrefetches.containsKey(key)) return;
 
+    final cancellationToken = RulePlaybackCancellationToken();
     late final Future<void> prefetch;
-    prefetch = linesForEpisode(detail.subject, episode)
-        .then<void>((_) {}, onError: (_, _) {})
-        .whenComplete(() {
+    prefetch =
+        linesForEpisode(
+          subject,
+          episode,
+          cancellationToken: cancellationToken,
+        ).then<void>((_) {}, onError: (_, _) {}).whenComplete(() {
           if (identical(_playbackPrefetches[key], prefetch)) {
             _playbackPrefetches.remove(key);
+            _playbackPrefetchCancellationTokens.remove(key);
           }
         });
     _playbackPrefetches[key] = prefetch;
+    _playbackPrefetchCancellationTokens[key] = cancellationToken;
   }
 
-  bool _usesRulePlayback(AnimeSubject subject) {
-    final source = subject.source.toLowerCase();
-    return source != 'direct' &&
-        !source.startsWith('m3u-channel:') &&
-        !source.startsWith('peertube:') &&
-        !source.startsWith('archive:') &&
-        !source.startsWith('commons:');
+  void _cancelPlaybackPrefetches() {
+    for (final token in _playbackPrefetchCancellationTokens.values) {
+      token.cancel();
+    }
+    _playbackPrefetchCancellationTokens.clear();
+    _playbackPrefetches.clear();
   }
 
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
-    return linesForEpisodeMode(subject, episode);
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    return linesForEpisodeMode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  Future<PlaybackLine> verifyPlaybackLine(
+    PlaybackLine line, {
+    bool enrichMetadata = true,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    return ref
+        .read(rulePlaybackResolverProvider)
+        .verifyPlaybackLine(
+          line: line,
+          enrichMetadata: enrichMetadata,
+          forceRefresh: forceRefresh,
+          cancellationToken: cancellationToken,
+        );
   }
 
   Future<List<PlaybackLine>> linesForEpisodeMode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
     final accountContextVersion = _accountContextVersion;
-    final accountId = _activeAccount?.id;
-    late final List<PlaybackLine> lines;
-    if (subject.source.startsWith('m3u-channel:')) {
-      lines = await _m3uLinesForEpisode(subject, episode);
-    } else if (subject.source.startsWith('peertube:')) {
-      final services = state.value?.services ?? const ExternalServiceSettings();
-      if (!services.peerTubeEnabled) {
-        return const <PlaybackLine>[];
-      }
-      lines = await ref
-          .read(peerTubeRepositoryProvider)
-          .linesForEpisode(subject, episode);
-    } else if (subject.source.startsWith('archive:')) {
-      final services = state.value?.services ?? const ExternalServiceSettings();
-      if (!services.publicCollectionSyncEnabled) {
-        return const <PlaybackLine>[];
-      }
-      lines = await ref
-          .read(internetArchivePlaybackProvider)
-          .linesForEpisode(subject, episode);
-    } else if (subject.source.startsWith('commons:')) {
-      final services = state.value?.services ?? const ExternalServiceSettings();
-      if (!services.wikimediaCommonsEnabled) {
-        return const <PlaybackLine>[];
-      }
-      lines = await ref
-          .read(wikimediaCommonsRepositoryProvider)
-          .linesForEpisode(subject, episode);
-    } else {
-      final ruleState =
-          state.value?.rulePlugins ??
-          const RulePluginRepository().defaultState();
-      final catalogRuleIds = _sourceCatalogRules.map((rule) => rule.id).toSet();
-      final effectiveRuleState = ruleState.copyWith(
-        installedIds: {...ruleState.installedIds, ...catalogRuleIds},
-        enabledIds: {...ruleState.enabledIds, ...catalogRuleIds},
-      );
-      lines = await RulePlaybackSourceRepository(
-        repository: RulePluginRepository(
-          extraRules: [..._sourceCatalogRules, ...ruleState.customRules],
-        ),
-        ruleState: effectiveRuleState,
-        resolver: ref.read(rulePlaybackResolverProvider),
-        cacheNamespace: '${accountId ?? 'guest'}:$accountContextVersion',
-      ).linesForEpisodeMode(subject, episode, expandAll: expandAll);
-    }
-    return accountContextVersion == _accountContextVersion
+    final lines = await _backendLinesForEpisode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+    return accountContextVersion == _accountContextVersion &&
+            !(cancellationToken?.isCancelled ?? false)
         ? lines
         : const <PlaybackLine>[];
   }
 
-  Future<List<PlaybackLine>> _m3uLinesForEpisode(
+  Future<List<PlaybackLine>> _backendLinesForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async {
-    final channel = await ref
-        .read(m3uSourceAdapterProvider)
-        .resolveSubject(
-          sources: state.value?.sourceCatalog.sources ?? const <VideoSource>[],
-          subject: subject,
-        );
-    if (channel == null) return const <PlaybackLine>[];
-    return <PlaybackLine>[channel.toPlaybackLine(episodeId: episode.id)];
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    if (!services.playbackBackendEnabled ||
+        !_usesBackendPlayback(subject) ||
+        ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+              services.playbackBackendEndpoint,
+            ) ==
+            null) {
+      return Future.value(const <PlaybackLine>[]);
+    }
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: services.playbackBackendEndpoint,
+      client: ref.read(zelunaBackendHttpClientProvider),
+      requestTimeout: const Duration(seconds: 4),
+    );
+    return repository
+        .linesForEpisode(subject, episode, cancellationToken: cancellationToken)
+        .timeout(
+          const Duration(seconds: 8),
+          onTimeout: () => const <PlaybackLine>[],
+        )
+        .onError((_, _) => const <PlaybackLine>[]);
+  }
+
+  ZelunaBackendCatalogRepository? _backendCatalogRepository() {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    if (!services.playbackBackendEnabled ||
+        ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+              services.playbackBackendEndpoint,
+            ) ==
+            null) {
+      return null;
+    }
+    return ZelunaBackendCatalogRepository(
+      baseUrl: services.playbackBackendEndpoint,
+      client: ref.read(zelunaBackendHttpClientProvider),
+    );
+  }
+
+  AnimeDetailBundle _fallbackDetail(AnimeSubject subject) {
+    final episodes = [
+      for (var number = 1; number <= subject.totalEpisodes; number++)
+        AnimeEpisode(
+          id: subject.id * 1000 + number,
+          subjectId: subject.id,
+          number: number,
+          title: '',
+          airdate: null,
+          duration: '',
+          description: '',
+        ),
+    ];
+    return AnimeDetailBundle(
+      subject: subject,
+      episodes: episodes,
+      characters: const [],
+      staff: const [],
+      recommendations: const [],
+    );
+  }
+
+  bool _usesBackendPlayback(AnimeSubject subject) {
+    final source = subject.source.toLowerCase();
+    return source == 'bangumi' || source.startsWith('tmdb:');
+  }
+
+  Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async* {
+    final accountContextVersion = _accountContextVersion;
+    final token = cancellationToken ?? RulePlaybackCancellationToken();
+    final lines = await _backendLinesForEpisode(
+      subject,
+      episode,
+      cancellationToken: token,
+    );
+    if (accountContextVersion != _accountContextVersion || token.isCancelled) {
+      return;
+    }
+    yield PlaybackLineLookupUpdate(
+      lines: lines,
+      completedRules: 1,
+      totalRules: 1,
+      phase: PlaybackLineLookupPhase.complete,
+    );
   }
 
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
@@ -1099,9 +1096,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> updateServices(ExternalServiceSettings settings) async {
     final accountId = _activeAccount?.id;
     final accountContextVersion = _accountContextVersion;
-    final normalized = settings.watchHubEnabled
-        ? settings.copyWith(watchHubEnabled: false)
-        : settings;
+    final normalized = _normalizeServices(settings);
     final current = state.value;
     final changed =
         current != null &&
@@ -1123,6 +1118,59 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       if (accountContextVersion == _accountContextVersion) {
         unawaited(_refreshHomeFeed(normalized).onError((_, _) {}));
       }
+    }
+  }
+
+  ExternalServiceSettings _normalizeServices(ExternalServiceSettings settings) {
+    final backendConfigured =
+        ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+          settings.playbackBackendEndpoint,
+        ) !=
+        null;
+    return settings.copyWith(
+      watchHubEnabled: false,
+      mediaMetadataEnabled: true,
+      tmdbEnabled: false,
+      cinemetaEnabled: false,
+      peerTubeEnabled: false,
+      wikimediaCommonsEnabled: false,
+      anilistEnabled: false,
+      jikanEnabled: false,
+      kitsuEnabled: false,
+      bangumiEnabled: false,
+      publicCollectionSyncEnabled: false,
+      preferBangumiChinese: true,
+      playbackBackendEnabled: backendConfigured,
+    );
+  }
+
+  void handleBangumiCredentialChanged() {
+    _cancelPlaybackPrefetches();
+    ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
+    ref.read(chineseMetadataRepositoryProvider).clearMemoryCache();
+    final current = state.value;
+    if (current != null && current.selectedSubjects.isNotEmpty) {
+      state = AsyncData(current.copyWith(selectedSubjects: const {}));
+    }
+  }
+
+  Future<void> handleTmdbCredentialChanged() async {
+    ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
+    _homeRefreshVersion++;
+    _latestMetadataRefreshes.remove(_seriesMetadataCacheKey);
+    _latestMetadataRefreshes.remove(_movieMetadataCacheKey);
+    final current = state.value;
+    if (current != null && current.selectedSubjects.isNotEmpty) {
+      state = AsyncData(current.copyWith(selectedSubjects: const {}));
+    }
+    await Future.wait([
+      _library.delete(_homeFeedCacheKey),
+      _library.delete(_seriesMetadataCacheKey),
+      _library.delete(_movieMetadataCacheKey),
+    ]);
+    final services = state.value?.services;
+    if (services != null && services.mediaMetadataEnabled) {
+      unawaited(_refreshHomeFeed(services).onError((_, _) {}));
     }
   }
 
@@ -1203,7 +1251,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     final refreshVersion = ++_sourceCatalogRefreshVersion;
     final sourceBridge = bridge.build(toggledCatalog);
-    _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(
       current.copyWith(rulePlugins: rulePlugins, sourceCatalog: sourceCatalog),
@@ -1297,7 +1344,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final sourceBridge = ref
         .read(sourceRuleBridgeProvider)
         .build(toggledCatalog);
-    _sourceCatalogRules = sourceBridge.rules;
     final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
     state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
     await _settings.put(
@@ -1305,16 +1351,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       sourceCatalog.enabledById,
     );
     await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
-  }
-
-  void _scheduleSourceCatalogHydration(SourceCatalogState catalog) {
-    final refreshVersion = ++_sourceCatalogRefreshVersion;
-    unawaited(
-      Future<void>.delayed(
-        _sourceCatalogHydrationDelay,
-        () => _hydrateAndApplySourceCatalog(catalog, refreshVersion),
-      ).onError((_, _) {}),
-    );
   }
 
   Future<void> _hydrateAndApplySourceCatalog(
@@ -1328,7 +1364,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (refreshVersion != _sourceCatalogRefreshVersion) return;
     final current = state.value;
     if (current == null) return;
-    _sourceCatalogRules = hydrated.rules;
     state = AsyncData(
       current.copyWith(sourceCatalog: hydrated.attachTo(current.sourceCatalog)),
     );
@@ -1350,17 +1385,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
     final repository = _ruleRepositoryFor(rulePlugins);
     return repository.normalizeState(rulePlugins);
-  }
-
-  RulePluginState _mergeDefaultNativeRules(
-    RulePluginState stored,
-    RulePluginState defaults,
-  ) {
-    final installedIds = {...stored.installedIds, ...defaults.installedIds};
-    final enabledIds = {...stored.enabledIds, ...defaults.enabledIds};
-    return _normalizeRulePlugins(
-      stored.copyWith(installedIds: installedIds, enabledIds: enabledIds),
-    );
   }
 
   Future<RuleImportResult> _importRuleBundle(
@@ -1443,18 +1467,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   RulePluginRepository _ruleRepositoryFor(RulePluginState state) {
     return RulePluginRepository(extraRules: state.customRules);
-  }
-
-  Future<SourceCatalogState> _loadSourceCatalog(
-    Map<String, bool> enabledOverrides,
-  ) async {
-    try {
-      return await ref
-          .read(sourceCatalogRepositoryProvider)
-          .loadCatalog(enabledOverrides: enabledOverrides);
-    } catch (error) {
-      return SourceCatalogState.failed(error);
-    }
   }
 
   Future<bool> toggleFavorite(AnimeSubject subject) async {
@@ -2017,12 +2029,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
-  _HomeFeedCacheSnapshot _readHomeFeedCache() {
+  _HomeFeedCacheSnapshot _readHomeFeedCache(String signature) {
     final value = _library.get(_homeFeedCacheKey);
     if (value is! Map) return const _HomeFeedCacheSnapshot();
     final version = value['version'];
-    if (version != _homeFeedCacheVersion &&
-        version != _legacyHomeFeedCacheVersion) {
+    if (version != _homeFeedCacheVersion ||
+        value['signature']?.toString() != signature) {
       return const _HomeFeedCacheSnapshot();
     }
     final feedJson = value['feed'];
@@ -2033,11 +2045,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       final age = fetchedAt == null
           ? null
           : DateTime.now().toUtc().difference(fetchedAt.toUtc());
-      final fresh =
-          version == _homeFeedCacheVersion &&
-          age != null &&
-          !age.isNegative &&
-          age <= _homeFeedCacheTtl;
+      final fresh = age != null && !age.isNegative && age <= _homeFeedCacheTtl;
       return _HomeFeedCacheSnapshot(feed: feed, fresh: fresh);
     } catch (_) {
       return const _HomeFeedCacheSnapshot();
@@ -2046,25 +2054,42 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<void> _refreshHomeFeed(ExternalServiceSettings services) async {
     final refreshVersion = ++_homeRefreshVersion;
-    final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
-    final fallback = bangumiRepository.fallbackHomeFeed();
-    final groups = await Future.wait<Object>([
-      if (services.bangumiEnabled)
-        bangumiRepository
-            .homeFeed()
-            .timeout(const Duration(seconds: 12), onTimeout: () => fallback)
-            .onError((_, _) => fallback)
-      else
-        Future.value(fallback),
-      _loadHomeHighlights(services).onError((_, _) => const _HomeHighlights()),
-    ]);
-    final feed = _composeHomeFeed(
-      groups[0] as AnimeHomeFeed,
-      groups[1] as _HomeHighlights,
+    final repository = _backendCatalogRepository();
+    if (repository == null) return;
+    final groups =
+        await Future.wait([
+          repository.home(SubjectContentType.anime),
+          repository.home(SubjectContentType.series),
+          repository.home(SubjectContentType.movie),
+        ]).onError(
+          (_, _) => const [
+            <AnimeSubject>[],
+            <AnimeSubject>[],
+            <AnimeSubject>[],
+          ],
+        );
+    final anime = _uniqueSubjects(groups[0]);
+    if (anime.isEmpty || refreshVersion != _homeRefreshVersion) return;
+    final categories = <String, AnimeCategory>{};
+    for (final subject in anime) {
+      for (final category in subject.categories) {
+        categories.putIfAbsent(category.name, () => category);
+      }
+    }
+    final feed = AnimeHomeFeed(
+      hero: anime.first,
+      recent: anime.take(24).toList(growable: false),
+      recommended: anime.skip(8).take(24).toList(growable: false),
+      index: anime,
+      categories: categories.values.toList(growable: false),
+      tags: const [],
+      seriesHighlights: _uniqueSubjects(groups[1]),
+      movieHighlights: _uniqueSubjects(groups[2]),
     );
     if (refreshVersion != _homeRefreshVersion) return;
     await _library.put(_homeFeedCacheKey, {
       'version': _homeFeedCacheVersion,
+      'signature': _servicesSignature(services),
       'fetchedAt': DateTime.now().toUtc().toIso8601String(),
       'feed': feed.toJson(),
     });
@@ -2074,6 +2099,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
   }
 
+  // Legacy metadata merge is retained temporarily for migration rollback.
+  // ignore: unused_element
   Future<_HomeHighlights> _loadHomeHighlights(
     ExternalServiceSettings services,
   ) async {
@@ -2096,16 +2123,30 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           (groups) => _uniqueSubjects([
             ..._interleaveSubjectGroups(groups, limitPerRound: 8),
             ...groups.expand((items) => items),
-          ]),
+          ], preferChinese: services.preferBangumiChinese),
         );
     final seriesFuture =
-        services.mediaMetadataEnabled && services.cinemetaEnabled
-        ? external
-              .cinemetaFeed(type: 'series', pages: 1)
-              .onError((_, _) => const <AnimeSubject>[])
-        : Future.value(const <AnimeSubject>[]);
+        Future.wait([
+          if (services.mediaMetadataEnabled && services.tmdbEnabled)
+            external
+                .tmdbSeriesFeed(pages: 1)
+                .onError((_, _) => const <AnimeSubject>[]),
+          if (services.mediaMetadataEnabled && services.cinemetaEnabled)
+            external
+                .cinemetaFeed(type: 'series', pages: 1)
+                .onError((_, _) => const <AnimeSubject>[]),
+        ]).then(
+          (groups) => _uniqueSubjects([
+            ..._interleaveSubjectGroups(groups, limitPerRound: 6),
+            ...groups.expand((items) => items),
+          ], preferChinese: services.preferBangumiChinese),
+        );
     final movieFuture =
         Future.wait([
+          if (services.mediaMetadataEnabled && services.tmdbEnabled)
+            external
+                .tmdbMovieFeed(pages: 1)
+                .onError((_, _) => const <AnimeSubject>[]),
           if (services.mediaMetadataEnabled)
             external
                 .movieMetadataFeed(
@@ -2118,7 +2159,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           (groups) => _uniqueSubjects([
             ..._interleaveSubjectGroups(groups, limitPerRound: 6),
             ...groups.expand((items) => items),
-          ]),
+          ], preferChinese: services.preferBangumiChinese),
         );
     final groups = await Future.wait([animeFuture, seriesFuture, movieFuture])
         .timeout(
@@ -2126,12 +2167,29 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           onTimeout: () => const <List<AnimeSubject>>[[], [], []],
         );
     final enriched = await Future.wait([
-      _enrichSubjects(groups[0], services, animeLookupLimit: 12),
-      _enrichSubjects(groups[1], services, animeLookupLimit: 0),
-      _enrichSubjects(groups[2], services, animeLookupLimit: 0),
-    ]).timeout(const Duration(seconds: 8), onTimeout: () => groups);
+      _enrichSubjects(
+        groups[0],
+        services,
+        animeLookupLimit: 12,
+      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[0]),
+      _enrichSubjects(
+        groups[1],
+        services,
+        animeLookupLimit: 0,
+      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[1]),
+      _enrichSubjects(
+        groups[2],
+        services,
+        animeLookupLimit: 0,
+      ).timeout(const Duration(seconds: 8), onTimeout: () => groups[2]),
+    ]);
+    final anime = services.preferBangumiChinese
+        ? enriched[0]
+              .where(_passesChineseAnimePreference)
+              .toList(growable: false)
+        : enriched[0];
     return _HomeHighlights(
-      anime: enriched[0],
+      anime: anime,
       series: enriched[1],
       movies: enriched[2],
     );
@@ -2150,7 +2208,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           .read(chineseMetadataRepositoryProvider)
           .enrichSubjects(
             items,
-            useBangumiForAnime: services.preferBangumiChinese,
+            useBangumiForAnime:
+                services.preferBangumiChinese && services.bangumiEnabled,
             animeLookupLimit: animeLookupLimit,
           )
           .timeout(const Duration(seconds: 24), onTimeout: () => items);
@@ -2158,6 +2217,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       enriched = items;
     }
     return enriched.map(_localizeSubjectLabels).toList(growable: false);
+  }
+
+  bool _passesChineseAnimePreference(AnimeSubject subject) {
+    if (!subjectMatchesContentType(subject, SubjectContentType.anime)) {
+      return true;
+    }
+    final source = subject.source.trim().toLowerCase();
+    if (source != 'anilist' && source != 'jikan' && source != 'kitsu') {
+      return true;
+    }
+    // Keep a correctly localized title even when no reliable Chinese synopsis
+    // exists. The catalog replaces that synopsis with a Chinese placeholder,
+    // so missing translations do not remove otherwise valid shows.
+    return isLikelyChineseTitle(subject.title);
   }
 
   AnimeSubject _localizeSubjectLabels(AnimeSubject subject) {
@@ -2284,10 +2357,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return true;
   }
 
+  // ignore: unused_element
   AnimeHomeFeed _composeHomeFeed(
     AnimeHomeFeed base,
-    _HomeHighlights highlights,
-  ) {
+    _HomeHighlights highlights, {
+    required bool preferChinese,
+  }) {
     final animeHighlights = _subjectsOfType(
       highlights.anime,
       SubjectContentType.anime,
@@ -2311,7 +2386,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         animeBaseRecent,
       ], limitPerRound: 4),
       ...animeBaseIndex,
-    ]);
+    ], preferChinese: preferChinese);
     final rankedAll = [...all]
       ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
     final heroCandidates =
@@ -2319,7 +2394,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ..sort((a, b) => _homeRank(b).compareTo(_homeRank(a)));
     final hero = heroCandidates.firstOrNull ?? base.hero;
     final recentCandidates =
-        _uniqueSubjects([...animeBaseRecent, ...animeHighlights])..sort((a, b) {
+        _uniqueSubjects([
+          ...animeBaseRecent,
+          ...animeHighlights,
+        ], preferChinese: preferChinese)..sort((a, b) {
           final rankOrder = _homeRank(b).compareTo(_homeRank(a));
           if (rankOrder != 0) return rankOrder;
           return (b.date ?? '').compareTo(a.date ?? '');
@@ -2361,8 +2439,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     var score = ((subject.ratingScore ?? 0) * 10).round();
     if ((subject.bannerUrl ?? '').isNotEmpty) score += 30;
     if ((subject.coverUrl ?? '').isNotEmpty) score += 12;
-    if (_containsChinese(subject.title)) score += 20;
-    if (_containsChinese(subject.summary)) score += 6;
+    if (isLikelyChineseTitle(subject.title)) score += 20;
+    if (isLikelyChineseText(subject.summary)) score += 6;
     if (_isDirectPlayable(subject)) score += 4;
     final date = DateTime.tryParse(subject.date ?? '');
     if (date != null) {
@@ -2397,39 +2475,31 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final servicesJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'services'),
     );
-    final rulePluginsJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'rulePlugins'),
-    );
-    final sourceEnabledJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'sourceEnabled'),
-    );
+    await Future.wait([
+      _settings.delete(_accountSettingsKeyFor(accountId, 'rulePlugins')),
+      _settings.delete(_accountSettingsKeyFor(accountId, 'sourceEnabled')),
+    ]);
     final misc = miscJson is Map
         ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
         : const MiscSettings();
-    final services = servicesJson is Map
-        ? ExternalServiceSettings.fromJson(servicesJson.cast<String, dynamic>())
-        : const ExternalServiceSettings();
-    final defaultRulePlugins = const RulePluginRepository().defaultState();
-    final rulePlugins = rulePluginsJson is Map
-        ? _mergeDefaultNativeRules(
-            _normalizeRulePlugins(
-              RulePluginState.fromJson(rulePluginsJson.cast<String, dynamic>()),
-            ),
-            defaultRulePlugins,
-          )
-        : defaultRulePlugins;
-    final loadedSourceCatalog = await _loadSourceCatalog(
-      _enabledOverridesFromJson(sourceEnabledJson),
+    final services = _normalizeServices(
+      servicesJson is Map
+          ? ExternalServiceSettings.fromJson(
+              servicesJson.cast<String, dynamic>(),
+            )
+          : const ExternalServiceSettings(),
     );
-    final sourceBridge = ref
-        .read(sourceRuleBridgeProvider)
-        .build(loadedSourceCatalog);
-    final sourceCatalog = sourceBridge.attachTo(loadedSourceCatalog);
+    const rulePlugins = RulePluginState();
+    const sourceCatalog = SourceCatalogState();
     final offlineTasks = await _readDownloadTasksFor(accountId);
     final current = state.value;
     if (current == null) return;
     await _accountRepository.setActiveAccount(accountId);
     _activeAccount = account;
+    ref.read(_bangumiCredentialAccountContextProvider).selectAccount(accountId);
+    ref.read(_tmdbCredentialAccountContextProvider).selectAccount(accountId);
+    ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
+    ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
     _accountContextVersion++;
     RulePlaybackSourceRepository.clearRuntimeCaches();
     ref.read(rulePlaybackResolverProvider).clearCaches();
@@ -2438,8 +2508,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
     _homeRefreshVersion++;
     _sourceCatalogRefreshVersion++;
-    _playbackPrefetches.clear();
-    _sourceCatalogRules = sourceBridge.rules;
+    _cancelPlaybackPrefetches();
     final session = LocalAccountSession(
       current: account,
       available: _accountRepository.listAccounts(),
@@ -2478,7 +2547,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     await WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {});
     unawaited(_refreshHomeFeed(services).onError((_, _) {}));
-    _scheduleSourceCatalogHydration(loadedSourceCatalog);
   }
 
   Future<void> _resumePendingRegistration(
@@ -2486,6 +2554,25 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   ) async {
     final accountId = pending.account.id;
     if (pending.importGuestData) {
+      await _settings.put(_pendingBangumiCredentialMigrationKey, accountId);
+      try {
+        await ref
+            .read(bangumiCredentialStoreProvider)
+            .migrateGuestToAccount(accountId);
+        await _settings.delete(_pendingBangumiCredentialMigrationKey);
+      } catch (_) {
+        // Registration remains usable. A non-secret pending marker retries
+        // the secure-store migration on the next startup.
+      }
+      await _settings.put(_pendingTmdbCredentialMigrationKey, accountId);
+      try {
+        await ref
+            .read(tmdbCredentialStoreProvider)
+            .migrateGuestToAccount(accountId);
+        await _settings.delete(_pendingTmdbCredentialMigrationKey);
+      } catch (_) {
+        // Keep registration usable and retry the non-secret marker later.
+      }
       for (final key in _accountSettingKeys) {
         if (key == 'profile') continue;
         final value = _settings.get(key);
@@ -2509,6 +2596,48 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       }
     }
     await _accountRepository.completeRegistration(accountId);
+  }
+
+  Future<void> _resumePendingBangumiCredentialMigration() async {
+    final accountId = _settings
+        .get(_pendingBangumiCredentialMigrationKey)
+        ?.toString()
+        .trim();
+    if (accountId == null || accountId.isEmpty) return;
+    if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
+    final pendingRegistration = _accountRepository.pendingRegistration();
+    final accountExists = _accountRepository.listAccounts().any(
+      (account) => account.id == accountId,
+    );
+    if (!accountExists && pendingRegistration?.account.id != accountId) {
+      await _settings.delete(_pendingBangumiCredentialMigrationKey);
+      return;
+    }
+    await ref
+        .read(bangumiCredentialStoreProvider)
+        .migrateGuestToAccount(accountId);
+    await _settings.delete(_pendingBangumiCredentialMigrationKey);
+  }
+
+  Future<void> _resumePendingTmdbCredentialMigration() async {
+    final accountId = _settings
+        .get(_pendingTmdbCredentialMigrationKey)
+        ?.toString()
+        .trim();
+    if (accountId == null || accountId.isEmpty) return;
+    if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
+    final pendingRegistration = _accountRepository.pendingRegistration();
+    final accountExists = _accountRepository.listAccounts().any(
+      (account) => account.id == accountId,
+    );
+    if (!accountExists && pendingRegistration?.account.id != accountId) {
+      await _settings.delete(_pendingTmdbCredentialMigrationKey);
+      return;
+    }
+    await ref
+        .read(tmdbCredentialStoreProvider)
+        .migrateGuestToAccount(accountId);
+    await _settings.delete(_pendingTmdbCredentialMigrationKey);
   }
 
   Future<void> _resumePendingDeletion(
@@ -2543,6 +2672,25 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       await attempt(
         () => _library.delete(_accountLibraryKeyFor(pending.accountId, key)),
       );
+    }
+    await attempt(
+      () => ref
+          .read(bangumiCredentialStoreProvider)
+          .clearAccount(pending.accountId),
+    );
+    await attempt(
+      () =>
+          ref.read(tmdbCredentialStoreProvider).clearAccount(pending.accountId),
+    );
+    if (_settings.get(_pendingBangumiCredentialMigrationKey)?.toString() ==
+        pending.accountId) {
+      await attempt(
+        () => _settings.delete(_pendingBangumiCredentialMigrationKey),
+      );
+    }
+    if (_settings.get(_pendingTmdbCredentialMigrationKey)?.toString() ==
+        pending.accountId) {
+      await attempt(() => _settings.delete(_pendingTmdbCredentialMigrationKey));
     }
     if (firstError == null) {
       await _accountRepository.completeDeletion(pending.accountId);
@@ -2793,15 +2941,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {
     final value = _library.get(key);
-    if (value is List) {
-      final legacy = value
-          .whereType<Map>()
-          .map((item) => AnimeSubject.fromJson(item.cast<String, dynamic>()))
-          .where((item) => item.title.trim().isNotEmpty)
-          .toList();
-      return _SubjectCacheSnapshot(subjects: legacy, fresh: false);
-    }
+    if (value is List) return const _SubjectCacheSnapshot();
     if (value is! Map) return const _SubjectCacheSnapshot();
+    if (value['version'] != _metadataCacheVersion ||
+        value['signature']?.toString() != signature) {
+      return const _SubjectCacheSnapshot();
+    }
     final rawSubjects = value['subjects'];
     final subjects = rawSubjects is List
         ? rawSubjects
@@ -2882,8 +3027,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     String signature,
     Future<List<AnimeSubject>> Function() load,
   ) {
-    final active = _metadataRefreshes[key];
-    if (active != null) return active;
+    final operationKey = '$key\u0000$signature';
+    final active = _metadataRefreshes[operationKey];
+    if (active != null && identical(_latestMetadataRefreshes[key], active)) {
+      return active;
+    }
     late final Future<List<AnimeSubject>> task;
     task = () async {
       final refreshed = _uniqueSubjects(await load());
@@ -2892,7 +3040,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         ...refreshed,
         ..._compatibleCachedSubjects(key, signature),
       ]);
-      await _library.put(key, {
+      if (!identical(_latestMetadataRefreshes[key], task)) {
+        return const <AnimeSubject>[];
+      }
+      final payload = {
         'version': _metadataCacheVersion,
         'signature': signature,
         'fetchedAt': DateTime.now().toUtc().toIso8601String(),
@@ -2901,20 +3052,34 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             .take(_metadataCacheLimit)
             .map((item) => item.toJson())
             .toList(growable: false),
+      };
+      final write = _metadataWriteQueue.then((_) async {
+        if (!identical(_latestMetadataRefreshes[key], task)) return;
+        await _library.put(key, payload);
       });
-      return subjects;
+      _metadataWriteQueue = write.then<void>((_) {}, onError: (_, _) {});
+      await write;
+      return identical(_latestMetadataRefreshes[key], task)
+          ? subjects
+          : const <AnimeSubject>[];
     }();
-    _metadataRefreshes[key] = task;
+    _metadataRefreshes[operationKey] = task;
+    _latestMetadataRefreshes[key] = task;
     return task.whenComplete(() {
-      if (identical(_metadataRefreshes[key], task)) {
-        _metadataRefreshes.remove(key);
+      if (identical(_metadataRefreshes[operationKey], task)) {
+        _metadataRefreshes.remove(operationKey);
+      }
+      if (identical(_latestMetadataRefreshes[key], task)) {
+        _latestMetadataRefreshes.remove(key);
       }
     });
   }
 
   List<AnimeSubject> _compatibleCachedSubjects(String key, String signature) {
     final value = _library.get(key);
-    if (value is! Map || value['signature']?.toString() != signature) {
+    if (value is! Map ||
+        value['version'] != _metadataCacheVersion ||
+        value['signature']?.toString() != signature) {
       return const [];
     }
     final rawSubjects = value['subjects'];
@@ -2943,6 +3108,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   String _servicesSignature(ExternalServiceSettings services) {
     return [
       services.mediaMetadataEnabled,
+      services.tmdbEnabled,
       services.cinemetaEnabled,
       services.anilistEnabled,
       services.jikanEnabled,
@@ -2977,7 +3143,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return result;
   }
 
-  List<AnimeSubject> _uniqueSubjects(Iterable<AnimeSubject> subjects) {
+  List<AnimeSubject> _uniqueSubjects(
+    Iterable<AnimeSubject> subjects, {
+    bool? preferChinese,
+  }) {
+    final shouldPreferChinese =
+        preferChinese ?? state.value?.services.preferBangumiChinese ?? true;
     final keyToIndex = <String, int>{};
     final unique = <AnimeSubject>[];
     for (final subject in subjects) {
@@ -2999,7 +3170,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         }
         continue;
       }
-      final merged = _mergeSubjects(unique[existingIndex], subject);
+      final merged = _mergeSubjects(
+        unique[existingIndex],
+        subject,
+        preferChinese: shouldPreferChinese,
+      );
       unique[existingIndex] = merged;
       for (final key in _subjectIdentityKeys(merged)) {
         keyToIndex[key] = existingIndex;
@@ -3029,35 +3204,70 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return keys;
   }
 
-  AnimeSubject _mergeSubjects(AnimeSubject first, AnimeSubject second) {
+  AnimeSubject _mergeSubjects(
+    AnimeSubject first,
+    AnimeSubject second, {
+    required bool preferChinese,
+  }) {
     final firstDirect = _isDirectPlayable(first);
     final secondDirect = _isDirectPlayable(second);
+    final firstBangumi = _isBangumiSubject(first);
+    final secondBangumi = _isBangumiSubject(second);
     final primary = firstDirect != secondDirect
         ? (firstDirect ? first : second)
         : _subjectQuality(second) > _subjectQuality(first)
         ? second
         : first;
     final secondary = identical(primary, first) ? second : first;
-    final title = _containsChinese(primary.title)
+    final bangumiMetadata =
+        preferChinese &&
+            !firstDirect &&
+            !secondDirect &&
+            firstBangumi != secondBangumi &&
+            subjectMatchesContentType(first, SubjectContentType.anime) &&
+            subjectMatchesContentType(second, SubjectContentType.anime)
+        ? (firstBangumi ? first : second)
+        : null;
+    final displayPrimary = bangumiMetadata ?? primary;
+    final displaySecondary = identical(displayPrimary, first) ? second : first;
+    final title = !preferChinese
         ? primary.title
-        : _containsChinese(secondary.title)
-        ? secondary.title
-        : primary.title;
-    final categories = <String, AnimeCategory>{
-      for (final item in primary.categories) item.name: item,
-      for (final item in secondary.categories) item.name: item,
-    }.values.take(8).toList(growable: false);
-    final tags = <String, AnimeTag>{
-      for (final item in primary.tags) item.name: item,
-      for (final item in secondary.tags) item.name: item,
-    }.values.take(20).toList(growable: false);
+        : isLikelyChineseTitle(displayPrimary.title)
+        ? displayPrimary.title
+        : isLikelyChineseTitle(displaySecondary.title)
+        ? displaySecondary.title
+        : displayPrimary.title;
+    final keepBangumiLabels = bangumiMetadata != null;
+    final categories = !preferChinese
+        ? primary.categories
+        : keepBangumiLabels
+        ? displayPrimary.categories
+        : <String, AnimeCategory>{
+            for (final item in primary.categories) item.name: item,
+            for (final item in secondary.categories) item.name: item,
+          }.values.take(8).toList(growable: false);
+    final tags = !preferChinese
+        ? primary.tags
+        : keepBangumiLabels
+        ? displayPrimary.tags
+        : <String, AnimeTag>{
+            for (final item in primary.tags) item.name: item,
+            for (final item in secondary.tags) item.name: item,
+          }.values.take(20).toList(growable: false);
     return AnimeSubject(
       id: primary.id,
       title: title,
       originalTitle: primary.originalTitle.trim().isNotEmpty
           ? primary.originalTitle
           : secondary.originalTitle,
-      summary: _preferredLocalizedText(primary.summary, secondary.summary),
+      summary: !preferChinese
+          ? primary.summary
+          : keepBangumiLabels
+          ? _preferredBangumiSummary(
+              displayPrimary.summary,
+              displaySecondary.summary,
+            )
+          : _preferredLocalizedText(primary.summary, secondary.summary),
       coverUrl:
           _isDirectPlayable(primary) &&
               secondary.source.startsWith('cinemeta:') &&
@@ -3092,8 +3302,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     var score = 0;
     if ((subject.bannerUrl ?? '').isNotEmpty) score += 16;
     if ((subject.coverUrl ?? '').isNotEmpty) score += 8;
-    if (_containsChinese(subject.title)) score += 4;
-    if (subject.summary.length >= 80) score += 3;
+    if (isLikelyChineseTitle(subject.title)) score += 4;
+    if (!isMetadataPlaceholder(subject.summary) &&
+        subject.summary.length >= 80) {
+      score += 3;
+    }
     if (subject.ratingScore != null) score += 3;
     if (subject.totalEpisodes > 0) score += 2;
     return score;
@@ -3105,15 +3318,27 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         subject.source.startsWith('commons:');
   }
 
-  bool _containsChinese(String value) {
-    return RegExp(r'[\u3400-\u9fff]').hasMatch(value);
+  bool _isBangumiSubject(AnimeSubject subject) {
+    final source = subject.source.trim().toLowerCase();
+    return source == 'bangumi' || source.startsWith('bangumi:');
   }
 
   String _preferredLocalizedText(String first, String second) {
-    final firstChinese = _containsChinese(first);
-    final secondChinese = _containsChinese(second);
+    final firstPlaceholder = isMetadataPlaceholder(first);
+    final secondPlaceholder = isMetadataPlaceholder(second);
+    if (firstPlaceholder != secondPlaceholder) {
+      return firstPlaceholder ? second : first;
+    }
+    final firstChinese = isLikelyChineseText(first);
+    final secondChinese = isLikelyChineseText(second);
     if (firstChinese != secondChinese) return firstChinese ? first : second;
     return first.length >= second.length ? first : second;
+  }
+
+  String _preferredBangumiSummary(String bangumi, String fallback) {
+    if (isLikelyChineseText(bangumi)) return bangumi;
+    if (isLikelyChineseText(fallback)) return fallback;
+    return isMetadataPlaceholder(bangumi) ? bangumi : '暂无中文简介。';
   }
 
   List<AnimeSubject> get _homeSubjects {
@@ -3151,16 +3376,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .map((item) => LocalFeedback.fromJson(item.cast<String, dynamic>()))
         .where((item) => item.title.trim().isNotEmpty)
         .toList();
-  }
-
-  Map<String, bool> _enabledOverridesFromJson(Object? value) {
-    if (value is! Map) return const {};
-    return {
-      for (final entry in value.entries)
-        entry.key.toString(): entry.value is bool
-            ? entry.value as bool
-            : entry.value.toString().toLowerCase() == 'true',
-    };
   }
 }
 

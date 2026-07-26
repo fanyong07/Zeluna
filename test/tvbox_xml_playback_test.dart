@@ -11,11 +11,8 @@ void main() {
     () async {
       final client = MockClient((request) async {
         if (request.url.host == 'cdn.example.com') {
-          return http.Response(
-            'video',
-            206,
-            headers: {'content-type': 'video/mp2t'},
-          );
+          if (request.url.path.endsWith('.m3u8')) return _playableHls();
+          return _playableSegment();
         }
         expect(request.url.host, 'api.example.com');
         expect(request.url.queryParameters['wd'], '测试番剧');
@@ -58,11 +55,8 @@ void main() {
     var successfulDetailRequests = 0;
     final client = MockClient((request) async {
       if (request.url.host == 'cdn.example.com') {
-        return http.Response(
-          'video',
-          206,
-          headers: {'content-type': 'video/mp2t'},
-        );
+        if (request.url.path.endsWith('.m3u8')) return _playableHls();
+        return _playableSegment();
       }
       final hasVodId = request.url.queryParameters['ids'] == '7';
       if (!hasVodId) {
@@ -111,6 +105,23 @@ void main() {
     expect(lines.single.available, isTrue);
     expect(lines.single.url, 'https://cdn.example.com/ep2.m3u8');
   });
+}
+
+http.Response _playableHls() => http.Response(
+  '#EXTM3U\n#EXTINF:10.0,\nsegment.ts\n#EXT-X-ENDLIST\n',
+  200,
+  headers: {'content-type': 'application/vnd.apple.mpegurl'},
+);
+
+http.Response _playableSegment() {
+  final bytes = List<int>.filled(188 * 2, 0);
+  bytes[0] = 0x47;
+  bytes[188] = 0x47;
+  return http.Response.bytes(
+    bytes,
+    206,
+    headers: {'content-type': 'video/mp2t'},
+  );
 }
 
 final _xmlApiRule = RulePlugin(

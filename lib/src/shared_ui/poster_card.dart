@@ -167,12 +167,14 @@ class PosterArt extends StatelessWidget {
     super.key,
     required this.coverUrl,
     required this.title,
+    this.fallbackCoverUrl,
     this.fit = BoxFit.cover,
     this.alignment = Alignment.center,
     this.allowHtmlFallback = true,
   });
 
   final String? coverUrl;
+  final String? fallbackCoverUrl;
   final String title;
   final BoxFit fit;
   final AlignmentGeometry alignment;
@@ -181,7 +183,9 @@ class PosterArt extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fallbackColor = _fallbackColor(coverUrl, title);
-    final url = coverUrl?.trim() ?? '';
+    final primaryUrl = coverUrl?.trim() ?? '';
+    final secondaryUrl = fallbackCoverUrl?.trim() ?? '';
+    final url = _isNetworkUrl(primaryUrl) ? primaryUrl : secondaryUrl;
     if (_isNetworkUrl(url)) {
       return LayoutBuilder(
         builder: (context, constraints) {
@@ -194,22 +198,26 @@ class PosterArt extends StatelessWidget {
             constraints.hasBoundedHeight ? constraints.maxHeight : null,
             pixelRatio,
           );
-          return Image.network(
+          final candidates = posterImageCandidates(
             url,
+            targetPixelWidth: cacheWidth,
+            webProxyBase: kIsWeb ? Uri.base : null,
+            fallbackValues:
+                _isNetworkUrl(primaryUrl) &&
+                    _isNetworkUrl(secondaryUrl) &&
+                    primaryUrl != secondaryUrl
+                ? [secondaryUrl]
+                : const [],
+          );
+          return _RetryingNetworkImage(
+            urls: candidates,
             fit: fit,
             alignment: alignment,
-            filterQuality: FilterQuality.low,
             cacheWidth: cacheWidth,
             cacheHeight: cacheHeight,
-            webHtmlElementStrategy: allowHtmlFallback
-                ? WebHtmlElementStrategy.fallback
-                : WebHtmlElementStrategy.never,
-            frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-              if (wasSynchronouslyLoaded || frame != null) return child;
-              return PosterPlaceholder(color: fallbackColor, title: title);
-            },
-            errorBuilder: (context, error, stackTrace) =>
-                PosterPlaceholder(color: fallbackColor, title: title),
+            allowHtmlFallback: allowHtmlFallback,
+            fallbackColor: fallbackColor,
+            title: title,
           );
         },
       );
@@ -233,13 +241,9 @@ class _PosterCardBackdropArt extends StatelessWidget {
   Widget build(BuildContext context) {
     final banner = bannerUrl?.trim() ?? '';
     final poster = posterUrl?.trim() ?? '';
-    final imageUrl = _isNetworkUrl(banner)
-        ? banner
-        : _isNetworkUrl(poster)
-        ? poster
-        : null;
     return PosterArt(
-      coverUrl: imageUrl == null ? null : _backdropUrl(imageUrl),
+      coverUrl: _isNetworkUrl(banner) ? banner : null,
+      fallbackCoverUrl: _isNetworkUrl(poster) ? poster : null,
       title: title,
       allowHtmlFallback: false,
     );
@@ -263,7 +267,10 @@ class BackdropArt extends StatelessWidget {
     final banner = bannerUrl?.trim() ?? '';
     if (_isNetworkUrl(banner)) {
       return PosterArt(
-        coverUrl: _backdropUrl(banner),
+        coverUrl: banner,
+        fallbackCoverUrl: _isNetworkUrl(posterUrl?.trim() ?? '')
+            ? posterUrl!.trim()
+            : null,
         title: title,
         allowHtmlFallback: false,
       );
@@ -280,7 +287,7 @@ class BackdropArt extends StatelessWidget {
           child: Transform.scale(
             scale: 1.16,
             child: PosterArt(
-              coverUrl: _backdropUrl(poster),
+              coverUrl: poster,
               title: title,
               allowHtmlFallback: false,
             ),
@@ -295,7 +302,7 @@ class BackdropArt extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.only(right: AppSpacing.lg),
               child: PosterArt(
-                coverUrl: _backdropUrl(poster),
+                coverUrl: poster,
                 title: title,
                 fit: BoxFit.contain,
                 alignment: Alignment.centerRight,
@@ -305,6 +312,101 @@ class BackdropArt extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _RetryingNetworkImage extends StatefulWidget {
+  const _RetryingNetworkImage({
+    required this.urls,
+    required this.fit,
+    required this.alignment,
+    required this.cacheWidth,
+    required this.cacheHeight,
+    required this.allowHtmlFallback,
+    required this.fallbackColor,
+    required this.title,
+  });
+
+  final List<String> urls;
+  final BoxFit fit;
+  final AlignmentGeometry alignment;
+  final int? cacheWidth;
+  final int? cacheHeight;
+  final bool allowHtmlFallback;
+  final Color fallbackColor;
+  final String title;
+
+  @override
+  State<_RetryingNetworkImage> createState() => _RetryingNetworkImageState();
+}
+
+class _RetryingNetworkImageState extends State<_RetryingNetworkImage> {
+  var _index = 0;
+  var _advanceScheduled = false;
+
+  @override
+  void didUpdateWidget(covariant _RetryingNetworkImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!listEquals(oldWidget.urls, widget.urls)) {
+      _index = 0;
+      _advanceScheduled = false;
+    }
+  }
+
+  void _tryNext(String failedUrl) {
+    if (_advanceScheduled || _index >= widget.urls.length - 1) return;
+    _advanceScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final currentUrl = widget.urls[_index];
+      setState(() {
+        if (currentUrl == failedUrl && _index < widget.urls.length - 1) {
+          _index++;
+        }
+        _advanceScheduled = false;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.urls.isEmpty) {
+      return PosterPlaceholder(
+        color: widget.fallbackColor,
+        title: widget.title,
+      );
+    }
+    final safeIndex = _index.clamp(0, widget.urls.length - 1);
+    final url = widget.urls[safeIndex];
+    final hasFallback = safeIndex < widget.urls.length - 1;
+    return Image.network(
+      url,
+      key: ValueKey(url),
+      fit: widget.fit,
+      alignment: widget.alignment,
+      filterQuality: FilterQuality.low,
+      cacheWidth: widget.cacheWidth,
+      cacheHeight: widget.cacheHeight,
+      webHtmlElementStrategy: widget.allowHtmlFallback
+          ? WebHtmlElementStrategy.fallback
+          : WebHtmlElementStrategy.never,
+      frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+        if (wasSynchronouslyLoaded || frame != null) return child;
+        return PosterPlaceholder(
+          color: widget.fallbackColor,
+          title: widget.title,
+          loading: true,
+        );
+      },
+      errorBuilder: (context, error, stackTrace) {
+        if (hasFallback) _tryNext(url);
+        return PosterPlaceholder(
+          color: widget.fallbackColor,
+          title: widget.title,
+          loading: hasFallback,
+        );
+      },
     );
   }
 }
@@ -504,10 +606,116 @@ int? _decodeDimension(double? logicalPixels, double pixelRatio) {
   return (logicalPixels * pixelRatio).ceil().clamp(1, 2048);
 }
 
-String _backdropUrl(String value) {
-  if (!kIsWeb || !_isNetworkUrl(value)) return value;
-  return Uri.base
-      .resolve('/media-proxy?url=${Uri.encodeQueryComponent(value)}')
+@visibleForTesting
+List<String> posterImageCandidates(
+  String value, {
+  int? targetPixelWidth,
+  Uri? webProxyBase,
+  Iterable<String> fallbackValues = const [],
+}) {
+  final source = value.trim();
+  if (!_isNetworkUrl(source)) return const [];
+  final upstream = <String>{};
+  for (final rawValue in [source, ...fallbackValues]) {
+    final candidate = rawValue.trim();
+    if (!_isNetworkUrl(candidate)) continue;
+    upstream.addAll(_sizedPosterCandidates(candidate, targetPixelWidth));
+  }
+  final upstreamList = upstream.toList(growable: false);
+  if (webProxyBase == null) return upstreamList;
+
+  final candidates = <String>{};
+  for (final url in upstreamList) {
+    candidates.add(_imageProxyUrl(url, webProxyBase));
+  }
+  for (final url in upstreamList) {
+    candidates.add(url);
+  }
+  return candidates.toList(growable: false);
+}
+
+List<String> _sizedPosterCandidates(String value, int? targetPixelWidth) {
+  final uri = Uri.tryParse(value);
+  if (uri == null) return [value];
+  final candidates = <String>{};
+  final host = uri.host.toLowerCase();
+  final width = targetPixelWidth ?? 400;
+
+  if (host == 'lain.bgm.tv') {
+    final coverAt = uri.path.indexOf('/pic/cover/');
+    if (coverAt >= 0) {
+      final coverPath = uri.path.substring(coverAt);
+      final size = switch (width) {
+        <= 200 => 200,
+        <= 400 => 400,
+        <= 600 => 600,
+        _ => 800,
+      };
+      candidates.add(uri.replace(path: '/r/$size$coverPath').toString());
+      if (size != 400) {
+        candidates.add(uri.replace(path: '/r/400$coverPath').toString());
+      }
+    }
+  } else if (host.endsWith('.anilist.co') || host == 'anilist.co') {
+    final coverSize = RegExp(r'/cover/(?:medium|large)/');
+    if (coverSize.hasMatch(uri.path)) {
+      final preferred = width <= 360 ? 'medium' : 'large';
+      final alternate = preferred == 'medium' ? 'large' : 'medium';
+      candidates.add(
+        uri
+            .replace(
+              path: uri.path.replaceFirst(coverSize, '/cover/$preferred/'),
+            )
+            .toString(),
+      );
+      candidates.add(
+        uri
+            .replace(
+              path: uri.path.replaceFirst(coverSize, '/cover/$alternate/'),
+            )
+            .toString(),
+      );
+    }
+  } else if (host == 'static.tvmaze.com') {
+    final imageSize = RegExp(
+      r'/uploads/images/(?:medium_portrait|original_untouched)/',
+    );
+    if (imageSize.hasMatch(uri.path)) {
+      final preferred = width <= 420 ? 'medium_portrait' : 'original_untouched';
+      final alternate = preferred == 'medium_portrait'
+          ? 'original_untouched'
+          : 'medium_portrait';
+      candidates.add(
+        uri
+            .replace(
+              path: uri.path.replaceFirst(
+                imageSize,
+                '/uploads/images/$preferred/',
+              ),
+            )
+            .toString(),
+      );
+      candidates.add(
+        uri
+            .replace(
+              path: uri.path.replaceFirst(
+                imageSize,
+                '/uploads/images/$alternate/',
+              ),
+            )
+            .toString(),
+      );
+    }
+  }
+
+  candidates.add(value);
+  return candidates.toList(growable: false);
+}
+
+String _imageProxyUrl(String value, Uri baseUri) {
+  return baseUri
+      .resolve('/image-proxy')
+      .replace(queryParameters: {'url': value})
       .toString();
 }
 

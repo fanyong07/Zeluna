@@ -4,7 +4,8 @@
 
 ## 当前能力
 
-- 聚合 Bangumi、AniList、Jikan/MyAnimeList、Kitsu、Cinemeta、TVMaze、Wikidata 资料。
+- 聚合 Bangumi、TMDB、AniList、Jikan/MyAnimeList、Kitsu、Cinemeta、TVMaze、Wikidata 资料。
+- TMDB 与 Bangumi 使用构建期注入的读取令牌补充中文电影、剧集、番剧、演员、评分、海报和推荐；应用内不提供令牌输入界面。
 - Cinemeta 电影/剧集按热门目录多页加载，提供 IMDb 标识、海报、横幅和基础详情。
 - 接入 Internet Archive 官方公开媒体搜索、分页与经许可/文件探测后的直接播放。
 - 接入 Sepia Search + PeerTube，仅展示明确开放许可且非 NSFW 的视频，并解析 HLS / MP4。
@@ -34,7 +35,11 @@ $env:PORT=5174
 node tools/dev_web_server.mjs
 ```
 
-打开 `http://127.0.0.1:5174/`。开发服务器包含媒体代理，用于缓解部分网页视频和横幅图片的跨域限制；网页预览建议使用该服务器，不要直接双击 `build/web/index.html`。
+打开 `http://127.0.0.1:5174/`。开发服务器包含媒体代理和受限的同源图片代理，用于缓解部分网页视频、横幅及封面图片的跨域限制；图片代理只接受公网 HTTP(S) 图片，并限制类型、大小和请求时间。网页预览建议使用该服务器，不要直接双击 `build/web/index.html`。
+
+正式部署 Web 版必须使用 HTTPS，并在托管层启用 HSTS、合理的 CSP、`Referrer-Policy` 和 `X-Content-Type-Options` 等安全响应头。
+
+也可以运行 `tools\start-web.bat` 使用固定的 `http://127.0.0.1:5190/`。该本机启动器兼容 Clash/TUN 的 `198.18.0.0/15` fake-IP DNS，但仍强制只监听回环地址，不应将代理端口暴露到局域网或公网。
 
 ## 验证
 
@@ -45,6 +50,13 @@ flutter build web --release
 ```
 
 ## Android 内测与正式发布
+
+内置资料令牌的构建文件放在被 Git 忽略的 `.dart_tool/codex_builtin_tokens.json`，字段为 `TMDB_READ_ACCESS_TOKEN` 与 `BANGUMI_ACCESS_TOKEN`。构建时使用：
+
+```powershell
+flutter build apk --release --dart-define-from-file=.dart_tool/codex_builtin_tokens.json
+flutter build web --release --dart-define-from-file=.dart_tool/codex_builtin_tokens.json
+```
 
 本地侧载内测使用 debug APK，不需要生产密钥：
 
@@ -67,7 +79,8 @@ powershell -ExecutionPolicy Bypass -File tool/check_release.ps1
 
 ## 数据源说明
 
-- 资料源默认使用公开 API，不要求用户填写账号密钥。
+- 大部分资料源使用无需密钥的公开 API；TMDB 与 Bangumi 的个人令牌通过本机忽略文件和 `--dart-define-from-file` 在构建时注入，不写入 Git 源码或普通设置。
+- 客户端内置令牌可从 APK 或 Web 资源中提取，因此内置版本仅适合个人使用或受控内测，不应公开分发。更换或撤销令牌后需要重新构建安装包与 Web 包。
 - Internet Archive 条目的授权状态由各条目自身说明决定。
 - 资料条目与播放线路分开管理；没有直链的条目只显示为“仅资料”。
 - PeerTube 内容来自不同开放视频实例，应用会过滤许可与内网地址，但仍以条目自身声明为准。
@@ -87,12 +100,17 @@ powershell -ExecutionPolicy Bypass -File tool/check_release.ps1
 
 ## 服务端
 
-`server/` 包含 FastAPI 兼容服务端原型：
+`server/` 包含可选的 FastAPI 聚合后端。App 未配置后端时仍使用原有规则；配置后会优先读取后端已验证缓存线路：
 
 ```powershell
 cd server
 pip install -r requirements.txt
 python run.py
+
+# 自动化测试
+python -m unittest discover -s tests -v
 ```
 
-服务端仍属于开发模式。部署前必须更换 `SECRET_KEY`、限制 CORS、删除演示账号并配置 HTTPS 和正式数据库。
+启动后在 App 的“设置 → 聚合后端”填写服务器地址并启用。完整 VPS、systemd、Nginx 和构建时预置说明见 `server/DEPLOY.md`。
+
+服务端仍包含兼容接口和演示数据。公开部署前必须更换 `SECRET_KEY`、限制 CORS、删除演示账号并配置 HTTPS 和正式数据库。

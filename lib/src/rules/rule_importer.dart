@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'csp_rule_support.dart';
 import 'rule_models.dart';
 
 class RuleImporter {
@@ -335,19 +336,57 @@ class RuleImporter {
           type?.toString() == '0' &&
           (api.startsWith('http://') || api.startsWith('https://'));
       final isXbpq = api.toLowerCase().contains('xbpq');
+      final isDrpy =
+          type?.toString() == '3' &&
+          RegExp(r'drpy2(?:\.min)?\.js', caseSensitive: false).hasMatch(api);
+      final drpyRuntimeUrl = isDrpy
+          ? _normalizeDrpyUrl(_resolveImportReference(api, sourceUrl))
+          : '';
+      final drpyInlineSource = isDrpy ? _drpyInlineSource(ext) : '';
+      final drpyExtUrl = isDrpy && drpyInlineSource.isEmpty
+          ? _normalizeDrpyUrl(
+              _resolveImportReference(ext?.toString() ?? '', sourceUrl),
+            )
+          : '';
+      final isAndroidCsp = type?.toString() == '3' && isAndroidCspApi(api);
       final engine = isJsonApi
           ? 'tvbox-json-api'
           : isXmlApi
           ? 'tvbox-xml-api'
           : isXbpq
           ? 'XBPQ'
+          : isDrpy
+          ? 'drpy-js'
+          : isAndroidCsp
+          ? 'android-csp'
           : api.trim().isNotEmpty
           ? api.trim()
           : 'tvbox-${type ?? 'site'}';
       final contentTypes = _tvBoxContentTypes(
         map,
-        supportsDirectLookup: isJsonApi || isXmlApi,
+        supportsDirectLookup: isJsonApi || isXmlApi || isDrpy || isAndroidCsp,
       );
+      final rawConfig = <String, dynamic>{
+        'site': map,
+        if (isDrpy) ...{
+          'sourceUrl': sourceUrl,
+          'runtimeUrl': drpyRuntimeUrl,
+          'extUrl': drpyExtUrl,
+          if (drpyInlineSource.isNotEmpty) 'inlineSource': drpyInlineSource,
+          'originalRuntime': api,
+          'originalExt': ext,
+        },
+        if (isAndroidCsp) 'sourceUrl': sourceUrl,
+        if (root.containsKey('spider')) 'spider': root['spider'],
+        if (root.containsKey('jar')) 'jar': root['jar'],
+        if (root.containsKey('jars')) 'jars': root['jars'],
+        if (root.containsKey('parses')) 'parses': root['parses'],
+        if (root.containsKey('flags')) 'flags': root['flags'],
+      };
+      final cspMd5 = isAndroidCsp ? androidCspSpiderMd5(rawConfig) : null;
+      final cspUnsupportedReason = isAndroidCsp
+          ? androidCspUnsupportedReason(rawConfig, fallbackApi: api)
+          : null;
       final baseId =
           'custom:tvbox:${_hash('$sourceUrl:${map['key'] ?? map['name'] ?? api}')}';
       for (var index = 0; index < contentTypes.length; index++) {
@@ -359,8 +398,10 @@ class RuleImporter {
           'source': 'tvbox',
           'engine': engine,
           'contentType': contentType,
-          'baseUrl': isJsonApi || isXmlApi
-              ? api
+          'baseUrl': isJsonApi || isXmlApi || isAndroidCsp
+              ? isAndroidCsp && cspMd5 != null
+                    ? androidCspPinnedBase(cspMd5)
+                    : api
               : extMap['主页url'] ?? extMap['baseUrl'] ?? '',
           'searchUrl': isJsonApi || isXmlApi
               ? api
@@ -379,15 +420,11 @@ class RuleImporter {
             if (isJsonApi) 'JSON API',
             if (isXmlApi) 'XML API',
             if (isXbpq) 'XBPQ',
+            if (isDrpy) 'drpy2',
+            if (isAndroidCsp) 'Android CSP',
           ],
-          'rawConfig': {
-            'site': map,
-            if (root.containsKey('spider')) 'spider': root['spider'],
-            if (root.containsKey('jar')) 'jar': root['jar'],
-            if (root.containsKey('jars')) 'jars': root['jars'],
-            if (root.containsKey('parses')) 'parses': root['parses'],
-            if (root.containsKey('flags')) 'flags': root['flags'],
-          },
+          'rawConfig': rawConfig,
+          'unsupportedReason': ?cspUnsupportedReason,
           'note': sourceUrl.isEmpty ? '从 TVBox 配置导入。' : '从 $sourceUrl 导入。',
         };
         final rule = _ruleFromMap(merged, sourceUrl);
@@ -782,6 +819,75 @@ String _importGroupId(String sourceUrl, String factoryId) {
   final source = sourceUrl.trim();
   if (source.isNotEmpty) return 'repo:${_hash('$source:$factoryId')}';
   return 'clipboard:$factoryId';
+}
+
+String _resolveImportReference(String value, String sourceUrl) {
+  final raw = value.trim();
+  if (raw.isEmpty) return '';
+  final uri = Uri.tryParse(raw);
+  if (uri != null &&
+      const {'http', 'https'}.contains(uri.scheme.toLowerCase()) &&
+      uri.host.isNotEmpty) {
+    return uri.toString();
+  }
+  final base = Uri.tryParse(sourceUrl.trim());
+  if (base == null ||
+      !const {'http', 'https'}.contains(base.scheme.toLowerCase()) ||
+      base.host.isEmpty) {
+    return raw;
+  }
+  return base.resolve(raw).toString();
+}
+
+String _normalizeDrpyUrl(String value) {
+  final raw = value.trim();
+  if (raw.isEmpty) return '';
+  const proxyPrefix = 'https://gh-proxy.net/';
+  if (raw.toLowerCase().startsWith(proxyPrefix)) {
+    final target = raw.substring(proxyPrefix.length);
+    final uri = Uri.tryParse(target);
+    if (uri != null &&
+        const {'http', 'https'}.contains(uri.scheme.toLowerCase()) &&
+        uri.host.isNotEmpty) {
+      return uri.toString();
+    }
+  }
+
+  final uri = Uri.tryParse(raw);
+  if (uri == null || uri.host.toLowerCase() != 'notabug.org') return raw;
+  final segments = uri.pathSegments;
+  if (segments.length < 5 ||
+      segments[0].toLowerCase() != 'fantaiying' ||
+      segments[1].toLowerCase() != 'ext' ||
+      segments[2].toLowerCase() != 'raw' ||
+      segments[3].toLowerCase() != 'main') {
+    return raw;
+  }
+  return Uri(
+    scheme: 'https',
+    host: 'raw.githubusercontent.com',
+    pathSegments: [
+      'fantaiying7',
+      'EXT',
+      'refs',
+      'heads',
+      'main',
+      ...segments.skip(4),
+    ],
+  ).toString();
+}
+
+String _drpyInlineSource(Object? ext) {
+  if (ext is Map) {
+    return 'var rule = ${jsonEncode(ext)};';
+  }
+  final text = ext?.toString().trim() ?? '';
+  if (text.isEmpty) return '';
+  if (RegExp(r'\b(?:var|let|const)\s+rule\s*=').hasMatch(text)) return text;
+  if (text.startsWith('{') && text.endsWith('}')) {
+    return 'var rule = $text;';
+  }
+  return '';
 }
 
 String _animekoBaseUrl(String searchUrl, String rawBaseUrl) {

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:collection';
 
+import '../rules/csp_rule_support.dart';
 import '../rules/rule_importer.dart';
 import '../rules/rule_models.dart';
 import '../rules/tvbox_xbpq_hydrator.dart';
@@ -21,7 +22,9 @@ class SourceRuleBridgeResult {
     return catalog.copyWith(
       playbackRuleCounts: ruleCountsBySource,
       availablePlaybackRuleCount: availableRuleCount,
-      activePlaybackRuleCount: rules.length,
+      activePlaybackRuleCount: rules
+          .where((rule) => rule.canResolveNatively)
+          .length,
       loadError: catalog.loadError,
     );
   }
@@ -186,7 +189,20 @@ bool _hasHydratableXbpqSite(VideoSource source) {
 }
 
 bool _canParticipateInPlayback(RulePlugin rule) {
-  if (!rule.searchable || !rule.canResolveNatively) return false;
+  if (!rule.searchable) return false;
+  if (rule.engine.toLowerCase() == 'android-csp') {
+    return isAuditedAndroidCspConfig(rule.rawConfig);
+  }
+  if (rule.engine.toLowerCase() == 'drpy-js') {
+    final inline = rule.rawConfig['inlineSource']?.toString().trim() ?? '';
+    final extUrl = rule.rawConfig['extUrl']?.toString().trim() ?? '';
+    final extUri = Uri.tryParse(extUrl);
+    return inline.isNotEmpty ||
+        (extUri != null &&
+            const {'http', 'https'}.contains(extUri.scheme.toLowerCase()) &&
+            extUri.host.isNotEmpty);
+  }
+  if (!rule.canResolveNatively) return false;
   if (rule.engine.toLowerCase() != 'xbpq') return true;
   final config = rule.xbpq;
   if (config == null) return false;
@@ -200,10 +216,32 @@ bool _canParticipateInPlayback(RulePlugin rule) {
 String _dedupeKey(RulePlugin rule) {
   final endpoint = _canonicalEndpoint(rule.baseUrl);
   final search = _canonicalEndpoint(rule.searchUrl);
-  final parser = rule.engine.toLowerCase() == 'xbpq'
-      ? jsonEncode(rule.xbpq?.toJson() ?? const <String, dynamic>{})
-      : '';
+  final engine = rule.engine.toLowerCase();
+  final parser = switch (engine) {
+    'xbpq' => jsonEncode(rule.xbpq?.toJson() ?? const <String, dynamic>{}),
+    'drpy-js' => _drpyScriptIdentity(rule),
+    'android-csp' => _androidCspIdentity(rule),
+    _ => '',
+  };
   return '${rule.contentType.name}|${rule.engine.toLowerCase()}|$endpoint|$search|$parser';
+}
+
+String _androidCspIdentity(RulePlugin rule) {
+  final md5 = androidCspSpiderMd5(rule.rawConfig);
+  final api = androidCspApi(rule.rawConfig);
+  if (md5 == null || api.isEmpty) return 'missing:${rule.id}';
+  final siteKey = androidCspSiteKey(rule.rawConfig, rule.id);
+  final ext = androidCspEncodedExt(rule.rawConfig);
+  return '$md5|$api|$siteKey|$ext';
+}
+
+String _drpyScriptIdentity(RulePlugin rule) {
+  final extUrl = rule.rawConfig['extUrl']?.toString().trim() ?? '';
+  if (extUrl.isNotEmpty) return _canonicalEndpoint(extUrl);
+  final inline = rule.rawConfig['inlineSource']?.toString().trim() ?? '';
+  if (inline.isNotEmpty) return 'inline:${rule.id}:${inline.hashCode}';
+  final site = rule.rawConfig['site'];
+  return 'site:${jsonEncode(site ?? const <String, dynamic>{})}';
 }
 
 String _canonicalEndpoint(String value) {

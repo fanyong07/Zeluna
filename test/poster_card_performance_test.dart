@@ -35,6 +35,146 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
+  testWidgets('poster uses the cover fallback when the banner is absent', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: SizedBox(
+          width: 120,
+          height: 180,
+          child: PosterArt(
+            coverUrl: null,
+            fallbackCoverUrl: 'https://example.invalid/fallback.jpg',
+            title: '测试海报',
+          ),
+        ),
+      ),
+    );
+
+    final image = tester.widget<Image>(find.byType(Image));
+    final provider = image.image as ResizeImage;
+    final network = provider.imageProvider as NetworkImage;
+    expect(network.url, 'https://example.invalid/fallback.jpg');
+  });
+
+  testWidgets('old Bangumi original url uses a display-sized thumbnail', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 800);
+    tester.view.devicePixelRatio = 2;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Center(
+          child: SizedBox(
+            width: 160,
+            height: 240,
+            child: PosterArt(
+              coverUrl:
+                  'https://lain.bgm.tv/pic/cover/l/27/ff/377130_wDU1x.jpg',
+              title: 'Witch Hat Atelier',
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final image = tester.widget<Image>(find.byType(Image));
+    final provider = image.image as ResizeImage;
+    final network = provider.imageProvider as NetworkImage;
+    expect(
+      network.url,
+      'https://lain.bgm.tv/r/400/pic/cover/l/27/ff/377130_wDU1x.jpg',
+    );
+  });
+
+  test('poster candidates keep smaller sources first and original fallback', () {
+    final bangumi = posterImageCandidates(
+      'https://lain.bgm.tv/pic/cover/l/27/ff/377130_wDU1x.jpg',
+      targetPixelWidth: 350,
+    );
+    expect(
+      bangumi.first,
+      'https://lain.bgm.tv/r/400/pic/cover/l/27/ff/377130_wDU1x.jpg',
+    );
+    expect(
+      bangumi,
+      contains('https://lain.bgm.tv/pic/cover/l/27/ff/377130_wDU1x.jpg'),
+    );
+
+    final anilist = posterImageCandidates(
+      'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/demo.jpg',
+      targetPixelWidth: 320,
+    );
+    expect(
+      anilist.first,
+      'https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/demo.jpg',
+    );
+    expect(anilist.last, contains('/cover/large/'));
+  });
+
+  test('web candidates use same-origin proxy for images without CORS', () {
+    final candidates = posterImageCandidates(
+      'https://s4.anilist.co/file/anilistcdn/media/anime/cover/large/demo.jpg',
+      targetPixelWidth: 320,
+      webProxyBase: Uri.parse('https://zeluna.example/app/'),
+    );
+
+    expect(candidates.first, startsWith('https://zeluna.example/image-proxy?'));
+    expect(
+      Uri.parse(candidates.first).queryParameters['url'],
+      'https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/demo.jpg',
+    );
+    expect(
+      candidates,
+      contains(
+        'https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/demo.jpg',
+      ),
+    );
+  });
+
+  test('web candidates proxy Bangumi thumbnails before direct fallback', () {
+    final candidates = posterImageCandidates(
+      'https://lain.bgm.tv/pic/cover/l/27/ff/377130_wDU1x.jpg',
+      targetPixelWidth: 350,
+      webProxyBase: Uri.parse('http://127.0.0.1:5190/catalog'),
+    );
+
+    expect(candidates.first, startsWith('http://127.0.0.1:5190/image-proxy?'));
+    expect(
+      Uri.parse(candidates.first).queryParameters['url'],
+      'https://lain.bgm.tv/r/400/pic/cover/l/27/ff/377130_wDU1x.jpg',
+    );
+    expect(candidates[1], startsWith('http://127.0.0.1:5190/image-proxy?'));
+    expect(
+      candidates.last,
+      'https://lain.bgm.tv/pic/cover/l/27/ff/377130_wDU1x.jpg',
+    );
+  });
+
+  test(
+    'web candidates try proxied poster before a broken banner direct URL',
+    () {
+      const banner =
+          'https://media.kitsu.app/anime/cover_images/8403/original.png';
+      const poster =
+          'https://media.kitsu.app/anime/poster_images/8403/large.jpg';
+      final candidates = posterImageCandidates(
+        banner,
+        fallbackValues: const [poster],
+        webProxyBase: Uri.parse('http://127.0.0.1:5190/anime'),
+      );
+
+      expect(Uri.parse(candidates[0]).queryParameters['url'], banner);
+      expect(Uri.parse(candidates[1]).queryParameters['url'], poster);
+      expect(candidates[2], banner);
+      expect(candidates[3], poster);
+    },
+  );
+
   testWidgets('landscape poster card avoids per-card blur filters', (
     tester,
   ) async {

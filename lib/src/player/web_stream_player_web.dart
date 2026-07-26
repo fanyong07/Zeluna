@@ -68,6 +68,9 @@ class WebStreamPlayer extends StatefulWidget {
 }
 
 class _WebStreamPlayerState extends State<WebStreamPlayer> {
+  // Kept in web/vendor so the first HLS playback never waits on a third-party
+  // CDN. web/index.html preloads the same version during application startup.
+  static const _hlsScriptAsset = 'vendor/hls-1.5.18.min.js';
   static int _nextId = 0;
   static Completer<void>? _hlsScript;
 
@@ -258,7 +261,10 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     _videoErrorSerial = -1;
     _loadTimeout?.cancel();
     _loadTimeout = Timer(
-      const Duration(seconds: 14),
+      // The page performs a seven-second soft fallback when another line is
+      // available. Keep the mounted player alive long enough for a valid but
+      // slow HLS source to download its first complete segment.
+      const Duration(seconds: 27),
       () => _reportLoadError(serial),
     );
     _destroyHls();
@@ -352,7 +358,7 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     }
 
     final script = web.HTMLScriptElement()
-      ..src = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js'
+      ..src = _hlsScriptAsset
       ..async = true;
     script.setAttribute('data-anime-hls', 'true');
     final timeout = Timer(const Duration(seconds: 10), () {
@@ -403,7 +409,12 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     if (constructor == null) throw StateError('hls.js is unavailable');
     final options = JSObject()
       ..setProperty('enableWorker'.toJS, true.toJS)
-      ..setProperty('lowLatencyMode'.toJS, true.toJS);
+      ..setProperty('lowLatencyMode'.toJS, true.toJS)
+      // The local media proxy already streams upstream bytes. Let hls.js
+      // transmux large TS fragments incrementally instead of waiting for the
+      // complete response before it can append the first playable data.
+      ..setProperty('progressive'.toJS, true.toJS)
+      ..setProperty('capLevelToPlayerSize'.toJS, true.toJS);
     return constructor.callAsConstructor<JSObject>(options);
   }
 

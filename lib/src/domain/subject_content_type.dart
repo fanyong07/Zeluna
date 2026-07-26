@@ -27,11 +27,14 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
     return SubjectContentType.anime;
   }
 
-  if (source.startsWith('cinemeta:series:') || source.startsWith('tvmaze')) {
+  if (source.startsWith('cinemeta:series:') ||
+      source.startsWith('tmdb:series:') ||
+      source.startsWith('tvmaze')) {
     return SubjectContentType.series;
   }
 
   if (source.startsWith('cinemeta:movie:') ||
+      source.startsWith('tmdb:movie:') ||
       source == 'wikidata' ||
       source.startsWith('archive:') ||
       source.startsWith('peertube:') ||

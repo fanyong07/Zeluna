@@ -20,6 +20,10 @@ const maxMediaSessions = 512;
 const upstreamTimeoutMs = 20 * 1000;
 const maxPlaylistBytes = 16 * 1024 * 1024;
 const maxSourceBytes = 6 * 1024 * 1024;
+const maxImageBytes = 8 * 1024 * 1024;
+const imageProxyTimeoutMs = 15 * 1000;
+const imageCacheControl =
+  'private, max-age=86400, stale-while-revalidate=604800';
 const maxMediaSessionHeaders = 24;
 const maxMediaSessionHeaderNameBytes = 128;
 const maxMediaSessionHeaderValueBytes = 8 * 1024;
@@ -60,7 +64,11 @@ const mimeTypes = new Map([
   ['.wasm', 'application/wasm'],
 ]);
 
-export function createAnimeWebServer({ fetchUpstream = fetchPublic } = {}) {
+export function createAnimeWebServer({
+  fetchUpstream = fetchPublic,
+  imageMaxBytes = maxImageBytes,
+  imageTimeoutMs = imageProxyTimeoutMs,
+} = {}) {
   return createServer(async (request, response) => {
     try {
       const requestUrl = new URL(
@@ -77,6 +85,13 @@ export function createAnimeWebServer({ fetchUpstream = fetchPublic } = {}) {
       }
       if (requestUrl.pathname === '/source-proxy') {
         await proxySource(request, response, requestUrl, fetchUpstream);
+        return;
+      }
+      if (requestUrl.pathname === '/image-proxy') {
+        await proxyImage(request, response, requestUrl, fetchUpstream, {
+          maxBytes: imageMaxBytes,
+          timeoutMs: imageTimeoutMs,
+        });
         return;
       }
       if (requestUrl.pathname === '/reset-browser-cache') {
@@ -305,6 +320,120 @@ async function proxyMedia(request, response, requestUrl, fetchUpstream) {
   upstream.body.pipe(response);
 }
 
+async function proxyImage(
+  request,
+  response,
+  requestUrl,
+  fetchUpstream,
+  { maxBytes, timeoutMs },
+) {
+  if (request.method === 'OPTIONS') {
+    response.writeHead(204, {
+      allow: 'GET, HEAD, OPTIONS',
+      'cache-control': 'no-store',
+    });
+    response.end();
+    return;
+  }
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    response.writeHead(405, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+      allow: 'GET, HEAD, OPTIONS',
+    });
+    response.end('Method not allowed');
+    return;
+  }
+
+  const target = requestUrl.searchParams.get('url');
+  const targetUrl = typeof target === 'string' && target.length <= 8192
+    ? validateTarget(target)
+    : null;
+  if (!targetUrl) {
+    throw new ProxyError(400, 'Invalid image url');
+  }
+
+  const abortController = new AbortController();
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      abortController.abort();
+      reject(new ProxyError(504, 'Upstream image request timed out'));
+    }, timeoutMs);
+  });
+  let upstream;
+  try {
+    const fetched = await Promise.race([
+      fetchUpstream(targetUrl, {
+        method: request.method,
+        headers: {
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            + 'AppleWebKit/537.36 Chrome/124 Safari/537.36',
+          accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          'accept-encoding': 'identity',
+          referer: targetUrl.origin,
+        },
+        strictRedirectHeaders: true,
+        signal: abortController.signal,
+        timeoutMs,
+      }),
+      timeout,
+    ]);
+    upstream = fetched.response;
+    const contentType = upstream.headers.get('content-type') ?? '';
+    if (!isAllowedImageContent(contentType)) {
+      upstream.body?.destroy();
+      throw new ProxyError(415, 'Upstream response is not an image');
+    }
+
+    const advertisedLengthText = upstream.headers.get('content-length');
+    const advertisedLength = advertisedLengthText === null
+      ? null
+      : Number(advertisedLengthText);
+    if (advertisedLength !== null &&
+        Number.isFinite(advertisedLength) &&
+        advertisedLength > maxBytes) {
+      upstream.body?.destroy();
+      throw new ProxyError(413, 'Upstream image exceeds the allowed size');
+    }
+
+    const cacheControl = upstream.status >= 200 && upstream.status < 300
+      ? imageCacheControl
+      : 'no-store';
+    const responseHeaders = {
+      ...safeProxyContentHeaders(contentType, 'application/octet-stream'),
+      'cache-control': cacheControl,
+      'cross-origin-resource-policy': 'same-origin',
+    };
+
+    if (request.method === 'HEAD' || !upstream.body) {
+      if (advertisedLength !== null &&
+          Number.isSafeInteger(advertisedLength) &&
+          advertisedLength >= 0) {
+        responseHeaders['content-length'] = advertisedLength.toString();
+      }
+      response.writeHead(upstream.status, responseHeaders);
+      response.end();
+      upstream.body?.destroy();
+      return;
+    }
+
+    const body = await Promise.race([
+      readStreamBody(upstream.body, maxBytes),
+      timeout,
+    ]);
+    responseHeaders['content-length'] = body.length.toString();
+    response.writeHead(upstream.status, responseHeaders);
+    response.end(body);
+  } catch (error) {
+    upstream?.body?.destroy();
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function createMediaSession(request, response) {
   if (request.method !== 'POST') {
     response.writeHead(405, {
@@ -463,6 +592,11 @@ export function isAllowedSourceContent(contentType, url) {
   ].includes(type)) return true;
   if (type !== 'application/octet-stream') return false;
   return /\.(?:m3u8?|txt|json|xml)(?:$|[?#])/i.test(url.toString());
+}
+
+export function isAllowedImageContent(contentType) {
+  const type = contentType.split(';', 1)[0].trim().toLowerCase();
+  return type.startsWith('image/') && type.length > 'image/'.length;
 }
 
 function looksBinary(value) {
@@ -643,6 +777,8 @@ async function fetchPublic(initialUrl, options) {
       headers,
       body,
       addresses,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
     });
     if (![301, 302, 303, 307, 308].includes(upstream.status)) {
       return { response: upstream, url: current };
@@ -673,11 +809,27 @@ async function fetchPublic(initialUrl, options) {
 
 export async function requestPublic(
   url,
-  { method, headers, body, addresses },
+  {
+    method,
+    headers,
+    body,
+    addresses,
+    signal,
+    timeoutMs = upstreamTimeoutMs,
+  },
 ) {
   const address = [...addresses].sort((a, b) => a.family - b.family)[0];
   const transport = url.protocol === 'https:' ? requestHttps : requestHttp;
   return new Promise((resolveRequest, rejectRequest) => {
+    let settled = false;
+    const cleanupAbortListener = () => {
+      signal?.removeEventListener('abort', abortRequest);
+    };
+    const abortRequest = () => {
+      upstreamRequest.destroy(
+        new ProxyError(504, 'Upstream request timed out'),
+      );
+    };
     const upstreamRequest = transport({
       protocol: url.protocol,
       hostname: stripIpv6Brackets(url.hostname),
@@ -693,14 +845,24 @@ export async function requestPublic(
         callback(null, address.address, address.family);
       },
     }, (upstreamResponse) => {
+      settled = true;
+      upstreamResponse.once('end', cleanupAbortListener);
+      upstreamResponse.once('close', cleanupAbortListener);
       resolveRequest(wrapUpstreamResponse(upstreamResponse));
     });
-    upstreamRequest.setTimeout(upstreamTimeoutMs, () => {
+    if (signal?.aborted) {
+      abortRequest();
+    } else {
+      signal?.addEventListener('abort', abortRequest, { once: true });
+    }
+    upstreamRequest.setTimeout(timeoutMs, () => {
       upstreamRequest.destroy(
         new ProxyError(504, 'Upstream request timed out'),
       );
     });
     upstreamRequest.once('error', (error) => {
+      cleanupAbortListener();
+      if (settled) return;
       rejectRequest(
         error instanceof ProxyError
           ? error
@@ -774,6 +936,11 @@ export async function ensurePublicAddress(
 ) {
   const host = stripIpv6Brackets(url.hostname);
   const family = isIP(host);
+  // Clash fake-IP addresses are meaningful only as DNS answers for a hostname.
+  // Never let a caller target the synthetic address range as a literal IP.
+  if (family === 4 && isSyntheticDnsIpv4(host)) {
+    throw new ProxyError(400, 'Upstream host uses a reserved synthetic address');
+  }
   let addresses;
   try {
     addresses = family
@@ -839,6 +1006,14 @@ export function createBlockedAddressList({ allowSyntheticDns }) {
 
 function isIpv4MappedAddress(value) {
   return stripIpv6Brackets(value).toLowerCase().startsWith('::ffff:');
+}
+
+function isSyntheticDnsIpv4(value) {
+  const parts = value.split('.').map((part) => Number(part));
+  return parts.length === 4 &&
+    parts[0] === 198 &&
+    (parts[1] === 18 || parts[1] === 19) &&
+    parts.slice(2).every((part) => Number.isInteger(part) && part >= 0 && part <= 255);
 }
 
 function stripIpv6Brackets(value) {

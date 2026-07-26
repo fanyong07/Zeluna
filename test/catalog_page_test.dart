@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:anime/src/app/anime_app.dart';
 import 'package:anime/src/catalog/catalog_page.dart';
 import 'package:anime/src/data/anime_controller.dart';
@@ -64,6 +66,33 @@ void main() {
     expect(find.text('我的'), findsOneWidget);
     expect(find.text('画廊'), findsNothing);
     expect(find.text('孤独摇滚！'), findsWidgets);
+  });
+
+  testWidgets('disabled Chinese preference shows the anime original title', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastServices = const ExternalServiceSettings(
+      preferBangumiChinese: false,
+    );
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      _FakeAnimeController.lastServices = const ExternalServiceSettings();
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('ぼっち・ざ・ろっく！'), findsOneWidget);
   });
 
   testWidgets('home search stays editable and submits in Android landscape', (
@@ -355,6 +384,37 @@ void main() {
     expect(find.text('The Godfather'), findsNothing);
   });
 
+  testWidgets('metadata refresh waits for the controller to be ready', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _DelayedMetadataController.reset();
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_DelayedMetadataController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.anime),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(_DelayedMetadataController.earlyDiscoveryCalls, 0);
+
+    _DelayedMetadataController.completeBuild();
+    await tester.pumpAndSettle();
+
+    expect(_DelayedMetadataController.earlyDiscoveryCalls, 0);
+    expect(_DelayedMetadataController.refreshDiscoveryCalls, 1);
+    expect(find.text('2026 测试番剧'), findsWidgets);
+  });
+
   testWidgets('detail hides internal provider metadata', (tester) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
@@ -582,11 +642,12 @@ void main() {
 
     expect(find.text('设置'), findsWidgets);
     expect(find.text('下载管理'), findsOneWidget);
-    expect(find.text('播放规则'), findsOneWidget);
+    expect(find.text('播放规则'), findsNothing);
     expect(find.text('自定义仓库'), findsNothing);
     expect(find.text('外部源目录'), findsNothing);
     expect(find.text('弹幕设置'), findsOneWidget);
     expect(find.text('播放设置'), findsOneWidget);
+    expect(find.text('聚合后端'), findsOneWidget);
 
     await tester.ensureVisible(find.text('播放设置'));
     await tester.tap(find.text('播放设置'));
@@ -767,6 +828,8 @@ void main() {
       expect(find.text('电影港'), findsOneWidget);
       expect(find.text('韩剧看看'), findsNothing);
     },
+    // 旧规则管理页面已从统一后端架构中移除。
+    skip: true,
   );
 
   testWidgets('external source route opens the source catalog', (tester) async {
@@ -807,7 +870,7 @@ void main() {
 
     expect(_FakeAnimeController.lastSourceToggle, ('source:m3u', true));
     expect(tester.widget<Switch>(sourceSwitch).value, isTrue);
-  });
+  }, skip: true); // 旧外部源目录已从统一后端架构中移除。
 
   testWidgets('playback settings rows are actionable', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
@@ -1124,6 +1187,46 @@ class _FakeAnimeController extends AnimeController {
   }
 }
 
+class _DelayedMetadataController extends AnimeController {
+  static late Completer<AnimeState> _buildCompleter;
+  static bool _ready = false;
+  static int earlyDiscoveryCalls = 0;
+  static int refreshDiscoveryCalls = 0;
+
+  static void reset() {
+    _buildCompleter = Completer<AnimeState>();
+    _ready = false;
+    earlyDiscoveryCalls = 0;
+    refreshDiscoveryCalls = 0;
+  }
+
+  static void completeBuild() {
+    _buildCompleter.complete(const AnimeState(homeFeed: _feed));
+  }
+
+  @override
+  Future<AnimeState> build() async {
+    final value = await _buildCompleter.future;
+    _ready = true;
+    return value;
+  }
+
+  @override
+  Future<List<AnimeSubject>> discoverSubjects({
+    bool waitForRefresh = false,
+  }) async {
+    if (!_ready) {
+      earlyDiscoveryCalls++;
+      throw StateError('controller is not ready');
+    }
+    if (waitForRefresh) {
+      refreshDiscoveryCalls++;
+      return const [_futureAnimeSubject];
+    }
+    return const [_subject];
+  }
+}
+
 class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
   int _contextVersion = 1;
 
@@ -1145,6 +1248,23 @@ class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
 }
 
 final _testRuleDate = DateTime(2026, 5, 5);
+
+const _futureAnimeSubject = AnimeSubject(
+  id: 2026,
+  title: '2026 测试番剧',
+  originalTitle: 'Future Anime',
+  summary: '用于验证首启后台刷新。',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2026-07-01',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '连载中',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [],
+  totalEpisodes: 12,
+);
 
 const _subject = AnimeSubject(
   id: 1,

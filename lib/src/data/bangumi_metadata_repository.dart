@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 
 import '../domain/anime_models.dart';
+import 'chinese_text.dart';
 
 extension _DateSeed on DateTime {
   int get dayOfYear => difference(DateTime(year)).inDays + 1;
@@ -29,21 +30,148 @@ class _PagedResponse {
   final bool succeeded;
 }
 
+class BangumiTokenValidation {
+  const BangumiTokenValidation._({
+    required this.isValid,
+    required this.message,
+    this.userId,
+    this.username,
+    this.displayName,
+  });
+
+  const BangumiTokenValidation.valid({
+    required String message,
+    String? userId,
+    String? username,
+    String? displayName,
+  }) : this._(
+         isValid: true,
+         message: message,
+         userId: userId,
+         username: username,
+         displayName: displayName,
+       );
+
+  const BangumiTokenValidation.invalid(String message)
+    : this._(isValid: false, message: message);
+
+  final bool isValid;
+  final String message;
+  final String? userId;
+  final String? username;
+  final String? displayName;
+}
+
+class BangumiRateLimitException extends http.ClientException {
+  BangumiRateLimitException({required this.retryAt, required Uri uri})
+    : super('Bangumi requests are cooling down until $retryAt', uri);
+
+  final DateTime retryAt;
+}
+
+class BangumiAccessCredential {
+  const BangumiAccessCredential({required this.token, this.accountId});
+
+  final String token;
+  final String? accountId;
+
+  @override
+  String toString() => 'BangumiAccessCredential(accountId: $accountId)';
+}
+
 class BangumiMetadataRepository {
-  BangumiMetadataRepository({http.Client? client})
-    : _client = client ?? http.Client();
+  BangumiMetadataRepository({
+    http.Client? client,
+    Future<BangumiAccessCredential?> Function()? accessCredentialProvider,
+    Future<void> Function(BangumiAccessCredential credential)?
+    onAccessTokenRejected,
+    DateTime Function()? clock,
+  }) : _client = client ?? http.Client(),
+       _accessCredentialProvider = accessCredentialProvider,
+       _onAccessTokenRejected = onAccessTokenRejected,
+       _clock = clock ?? DateTime.now;
 
   final http.Client _client;
+  final Future<BangumiAccessCredential?> Function()? _accessCredentialProvider;
+  final Future<void> Function(BangumiAccessCredential credential)?
+  _onAccessTokenRejected;
+  final DateTime Function() _clock;
+  bool _suppressAccessToken = false;
+  int _credentialGeneration = 0;
+  DateTime? _rateLimitedUntil;
 
   static const _baseUrl = 'https://api.bgm.tv';
   static const _recentWindow = Duration(days: 180);
   static const _distinctHomePrefix = 18;
   static const _subjectPageSize = 20;
   static const _episodePageSize = 100;
+  static const _defaultRateLimitCooldown = Duration(seconds: 30);
+  static const _maxRateLimitCooldown = Duration(minutes: 5);
   static const _headers = {
-    'User-Agent': 'anime-app/1.0 (AniCh-style client)',
+    'User-Agent':
+        'fanyong/Zeluna/1.0 (Flutter; Android/Windows/Web) '
+        '(https://github.com/fanyong07/anime)',
     'Accept': 'application/json',
   };
+
+  void close() => _client.close();
+
+  void resetAccessTokenState() {
+    _credentialGeneration++;
+    _suppressAccessToken = false;
+  }
+
+  Future<BangumiTokenValidation> validateAccessToken(String token) async {
+    final normalized = token.trim();
+    if (normalized.length < 16 ||
+        normalized.length > 512 ||
+        RegExp(r'\s').hasMatch(normalized)) {
+      return const BangumiTokenValidation.invalid('令牌格式不正确');
+    }
+    try {
+      final response = await _sendGet(
+        Uri.parse('$_baseUrl/v0/me'),
+        headers: {..._headers, 'Authorization': 'Bearer $normalized'},
+      ).timeout(const Duration(seconds: 12));
+      if (response.statusCode == 401) {
+        return const BangumiTokenValidation.invalid('令牌无效或已过期');
+      }
+      if (response.statusCode == 403) {
+        return const BangumiTokenValidation.invalid(
+          'Bangumi 拒绝了本次验证，请稍后重试或检查令牌权限',
+        );
+      }
+      if (response.statusCode == 429) {
+        return const BangumiTokenValidation.invalid('请求过于频繁，请稍后再试');
+      }
+      if (response.statusCode != 200) {
+        return BangumiTokenValidation.invalid(
+          'Bangumi 暂时无法验证令牌（HTTP ${response.statusCode}）',
+        );
+      }
+      final json = _decodeResponse(response);
+      final userId = _blankToNull(json['id']?.toString());
+      final username = _blankToNull(json['username']?.toString());
+      final displayName =
+          _blankToNull(json['nickname']?.toString()) ?? username;
+      if (userId == null && username == null) {
+        return const BangumiTokenValidation.invalid('Bangumi 返回了无法识别的账号信息');
+      }
+      final label = displayName ?? username ?? 'Bangumi 用户';
+      return BangumiTokenValidation.valid(
+        message: '验证成功：$label',
+        userId: userId,
+        username: username,
+        displayName: displayName,
+      );
+    } on BangumiRateLimitException {
+      return const BangumiTokenValidation.invalid('请求过于频繁，请稍后再试');
+    } on TimeoutException {
+      return const BangumiTokenValidation.invalid('连接 Bangumi 超时，请检查网络后重试');
+    } catch (_) {
+      return const BangumiTokenValidation.invalid('无法连接 Bangumi，请检查网络后重试');
+    }
+  }
 
   AnimeHomeFeed fallbackHomeFeed() => _fallbackFeed;
 
@@ -131,6 +259,8 @@ class BangumiMetadataRepository {
         ]),
         tags: _buildTags([hero, ...recent, ...recommended, ...index]),
       );
+    } on BangumiRateLimitException {
+      rethrow;
     } catch (_) {
       return _fallbackFeed;
     }
@@ -139,25 +269,28 @@ class BangumiMetadataRepository {
   Future<List<AnimeSubject>> subjectsByCategory(String categoryName) async {
     final name = categoryName.trim();
     if (name.isEmpty) return const [];
+    final queryNames = _bangumiQueryNames(name);
     final results = await Future.wait([
-      searchSubjects(
-        keyword: '',
-        sort: 'heat',
-        filters: {
-          'type': [2],
-          'tag': [name],
-        },
-        limit: 48,
-      ),
-      searchSubjects(
-        keyword: '',
-        sort: 'heat',
-        filters: {
-          'type': [2],
-          'meta_tags': [name],
-        },
-        limit: 48,
-      ),
+      for (final queryName in queryNames)
+        searchSubjects(
+          keyword: '',
+          sort: 'heat',
+          filters: {
+            'type': [2],
+            'tag': [queryName],
+          },
+          limit: 48,
+        ),
+      for (final queryName in queryNames)
+        searchSubjects(
+          keyword: '',
+          sort: 'heat',
+          filters: {
+            'type': [2],
+            'meta_tags': [queryName],
+          },
+          limit: 48,
+        ),
       searchSubjects(keyword: name, sort: 'match', limit: 24),
     ]).timeout(const Duration(seconds: 20), onTimeout: () => const []);
     return _uniqueSubjects(results.expand((items) => items));
@@ -166,16 +299,18 @@ class BangumiMetadataRepository {
   Future<List<AnimeSubject>> subjectsByTag(String tagName) async {
     final name = tagName.trim();
     if (name.isEmpty) return const [];
+    final queryNames = _bangumiQueryNames(name);
     final results = await Future.wait([
-      searchSubjects(
-        keyword: '',
-        sort: 'heat',
-        filters: {
-          'type': [2],
-          'tag': [name],
-        },
-        limit: 60,
-      ),
+      for (final queryName in queryNames)
+        searchSubjects(
+          keyword: '',
+          sort: 'heat',
+          filters: {
+            'type': [2],
+            'tag': [queryName],
+          },
+          limit: 60,
+        ),
       searchSubjects(keyword: name, sort: 'match', limit: 36),
     ]).timeout(const Duration(seconds: 20), onTimeout: () => const []);
     return _uniqueSubjects(results.expand((items) => items));
@@ -183,9 +318,10 @@ class BangumiMetadataRepository {
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
     try {
-      final response = await _client
-          .get(Uri.parse('$_baseUrl/calendar'), headers: _headers)
-          .timeout(const Duration(seconds: 16));
+      final response = await _sendGet(
+        Uri.parse('$_baseUrl/calendar'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 16));
       if (response.statusCode != 200) return const {};
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! List) return const {};
@@ -214,6 +350,8 @@ class BangumiMetadataRepository {
         for (final entry in schedule.entries)
           entry.key: _uniqueSubjects(entry.value),
       };
+    } on BangumiRateLimitException {
+      rethrow;
     } catch (_) {
       return const {};
     }
@@ -229,7 +367,7 @@ class BangumiMetadataRepository {
         },
         pageSize: 36,
         pages: 4,
-      ).onError((_, _) => const <AnimeSubject>[]),
+      ).onError(_emptySubjectsOnRecoverableError),
       _searchSubjectPages(
         keyword: '',
         sort: 'rank',
@@ -238,7 +376,7 @@ class BangumiMetadataRepository {
         },
         pageSize: 36,
         pages: 4,
-      ).onError((_, _) => const <AnimeSubject>[]),
+      ).onError(_emptySubjectsOnRecoverableError),
       _searchSubjectPages(
         keyword: '',
         sort: 'score',
@@ -247,7 +385,7 @@ class BangumiMetadataRepository {
         },
         pageSize: 36,
         pages: 4,
-      ).onError((_, _) => const <AnimeSubject>[]),
+      ).onError(_emptySubjectsOnRecoverableError),
     ]).timeout(const Duration(seconds: 20), onTimeout: () => const []);
     return _uniqueSubjects(batches.expand((items) => items));
   }
@@ -265,7 +403,7 @@ class BangumiMetadataRepository {
     final uri = Uri.parse(
       '$_baseUrl/v0/search/subjects',
     ).replace(queryParameters: {'limit': '$requestLimit', 'offset': '$offset'});
-    final response = await _client.post(
+    final response = await _sendPost(
       uri,
       headers: const {..._headers, 'Content-Type': 'application/json'},
       body: jsonEncode({'keyword': keyword, 'sort': sort, 'filter': filters}),
@@ -297,12 +435,15 @@ class BangumiMetadataRepository {
           filters: filters,
           limit: requestPageSize,
           offset: page * requestPageSize,
-        ).onError((_, _) => const <AnimeSubject>[]),
+        ).onError(_emptySubjectsOnRecoverableError),
     ]);
     return _uniqueSubjects(batches.expand((items) => items));
   }
 
-  Future<AnimeDetailBundle> detail(int subjectId) async {
+  Future<AnimeDetailBundle> detail(
+    int subjectId, {
+    AnimeSubject? fallbackSubject,
+  }) async {
     try {
       final results = await Future.wait([
         _getObject('/v0/subjects/$subjectId'),
@@ -351,11 +492,13 @@ class BangumiMetadataRepository {
             ? _fallbackRecommendations(subject)
             : recommendations,
       );
+    } on BangumiRateLimitException {
+      rethrow;
     } catch (_) {
-      final subject = _fallbackSubjects.firstWhere(
-        (item) => item.id == subjectId,
-        orElse: () => _fallbackSubjects.first,
-      );
+      final subject =
+          fallbackSubject ??
+          _fallbackSubjects.where((item) => item.id == subjectId).firstOrNull ??
+          _unavailableSubject(subjectId);
       return AnimeDetailBundle(
         subject: subject,
         episodes: _fallbackEpisodes(subject),
@@ -367,19 +510,18 @@ class BangumiMetadataRepository {
   }
 
   Future<Map<String, dynamic>> _getObject(String path) async {
-    final response = await _client.get(
-      Uri.parse('$_baseUrl$path'),
-      headers: _headers,
-    );
-    if (response.statusCode != 200) return const {};
+    final response = await _getWithOptionalAuth(Uri.parse('$_baseUrl$path'));
+    if (response.statusCode != 200) {
+      throw http.ClientException(
+        'Bangumi request failed with HTTP ${response.statusCode}',
+        Uri.parse('$_baseUrl$path'),
+      );
+    }
     return _decodeResponse(response);
   }
 
   Future<List<dynamic>> _getList(String path) async {
-    final response = await _client.get(
-      Uri.parse('$_baseUrl$path'),
-      headers: _headers,
-    );
+    final response = await _getWithOptionalAuth(Uri.parse('$_baseUrl$path'));
     if (response.statusCode != 200) return const [];
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     return decoded is List ? decoded : const [];
@@ -407,7 +549,7 @@ class BangumiMetadataRepository {
           ...query,
           'limit': '$pageSize',
           'offset': '$offset',
-        }).onError((_, _) => const _PagedResponse.failed()),
+        }).onError(_failedPageOnRecoverableError),
     ]);
     for (final page in remainingPages) {
       if (page.succeeded) items.addAll(page.data);
@@ -419,9 +561,8 @@ class BangumiMetadataRepository {
     String path,
     Map<String, String> query,
   ) async {
-    final response = await _client.get(
+    final response = await _getWithOptionalAuth(
       Uri.parse('$_baseUrl$path').replace(queryParameters: query),
-      headers: _headers,
     );
     if (response.statusCode != 200) return const _PagedResponse.failed();
     final json = _decodeResponse(response);
@@ -435,6 +576,114 @@ class BangumiMetadataRepository {
           int.tryParse(query['limit'] ?? '') ??
           data.length,
     );
+  }
+
+  List<AnimeSubject> _emptySubjectsOnRecoverableError(
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    if (error is BangumiRateLimitException) {
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+    return const <AnimeSubject>[];
+  }
+
+  _PagedResponse _failedPageOnRecoverableError(
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    if (error is BangumiRateLimitException) {
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+    return const _PagedResponse.failed();
+  }
+
+  Future<http.Response> _sendGet(
+    Uri uri, {
+    required Map<String, String> headers,
+  }) async {
+    _ensureRequestAllowed(uri);
+    final response = await _client.get(uri, headers: headers);
+    return _acceptResponse(response, uri);
+  }
+
+  Future<http.Response> _sendPost(
+    Uri uri, {
+    required Map<String, String> headers,
+    Object? body,
+  }) async {
+    _ensureRequestAllowed(uri);
+    final response = await _client.post(uri, headers: headers, body: body);
+    return _acceptResponse(response, uri);
+  }
+
+  http.Response _acceptResponse(http.Response response, Uri uri) {
+    if (response.statusCode != 429) return response;
+    final seconds = int.tryParse(response.headers['retry-after']?.trim() ?? '');
+    final cooldownSeconds = seconds == null
+        ? _defaultRateLimitCooldown.inSeconds
+        : seconds.clamp(1, _maxRateLimitCooldown.inSeconds).toInt();
+    final candidate = _clock().toUtc().add(Duration(seconds: cooldownSeconds));
+    final current = _rateLimitedUntil;
+    if (current == null || candidate.isAfter(current)) {
+      _rateLimitedUntil = candidate;
+    }
+    throw BangumiRateLimitException(retryAt: _rateLimitedUntil!, uri: uri);
+  }
+
+  void _ensureRequestAllowed(Uri uri) {
+    final until = _rateLimitedUntil;
+    if (until == null) return;
+    if (!until.isAfter(_clock().toUtc())) {
+      _rateLimitedUntil = null;
+      return;
+    }
+    throw BangumiRateLimitException(retryAt: until, uri: uri);
+  }
+
+  Future<http.Response> _getWithOptionalAuth(Uri uri) async {
+    final credentialGeneration = _credentialGeneration;
+    final credential = await _readAccessCredential();
+    if (credential == null || credentialGeneration != _credentialGeneration) {
+      return _sendGet(uri, headers: _headers);
+    }
+
+    final response = await _sendGet(
+      uri,
+      headers: {..._headers, 'Authorization': 'Bearer ${credential.token}'},
+    );
+    if (credentialGeneration != _credentialGeneration) {
+      return _sendGet(uri, headers: _headers);
+    }
+    if (response.statusCode == 401) {
+      _suppressAccessToken = true;
+      _credentialGeneration++;
+      try {
+        await _onAccessTokenRejected?.call(credential);
+      } catch (_) {
+        // Credential status persistence must never block anonymous metadata.
+      }
+      return _sendGet(uri, headers: _headers);
+    }
+    if (response.statusCode == 403) {
+      return _sendGet(uri, headers: _headers);
+    }
+    return response;
+  }
+
+  Future<BangumiAccessCredential?> _readAccessCredential() async {
+    if (_suppressAccessToken) return null;
+    try {
+      final credential = await _accessCredentialProvider?.call();
+      final token = credential?.token.trim() ?? '';
+      if (token.isEmpty || RegExp(r'[\r\n]').hasMatch(token)) return null;
+      return BangumiAccessCredential(
+        token: token,
+        accountId: credential?.accountId,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   Map<String, dynamic> _decodeResponse(http.Response response) {
@@ -452,7 +701,7 @@ class BangumiMetadataRepository {
       json['platform']?.toString(),
     );
     final rating = _map(json['rating']);
-    final title = _bestTitle(json['name_cn'], json['name']);
+    final title = _bestSubjectTitle(json);
     final originalTitle = json['name']?.toString() ?? title;
     final date = _blankToNull(json['date']?.toString());
     final platform = _blankToNull(json['platform']?.toString()) ?? 'TV';
@@ -462,10 +711,10 @@ class BangumiMetadataRepository {
       id: _intValue(json['id']) ?? 0,
       title: title,
       originalTitle: originalTitle,
-      summary: _cleanSummary(json['summary']?.toString()),
+      summary: _cleanChineseSummary(json['summary']?.toString()),
       coverUrl:
-          _blankToNull(images['large']?.toString()) ??
           _blankToNull(images['common']?.toString()) ??
+          _blankToNull(images['large']?.toString()) ??
           _blankToNull(json['image']?.toString()),
       bannerUrl: null,
       date: date,
@@ -499,7 +748,7 @@ class BangumiMetadataRepository {
     final ep = (json['ep'] as num?)?.round();
     final sort = (json['sort'] as num?)?.round();
     final number = ep ?? sort ?? 0;
-    final title = _bestTitle(json['name_cn'], json['name']);
+    final title = _bestChineseTitle(json['name_cn']);
     return AnimeEpisode(
       id: _intValue(json['id']) ?? number,
       subjectId: subject.id,
@@ -509,7 +758,7 @@ class BangumiMetadataRepository {
       duration:
           _blankToNull(json['duration']?.toString()) ??
           _formatSeconds(_intValue(json['duration_seconds']) ?? 0),
-      description: _cleanSummary(json['desc']?.toString()),
+      description: _cleanChineseDescription(json['desc']?.toString()),
       thumbnailUrl: subject.coverUrl,
     );
   }
@@ -527,7 +776,7 @@ class BangumiMetadataRepository {
       name: _bestTitle(json['name_cn'], json['name']),
       relation: _blankToNull(json['relation']?.toString()) ?? '角色',
       cv: cv.isEmpty ? '未知' : cv,
-      summary: _cleanSummary(json['summary']?.toString()),
+      summary: _cleanChineseSummary(json['summary']?.toString()),
       imageUrl: _imageFrom(json['images']),
     );
   }
@@ -550,7 +799,7 @@ class BangumiMetadataRepository {
     if (id == null) return null;
     final subject = AnimeSubject(
       id: id,
-      title: _bestTitle(json['name_cn'], json['name']),
+      title: _bestSubjectTitle(json),
       originalTitle: json['name']?.toString() ?? '',
       summary: '',
       coverUrl: _imageFrom(json['images']),
@@ -566,23 +815,24 @@ class BangumiMetadataRepository {
     );
     return AnimeRecommendation(
       subject: subject,
-      relation: _blankToNull(json['relation']?.toString()) ?? '相关',
+      relation:
+          verifiedChineseText(json['relation']?.toString(), title: true) ??
+          '相关',
     );
   }
 
   List<AnimeTag> _tagsFromJson(Object? value) {
     if (value is! List) return const [];
-    return value
-        .whereType<Map>()
-        .map(
-          (item) => AnimeTag(
-            name: item['name']?.toString() ?? '',
-            count: _intValue(item['count']) ?? 0,
-          ),
-        )
-        .where((item) => item.name.isNotEmpty)
-        .take(28)
-        .toList();
+    final localized = <String, AnimeTag>{};
+    for (final item in value.whereType<Map>()) {
+      final name = _localizedTagName(item['name']?.toString() ?? '');
+      if (!isLikelyChineseTitle(name)) continue;
+      final tag = AnimeTag(name: name, count: _intValue(item['count']) ?? 0);
+      final current = localized[name];
+      if (current == null || tag.count > current.count) localized[name] = tag;
+      if (localized.length >= 28) break;
+    }
+    return localized.values.toList(growable: false);
   }
 
   List<AnimeCategory> _categoriesFrom(
@@ -592,7 +842,8 @@ class BangumiMetadataRepository {
   ) {
     final names = <String>{};
     final all = [...metaTags, ...tags.map((item) => item.name), ?platform];
-    for (final item in all) {
+    for (final rawItem in all) {
+      final item = _localizedTagName(rawItem);
       if (_categoryNames.contains(item)) names.add(item);
       if (item.contains('动画')) names.add('动画');
       if (item.contains('喜剧')) names.add('喜剧');
@@ -762,6 +1013,104 @@ class BangumiMetadataRepository {
     return original?.toString().trim() ?? '';
   }
 
+  String _bestSubjectTitle(Map<String, dynamic> json) {
+    final candidates = <({int score, String value})>[];
+
+    void addCandidate(Object? rawValue, int score) {
+      final value = verifiedChineseText(rawValue?.toString(), title: true);
+      if (value == null) return;
+      candidates.add((score: score, value: value));
+    }
+
+    final chineseName = json['name_cn']?.toString().trim() ?? '';
+    addCandidate(chineseName, 1000);
+    final infobox = json['infobox'];
+    if (infobox is List) {
+      for (final rawItem in infobox.whereType<Map>()) {
+        final item = rawItem.cast<Object?, Object?>();
+        final key = item['key']?.toString().trim() ?? '';
+        if (!_isChineseTitleInfoboxKey(key)) continue;
+        final baseScore = _chineseTitleKeyScore(key);
+        final value = item['value'];
+        if (value is List) {
+          for (final rawAlias in value) {
+            if (rawAlias is Map) {
+              final aliasKey =
+                  rawAlias['k']?.toString().trim() ??
+                  rawAlias['key']?.toString().trim() ??
+                  '';
+              final aliasValue =
+                  rawAlias['v'] ?? rawAlias['value'] ?? rawAlias['name'];
+              addCandidate(
+                aliasValue,
+                baseScore + _chineseTitleKeyScore(aliasKey),
+              );
+            } else {
+              addCandidate(rawAlias, baseScore);
+            }
+          }
+        } else if (value is Map) {
+          final aliasKey =
+              value['k']?.toString().trim() ??
+              value['key']?.toString().trim() ??
+              '';
+          addCandidate(
+            value['v'] ?? value['value'] ?? value['name'],
+            baseScore + _chineseTitleKeyScore(aliasKey),
+          );
+        } else {
+          addCandidate(value, baseScore);
+        }
+      }
+    }
+    if (candidates.isNotEmpty) {
+      candidates.sort((first, second) {
+        final scoreOrder = second.score.compareTo(first.score);
+        if (scoreOrder != 0) return scoreOrder;
+        return first.value.length.compareTo(second.value.length);
+      });
+      return candidates.first.value;
+    }
+    if (chineseName.isNotEmpty) return chineseName;
+    return json['name']?.toString().trim() ?? '';
+  }
+
+  String _bestChineseTitle(Object? cn) {
+    return verifiedChineseText(cn?.toString(), title: true) ?? '';
+  }
+
+  bool _isChineseTitleInfoboxKey(String value) {
+    final key = value.toLowerCase();
+    return key.contains('中文名') ||
+        key.contains('中文译') ||
+        key.contains('简体') ||
+        key.contains('大陆') ||
+        key == '别名';
+  }
+
+  int _chineseTitleKeyScore(String value) {
+    final key = value.toLowerCase();
+    if (key.contains('大陆版权译') || key.contains('大陆官方')) return 1200;
+    if (key.contains('简体中文') || key.contains('简中')) return 1100;
+    if (key.contains('中文名') || key.contains('中文译')) return 900;
+    if (key.contains('大陆') || key.contains('中文')) return 800;
+    if (key == '别名') return 40;
+    return 0;
+  }
+
+  String _localizedTagName(String value) {
+    final text = value.trim();
+    if (text.isEmpty) return '';
+    return _bangumiTagTranslations[text.toLowerCase()] ?? text;
+  }
+
+  List<String> _bangumiQueryNames(String value) {
+    return <String>{
+      value,
+      ?_bangumiLocalizedQueryAliases[value],
+    }.toList(growable: false);
+  }
+
   int? _intValue(Object? value) {
     if (value is int) return value;
     if (value is num) return value.round();
@@ -774,10 +1123,101 @@ class BangumiMetadataRepository {
     return text;
   }
 
-  String _cleanSummary(String? value) {
+  String _cleanChineseSummary(String? value) {
     final text = value?.trim();
-    if (text == null || text.isEmpty) return '暂无简介。';
-    return text.replaceAll(RegExp(r'\s+'), ' ');
+    if (text == null || text.isEmpty) return '暂无中文简介。';
+    final extracted = _extractChineseSummary(text);
+    return extracted ?? '暂无中文简介。';
+  }
+
+  String _cleanChineseDescription(String? value) {
+    final text = value?.trim();
+    if (text == null || text.isEmpty) return '';
+    return _extractChineseSummary(text) ?? '';
+  }
+
+  String? _extractChineseSummary(String value) {
+    final normalized = value.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+    final chineseMarker = RegExp(
+      r'[\[【（(]\s*(?:中文简介|中文介绍|中文剧情简介)\s*[\]】）)]',
+      caseSensitive: false,
+    );
+    final originalMarker = RegExp(
+      r'[\[【（(]\s*(?:简介原文|原文简介|原文)\s*[\]】）)]',
+      caseSensitive: false,
+    );
+
+    final chineseMatch = chineseMarker.firstMatch(normalized);
+    if (chineseMatch != null) {
+      var localized = normalized.substring(chineseMatch.end);
+      final followingOriginal = originalMarker.firstMatch(localized);
+      if (followingOriginal != null) {
+        localized = localized.substring(0, followingOriginal.start);
+      }
+      final selected = _bestChineseSummaryBlock(localized);
+      if (selected != null) return selected;
+    }
+
+    final originalMatch = originalMarker.firstMatch(normalized);
+    if (originalMatch != null) {
+      final selected = _bestChineseSummaryBlock(
+        normalized.substring(0, originalMatch.start),
+      );
+      if (selected != null) return selected;
+    }
+    return _bestChineseSummaryBlock(normalized);
+  }
+
+  String? _bestChineseSummaryBlock(String value) {
+    final candidates = <String>[];
+
+    void addGroup(List<String> blocks) {
+      if (blocks.isEmpty) return;
+      final text = blocks.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (isLikelyChineseText(text)) candidates.add(text);
+    }
+
+    void collect(Iterable<String> rawBlocks) {
+      var group = <String>[];
+      for (final rawBlock in rawBlocks) {
+        final block = rawBlock.replaceAll(RegExp(r'\s+'), ' ').trim();
+        if (block.isEmpty) continue;
+        if (isLikelyChineseText(block)) {
+          group.add(block);
+        } else {
+          addGroup(group);
+          group = <String>[];
+        }
+      }
+      addGroup(group);
+    }
+
+    final paragraphs = value.split(RegExp(r'\n\s*\n+'));
+    if (paragraphs.length > 1) collect(paragraphs);
+    final lines = value.split('\n');
+    if (lines.length > 1) collect(lines);
+    final sentences = <String>[];
+    var sentenceStart = 0;
+    for (final match in RegExp(r'[。！？!?]+').allMatches(value)) {
+      sentences.add(value.substring(sentenceStart, match.end));
+      sentenceStart = match.end;
+    }
+    if (sentenceStart < value.length) {
+      sentences.add(value.substring(sentenceStart));
+    }
+    if (sentences.length > 1) collect(sentences);
+    final compact = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (candidates.isEmpty && isLikelyChineseText(compact)) {
+      candidates.add(compact);
+    }
+    if (candidates.isEmpty) return null;
+    candidates.sort((first, second) {
+      final firstHan = RegExp(r'[\u3400-\u9fff]').allMatches(first).length;
+      final secondHan = RegExp(r'[\u3400-\u9fff]').allMatches(second).length;
+      final hanOrder = secondHan.compareTo(firstHan);
+      return hanOrder != 0 ? hanOrder : second.length.compareTo(first.length);
+    });
+    return candidates.first;
   }
 
   String _formatSeconds(int seconds) {
@@ -810,8 +1250,64 @@ class BangumiMetadataRepository {
   }
 }
 
+const _bangumiTagTranslations = <String, String>{
+  'anime': '动画',
+  'animation': '动画',
+  'tv': '电视动画',
+  'web': '网络动画',
+  'movie': '动画电影',
+  'ova': '原创动画录像',
+  'ona': '网络动画',
+  'action': '动作',
+  'adventure': '冒险',
+  'comedy': '喜剧',
+  'drama': '剧情',
+  'fantasy': '奇幻',
+  'romance': '恋爱',
+  'mystery': '悬疑',
+  'horror': '恐怖',
+  'music': '音乐',
+  'school': '校园',
+  'sci-fi': '科幻',
+  'science fiction': '科幻',
+  'slice of life': '日常',
+  'supernatural': '超自然',
+  'manga adaptation': '漫画改',
+  'novel adaptation': '小说改',
+  'original': '原创',
+};
+
+const _bangumiLocalizedQueryAliases = <String, String>{
+  '动画': 'Animation',
+  '电视动画': 'TV',
+  '网络动画': 'ONA',
+  '动画电影': 'Movie',
+  '原创动画录像': 'OVA',
+  '动作': 'Action',
+  '动作冒险': 'Action',
+  '冒险': 'Adventure',
+  '喜剧': 'Comedy',
+  '剧情': 'Drama',
+  '奇幻': 'Fantasy',
+  '恋爱': 'Romance',
+  '悬疑': 'Mystery',
+  '恐怖': 'Horror',
+  '音乐': 'Music',
+  '校园': 'School',
+  '科幻': 'Sci-Fi',
+  '日常': 'Slice of Life',
+  '超自然': 'Supernatural',
+  '漫画改': 'Manga adaptation',
+  '小说改': 'Novel adaptation',
+  '原创': 'Original',
+};
+
 const _categoryNames = {
   '动画',
+  '电视动画',
+  '网络动画',
+  '动画电影',
+  '原创动画录像',
   '喜剧',
   '奇幻',
   '家庭',
@@ -822,20 +1318,49 @@ const _categoryNames = {
   '动作',
   '科幻',
   '悬疑',
+  '恐怖',
   '战斗',
   '音乐',
   '校园',
   '恋爱',
   '日常',
+  '超自然',
 };
+
+const _fallbackBocchiId = 328609;
+const _fallbackBocchiCoverUrl =
+    'https://api.bgm.tv/v0/subjects/328609/image?type=common';
+const _fallbackFrierenId = 400602;
+const _fallbackFrierenCoverUrl =
+    'https://api.bgm.tv/v0/subjects/400602/image?type=common';
+const _fallbackDungeonMeshiId = 395378;
+const _fallbackDungeonMeshiCoverUrl =
+    'https://api.bgm.tv/v0/subjects/395378/image?type=common';
+
+AnimeSubject _unavailableSubject(int subjectId) => AnimeSubject(
+  id: subjectId,
+  title: 'Bangumi 条目 $subjectId',
+  originalTitle: 'Bangumi subject $subjectId',
+  summary: 'Bangumi 资料暂时不可用，请稍后重试。',
+  coverUrl: 'https://api.bgm.tv/v0/subjects/$subjectId/image?type=common',
+  bannerUrl: null,
+  date: null,
+  platform: 'TV',
+  language: '未知',
+  region: '未知',
+  status: '资料暂不可用',
+  categories: const [],
+  tags: const [],
+  totalEpisodes: 0,
+);
 
 final _fallbackSubjects = [
   const AnimeSubject(
-    id: 489888,
+    id: _fallbackBocchiId,
     title: '孤独摇滚！',
     originalTitle: 'ぼっち・ざ・ろっく！',
     summary: '极度怕生的少女后藤一里因为吉他结识乐队伙伴，在舞台和日常里一点点靠近自己真正想成为的样子。',
-    coverUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
+    coverUrl: _fallbackBocchiCoverUrl,
     bannerUrl: null,
     date: '2022-10-08',
     platform: 'TV',
@@ -858,11 +1383,11 @@ final _fallbackSubjects = [
     ratingTotal: 12000,
   ),
   const AnimeSubject(
-    id: 367247,
+    id: _fallbackFrierenId,
     title: '葬送的芙莉莲',
     originalTitle: '葬送のフリーレン',
     summary: '勇者一行讨伐魔王之后，长寿精灵芙莉莲重新踏上旅途，学习理解人类短暂却明亮的一生。',
-    coverUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
+    coverUrl: _fallbackFrierenCoverUrl,
     bannerUrl: null,
     date: '2023-09-29',
     platform: 'TV',
@@ -885,11 +1410,11 @@ final _fallbackSubjects = [
     ratingTotal: 16000,
   ),
   const AnimeSubject(
-    id: 464376,
+    id: _fallbackDungeonMeshiId,
     title: '迷宫饭',
     originalTitle: 'ダンジョン飯',
     summary: '一支冒险队深入地下城救人，同时认真研究如何把沿途魔物做成一顿像样的饭。',
-    coverUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+    coverUrl: _fallbackDungeonMeshiCoverUrl,
     bannerUrl: null,
     date: '2024-01-04',
     platform: 'TV',
@@ -924,34 +1449,22 @@ AnimeHomeFeed get _fallbackFeed {
       AnimeCategory(
         name: '动画',
         count: 35681,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
+        imageUrl: _fallbackFrierenCoverUrl,
       ),
       AnimeCategory(
         name: '喜剧',
         count: 11599,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+        imageUrl: _fallbackDungeonMeshiCoverUrl,
       ),
-      AnimeCategory(
-        name: '奇幻',
-        count: 8676,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
-      ),
+      AnimeCategory(name: '奇幻', count: 8676, imageUrl: _fallbackBocchiCoverUrl),
     ],
     tags: const [
-      AnimeTag(
-        name: 'TV',
-        count: 12883,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/39/88/328609_pRZqu.jpg',
-      ),
-      AnimeTag(
-        name: '日本',
-        count: 10822,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/7f/b1/400602_Z4B4z.jpg',
-      ),
+      AnimeTag(name: 'TV', count: 12883, imageUrl: _fallbackBocchiCoverUrl),
+      AnimeTag(name: '日本', count: 10822, imageUrl: _fallbackFrierenCoverUrl),
       AnimeTag(
         name: '漫画改',
         count: 5899,
-        imageUrl: 'https://lain.bgm.tv/pic/cover/l/fb/84/395378_HoH00.jpg',
+        imageUrl: _fallbackDungeonMeshiCoverUrl,
       ),
     ],
   );

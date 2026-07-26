@@ -36,8 +36,15 @@ void main() {
       ),
       SubjectContentType.series,
     );
+    expect(
+      subjectContentTypeOf(
+        _subject(source: 'tmdb:series:123', platform: 'Series'),
+      ),
+      SubjectContentType.series,
+    );
     for (final source in const [
       'cinemeta:movie:tt456',
+      'tmdb:movie:456',
       'wikidata',
       'archive:public-film',
       'peertube:video',

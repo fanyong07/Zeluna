@@ -96,6 +96,8 @@ void main() {
                 'genres': ['Drama'],
                 'image': {
                   'medium': 'https://images.example/show-$page-$index.jpg',
+                  'original':
+                      'https://images.example/show-$page-$index-original.jpg',
                 },
               },
           ]),
@@ -110,6 +112,7 @@ void main() {
     expect(subjects, hasLength(660));
     expect(subjects.map((item) => item.title), contains('Show 0-219'));
     expect(subjects.map((item) => item.title), isNot(contains('Show 0-220')));
+    expect(subjects.first.coverUrl, 'https://images.example/show-0-0.jpg');
   });
 
   test(

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -5,12 +6,69 @@ import 'package:http/http.dart' as http;
 
 import '../domain/anime_models.dart';
 
+class TmdbTokenValidation {
+  const TmdbTokenValidation._({required this.isValid, required this.message});
+
+  const TmdbTokenValidation.valid(String message)
+    : this._(isValid: true, message: message);
+
+  const TmdbTokenValidation.invalid(String message)
+    : this._(isValid: false, message: message);
+
+  final bool isValid;
+  final String message;
+}
+
 class ExternalServiceRepository {
-  ExternalServiceRepository({http.Client? client})
-    : _client = client ?? http.Client();
+  ExternalServiceRepository({
+    http.Client? client,
+    Future<String?> Function()? tmdbAccessTokenProvider,
+    Future<void> Function(String rejectedToken)? onTmdbAccessTokenRejected,
+  }) : _client = client ?? http.Client(),
+       _tmdbAccessTokenProvider = tmdbAccessTokenProvider,
+       _onTmdbAccessTokenRejected = onTmdbAccessTokenRejected;
 
   final http.Client _client;
+  final Future<String?> Function()? _tmdbAccessTokenProvider;
+  final Future<void> Function(String rejectedToken)? _onTmdbAccessTokenRejected;
+  final Set<String> _rejectedTmdbAccessTokens = <String>{};
+  bool _suppressTmdbAccessToken = false;
+  int _tmdbAccessTokenGeneration = 0;
+  DateTime? _tmdbRateLimitedUntil;
   static const _cinemetaBase = 'https://v3-cinemeta.strem.io';
+  static const _tmdbBase = 'https://api.themoviedb.org/3';
+  static const _tmdbImageBase = 'https://image.tmdb.org/t/p';
+  static const _tmdbDefaultRateLimitCooldown = Duration(seconds: 15);
+  static const _tmdbMaxRateLimitCooldown = Duration(minutes: 1);
+  static const _tmdbGenreNames = <int, String>{
+    12: '冒险',
+    14: '奇幻',
+    16: '动画',
+    18: '剧情',
+    27: '恐怖',
+    28: '动作',
+    35: '喜剧',
+    36: '历史',
+    37: '西部',
+    53: '惊悚',
+    80: '犯罪',
+    99: '纪录片',
+    878: '科幻',
+    9648: '悬疑',
+    10402: '音乐',
+    10749: '爱情',
+    10751: '家庭',
+    10752: '战争',
+    10759: '动作冒险',
+    10762: '儿童',
+    10763: '新闻',
+    10764: '真人秀',
+    10765: '科幻奇幻',
+    10766: '肥皂剧',
+    10767: '脱口秀',
+    10768: '战争政治',
+    10770: '电视电影',
+  };
   static const _archiveCollections = <String>[
     'animationandcartoons',
     'feature_films',
@@ -25,6 +83,183 @@ class ExternalServiceRepository {
     'Origin': 'https://www.bilibili.com',
     'Accept': 'application/json, text/plain, */*',
   };
+
+  void resetTmdbAccessTokenState() {
+    _tmdbAccessTokenGeneration++;
+    _suppressTmdbAccessToken = false;
+    _rejectedTmdbAccessTokens.clear();
+    _tmdbRateLimitedUntil = null;
+  }
+
+  Future<TmdbTokenValidation> validateTmdbAccessToken(String token) async {
+    final normalized = token.trim();
+    if (normalized.length < 32 ||
+        normalized.length > 2048 ||
+        RegExp(r'\s').hasMatch(normalized)) {
+      return const TmdbTokenValidation.invalid('令牌格式不正确');
+    }
+    final uri = Uri.parse(
+      '$_tmdbBase/authentication',
+    ).replace(queryParameters: const {'language': 'zh-CN'});
+    try {
+      if (_tmdbRequestIsCoolingDown()) {
+        return const TmdbTokenValidation.invalid('请求过于频繁，请稍后再试');
+      }
+      final response = await _client
+          .get(uri, headers: _tmdbHeaders(normalized))
+          .timeout(const Duration(seconds: 12));
+      _acceptTmdbRateLimit(response);
+      if (response.statusCode == 401) {
+        return const TmdbTokenValidation.invalid('令牌无效或已过期');
+      }
+      if (response.statusCode == 403) {
+        return const TmdbTokenValidation.invalid('TMDB 拒绝了本次验证，请检查令牌权限或稍后重试');
+      }
+      if (response.statusCode == 429) {
+        return const TmdbTokenValidation.invalid('请求过于频繁，请稍后再试');
+      }
+      if (response.statusCode != 200) {
+        return TmdbTokenValidation.invalid(
+          'TMDB 暂时无法验证令牌（HTTP ${response.statusCode}）',
+        );
+      }
+      final json = _decodeJsonMap(response);
+      if (json['success'] != true) {
+        return const TmdbTokenValidation.invalid('TMDB 未接受这个令牌');
+      }
+      return const TmdbTokenValidation.valid('TMDB 连接成功');
+    } on TimeoutException {
+      return const TmdbTokenValidation.invalid('连接 TMDB 超时，请检查网络后重试');
+    } catch (_) {
+      return const TmdbTokenValidation.invalid('无法连接 TMDB，请检查网络后重试');
+    }
+  }
+
+  Future<List<AnimeSubject>> tmdbSearch(String keyword, {int page = 1}) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    final safePage = page.clamp(1, 500).toInt();
+    final groups = await Future.wait([
+      _tmdbSubjects(
+        path: '/search/movie',
+        type: 'movie',
+        queryParameters: {
+          'query': query,
+          'page': '$safePage',
+          'language': 'zh-CN',
+          'region': 'CN',
+          'include_adult': 'false',
+        },
+      ),
+      _tmdbSubjects(
+        path: '/search/tv',
+        type: 'tv',
+        queryParameters: {
+          'query': query,
+          'page': '$safePage',
+          'language': 'zh-CN',
+          'include_adult': 'false',
+        },
+      ),
+    ]);
+    return _uniqueSubjects(_interleaveSubjectGroups(groups, limitPerRound: 6));
+  }
+
+  Future<List<AnimeSubject>> tmdbSeriesFeed({int pages = 3}) async {
+    final safePages = pages.clamp(1, 10).toInt();
+    final groups = await Future.wait([
+      for (var page = 1; page <= safePages; page++)
+        _tmdbSubjects(
+          path: '/discover/tv',
+          type: 'tv',
+          queryParameters: {
+            'page': '$page',
+            'language': 'zh-CN',
+            'include_adult': 'false',
+            'include_null_first_air_dates': 'false',
+            'sort_by': 'popularity.desc',
+            'watch_region': 'CN',
+          },
+        ),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<List<AnimeSubject>> tmdbMovieFeed({int pages = 3}) async {
+    final safePages = pages.clamp(1, 10).toInt();
+    final groups = await Future.wait([
+      for (var page = 1; page <= safePages; page++)
+        _tmdbSubjects(
+          path: '/discover/movie',
+          type: 'movie',
+          queryParameters: {
+            'page': '$page',
+            'language': 'zh-CN',
+            'region': 'CN',
+            'include_adult': 'false',
+            'sort_by': 'popularity.desc',
+          },
+        ),
+    ]);
+    return _uniqueSubjects(groups.expand((items) => items));
+  }
+
+  Future<AnimeDetailBundle?> tmdbDetail(AnimeSubject subject) async {
+    final identity = _tmdbIdentity(subject);
+    if (identity == null) return null;
+    final response = await _tmdbGet(
+      Uri.parse('$_tmdbBase/${identity.$1}/${identity.$2}').replace(
+        queryParameters: const {
+          'language': 'zh-CN',
+          'append_to_response': 'credits,recommendations',
+        },
+      ),
+    );
+    if (response == null || response.statusCode != 200) return null;
+    final json = _decodeJsonMap(response);
+    if (json.isEmpty) return null;
+    final detailedSubject = _subjectFromTmdb(json, identity.$1);
+    if (detailedSubject.id <= 0 || detailedSubject.title.trim().isEmpty) {
+      return null;
+    }
+    final credits = json['credits'] is Map
+        ? (json['credits'] as Map).cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final recommendations = json['recommendations'] is Map
+        ? (json['recommendations'] as Map).cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final recommendationItems = recommendations['results'] is List
+        ? recommendations['results'] as List
+        : const [];
+    return AnimeDetailBundle(
+      subject: detailedSubject,
+      episodes: identity.$1 == 'tv'
+          ? _tmdbSeriesEpisodes(json, detailedSubject)
+          : _tmdbMovieEpisodes(json, detailedSubject),
+      characters: _tmdbCharacters(credits),
+      staff: _tmdbStaff(credits),
+      recommendations: recommendationItems
+          .whereType<Map>()
+          .map(
+            (item) =>
+                _subjectFromTmdb(item.cast<String, dynamic>(), identity.$1),
+          )
+          .where(
+            (item) =>
+                item.id > 0 &&
+                item.source != detailedSubject.source &&
+                item.title.trim().isNotEmpty,
+          )
+          .take(12)
+          .map(
+            (item) => AnimeRecommendation(
+              subject: item,
+              relation: identity.$1 == 'tv' ? '相关剧集' : '相关电影',
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
 
   Future<List<AnimeSubject>> anilistSearch(String keyword, {int perPage = 24}) {
     return _anilistSubjects(
@@ -1200,6 +1435,490 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
     return RegExp(r'<d\s').allMatches(utf8.decode(response.bodyBytes)).length;
   }
 
+  Future<List<AnimeSubject>> _tmdbSubjects({
+    required String path,
+    required String type,
+    required Map<String, String> queryParameters,
+  }) async {
+    final response = await _tmdbGet(
+      Uri.parse('$_tmdbBase$path').replace(queryParameters: queryParameters),
+    );
+    if (response == null || response.statusCode != 200) return const [];
+    final json = _decodeJsonMap(response);
+    final results = json['results'];
+    if (results is! List) return const [];
+    return results
+        .whereType<Map>()
+        .map((item) => _subjectFromTmdb(item.cast<String, dynamic>(), type))
+        .where((item) => item.id > 0 && item.title.trim().isNotEmpty)
+        .toList(growable: false);
+  }
+
+  Future<http.Response?> _tmdbGet(Uri uri) async {
+    if (_tmdbRequestIsCoolingDown()) return null;
+    final generation = _tmdbAccessTokenGeneration;
+    final token = await _readTmdbAccessToken();
+    if (token == null || generation != _tmdbAccessTokenGeneration) return null;
+    try {
+      final response = await _client
+          .get(uri, headers: _tmdbHeaders(token))
+          .timeout(const Duration(seconds: 8));
+      if (generation != _tmdbAccessTokenGeneration) return null;
+      _acceptTmdbRateLimit(response);
+      if (response.statusCode == 403) {
+        _startTmdbCooldown(_tmdbDefaultRateLimitCooldown);
+      }
+      if (response.statusCode == 401) {
+        await _rejectTmdbAccessToken(token, generation);
+      }
+      return response;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<String?> _readTmdbAccessToken() async {
+    if (_suppressTmdbAccessToken) return null;
+    try {
+      final token = (await _tmdbAccessTokenProvider?.call())?.trim() ?? '';
+      if (token.length < 32 ||
+          token.length > 2048 ||
+          RegExp(r'[\r\n\s]').hasMatch(token)) {
+        return null;
+      }
+      return token;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _rejectTmdbAccessToken(String token, int generation) async {
+    if (generation != _tmdbAccessTokenGeneration ||
+        _rejectedTmdbAccessTokens.contains(token)) {
+      return;
+    }
+    String currentToken;
+    try {
+      currentToken = (await _tmdbAccessTokenProvider?.call())?.trim() ?? '';
+    } catch (_) {
+      return;
+    }
+    if (generation != _tmdbAccessTokenGeneration || currentToken != token) {
+      return;
+    }
+    if (!_rejectedTmdbAccessTokens.add(token)) return;
+    _suppressTmdbAccessToken = true;
+    _tmdbAccessTokenGeneration++;
+    try {
+      await _onTmdbAccessTokenRejected?.call(token);
+    } catch (_) {
+      // Persisting the rejected state must not make metadata calls fail.
+    }
+  }
+
+  Map<String, String> _tmdbHeaders(String token) => {
+    'Accept': 'application/json',
+    'Authorization': 'Bearer $token',
+  };
+
+  void _acceptTmdbRateLimit(http.Response response) {
+    if (response.statusCode != 429) return;
+    final retryAfter = int.tryParse(
+      response.headers['retry-after']?.trim() ?? '',
+    );
+    final seconds = retryAfter == null
+        ? _tmdbDefaultRateLimitCooldown.inSeconds
+        : retryAfter.clamp(1, _tmdbMaxRateLimitCooldown.inSeconds).toInt();
+    _startTmdbCooldown(Duration(seconds: seconds));
+  }
+
+  void _startTmdbCooldown(Duration duration) {
+    final candidate = DateTime.now().toUtc().add(duration);
+    final current = _tmdbRateLimitedUntil;
+    if (current == null || candidate.isAfter(current)) {
+      _tmdbRateLimitedUntil = candidate;
+    }
+  }
+
+  bool _tmdbRequestIsCoolingDown() {
+    final until = _tmdbRateLimitedUntil;
+    if (until == null) return false;
+    if (until.isAfter(DateTime.now().toUtc())) return true;
+    _tmdbRateLimitedUntil = null;
+    return false;
+  }
+
+  Map<String, dynamic> _decodeJsonMap(http.Response response) {
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      return decoded is Map<String, dynamic> ? decoded : const {};
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  (String, int)? _tmdbIdentity(AnimeSubject subject) {
+    final parts = subject.source.split(':');
+    if (parts.length != 3 || parts.first != 'tmdb') return null;
+    final type = switch (parts[1]) {
+      'movie' => 'movie',
+      'series' => 'tv',
+      _ => null,
+    };
+    final id = int.tryParse(parts[2]);
+    if (type == null || id == null || id <= 0) return null;
+    return (type, id);
+  }
+
+  AnimeSubject _subjectFromTmdb(Map<String, dynamic> json, String type) {
+    final isSeries = type == 'tv';
+    final id = _intValue(json['id']) ?? 0;
+    final title = _bestText(
+      isSeries ? json['name'] : json['title'],
+      isSeries ? json['original_name'] : json['original_title'],
+      '',
+    );
+    final originalTitle = _bestText(
+      isSeries ? json['original_name'] : json['original_title'],
+      title,
+      '',
+    );
+    final totalEpisodes = isSeries
+        ? _intValue(json['number_of_episodes']) ?? 0
+        : 1;
+    final categories = _tmdbCategories(json);
+    final region = _tmdbRegion(json);
+    final companies = json['production_companies'] is List
+        ? json['production_companies'] as List
+        : const [];
+    return AnimeSubject(
+      id: id,
+      title: title,
+      originalTitle: originalTitle,
+      summary: _cleanText(json['overview']?.toString()),
+      coverUrl: _tmdbImageUrl(json['poster_path'], 'w500'),
+      bannerUrl: _tmdbImageUrl(json['backdrop_path'], 'w1280'),
+      date: _dateOnly(
+        (isSeries ? json['first_air_date'] : json['release_date'])?.toString(),
+      ),
+      platform: isSeries ? 'Series' : 'Movie',
+      language: _tmdbLanguageName(json['original_language']?.toString()),
+      region: region,
+      status: _tmdbStatus(json['status']?.toString(), isSeries, totalEpisodes),
+      categories: categories,
+      tags: [
+        const AnimeTag(name: 'TMDB'),
+        ...companies
+            .whereType<Map>()
+            .map((item) => item['name']?.toString().trim() ?? '')
+            .where((name) => name.isNotEmpty)
+            .take(5)
+            .map((name) => AnimeTag(name: name)),
+      ],
+      totalEpisodes: totalEpisodes,
+      ratingScore: (json['vote_average'] as num?)?.toDouble(),
+      ratingTotal: _intValue(json['vote_count']),
+      source: 'tmdb:${isSeries ? 'series' : 'movie'}:$id',
+    );
+  }
+
+  List<AnimeCategory> _tmdbCategories(Map<String, dynamic> json) {
+    final genres = json['genres'];
+    if (genres is List) {
+      return genres
+          .whereType<Map>()
+          .map((item) => item['name']?.toString().trim() ?? '')
+          .where((name) => name.isNotEmpty)
+          .take(6)
+          .map((name) => AnimeCategory(name: name))
+          .toList(growable: false);
+    }
+    final genreIds = json['genre_ids'];
+    if (genreIds is! List) return const [];
+    return genreIds
+        .map(_intValue)
+        .whereType<int>()
+        .map((id) => _tmdbGenreNames[id])
+        .whereType<String>()
+        .take(6)
+        .map((name) => AnimeCategory(name: name))
+        .toList(growable: false);
+  }
+
+  String _tmdbRegion(Map<String, dynamic> json) {
+    final countries = json['production_countries'];
+    if (countries is List) {
+      final names = countries
+          .whereType<Map>()
+          .map((item) {
+            final code = item['iso_3166_1']?.toString();
+            return _tmdbCountryName(code, item['name']?.toString());
+          })
+          .where((name) => name.isNotEmpty)
+          .take(3)
+          .toList(growable: false);
+      if (names.isNotEmpty) return names.join('/');
+    }
+    final origins = json['origin_country'];
+    if (origins is List) {
+      final names = origins
+          .map((item) => _tmdbCountryName(item?.toString(), null))
+          .where((name) => name.isNotEmpty)
+          .take(3)
+          .toList(growable: false);
+      if (names.isNotEmpty) return names.join('/');
+    }
+    return 'TMDB';
+  }
+
+  List<AnimeEpisode> _tmdbSeriesEpisodes(
+    Map<String, dynamic> json,
+    AnimeSubject subject,
+  ) {
+    final rawSeasons = json['seasons'] is List
+        ? (json['seasons'] as List).whereType<Map>().toList(growable: false)
+        : const <Map>[];
+    final seasons =
+        rawSeasons
+            .where((season) {
+              final number = _intValue(season['season_number']) ?? 0;
+              return number > 0 &&
+                  (_intValue(season['episode_count']) ?? 0) > 0;
+            })
+            .toList(growable: false)
+          ..sort(
+            (a, b) => (_intValue(a['season_number']) ?? 0).compareTo(
+              _intValue(b['season_number']) ?? 0,
+            ),
+          );
+    final reportedTotal = _intValue(json['number_of_episodes']) ?? 0;
+    final seasonTotal = seasons.fold<int>(
+      0,
+      (total, season) => total + (_intValue(season['episode_count']) ?? 0),
+    );
+    final targetTotal = reportedTotal > 0 ? reportedTotal : seasonTotal;
+    if (targetTotal <= 0) return const [];
+    final runtime = _tmdbRuntime(json);
+    final episodes = <AnimeEpisode>[];
+    for (final season in seasons) {
+      final seasonNumber = _intValue(season['season_number']) ?? 0;
+      final episodeCount = _intValue(season['episode_count']) ?? 0;
+      final seasonSummary = season['overview']?.toString().trim() ?? '';
+      final seasonDate = _dateOnly(season['air_date']?.toString());
+      final seasonImage =
+          _tmdbImageUrl(season['poster_path'], 'w500') ??
+          subject.bannerUrl ??
+          subject.coverUrl;
+      for (
+        var episodeNumber = 1;
+        episodeNumber <= episodeCount && episodes.length < targetTotal;
+        episodeNumber++
+      ) {
+        final globalNumber = episodes.length + 1;
+        episodes.add(
+          AnimeEpisode(
+            id: _stableInt('${subject.source}:$seasonNumber:$episodeNumber'),
+            subjectId: subject.id,
+            number: globalNumber,
+            title: '第$seasonNumber季 第$episodeNumber集',
+            airdate: episodeNumber == 1 ? seasonDate : null,
+            duration: runtime,
+            description: seasonSummary.isEmpty
+                ? subject.summary
+                : seasonSummary,
+            thumbnailUrl: seasonImage,
+          ),
+        );
+      }
+    }
+    while (episodes.length < targetTotal) {
+      final globalNumber = episodes.length + 1;
+      episodes.add(
+        AnimeEpisode(
+          id: _stableInt('${subject.source}:episode:$globalNumber'),
+          subjectId: subject.id,
+          number: globalNumber,
+          title: '',
+          airdate: globalNumber == 1 ? subject.date : null,
+          duration: runtime,
+          description: subject.summary,
+          thumbnailUrl: subject.bannerUrl ?? subject.coverUrl,
+        ),
+      );
+    }
+    return episodes;
+  }
+
+  List<AnimeEpisode> _tmdbMovieEpisodes(
+    Map<String, dynamic> json,
+    AnimeSubject subject,
+  ) {
+    return [
+      AnimeEpisode(
+        id: _stableInt('${subject.source}:feature'),
+        subjectId: subject.id,
+        number: 1,
+        title: '正片',
+        airdate: subject.date,
+        duration: _tmdbRuntime(json),
+        description: subject.summary,
+        thumbnailUrl: subject.bannerUrl ?? subject.coverUrl,
+      ),
+    ];
+  }
+
+  List<AnimeCharacter> _tmdbCharacters(Map<String, dynamic> credits) {
+    final cast = credits['cast'];
+    if (cast is! List) return const [];
+    return cast
+        .whereType<Map>()
+        .map((item) {
+          final actor = item['name']?.toString().trim() ?? '';
+          final character = item['character']?.toString().trim() ?? '';
+          final creditId = item['credit_id']?.toString() ?? '';
+          return AnimeCharacter(
+            id:
+                _intValue(item['cast_id']) ??
+                _intValue(item['id']) ??
+                _stableInt('tmdb-cast:$creditId:$actor:$character'),
+            name: character.isEmpty ? actor : character,
+            relation: '角色',
+            cv: actor,
+            summary: '',
+            imageUrl: _tmdbImageUrl(item['profile_path'], 'w500'),
+          );
+        })
+        .where((item) => item.name.isNotEmpty)
+        .take(24)
+        .toList(growable: false);
+  }
+
+  List<AnimeStaff> _tmdbStaff(Map<String, dynamic> credits) {
+    final crew = credits['crew'];
+    if (crew is! List) return const [];
+    final items = crew.whereType<Map>().toList(growable: false)
+      ..sort(
+        (a, b) => _tmdbCrewPriority(
+          a['department']?.toString(),
+        ).compareTo(_tmdbCrewPriority(b['department']?.toString())),
+      );
+    final seen = <String>{};
+    final result = <AnimeStaff>[];
+    for (final item in items) {
+      final name = item['name']?.toString().trim() ?? '';
+      final job = item['job']?.toString().trim() ?? '';
+      if (name.isEmpty || !seen.add('$name\u0000$job')) continue;
+      result.add(
+        AnimeStaff(
+          id: _intValue(item['id']) ?? _stableInt('$name:$job'),
+          name: name,
+          role: _tmdbCrewRole(job, item['department']?.toString()),
+          career: item['department']?.toString() ?? '',
+          imageUrl: _tmdbImageUrl(item['profile_path'], 'w500'),
+        ),
+      );
+      if (result.length >= 24) break;
+    }
+    return result;
+  }
+
+  String _tmdbRuntime(Map<String, dynamic> json) {
+    final runtime = _intValue(json['runtime']);
+    if (runtime != null && runtime > 0) return _formatMinutes(runtime);
+    final episodeRuntimes = json['episode_run_time'];
+    if (episodeRuntimes is List) {
+      final first = episodeRuntimes.map(_intValue).whereType<int>().firstOrNull;
+      if (first != null && first > 0) return _formatMinutes(first);
+    }
+    return '待补';
+  }
+
+  String _tmdbStatus(String? status, bool isSeries, int totalEpisodes) {
+    final translated = switch (status?.trim()) {
+      'Returning Series' => '连载中',
+      'In Production' => '制作中',
+      'Planned' => '已计划',
+      'Pilot' => '试播',
+      'Ended' => '已完结',
+      'Canceled' => '已取消',
+      'Released' => '已上映',
+      'Post Production' => '后期制作',
+      'Rumored' => '传闻',
+      _ => status?.trim() ?? '',
+    };
+    if (isSeries && totalEpisodes > 0) {
+      return translated.isEmpty
+          ? '全$totalEpisodes集'
+          : '$translated · 全$totalEpisodes集';
+    }
+    return translated.isEmpty ? (isSeries ? '剧集' : '电影') : translated;
+  }
+
+  String _tmdbCrewRole(String job, String? department) {
+    return switch (job) {
+      'Director' => '导演',
+      'Writer' || 'Screenplay' => '编剧',
+      'Producer' => '制片人',
+      'Executive Producer' => '执行制片人',
+      'Director of Photography' => '摄影指导',
+      'Original Music Composer' => '作曲',
+      'Editor' => '剪辑',
+      'Casting' => '选角',
+      _ => job.isNotEmpty ? job : department?.trim() ?? '制作人员',
+    };
+  }
+
+  int _tmdbCrewPriority(String? department) {
+    return switch (department?.trim()) {
+      'Directing' => 0,
+      'Writing' => 1,
+      'Production' => 2,
+      'Camera' => 3,
+      'Sound' => 4,
+      'Editing' => 5,
+      _ => 10,
+    };
+  }
+
+  String _tmdbLanguageName(String? code) {
+    return switch (code?.toLowerCase()) {
+      'zh' => '中文',
+      'ja' => '日语',
+      'ko' => '韩语',
+      'en' => '英语',
+      'fr' => '法语',
+      'de' => '德语',
+      'es' => '西班牙语',
+      'it' => '意大利语',
+      'ru' => '俄语',
+      null || '' => '未知',
+      final code => code,
+    };
+  }
+
+  String _tmdbCountryName(String? code, String? fallback) {
+    final normalized = code?.toUpperCase().trim() ?? '';
+    return switch (normalized) {
+      'CN' => '中国大陆',
+      'HK' => '中国香港',
+      'TW' => '中国台湾',
+      'JP' => '日本',
+      'KR' => '韩国',
+      'US' => '美国',
+      'GB' => '英国',
+      'FR' => '法国',
+      'DE' => '德国',
+      'IN' => '印度',
+      _ => fallback?.trim().isNotEmpty == true ? fallback!.trim() : normalized,
+    };
+  }
+
+  String? _tmdbImageUrl(Object? path, String size) {
+    final value = path?.toString().trim() ?? '';
+    if (value.isEmpty || !value.startsWith('/')) return null;
+    return '$_tmdbImageBase/$size$value';
+  }
+
   AnimeSubject _subjectFromAnilist(Map<String, dynamic> json) {
     final title = json['title'] is Map ? json['title'] as Map : const {};
     final cover = json['coverImage'] is Map
@@ -1220,7 +1939,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       title: _bestText(title['english'], title['romaji'], title['native']),
       originalTitle: title['native']?.toString() ?? '',
       summary: _cleanText(json['description']?.toString()),
-      coverUrl: cover['extraLarge']?.toString() ?? cover['large']?.toString(),
+      coverUrl: cover['large']?.toString() ?? cover['extraLarge']?.toString(),
       bannerUrl: json['bannerImage']?.toString(),
       date: date,
       platform: json['format']?.toString() ?? 'TV',
@@ -1275,7 +1994,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       originalTitle: json['title_japanese']?.toString() ?? title,
       summary: _cleanText(json['synopsis']?.toString()),
       coverUrl:
-          jpg['large_image_url']?.toString() ?? jpg['image_url']?.toString(),
+          jpg['image_url']?.toString() ?? jpg['large_image_url']?.toString(),
       bannerUrl: trailer['images'] is Map
           ? ((trailer['images'] as Map)['maximum_image_url']?.toString() ??
                 jpg['large_image_url']?.toString())
@@ -1334,7 +2053,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       title: title,
       originalTitle: titles['ja_jp']?.toString() ?? title,
       summary: _cleanText(attributes['synopsis']?.toString()),
-      coverUrl: poster['original']?.toString() ?? poster['large']?.toString(),
+      coverUrl: poster['large']?.toString() ?? poster['original']?.toString(),
       bannerUrl: cover['original']?.toString() ?? cover['large']?.toString(),
       date: attributes['startDate']?.toString(),
       platform: subtype,
@@ -1501,7 +2220,7 @@ query ($page: Int, $perPage: Int, $season: MediaSeason, $seasonYear: Int) {
       title: title,
       originalTitle: title,
       summary: _cleanText(showJson['summary']?.toString()),
-      coverUrl: images['original']?.toString() ?? images['medium']?.toString(),
+      coverUrl: images['medium']?.toString() ?? images['original']?.toString(),
       bannerUrl: null,
       date: showJson['premiered']?.toString(),
       platform: showJson['type']?.toString() ?? 'TV',

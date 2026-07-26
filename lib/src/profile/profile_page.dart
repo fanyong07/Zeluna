@@ -72,7 +72,8 @@ class _ProfileBanner extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               PosterArt(
-                coverUrl: hero.bannerUrl ?? hero.coverUrl,
+                coverUrl: hero.bannerUrl,
+                fallbackCoverUrl: hero.coverUrl,
                 title: state.profile.nickname,
               ),
               const DecoratedBox(
@@ -299,7 +300,8 @@ class _PlaylistCard extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 PosterArt(
-                  coverUrl: subject.bannerUrl ?? subject.coverUrl,
+                  coverUrl: subject.bannerUrl,
+                  fallbackCoverUrl: subject.coverUrl,
                   title: title,
                 ),
                 const DecoratedBox(
@@ -397,21 +399,6 @@ class _ProfileShortcutSection extends StatelessWidget {
                   title: '下载管理',
                   value: '${state.offlineTasks.length}',
                   onTap: () => context.push('/profile/offline'),
-                ),
-                _ShortcutTile(
-                  icon: Icons.extension_outlined,
-                  title: '播放规则',
-                  value:
-                      '${state.rulePlugins.enabledIds.length + state.sourceCatalog.activePlaybackRuleCount}/'
-                      '${state.rulePlugins.installedIds.length + state.sourceCatalog.availablePlaybackRuleCount}',
-                  onTap: () => context.push('/profile/rules'),
-                ),
-                _ShortcutTile(
-                  icon: Icons.hub_outlined,
-                  title: '外部源目录',
-                  value:
-                      '${state.sourceCatalog.enabledCount}/${state.sourceCatalog.importedCount}',
-                  onTap: () => context.push('/profile/sources'),
                 ),
                 _ShortcutTile(
                   icon: Icons.subtitles,
@@ -609,7 +596,8 @@ class _HistoryCard extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 PosterArt(
-                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
                   title: entry.title,
                 ),
                 const DecoratedBox(
@@ -718,7 +706,8 @@ class _DownloadRow extends ConsumerWidget {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(6),
               child: PosterArt(
-                coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                coverUrl: entry.subject.bannerUrl,
+                fallbackCoverUrl: entry.subject.coverUrl,
                 title: entry.title,
               ),
             ),
@@ -853,7 +842,8 @@ class _DownloadTaskCard extends ConsumerWidget {
               width: 116,
               height: 68,
               child: PosterArt(
-                coverUrl: task.subject.bannerUrl ?? task.subject.coverUrl,
+                coverUrl: task.subject.bannerUrl,
+                fallbackCoverUrl: task.subject.coverUrl,
                 title: task.title,
               ),
             ),
@@ -1029,18 +1019,6 @@ class _ProfileRightRail extends StatelessWidget {
                 title: '反馈记录',
                 value: '${state.feedbacks.length}',
                 onTap: () => context.push('/profile/feedback'),
-              ),
-              _RailAction(
-                icon: Icons.extension_outlined,
-                title: '播放规则',
-                value: '${state.rulePlugins.installedIds.length}',
-                onTap: () => context.push('/profile/rules'),
-              ),
-              _RailAction(
-                icon: Icons.hub_outlined,
-                title: '外部源目录',
-                value: '${state.sourceCatalog.enabledCount}',
-                onTap: () => context.push('/profile/sources'),
               ),
             ],
           ),
@@ -1332,7 +1310,8 @@ class _HistoryListTile extends StatelessWidget {
                 width: 116,
                 height: 68,
                 child: PosterArt(
-                  coverUrl: entry.subject.bannerUrl ?? entry.subject.coverUrl,
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
                   title: entry.title,
                 ),
               ),
@@ -1680,7 +1659,7 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                   const _ReadonlyRow(
                     title: '播放能力',
-                    value: '播放规则 / 网络直链 / 本地文件',
+                    value: '统一聚合后端 / 网络直链 / 本地文件',
                   ),
                   const _ReadonlyRow(
                     title: '播放器',
@@ -2288,37 +2267,10 @@ class _PosterThumb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final url = subject.coverUrl;
-    if (url != null && url.startsWith('http')) {
-      return Image.network(
-        url,
-        fit: BoxFit.cover,
-        errorBuilder: (context, error, stackTrace) =>
-            _FallbackThumb(title: subject.title),
-      );
-    }
-    return _FallbackThumb(title: subject.title);
-  }
-}
-
-class _FallbackThumb extends StatelessWidget {
-  const _FallbackThumb({required this.title});
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(color: Color(0xFF30374D)),
-      child: Center(
-        child: Text(
-          String.fromCharCodes(title.runes.take(2)),
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-      ),
+    return PosterArt(
+      coverUrl: subject.coverUrl,
+      title: subject.title,
+      fit: BoxFit.cover,
     );
   }
 }

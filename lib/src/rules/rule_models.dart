@@ -1,3 +1,7 @@
+import 'package:flutter/foundation.dart';
+
+import 'csp_rule_support.dart';
+
 enum RuleContentType {
   anime('番剧'),
   series('电视剧'),
@@ -131,9 +135,23 @@ class RulePlugin {
     }
 
     final normalizedEngine = engine.toLowerCase();
+    if (normalizedEngine == 'android-csp' &&
+        (kIsWeb || defaultTargetPlatform != TargetPlatform.android)) {
+      return RuleExecutionStatus.unsupportedEngine;
+    }
+    if (normalizedEngine == 'drpy-js' &&
+        (kIsWeb ||
+            !const {
+              TargetPlatform.android,
+              TargetPlatform.windows,
+            }.contains(defaultTargetPlatform))) {
+      return RuleExecutionStatus.unsupportedEngine;
+    }
     final knownEngine = switch (normalizedEngine) {
       'native' ||
       'xbpq' ||
+      'drpy-js' ||
+      'android-csp' ||
       'animeko-web-selector' ||
       'tvbox-json-api' ||
       'tvbox-xml-api' => true,
@@ -147,6 +165,8 @@ class RulePlugin {
     final complete = switch (normalizedEngine) {
       'native' => _hasCompleteKazumiConfig(this),
       'xbpq' => _hasCompleteXbpqConfig(this),
+      'drpy-js' => _hasCompleteDrpyConfig(this),
+      'android-csp' => _hasCompleteAndroidCspConfig(this),
       'animeko-web-selector' => _hasCompleteAnimekoConfig(this),
       'tvbox-json-api' || 'tvbox-xml-api' => _hasHttpEndpoint(baseUrl),
       _ => false,
@@ -353,6 +373,16 @@ bool _hasCompleteXbpqConfig(RulePlugin rule) {
     config.playLink,
   ]);
 }
+
+bool _hasCompleteDrpyConfig(RulePlugin rule) {
+  final inlineSource = rule.rawConfig['inlineSource']?.toString().trim() ?? '';
+  if (inlineSource.isNotEmpty) return true;
+  final extUrl = rule.rawConfig['extUrl']?.toString() ?? '';
+  return _hasHttpEndpoint(extUrl);
+}
+
+bool _hasCompleteAndroidCspConfig(RulePlugin rule) =>
+    isAuditedAndroidCspConfig(rule.rawConfig, fallbackApi: rule.engine);
 
 bool _hasCompleteAnimekoConfig(RulePlugin rule) {
   final config = rule.animeko;

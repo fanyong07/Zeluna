@@ -9,10 +9,8 @@ import '../domain/anime_models.dart';
 import '../player/player_page.dart';
 import '../player/open_media_page.dart';
 import '../profile/profile_page.dart';
-import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
-import '../sources/source_management_page.dart';
 import 'app_theme.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -107,18 +105,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       },
     ),
     GoRoute(
-      path: '/profile/rules',
-      builder: (context, state) => const RuleManagementPage(),
-    ),
-    GoRoute(
-      path: '/profile/sources',
-      builder: (context, state) => const SourceManagementPage(),
-    ),
-    GoRoute(
-      path: '/profile/rules/repository',
-      builder: (context, state) => const RuleRepositoryPage(),
-    ),
-    GoRoute(
       path: '/settings',
       builder: (context, state) => const SettingsHubPage(),
     ),
@@ -144,6 +130,10 @@ final routerProvider = Provider<GoRouter>((ref) {
   routes.add(
     GoRoute(
       path: '/settings/services/:kind',
+      redirect: (context, state) {
+        final kind = state.pathParameters['kind'];
+        return kind == 'media' || kind == 'anime' ? '/settings' : null;
+      },
       builder: (context, state) =>
           ServiceSettingsPage(kind: state.pathParameters['kind'] ?? ''),
     ),

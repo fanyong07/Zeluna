@@ -9,6 +9,7 @@ import {
   ensureAllowedSourceHost,
   ensurePublicAddress,
   headersForRedirect,
+  isAllowedImageContent,
   isAllowedSourceContent,
   parseAllowedHosts,
   requestPublic,
@@ -19,14 +20,22 @@ import {
   validateTarget,
 } from './dev_web_server.mjs';
 
-function mockUpstreamResponse(body, contentType) {
+function mockUpstreamResponse(
+  body,
+  contentType,
+  { status = 200, headers: extraHeaders = {}, advertiseLength = true } = {},
+) {
   const bytes = Buffer.from(body);
   const headers = new Map([
     ['content-type', contentType],
-    ['content-length', bytes.length.toString()],
+    ...(advertiseLength ? [['content-length', bytes.length.toString()]] : []),
+    ...Object.entries(extraHeaders).map(([name, value]) => [
+      name.toLowerCase(),
+      value.toString(),
+    ]),
   ]);
   return {
-    status: 200,
+    status,
     headers: {
       get(name) {
         return headers.get(name.toLowerCase()) ?? null;
@@ -71,6 +80,20 @@ test('address validation blocks private and mapped IPv4 literals', async () => {
   );
   await assert.rejects(
     ensurePublicAddress(new URL('http://[::ffff:127.0.0.1]/file'), blockList),
+    (error) => error?.statusCode === 400,
+  );
+});
+
+test('synthetic DNS range is allowed only for hostname lookups with the local option', async () => {
+  const strict = createBlockedAddressList({ allowSyntheticDns: false });
+  const syntheticDns = createBlockedAddressList({ allowSyntheticDns: true });
+
+  assert.equal(strict.check('198.18.0.1', 'ipv4'), true);
+  assert.equal(syntheticDns.check('198.18.0.1', 'ipv4'), false);
+  assert.equal(syntheticDns.check('127.0.0.1', 'ipv4'), true);
+  assert.equal(syntheticDns.check('192.168.1.1', 'ipv4'), true);
+  await assert.rejects(
+    ensurePublicAddress(new URL('http://198.18.0.1/poster.jpg'), syntheticDns),
     (error) => error?.statusCode === 400,
   );
 });
@@ -318,6 +341,219 @@ test('source proxy content policy allows text catalogs but rejects media', () =>
     isAllowedSourceContent('video/mp4', new URL('https://example.com/a.mp4')),
     false,
   );
+});
+
+test('image proxy content policy accepts only declared image responses', () => {
+  assert.equal(isAllowedImageContent('image/jpeg'), true);
+  assert.equal(isAllowedImageContent('image/webp; charset=binary'), true);
+  assert.equal(isAllowedImageContent('application/octet-stream'), false);
+  assert.equal(isAllowedImageContent('text/html'), false);
+  assert.equal(isAllowedImageContent('image/'), false);
+});
+
+test('image proxy returns cacheable bounded images without forwarding secrets', async () => {
+  const upstreamRequests = [];
+  const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+  const server = createAnimeWebServer({
+    fetchUpstream: async (url, options) => {
+      upstreamRequests.push({ url: url.toString(), options });
+      return {
+        response: mockUpstreamResponse(image, 'image/png', {
+          headers: {
+            'set-cookie': 'upstream=secret',
+            'www-authenticate': 'Bearer realm="private"',
+            'x-upstream-secret': 'do-not-copy',
+          },
+        }),
+        url,
+      };
+    },
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    const target = 'https://images.example.com/poster.png';
+    const response = await fetch(
+      `${baseUrl}/image-proxy?url=${encodeURIComponent(target)}`,
+      {
+        headers: {
+          authorization: 'Bearer browser-secret',
+          cookie: 'browser=secret',
+          'x-upstream-authorization': 'Bearer bypass',
+          'x-upstream-cookie': 'bypass=secret',
+        },
+      },
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/png');
+    assert.equal(
+      response.headers.get('cache-control'),
+      'private, max-age=86400, stale-while-revalidate=604800',
+    );
+    assert.equal(response.headers.get('cross-origin-resource-policy'), 'same-origin');
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal(response.headers.get('www-authenticate'), null);
+    assert.equal(response.headers.get('x-upstream-secret'), null);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), image);
+
+    assert.equal(upstreamRequests.length, 1);
+    const [{ options }] = upstreamRequests;
+    assert.equal(options.method, 'GET');
+    assert.equal(options.strictRedirectHeaders, true);
+    assert.equal(options.headers.authorization, undefined);
+    assert.equal(options.headers.cookie, undefined);
+    assert.equal(options.headers['x-upstream-authorization'], undefined);
+    assert.equal(options.headers['x-upstream-cookie'], undefined);
+    assert.equal(options.headers.referer, 'https://images.example.com');
+    assert.match(options.headers.accept, /^image\//);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('image proxy supports HEAD without downloading a response body', async () => {
+  let upstreamBody;
+  const server = createAnimeWebServer({
+    fetchUpstream: async (url) => {
+      const response = mockUpstreamResponse('poster-bytes', 'image/jpeg');
+      upstreamBody = response.body;
+      return { response, url };
+    },
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    const target = 'https://images.example.com/poster.jpg';
+    const response = await fetch(
+      `${baseUrl}/image-proxy?url=${encodeURIComponent(target)}`,
+      { method: 'HEAD' },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-length'), '12');
+    assert.equal(await response.text(), '');
+    assert.equal(upstreamBody.destroyed, true);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('image proxy rejects non-images and both advertised and streamed oversize bodies', async () => {
+  const cases = [
+    {
+      response: mockUpstreamResponse('<html>not an image</html>', 'text/html'),
+      status: 415,
+    },
+    {
+      response: mockUpstreamResponse('12345', 'image/jpeg'),
+      status: 413,
+    },
+    {
+      response: mockUpstreamResponse('12345', 'image/jpeg', {
+        advertiseLength: false,
+      }),
+      status: 413,
+    },
+  ];
+  let index = 0;
+  const server = createAnimeWebServer({
+    imageMaxBytes: 4,
+    fetchUpstream: async (url) => ({
+      response: cases[index++].response,
+      url,
+    }),
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    for (const expected of cases) {
+      const target = `https://images.example.com/poster-${index}.jpg`;
+      const response = await fetch(
+        `${baseUrl}/image-proxy?url=${encodeURIComponent(target)}`,
+      );
+      assert.equal(response.status, expected.status);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('image proxy enforces a total upstream timeout', async () => {
+  const server = createAnimeWebServer({
+    imageTimeoutMs: 20,
+    fetchUpstream: async () => new Promise(() => {}),
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    const target = 'https://images.example.com/never-responds.jpg';
+    const response = await fetch(
+      `${baseUrl}/image-proxy?url=${encodeURIComponent(target)}`,
+    );
+    assert.equal(response.status, 504);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.match(await response.text(), /timed out/i);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('image proxy timeout also stops a stalled image body', async () => {
+  let stalledBody;
+  const server = createAnimeWebServer({
+    imageTimeoutMs: 20,
+    fetchUpstream: async (url) => {
+      stalledBody = new Readable({ read() {} });
+      return {
+        response: {
+          status: 200,
+          headers: {
+            get(name) {
+              return name.toLowerCase() === 'content-type' ? 'image/jpeg' : null;
+            },
+          },
+          body: stalledBody,
+        },
+        url,
+      };
+    },
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    const target = 'https://images.example.com/stalled.jpg';
+    const response = await fetch(
+      `${baseUrl}/image-proxy?url=${encodeURIComponent(target)}`,
+    );
+    assert.equal(response.status, 504);
+    assert.equal(stalledBody.destroyed, true);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('image proxy rejects invalid targets and mutating methods before fetching', async () => {
+  let fetchCount = 0;
+  const server = createAnimeWebServer({
+    fetchUpstream: async () => {
+      fetchCount++;
+      throw new Error('unexpected fetch');
+    },
+  });
+  const baseUrl = await listenOnLoopback(server);
+  try {
+    const invalid = await fetch(
+      `${baseUrl}/image-proxy?url=${encodeURIComponent('http://127.0.0.1/a.png')}`,
+    );
+    assert.equal(invalid.status, 400);
+
+    const target = encodeURIComponent('https://images.example.com/a.png');
+    const post = await fetch(`${baseUrl}/image-proxy?url=${target}`, {
+      method: 'POST',
+    });
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.get('allow'), 'GET, HEAD, OPTIONS');
+    assert.equal(fetchCount, 0);
+  } finally {
+    await closeServer(server);
+  }
 });
 
 test('proxy endpoints make upstream HTML inert while preserving its text', async () => {

@@ -14,6 +14,54 @@ class PlaybackLineValidationDecision {
   final PlaybackLine? selectedLine;
 }
 
+bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
+  if (!line.available) return false;
+  final rawUrl = line.url?.trim() ?? '';
+  final uri = Uri.tryParse(rawUrl);
+  return uri?.scheme.toLowerCase() != 'file';
+}
+
+List<PlaybackLine> initialPlaybackLinesForDisplay(PlaybackLine? line) {
+  if (line == null || playbackLineNeedsPreDisplayVerification(line)) {
+    return const <PlaybackLine>[];
+  }
+  return List<PlaybackLine>.unmodifiable(<PlaybackLine>[line]);
+}
+
+Future<List<PlaybackLine>> verifyPlaybackLinesBeforeDisplay(
+  Iterable<PlaybackLine> lines, {
+  required Future<PlaybackLine> Function(PlaybackLine line) verify,
+}) async {
+  final verified = await Future.wait(<Future<PlaybackLine>>[
+    for (final line in lines)
+      if (playbackLineNeedsPreDisplayVerification(line))
+        verify(line)
+      else
+        Future<PlaybackLine>.value(line),
+  ]);
+  return List<PlaybackLine>.unmodifiable(verified);
+}
+
+List<PlaybackLine> upsertPlaybackLine(
+  Iterable<PlaybackLine> lines,
+  PlaybackLine replacement,
+) {
+  var replaced = false;
+  final result = <PlaybackLine>[];
+  for (final line in lines) {
+    if (line.id != replacement.id) {
+      result.add(line);
+      continue;
+    }
+    if (!replaced) {
+      result.add(replacement);
+      replaced = true;
+    }
+  }
+  if (!replaced) result.add(replacement);
+  return List<PlaybackLine>.unmodifiable(result);
+}
+
 List<PlaybackLine> playablePlaybackLinesInSourceOrder(
   Iterable<PlaybackLine> lines,
 ) {
@@ -22,6 +70,108 @@ List<PlaybackLine> playablePlaybackLinesInSourceOrder(
       (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
     ),
   );
+}
+
+List<PlaybackLine> selectablePlaybackLinesForDisplay(
+  Iterable<PlaybackLine> lines, {
+  Set<String> failedLineIds = const <String>{},
+}) {
+  return sortPlaybackLinesForDisplay(
+    playablePlaybackLinesInSourceOrder(
+      lines,
+    ).where((line) => !failedLineIds.contains(line.id)),
+  );
+}
+
+List<PlaybackLine> mergePlaybackLineSnapshot({
+  required Iterable<PlaybackLine> currentLines,
+  required Iterable<PlaybackLine> snapshotLines,
+  String? replacedProviderId,
+  bool authoritative = false,
+}) {
+  final snapshot = snapshotLines.toList(growable: false);
+  if (authoritative) return List<PlaybackLine>.unmodifiable(snapshot);
+
+  final merged = <String, PlaybackLine>{
+    for (final line in currentLines)
+      if (replacedProviderId == null || line.providerId != replacedProviderId)
+        line.id: line,
+    for (final line in snapshot) line.id: line,
+  };
+  return List<PlaybackLine>.unmodifiable(merged.values);
+}
+
+bool nativePlaybackHasFirstFrame({
+  required bool playing,
+  required Duration position,
+}) {
+  // media_kit may publish playing=true as soon as the play command is accepted,
+  // before a frame has decoded. Position progress is the startup signal.
+  return position > Duration.zero;
+}
+
+bool nativePlaybackReachedFirstFrame({
+  required Duration previousPosition,
+  required Duration currentPosition,
+}) {
+  return previousPosition <= Duration.zero && currentPosition > Duration.zero;
+}
+
+bool nativePlaybackShouldSwitchAtSoftTimeout({
+  required Duration position,
+  required bool hasAlternative,
+}) {
+  // A slow HLS stream may need more than seven seconds for its first segment.
+  // Only abandon it early when another playable line is already available.
+  return position <= Duration.zero && hasAlternative;
+}
+
+bool webPlaybackStartupTimedOut({required bool waitingForReady}) {
+  // A ready web video can still be paused because the browser rejected
+  // autoplay. That is a user-gesture state, not a broken playback line.
+  return waitingForReady;
+}
+
+bool webPlaybackShouldSwitchAtSoftTimeout({
+  required bool waitingForReady,
+  required bool hasAlternative,
+}) {
+  // Seven seconds is useful for a fast fallback, but some valid HLS sources
+  // need longer than that to download their first complete segment.
+  return waitingForReady && hasAlternative;
+}
+
+bool webPlaybackShouldApplyPlayingUpdate({
+  required bool loading,
+  required bool playing,
+}) {
+  // Resetting an existing HTML video emits pause while the new source is still
+  // loading. Preserve the autoplay intent until ready; a real autoplay denial
+  // is reported after loading completes.
+  return playing || !loading;
+}
+
+bool shouldPreserveLoadedPlaybackLine({
+  required PlaybackLine? currentLine,
+  required PlaybackLine? replacementLine,
+  required String? loadedUrl,
+  required Set<String> failedLineIds,
+  required bool playbackFailed,
+}) {
+  if (currentLine == null ||
+      !currentLine.available ||
+      currentLine.url?.trim().isEmpty != false ||
+      playbackFailed ||
+      failedLineIds.contains(currentLine.id) ||
+      loadedUrl?.trim() != currentLine.url?.trim()) {
+    return false;
+  }
+  if (replacementLine == null || !replacementLine.available) return true;
+  return replacementLine.url?.trim() != currentLine.url?.trim();
+}
+
+bool shouldExpandPlaybackLookupAfterQuickLines(Iterable<PlaybackLine> lines) {
+  return playablePlaybackLinesInSourceOrder(lines).isEmpty;
 }
 
 PlaybackLineValidationDecision decidePlaybackLineAfterValidation({

@@ -31,14 +31,6 @@ class SettingsHubPage extends ConsumerWidget {
             onTap: () => context.push('/profile/offline'),
           ),
           _SettingsHubTile(
-            icon: Icons.extension_outlined,
-            title: '播放规则',
-            value:
-                '${state.rulePlugins.enabledIds.length + state.sourceCatalog.activePlaybackRuleCount}/'
-                '${state.rulePlugins.installedIds.length + state.sourceCatalog.availablePlaybackRuleCount}',
-            onTap: () => context.push('/profile/rules'),
-          ),
-          _SettingsHubTile(
             icon: Icons.subtitles,
             title: '弹幕设置',
             value: state.danmaku.enabled ? '开启' : '关闭',
@@ -49,6 +41,12 @@ class SettingsHubPage extends ConsumerWidget {
             title: '播放设置',
             value: '偏好',
             onTap: () => context.push('/settings/playback'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.dns_outlined,
+            title: '聚合后端',
+            value: state.services.playbackBackendEnabled ? '已启用' : '未启用',
+            onTap: () => context.push('/settings/services/playback'),
           ),
         ];
         return AppChrome(
@@ -216,10 +214,8 @@ class _SettingsHubRail extends StatelessWidget {
               const SectionTitle(title: '当前状态'),
               const SizedBox(height: 14),
               _SettingsHubRailLine(
-                label: '播放规则',
-                value:
-                    '${state.rulePlugins.enabledIds.length + state.sourceCatalog.activePlaybackRuleCount}/'
-                    '${state.rulePlugins.installedIds.length + state.sourceCatalog.availablePlaybackRuleCount}',
+                label: '内容线路',
+                value: state.services.playbackBackendEnabled ? '统一后端' : '未连接',
               ),
               _SettingsHubRailLine(
                 label: '缓存任务',
@@ -235,8 +231,8 @@ class _SettingsHubRail extends StatelessWidget {
             children: [
               SectionTitle(title: '管理范围'),
               SizedBox(height: 12),
-              _SettingsHubNote(text: '播放偏好、弹幕过滤和规则管理都在这里进入'),
-              _SettingsHubNote(text: '规则仓库、自动规则包和批量开关统一从“播放规则”进入'),
+              _SettingsHubNote(text: '番剧、电视剧和电影统一由后端目录与线路服务提供'),
+              _SettingsHubNote(text: '客户端不再导入或执行第三方播放规则'),
             ],
           ),
         ),
@@ -550,10 +546,17 @@ class PlaybackSettingsView extends StatelessWidget {
 }
 
 class _SettingsTitle extends StatelessWidget {
-  const _SettingsTitle({required this.onBack, required this.compact});
+  const _SettingsTitle({
+    required this.onBack,
+    required this.compact,
+    this.title = '播放设置',
+    this.subtitle = '调整画面、声音和播放器行为',
+  });
 
   final VoidCallback onBack;
   final bool compact;
+  final String title;
+  final String subtitle;
 
   @override
   Widget build(BuildContext context) {
@@ -575,7 +578,7 @@ class _SettingsTitle extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '播放设置',
+                  title,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     color: Colors.white,
                     fontWeight: FontWeight.w800,
@@ -585,7 +588,7 @@ class _SettingsTitle extends StatelessWidget {
                 if (!compact) ...[
                   const SizedBox(height: 3),
                   Text(
-                    '调整画面、声音和播放器行为',
+                    subtitle,
                     style: Theme.of(
                       context,
                     ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
@@ -1571,19 +1574,22 @@ class ServiceSettingsPage extends ConsumerWidget {
                   padding: const EdgeInsets.fromLTRB(8, 0, 12, 120),
                   children: [
                     _SettingsTitle(
-                      onBack: () => safeNavigateBack(
-                        context,
-                        fallbackRoute: '/settings/playback',
-                      ),
+                      onBack: () =>
+                          safeNavigateBack(context, fallbackRoute: '/settings'),
                       compact: false,
+                      title: '外部服务',
+                      subtitle: '管理资料来源与第三方接口',
                     ),
                     const SizedBox(height: 12),
                     ...switch (kind) {
-                      'media' => _mediaSourceCards(settings, controller),
-                      'anime' => _animeSourceCards(settings, controller),
                       'sync' => _syncSourceCards(settings, controller),
                       'subtitles' => _subtitleSourceCards(settings, controller),
                       'danmaku' => _danmakuSourceCards(
+                        settings,
+                        controller,
+                        context,
+                      ),
+                      'playback' => _playbackSourceCards(
                         settings,
                         controller,
                         context,
@@ -1603,10 +1609,8 @@ class ServiceSettingsPage extends ConsumerWidget {
                   bottom: 24,
                   child: Center(
                     child: _BackPill(
-                      onBack: () => safeNavigateBack(
-                        context,
-                        fallbackRoute: '/settings/playback',
-                      ),
+                      onBack: () =>
+                          safeNavigateBack(context, fallbackRoute: '/settings'),
                     ),
                   ),
                 ),
@@ -1616,116 +1620,6 @@ class ServiceSettingsPage extends ConsumerWidget {
         );
       },
     );
-  }
-
-  List<Widget> _mediaSourceCards(
-    ExternalServiceSettings settings,
-    AnimeController controller,
-  ) {
-    return [
-      const _InfoCard(
-        title: '影视内容与开放影片',
-        lines: [
-          '提供大容量电影与剧集资料，包括评分、近期热门海报、横幅和分集信息。',
-          '开放影片频道补充可直接播放的动画、短片和纪录片。',
-        ],
-      ),
-      const SizedBox(height: 12),
-      _SettingsCard(
-        children: [
-          _SwitchRow(
-            title: '启用影视资料',
-            subtitle: '提供电影、剧集、海报、评分与分集信息',
-            value: settings.mediaMetadataEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(mediaMetadataEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用热门影视资料',
-            subtitle: '电影和剧集热门、分页、海报、横幅与 IMDb 标识',
-            value: settings.cinemetaEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(cinemetaEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用开放视频搜索',
-            subtitle: '发现开放许可视频并解析可直接播放的清晰线路',
-            value: settings.peerTubeEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(peerTubeEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用开放影片库',
-            subtitle: '提供公共领域与开放许可的动画、短片和纪录片',
-            value: settings.wikimediaCommonsEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(wikimediaCommonsEnabled: value),
-            ),
-          ),
-          const _ActionRow(title: '豆瓣适配', subtitle: '保留自建接口扩展口，暂不内置非官方抓取'),
-        ],
-      ),
-    ];
-  }
-
-  List<Widget> _animeSourceCards(
-    ExternalServiceSettings settings,
-    AnimeController controller,
-  ) {
-    return [
-      const _InfoCard(
-        title: '番剧资料与中文增强',
-        lines: ['汇总热门番剧、角色、制作人员、评分和放送信息。', '优先补充中文标题与简介，并提供搜索、榜单和封面后备。'],
-      ),
-      const SizedBox(height: 12),
-      _SettingsCard(
-        children: [
-          _SwitchRow(
-            title: '启用热门番剧资料',
-            subtitle: '补充热门内容、角色、制作人员与放送信息',
-            value: settings.anilistEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(anilistEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用榜单与搜索补充',
-            subtitle: '扩充热门榜单与番剧搜索结果',
-            value: settings.jikanEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(jikanEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用封面与搜索后备',
-            subtitle: '在主要资料暂不可用时补充封面与搜索结果',
-            value: settings.kitsuEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(kitsuEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '启用中文番剧资料',
-            subtitle: '补充中文标题、简介、评分与放送信息',
-            value: settings.bangumiEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(bangumiEnabled: value),
-            ),
-          ),
-          _SwitchRow(
-            title: '优先中文标题',
-            subtitle: '有中文标题时优先展示中文',
-            value: settings.preferBangumiChinese,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(preferBangumiChinese: value),
-            ),
-          ),
-        ],
-      ),
-    ];
   }
 
   List<Widget> _syncSourceCards(
@@ -1753,6 +1647,50 @@ class ServiceSettingsPage extends ConsumerWidget {
             onChanged: (value) => controller.updateServices(
               settings.copyWith(publicCollectionSyncEnabled: value),
             ),
+          ),
+        ],
+      ),
+    ];
+  }
+
+  List<Widget> _playbackSourceCards(
+    ExternalServiceSettings settings,
+    AnimeController controller,
+    BuildContext context,
+  ) {
+    final endpoint = settings.playbackBackendEndpoint.trim();
+    return [
+      const _InfoCard(
+        title: 'Zeluna 聚合后端',
+        lines: [
+          '番剧、电视剧和电影统一读取自建后端；后端不可用时会明确提示，不再回退到本地规则。',
+          '地址只接受 HTTP 或 HTTPS，不要填写账号、密码或带参数的链接。',
+        ],
+      ),
+      const SizedBox(height: 12),
+      _SettingsCard(
+        children: [
+          _SwitchRow(
+            title: '启用聚合后端',
+            subtitle: endpoint.isEmpty ? '请先配置服务器地址' : endpoint,
+            value: settings.playbackBackendEnabled,
+            onChanged: (value) {
+              if (value && endpoint.isEmpty) {
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(const SnackBar(content: Text('请先填写聚合后端地址')));
+                return;
+              }
+              controller.updateServices(
+                settings.copyWith(playbackBackendEnabled: value),
+              );
+            },
+          ),
+          _ActionRow(
+            title: '服务器地址',
+            subtitle: endpoint.isEmpty ? '未配置' : endpoint,
+            onTap: () =>
+                _showPlaybackBackendEditor(context, settings, controller),
           ),
         ],
       ),
@@ -1957,6 +1895,81 @@ class ServiceSettingsPage extends ConsumerWidget {
                       ),
                     );
                     Navigator.of(context).pop();
+                  },
+                  child: const Text('保存'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showPlaybackBackendEditor(
+    BuildContext context,
+    ExternalServiceSettings settings,
+    AnimeController controller,
+  ) {
+    final text = TextEditingController(text: settings.playbackBackendEndpoint);
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF151515),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              18,
+              20,
+              MediaQuery.viewInsetsOf(sheetContext).bottom + 20,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  key: const ValueKey('playback_backend_endpoint_field'),
+                  controller: text,
+                  keyboardType: TextInputType.url,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: '聚合后端地址',
+                    hintText: 'https://anime.example.com',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                FilledButton(
+                  key: const ValueKey('save_playback_backend_endpoint'),
+                  onPressed: () {
+                    final value = text.text.trim().replaceFirst(
+                      RegExp(r'/+$'),
+                      '',
+                    );
+                    final uri = Uri.tryParse(value);
+                    final valid =
+                        value.isEmpty ||
+                        (uri != null &&
+                            uri.hasAuthority &&
+                            (uri.scheme == 'http' || uri.scheme == 'https') &&
+                            uri.userInfo.isEmpty &&
+                            uri.query.isEmpty &&
+                            uri.fragment.isEmpty);
+                    if (!valid) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('请输入有效的 HTTP 或 HTTPS 地址')),
+                      );
+                      return;
+                    }
+                    controller.updateServices(
+                      settings.copyWith(
+                        playbackBackendEndpoint: value,
+                        playbackBackendEnabled: value.isEmpty
+                            ? false
+                            : settings.playbackBackendEnabled,
+                      ),
+                    );
+                    Navigator.of(sheetContext).pop();
                   },
                   child: const Text('保存'),
                 ),

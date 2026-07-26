@@ -27,6 +27,10 @@ fun producesReleaseArtifact(taskName: String): Boolean {
 val releaseTaskRequested = gradle.startParameter.taskNames.any {
     producesReleaseArtifact(it)
 }
+val allowLegacyDebugReleaseSigning =
+    providers.gradleProperty("allowLegacyDebugReleaseSigning")
+        .orNull
+        ?.equals("true", ignoreCase = true) == true
 val requiredSigningKeys = listOf(
     "storeFile",
     "storePassword",
@@ -122,6 +126,10 @@ fun validateReleaseKeyStore(
 }
 
 fun requireValidReleaseSigning() {
+    // Explicit compatibility mode for internal APKs that must update the
+    // project's historical debug-signed "release" builds. Normal release
+    // commands still require a private production keystore.
+    if (allowLegacyDebugReleaseSigning) return
     if (!keystorePropertiesFile.isFile) {
         throw GradleException(
             "Release builds require android/key.properties. " +
@@ -209,13 +217,27 @@ android {
 
     buildTypes {
         release {
-            // Release artifacts are never signed with the Android debug key.
-            // Use a debug APK for local sideload testing instead.
-            if (hasUsableReleaseSigning) {
+            if (allowLegacyDebugReleaseSigning) {
+                signingConfig = signingConfigs.getByName("debug")
+            } else if (hasUsableReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
     }
+}
+
+dependencies {
+    // Runtime ABI dependencies used by the pinned gao TVBox Spider DEX.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.11.0")
+    implementation("com.google.net.cronet:cronet-okhttp:0.1.1")
+    implementation("com.github.thegrizzlylabs:sardine-android:0.9")
+    implementation("wang.harlon.quickjs:wrapper-android:3.2.3")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.orhanobut:logger:2.2.0")
+    implementation("org.slf4j:slf4j-nop:1.7.36")
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 flutter {

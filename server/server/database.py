@@ -5,7 +5,11 @@ SQLAlchemy 异步引擎 + ORM 模型
 import datetime
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func
+from sqlalchemy import (
+    String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func,
+    UniqueConstraint, select, text,
+)
+from sqlalchemy.exc import IntegrityError
 
 from .config import DATABASE_URL
 
@@ -262,6 +266,149 @@ class PlayHistory(Base):
     updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
 
 
+# ---------------------------------------------------------------------------
+# 播放线路缓存 (预爬 + 可达性验证后写入, 供 /api/v2/vod 秒回)
+# ---------------------------------------------------------------------------
+class PlaybackCache(Base):
+    __tablename__ = "playback_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "episode", name="uq_playback_cache_subject_episode"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    subject_id: Mapped[str] = mapped_column(String(200), index=True)  # 如 maccms:iKun:123
+    episode: Mapped[int] = mapped_column(Integer, default=1)
+    title: Mapped[str] = mapped_column(String(500), default="")
+    # JSON: [{"url","title","format","source"}] —— 只存验证过可达的线路
+    lines_json: Mapped[str] = mapped_column(Text, default="[]")
+    line_count: Mapped[int] = mapped_column(Integer, default=0)
+    verified_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+# ---------------------------------------------------------------------------
+# 统一内容目录与播放源绑定
+# ---------------------------------------------------------------------------
+class CatalogSubject(Base):
+    """Bangumi/TMDB 元数据的本地目录项，stable_id 是客户端唯一作品 ID。"""
+
+    __tablename__ = "catalog_subjects"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(30), index=True)
+    provider_id: Mapped[str] = mapped_column(String(100), index=True)
+    media_type: Mapped[str] = mapped_column(String(20), index=True)
+    title: Mapped[str] = mapped_column(String(500), index=True)
+    original_title: Mapped[str] = mapped_column(String(500), default="")
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    popularity: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+        index=True,
+    )
+
+
+class SourceBinding(Base):
+    """稳定作品 ID 到某个采集站条目的映射。"""
+
+    __tablename__ = "source_bindings"
+    __table_args__ = (
+        UniqueConstraint("stable_id", "source_id", name="uq_source_binding"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    stable_id: Mapped[str] = mapped_column(String(200), index=True)
+    source_id: Mapped[str] = mapped_column(String(300), index=True)
+    source_name: Mapped[str] = mapped_column(String(100), index=True)
+    matched_title: Mapped[str] = mapped_column(String(500), default="")
+    media_type: Mapped[str] = mapped_column(String(20), default="")
+    year: Mapped[int] = mapped_column(Integer, default=0)
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    episode_count: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_success_at: Mapped[float] = mapped_column(Float, default=0.0)
+    last_failure_at: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+
+
+class SourceHealth(Base):
+    """采集站的长期健康分，用于自动降权和恢复。"""
+
+    __tablename__ = "source_health"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    source_name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_status: Mapped[str] = mapped_column(String(30), default="unknown")
+    last_checked_at: Mapped[float] = mapped_column(Float, default=0.0)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if conn.dialect.name == "sqlite":
+            # create_all cannot retrofit constraints onto an existing SQLite
+            # table. Keep the newest row for each key before adding the index.
+            await conn.execute(text("""
+                DELETE FROM playback_cache
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM playback_cache
+                    GROUP BY subject_id, episode
+                )
+            """))
+            await conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_playback_cache_subject_episode
+                ON playback_cache(subject_id, episode)
+            """))
+
+
+async def upsert_playback_cache(
+    session: AsyncSession,
+    *,
+    subject_id: str,
+    episode: int,
+    title: str,
+    lines_json: str,
+    line_count: int,
+    verified_at: float,
+) -> PlaybackCache:
+    """Store one cache row and recover cleanly from concurrent inserts."""
+    query = select(PlaybackCache).where(
+        PlaybackCache.subject_id == subject_id,
+        PlaybackCache.episode == episode,
+    )
+    row = (await session.execute(query)).scalar_one_or_none()
+    if row is None:
+        row = PlaybackCache(subject_id=subject_id, episode=episode)
+        session.add(row)
+    row.title = title
+    row.lines_json = lines_json
+    row.line_count = line_count
+    row.verified_at = verified_at
+    try:
+        await session.commit()
+        return row
+    except IntegrityError:
+        await session.rollback()
+        row = (await session.execute(query)).scalar_one()
+        row.title = title
+        row.lines_json = lines_json
+        row.line_count = line_count
+        row.verified_at = verified_at
+        await session.commit()
+        return row

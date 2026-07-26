@@ -546,7 +546,8 @@ class CompactSubjectRow extends StatelessWidget {
                   width: 64,
                   height: 44,
                   child: PosterArt(
-                    coverUrl: subject.bannerUrl ?? subject.coverUrl,
+                    coverUrl: subject.bannerUrl,
+                    fallbackCoverUrl: subject.coverUrl,
                     title: subject.title,
                   ),
                 ),

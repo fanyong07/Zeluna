@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
+import '../data/chinese_text.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../shared_ui/app_chrome.dart';
@@ -70,8 +71,21 @@ String _publicSummary(String value) {
   return normalized.isEmpty ? '内容资料正在完善。' : normalized;
 }
 
-AnimeSubject _publicSubjectMetadata(AnimeSubject subject) {
-  final platformFallback = switch (subjectContentTypeOf(subject)) {
+bool _preferChineseMetadata(BuildContext context) {
+  return ProviderScope.containerOf(
+        context,
+      ).read(animeControllerProvider).value?.services.preferBangumiChinese ??
+      true;
+}
+
+AnimeSubject _publicSubjectMetadata(
+  BuildContext context,
+  AnimeSubject subject,
+) {
+  final contentType = subjectContentTypeOf(subject);
+  final isAnime = contentType == SubjectContentType.anime;
+  final preferChinese = _preferChineseMetadata(context);
+  final platformFallback = switch (contentType) {
     SubjectContentType.anime => '番剧',
     SubjectContentType.series => '剧集',
     SubjectContentType.movie => '电影',
@@ -80,7 +94,9 @@ AnimeSubject _publicSubjectMetadata(AnimeSubject subject) {
     id: subject.id,
     title: subject.title,
     originalTitle: subject.originalTitle,
-    summary: _publicSummary(subject.summary),
+    summary: preferChinese && isAnime && !isLikelyChineseText(subject.summary)
+        ? '暂无中文简介。'
+        : _publicSummary(subject.summary),
     coverUrl: subject.coverUrl,
     bannerUrl: subject.bannerUrl,
     date: subject.date,
@@ -92,10 +108,18 @@ AnimeSubject _publicSubjectMetadata(AnimeSubject subject) {
     region: _publicMetadataValue(subject.region),
     status: _publicMetadataValue(subject.status),
     categories: subject.categories
-        .where((item) => !_isInternalMetadataLabel(item.name))
+        .where(
+          (item) =>
+              !_isInternalMetadataLabel(item.name) &&
+              (!preferChinese || !isAnime || isLikelyChineseTitle(item.name)),
+        )
         .toList(growable: false),
     tags: subject.tags
-        .where((item) => !_isInternalMetadataLabel(item.name))
+        .where(
+          (item) =>
+              !_isInternalMetadataLabel(item.name) &&
+              (!preferChinese || !isAnime || isLikelyChineseTitle(item.name)),
+        )
         .toList(growable: false),
     totalEpisodes: subject.totalEpisodes,
     ratingScore: subject.ratingScore,
@@ -657,6 +681,8 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   Future<void> _refreshSubjectsInBackground() async {
     final requestVersion = ++_subjectsRequestVersion;
     try {
+      await ref.read(animeControllerProvider.future);
+      if (!mounted || requestVersion != _subjectsRequestVersion) return;
       final subjects = await _loadSubjects(ref, waitForRefresh: true);
       if (!mounted || requestVersion != _subjectsRequestVersion) return;
       setState(() => _subjectsFuture = Future.value(subjects));
@@ -1310,7 +1336,7 @@ class _MetadataRightRail extends StatelessWidget {
               else
                 for (final subject in subjects.take(5))
                   CompactSubjectRow(
-                    subject: _publicSubjectMetadata(subject),
+                    subject: _publicSubjectMetadata(context, subject),
                     onTap: () => _openSubject(context, subject),
                   ),
             ],
@@ -2341,7 +2367,7 @@ class _HomeRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               for (final subject in feed.recent.take(5))
                 CompactSubjectRow(
-                  subject: _publicSubjectMetadata(subject),
+                  subject: _publicSubjectMetadata(context, subject),
                   trailing: '刚刚',
                   onTap: () => onOpen(subject),
                 ),
@@ -2423,7 +2449,8 @@ class _MiniNowPlaying extends StatelessWidget {
               height: 62,
               width: double.infinity,
               child: PosterArt(
-                coverUrl: subject.bannerUrl ?? subject.coverUrl,
+                coverUrl: subject.bannerUrl,
+                fallbackCoverUrl: subject.coverUrl,
                 title: subject.title,
               ),
             ),
@@ -2813,9 +2840,9 @@ class _MobileQuickActions extends StatelessWidget {
         onTap: () => context.push('/history'),
       ),
       _MobileQuickAction(
-        icon: Icons.rule_folder_outlined,
-        label: '播放规则',
-        onTap: () => context.push('/profile/rules'),
+        icon: Icons.movie_outlined,
+        label: '电影',
+        onTap: () => context.push('/movies'),
       ),
     ];
     return SizedBox(
@@ -2983,7 +3010,7 @@ class _SubjectGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final subject = subjects[index];
         return PosterCard(
-          subject: _publicSubjectMetadata(subject),
+          subject: _publicSubjectMetadata(context, subject),
           landscape: landscape,
           badge: landscape ? '有资源' : _publicMetadataValue(subject.status),
           onTap: () => onOpen(subject),
@@ -3016,7 +3043,7 @@ class _SubjectGridSliver extends StatelessWidget {
         delegate: SliverChildBuilderDelegate((context, index) {
           final subject = subjects[index];
           return PosterCard(
-            subject: _publicSubjectMetadata(subject),
+            subject: _publicSubjectMetadata(context, subject),
             landscape: !compact && landscape,
             badge: showPlaybackAvailability
                 ? subjectPlaybackLabel(subject)
@@ -3245,13 +3272,15 @@ class _HeroBannerSlide extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displaySubject = _publicSubjectMetadata(subject);
+    final displaySubject = _publicSubjectMetadata(context, subject);
     final categoryText = displaySubject.categories
         .map((item) => item.name)
         .where((item) => item.trim().isNotEmpty)
         .take(2)
         .join('/');
     final isMovie = subject.platform.toLowerCase().contains('movie');
+    final isAnime = subjectContentTypeOf(subject) == SubjectContentType.anime;
+    final preferChinese = _preferChineseMetadata(context);
     final metadata = [
       if (subject.year != '未知') subject.year,
       if (displaySubject.region.isNotEmpty) displaySubject.region,
@@ -3262,6 +3291,7 @@ class _HeroBannerSlide extends StatelessWidget {
         '全${subject.totalEpisodes}集',
     ].join(' · ');
     final hasOriginalTitle =
+        (!isAnime || !preferChinese) &&
         subject.originalTitle.trim().isNotEmpty &&
         subject.originalTitle.trim() != subject.title.trim();
     final directPlayable = hasKnownDirectPlayback(subject);
@@ -3545,7 +3575,7 @@ class _DetailHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final directlyPlayable = hasKnownDirectPlayback(subject);
-    final displaySubject = _publicSubjectMetadata(subject);
+    final displaySubject = _publicSubjectMetadata(context, subject);
     final metadata = [
       subject.year,
       if (displaySubject.region.isNotEmpty) displaySubject.region,
@@ -3811,7 +3841,7 @@ class _DetailRightRail extends StatelessWidget {
               const SectionTitle(title: '简介'),
               const SizedBox(height: 10),
               Text(
-                _publicSummary(bundle.subject.summary),
+                _publicSubjectMetadata(context, bundle.subject).summary,
                 maxLines: 7,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -3830,7 +3860,7 @@ class _DetailRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               for (final item in bundle.recommendations.take(5))
                 CompactSubjectRow(
-                  subject: _publicSubjectMetadata(item.subject),
+                  subject: _publicSubjectMetadata(context, item.subject),
                   trailing:
                       item.subject.ratingScore?.toStringAsFixed(1) ??
                       item.relation,
@@ -3905,7 +3935,7 @@ class _DetailInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final subject = _publicSubjectMetadata(bundle.subject);
+    final subject = _publicSubjectMetadata(context, bundle.subject);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 0, 8, 120),
       children: [
@@ -4080,7 +4110,7 @@ class _RecommendationGrid extends StatelessWidget {
       itemBuilder: (context, index) {
         final item = items[index];
         return PosterCard(
-          subject: _publicSubjectMetadata(item.subject),
+          subject: _publicSubjectMetadata(context, item.subject),
           badge: _publicMetadataValue(item.relation),
           onTap: () => onOpen(item),
         );
@@ -4158,11 +4188,12 @@ class _BlurredBackdrop extends StatelessWidget {
           if (subject.bannerUrl != null || subject.coverUrl != null)
             ImageFiltered(
               imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: Image.network(
-                subject.bannerUrl ?? subject.coverUrl!,
+              child: PosterArt(
+                coverUrl: subject.bannerUrl,
+                fallbackCoverUrl: subject.coverUrl,
+                title: subject.title,
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) =>
-                    const ColoredBox(color: Colors.black),
+                allowHtmlFallback: false,
               ),
             )
           else
@@ -4607,7 +4638,7 @@ class _ScheduleRightRail extends StatelessWidget {
               else
                 for (final item in state.following.take(5))
                   CompactSubjectRow(
-                    subject: _publicSubjectMetadata(item.subject),
+                    subject: _publicSubjectMetadata(context, item.subject),
                     trailing: '提醒',
                   ),
             ],
