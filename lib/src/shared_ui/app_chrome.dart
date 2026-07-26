@@ -1,10 +1,13 @@
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'dart:async';
+
+import '../catalog/search_ranking.dart';
 import '../data/anime_controller.dart';
+import '../data/search_history_store.dart';
+import '../domain/subject_content_type.dart';
 import '../domain/anime_models.dart';
 import 'app_design.dart';
 import 'poster_card.dart';
@@ -24,6 +27,7 @@ class AppChrome extends StatelessWidget {
     this.title,
     this.showSearch = true,
     this.onBack,
+    this.onOpenSuggestion,
   });
 
   final ChromeDestination active;
@@ -36,6 +40,10 @@ class AppChrome extends StatelessWidget {
   final String? title;
   final bool showSearch;
   final VoidCallback? onBack;
+
+  /// Opens a suggested subject directly (usually the detail page). When null,
+  /// picking a suggestion falls back to a normal keyword search.
+  final ValueChanged<AnimeSubject>? onOpenSuggestion;
 
   static final profileHistorySectionKey = GlobalKey();
 
@@ -72,6 +80,7 @@ class AppChrome extends StatelessWidget {
                           trailing: trailing,
                           showSearch: showSearch,
                           onBack: onBack,
+                          onOpenSuggestion: onOpenSuggestion,
                         ),
                         Expanded(
                           child: Row(
@@ -352,7 +361,7 @@ class SectionTitle extends StatelessWidget {
   }
 }
 
-class AccentButton extends StatelessWidget {
+class AccentButton extends StatefulWidget {
   const AccentButton({
     super.key,
     required this.icon,
@@ -369,6 +378,24 @@ class AccentButton extends StatelessWidget {
   final bool compact;
 
   @override
+  State<AccentButton> createState() => _AccentButtonState();
+}
+
+class _AccentButtonState extends State<AccentButton> {
+  var _pressed = false;
+
+  IconData get icon => widget.icon;
+  String get label => widget.label;
+  VoidCallback? get onTap => widget.onTap;
+  bool get filled => widget.filled;
+  bool get compact => widget.compact;
+
+  void _setPressed(bool value) {
+    if (_pressed == value) return;
+    setState(() => _pressed = value);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final style = compact
         ? ButtonStyle(
@@ -378,22 +405,34 @@ class AccentButton extends StatelessWidget {
             ),
           )
         : null;
-    if (filled) {
-      return DecoratedBox(
-        decoration: const BoxDecoration(boxShadow: AppShadows.primaryGlow),
-        child: FilledButton.icon(
-          onPressed: onTap,
-          style: style,
-          icon: Icon(icon, size: compact ? 17 : 18),
-          label: Text(label),
-        ),
-      );
-    }
-    return OutlinedButton.icon(
-      onPressed: onTap,
-      style: style,
-      icon: Icon(icon, size: compact ? 17 : 18),
-      label: Text(label),
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final button = filled
+        ? DecoratedBox(
+            decoration: const BoxDecoration(boxShadow: AppShadows.primaryGlow),
+            child: FilledButton.icon(
+              onPressed: onTap,
+              style: style,
+              icon: Icon(icon, size: compact ? 17 : 18),
+              label: Text(label),
+            ),
+          )
+        : OutlinedButton.icon(
+            onPressed: onTap,
+            style: style,
+            icon: Icon(icon, size: compact ? 17 : 18),
+            label: Text(label),
+          );
+    if (reduceMotion || onTap == null) return button;
+    return Listener(
+      onPointerDown: (_) => _setPressed(true),
+      onPointerUp: (_) => _setPressed(false),
+      onPointerCancel: (_) => _setPressed(false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.96 : 1,
+        duration: AppMotion.quick,
+        curve: Curves.easeOut,
+        child: button,
+      ),
     );
   }
 }
@@ -737,29 +776,26 @@ class _BottomNavigation extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return ClipRRect(
       borderRadius: BorderRadius.circular(AppRadius.xl),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: DecoratedBox(
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainer.withValues(alpha: 0.88),
-            borderRadius: BorderRadius.circular(AppRadius.xl),
-            border: Border.all(color: scheme.primary.withValues(alpha: 0.22)),
-            boxShadow: AppShadows.elevated,
-          ),
-          child: SizedBox(
-            height: AppLayout.mobileNavigationHeight,
-            child: Row(
-              children: [
-                for (final item in items)
-                  Expanded(
-                    child: _BottomNavItem(
-                      item: item,
-                      active: item == active,
-                      onTap: () => _go(context, item),
-                    ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(AppRadius.xl),
+          border: Border.all(color: scheme.outlineVariant),
+          boxShadow: AppShadows.elevated,
+        ),
+        child: SizedBox(
+          height: AppLayout.mobileNavigationHeight,
+          child: Row(
+            children: [
+              for (final item in items)
+                Expanded(
+                  child: _BottomNavItem(
+                    item: item,
+                    active: item == active,
+                    onTap: () => _go(context, item),
                   ),
-              ],
-            ),
+                ),
+            ],
           ),
         ),
       ),
@@ -793,18 +829,20 @@ class _BottomNavItem extends StatelessWidget {
             children: [
               AnimatedContainer(
                 duration: AppMotion.quick,
-                width: active ? 38 : 30,
+                width: active ? 40 : 30,
                 height: 28,
                 decoration: BoxDecoration(
-                  color: active ? null : Colors.transparent,
-                  gradient: active ? AppGradients.accent : null,
+                  color: active
+                      ? scheme.primary.withValues(
+                          alpha: context.isDarkMode ? 0.26 : 0.15,
+                        )
+                      : Colors.transparent,
                   borderRadius: BorderRadius.circular(AppRadius.pill),
-                  boxShadow: active ? AppShadows.primaryGlow : null,
                 ),
                 child: Icon(
                   item.icon,
                   size: 21,
-                  color: active ? Colors.white : scheme.onSurfaceVariant,
+                  color: active ? _navAccent(context) : scheme.onSurfaceVariant,
                 ),
               ),
               const SizedBox(height: 3),
@@ -813,8 +851,8 @@ class _BottomNavItem extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: active ? scheme.onSurface : scheme.onSurfaceVariant,
-                  fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+                  color: active ? _navAccent(context) : scheme.onSurfaceVariant,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w600,
                 ),
               ),
             ],
@@ -841,15 +879,12 @@ class _NavItem extends StatelessWidget {
       ),
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: active ? null : Colors.transparent,
-          gradient: active ? AppGradients.accent : null,
+          color: active
+              ? scheme.primary.withValues(
+                  alpha: context.isDarkMode ? 0.22 : 0.13,
+                )
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(AppRadius.md),
-          border: Border.all(
-            color: active
-                ? scheme.primary.withValues(alpha: 0.42)
-                : Colors.transparent,
-          ),
-          boxShadow: active ? AppShadows.primaryGlow : null,
         ),
         child: Material(
           color: Colors.transparent,
@@ -865,7 +900,9 @@ class _NavItem extends StatelessWidget {
                   Icon(
                     item.icon,
                     size: 20,
-                    color: active ? Colors.white : scheme.onSurfaceVariant,
+                    color: active
+                        ? _navAccent(context)
+                        : scheme.onSurfaceVariant,
                   ),
                   const SizedBox(width: AppSpacing.md),
                   Expanded(
@@ -874,8 +911,10 @@ class _NavItem extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: active ? Colors.white : scheme.onSurfaceVariant,
-                        fontWeight: active ? FontWeight.w900 : FontWeight.w600,
+                        color: active
+                            ? _navAccent(context)
+                            : scheme.onSurfaceVariant,
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w600,
                       ),
                     ),
                   ),
@@ -923,6 +962,7 @@ class _TopBar extends StatelessWidget {
     required this.trailing,
     required this.showSearch,
     required this.onBack,
+    required this.onOpenSuggestion,
   });
 
   final TextEditingController? controller;
@@ -931,6 +971,7 @@ class _TopBar extends StatelessWidget {
   final Widget? trailing;
   final bool showSearch;
   final VoidCallback? onBack;
+  final ValueChanged<AnimeSubject>? onOpenSuggestion;
 
   @override
   Widget build(BuildContext context) {
@@ -949,7 +990,11 @@ class _TopBar extends StatelessWidget {
         ],
         Expanded(
           child: showSearch
-              ? _SearchField(controller: controller, onSearch: onSearch)
+              ? _SearchField(
+                  controller: controller,
+                  onSearch: onSearch,
+                  onOpenSuggestion: onOpenSuggestion,
+                )
               : Text(
                   title ?? '',
                   maxLines: 1,
@@ -1007,11 +1052,144 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-class _SearchField extends StatelessWidget {
-  const _SearchField({required this.controller, required this.onSearch});
+class _SearchField extends ConsumerStatefulWidget {
+  const _SearchField({
+    required this.controller,
+    required this.onSearch,
+    required this.onOpenSuggestion,
+  });
 
   final TextEditingController? controller;
   final ValueChanged<String>? onSearch;
+  final ValueChanged<AnimeSubject>? onOpenSuggestion;
+
+  @override
+  ConsumerState<_SearchField> createState() => _SearchFieldState();
+}
+
+class _SearchFieldState extends ConsumerState<_SearchField> {
+  static const _debounce = Duration(milliseconds: 300);
+
+  final _portal = OverlayPortalController();
+  final _link = LayerLink();
+  final _focus = FocusNode();
+  TextEditingController? _ownController;
+  Timer? _debounceTimer;
+  var _querySerial = 0;
+  var _suggestions = const <AnimeSubject>[];
+  var _history = const <String>[];
+  var _fieldWidth = 560.0;
+
+  TextEditingController get _controller =>
+      widget.controller ?? (_ownController ??= TextEditingController());
+
+  String get _accountId =>
+      ref.read(animeControllerProvider).value?.accountSession.current?.id ?? '';
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(_handleFocus);
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    _focus.removeListener(_handleFocus);
+    _focus.dispose();
+    _ownController?.dispose();
+    super.dispose();
+  }
+
+  void _handleFocus() {
+    if (_focus.hasFocus) {
+      _refreshOverlay();
+    } else {
+      _debounceTimer?.cancel();
+      _querySerial++;
+      _portal.hide();
+    }
+  }
+
+  Future<void> _refreshOverlay() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty) {
+      _debounceTimer?.cancel();
+      final serial = ++_querySerial;
+      final history = await ref
+          .read(searchHistoryStoreProvider)
+          .load(_accountId);
+      if (!mounted ||
+          serial != _querySerial ||
+          !_focus.hasFocus ||
+          _controller.text.trim().isNotEmpty) {
+        return;
+      }
+      setState(() {
+        _history = history;
+        _suggestions = const [];
+      });
+      history.isEmpty ? _portal.hide() : _portal.show();
+      return;
+    }
+    _queueSuggestions(text);
+  }
+
+  void _queueSuggestions(String text) {
+    _debounceTimer?.cancel();
+    final serial = ++_querySerial;
+    _debounceTimer = Timer(_debounce, () async {
+      try {
+        final results = await ref
+            .read(animeControllerProvider.notifier)
+            .search(text);
+        if (!mounted || serial != _querySerial || !_focus.hasFocus) return;
+        final ranked = rankSearchSubjects(text, results)
+            .where((item) => !item.source.startsWith('m3u-channel:'))
+            .take(6)
+            .toList(growable: false);
+        setState(() {
+          _suggestions = ranked;
+          _history = const [];
+        });
+        ranked.isEmpty ? _portal.hide() : _portal.show();
+      } on Exception {
+        // Suggestions are best-effort; typing must never surface errors.
+      }
+    });
+  }
+
+  void _submit(String keyword) {
+    final text = keyword.trim();
+    if (text.isEmpty) return;
+    _portal.hide();
+    _focus.unfocus();
+    unawaited(ref.read(searchHistoryStoreProvider).add(_accountId, text));
+    widget.onSearch?.call(text);
+  }
+
+  void _openSuggestion(AnimeSubject subject) {
+    _portal.hide();
+    _focus.unfocus();
+    unawaited(
+      ref.read(searchHistoryStoreProvider).add(_accountId, subject.title),
+    );
+    final open = widget.onOpenSuggestion;
+    if (open != null) {
+      open(subject);
+    } else {
+      widget.onSearch?.call(subject.title);
+    }
+  }
+
+  Future<void> _removeHistory(String term) async {
+    final next = await ref
+        .read(searchHistoryStoreProvider)
+        .remove(_accountId, term);
+    if (!mounted) return;
+    setState(() => _history = next);
+    if (next.isEmpty && _suggestions.isEmpty) _portal.hide();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1019,51 +1197,215 @@ class _SearchField extends StatelessWidget {
       alignment: Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560),
-        child: TextField(
-          controller: controller,
-          textInputAction: TextInputAction.search,
-          onSubmitted: onSearch,
-          style: Theme.of(context).textTheme.bodyMedium,
-          decoration: InputDecoration(
-            prefixIcon: const Icon(Icons.search_rounded, size: 20),
-            suffixIcon: IconButton(
-              key: const ValueKey('appSearchSubmit'),
-              tooltip: '搜索',
-              onPressed: onSearch == null
-                  ? null
-                  : () => onSearch!(controller?.text ?? ''),
-              icon: const Icon(Icons.arrow_forward_rounded, size: 20),
-            ),
-            suffixIconConstraints: const BoxConstraints(
-              minWidth: 48,
-              maxWidth: 48,
-              minHeight: 48,
-              maxHeight: 48,
-            ),
-            hintText: '搜索番剧、剧集、电影、演员',
-            fillColor: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHigh.withValues(alpha: 0.78),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              borderSide: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            _fieldWidth = constraints.maxWidth;
+            return OverlayPortal(
+              controller: _portal,
+              overlayChildBuilder: (context) => Positioned(
+                width: _fieldWidth,
+                child: CompositedTransformFollower(
+                  link: _link,
+                  targetAnchor: Alignment.bottomLeft,
+                  offset: const Offset(0, 6),
+                  showWhenUnlinked: false,
+                  child: TapRegion(
+                    groupId: this,
+                    child: _SearchOverlayCard(
+                      suggestions: _suggestions,
+                      history: _history,
+                      onPickSuggestion: _openSuggestion,
+                      onPickHistory: _submit,
+                      onRemoveHistory: _removeHistory,
+                    ),
+                  ),
+                ),
               ),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              borderSide: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant,
+              child: CompositedTransformTarget(
+                link: _link,
+                child: TapRegion(
+                  groupId: this,
+                  onTapOutside: (_) {
+                    _portal.hide();
+                    _focus.unfocus();
+                  },
+                  child: TextField(
+                    controller: _controller,
+                    focusNode: _focus,
+                    textInputAction: TextInputAction.search,
+                    onChanged: (_) => _refreshOverlay(),
+                    onSubmitted: _submit,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                      suffixIcon: IconButton(
+                        key: const ValueKey('appSearchSubmit'),
+                        tooltip: '搜索',
+                        onPressed: widget.onSearch == null
+                            ? null
+                            : () => _submit(_controller.text),
+                        icon: const Icon(Icons.arrow_forward_rounded, size: 20),
+                      ),
+                      suffixIconConstraints: const BoxConstraints(
+                        minWidth: 48,
+                        maxWidth: 48,
+                        minHeight: 48,
+                        maxHeight: 48,
+                      ),
+                      hintText: '搜索番剧、剧集、电影、演员',
+                      fillColor: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHigh
+                          .withValues(alpha: 0.78),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                        borderSide: BorderSide(
+                          color: Theme.of(context).colorScheme.outlineVariant,
+                        ),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                        borderSide: BorderSide(
+                          color: Theme.of(context).colorScheme.outlineVariant,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.pill),
+                        borderSide: BorderSide(
+                          color: Theme.of(context).colorScheme.primary,
+                          width: 1.4,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(AppRadius.pill),
-              borderSide: BorderSide(
-                color: Theme.of(context).colorScheme.primary,
-                width: 1.4,
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _SearchOverlayCard extends StatelessWidget {
+  const _SearchOverlayCard({
+    required this.suggestions,
+    required this.history,
+    required this.onPickSuggestion,
+    required this.onPickHistory,
+    required this.onRemoveHistory,
+  });
+
+  final List<AnimeSubject> suggestions;
+  final List<String> history;
+  final ValueChanged<AnimeSubject> onPickSuggestion;
+  final ValueChanged<String> onPickHistory;
+  final ValueChanged<String> onRemoveHistory;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainerLow,
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 336),
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          children: [
+            if (suggestions.isNotEmpty)
+              for (final subject in suggestions)
+                InkWell(
+                  onTap: () => onPickSuggestion(subject),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.north_east_rounded,
+                          size: 15,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            subject.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: scheme.onSurface),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        SmallBadge(
+                          label: switch (subjectContentTypeOf(subject)) {
+                            SubjectContentType.anime => '番剧',
+                            SubjectContentType.series => '剧集',
+                            SubjectContentType.movie => '电影',
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            if (suggestions.isEmpty && history.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 6, 14, 4),
+                child: Text(
+                  '搜索历史',
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    letterSpacing: 1.1,
+                  ),
+                ),
               ),
-            ),
-          ),
+              for (final term in history)
+                InkWell(
+                  onTap: () => onPickHistory(term),
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 14, right: 4),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.history_rounded,
+                          size: 15,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            term,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: scheme.onSurface),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: '删除',
+                          iconSize: 15,
+                          onPressed: () => onRemoveHistory(term),
+                          icon: Icon(
+                            Icons.close_rounded,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ],
         ),
       ),
     );
@@ -1192,6 +1534,11 @@ class _BrandMark extends StatelessWidget {
     );
   }
 }
+
+/// Readable accent for active navigation states: deep mist blue on paper,
+/// lightened mist blue on charcoal.
+Color _navAccent(BuildContext context) =>
+    context.isDarkMode ? AppColors.primary2 : AppColors.accentDeep;
 
 void _go(BuildContext context, ChromeDestination item) {
   GoRouter.of(context).go(item.route);

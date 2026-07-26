@@ -40,7 +40,7 @@ class ZelunaBackendCatalogRepository {
     };
     final response = await _get(
       ['api', 'v3', 'catalog', 'home', value],
-      query: const {'limit': '80'},
+      query: const {'limit': '240'},
     );
     return _subjects(response);
   }
@@ -53,6 +53,7 @@ class ZelunaBackendCatalogRepository {
     final decoded = jsonDecode(utf8.decode(response.bodyBytes));
     if (decoded is! Map) return null;
     final json = decoded.cast<Object?, Object?>();
+    if (json['detail_complete'] != true) return null;
     final detailed = _subject(json);
     if (detailed == null) return null;
     final rawEpisodes = json['episodes'];

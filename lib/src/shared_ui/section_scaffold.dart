@@ -96,10 +96,9 @@ class _PageHeader extends StatelessWidget {
                 title,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  color: scheme.onSurface,
-                  fontWeight: FontWeight.w900,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.headlineMedium?.copyWith(color: scheme.onSurface),
               ),
               if (subtitle.trim().isNotEmpty) ...[
                 const SizedBox(height: AppSpacing.xs),
@@ -299,10 +298,9 @@ class AppStateView extends StatelessWidget {
           SizedBox(height: compact ? AppSpacing.md : AppSpacing.lg),
           Text(
             title,
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: scheme.onSurface,
-              fontWeight: FontWeight.w800,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(color: scheme.onSurface),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: AppSpacing.sm),

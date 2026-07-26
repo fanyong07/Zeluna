@@ -12,7 +12,7 @@ void main() {
     ]) {
       final subject = _subject(source);
       expect(hasKnownDirectPlayback(subject), isTrue, reason: source);
-      expect(subjectPlaybackLabel(subject), '直连播放');
+      expect(subjectPlaybackLabel(subject), '可播放');
     }
   });
 
@@ -27,7 +27,7 @@ void main() {
     ]) {
       final subject = _subject(source);
       expect(hasKnownDirectPlayback(subject), isFalse, reason: source);
-      expect(subjectPlaybackLabel(subject), '规则查源');
+      expect(subjectPlaybackLabel(subject), '');
     }
   });
 }

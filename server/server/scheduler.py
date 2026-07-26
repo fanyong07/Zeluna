@@ -193,7 +193,7 @@ class ContentScheduler:
             try:
                 async with async_session() as session:
                     for media_type in ("anime", "tv", "movie"):
-                        await catalog_service.home(media_type, session, limit=60)
+                        await catalog_service.home(media_type, session, limit=240)
                 self._stats["last_sync"] = datetime.now().isoformat()
                 await asyncio.sleep(12 * 3600)
             except asyncio.CancelledError:

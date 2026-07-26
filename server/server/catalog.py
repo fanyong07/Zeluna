@@ -29,6 +29,8 @@ _BANGUMI_API = "https://api.bgm.tv"
 _TMDB_API = "https://api.themoviedb.org/3"
 _TMDB_IMAGE = "https://image.tmdb.org/t/p"
 _USER_AGENT = "Zeluna/1.0 (metadata aggregator)"
+_HOME_CACHE_TARGET = 180
+_HOME_MAX_ITEMS = 300
 
 
 def parse_stable_id(value: str) -> tuple[str, str, str] | None:
@@ -61,6 +63,28 @@ def _unique_text(values) -> list[str]:
             seen.add(key)
             result.append(value)
     return result
+
+
+def _interleave_unique(groups: list[list[dict]]) -> list[dict]:
+    """Mix provider lists so one ranking does not crowd out every other one."""
+    result: list[dict] = []
+    seen: set[str] = set()
+    max_length = max((len(group) for group in groups), default=0)
+    for index in range(max_length):
+        for group in groups:
+            if index >= len(group):
+                continue
+            item = group[index]
+            stable_id = _clean_text(item.get("stable_id"))
+            if not stable_id or stable_id in seen:
+                continue
+            seen.add(stable_id)
+            result.append(item)
+    return result
+
+
+def _is_complete_detail(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("detail_complete") is True
 
 
 def _image(path: Any, size: str) -> str:
@@ -160,7 +184,7 @@ class CatalogService:
                     CatalogSubject.updated_at >= fresh_after,
                 )
                 .order_by(CatalogSubject.popularity.desc())
-                .limit(max(1, min(limit, 100)))
+                .limit(max(1, min(limit, _HOME_MAX_ITEMS)))
             )
         ).all()
         cached = []
@@ -171,17 +195,23 @@ class CatalogService:
                 continue
             if isinstance(item, dict):
                 cached.append(item)
-        if len(cached) >= min(20, limit):
+        requested_limit = max(1, min(limit, _HOME_MAX_ITEMS))
+        cache_target = min(requested_limit, _HOME_CACHE_TARGET)
+        if len(cached) >= cache_target:
             return cached
         if media_type == "anime":
-            items = await self._bangumi_calendar()
+            calendar, ranked = await asyncio.gather(
+                self._bangumi_calendar(),
+                self._bangumi_ranked(requested_limit),
+            )
+            items = _interleave_unique([calendar, ranked])
         elif media_type in {"tv", "movie"} and TMDB_READ_ACCESS_TOKEN:
-            items = await self._tmdb_trending(media_type)
+            items = await self._tmdb_home(media_type, requested_limit)
         else:
             items = []
-        items = items[: max(1, min(limit, 100))]
+        items = items[:requested_limit]
         await self._persist_many(session, items)
-        return items
+        return items or cached
 
     async def get_subject(
         self,
@@ -197,11 +227,22 @@ class CatalogService:
             select(CatalogSubject).where(CatalogSubject.stable_id == stable_id)
         )
         fresh_after = time.time() - CATALOG_CACHE_HOURS * 3600
-        if row is not None and not refresh and row.updated_at >= fresh_after:
+        cached_item: dict | None = None
+        if row is not None:
             try:
-                return json.loads(row.metadata_json)
+                parsed = json.loads(row.metadata_json)
+                if isinstance(parsed, dict):
+                    cached_item = parsed
             except (json.JSONDecodeError, TypeError):
                 pass
+        if (
+            cached_item is not None
+            and not refresh
+            and row is not None
+            and row.updated_at >= fresh_after
+            and _is_complete_detail(cached_item)
+        ):
+            return cached_item
         provider, media_type, provider_id = identity
         if provider == "bangumi":
             item = await self._bangumi_detail(provider_id)
@@ -212,12 +253,7 @@ class CatalogService:
         if item is not None:
             await self._persist_many(session, [item])
             return item
-        if row is not None:
-            try:
-                return json.loads(row.metadata_json)
-            except (json.JSONDecodeError, TypeError):
-                return None
-        return None
+        return cached_item
 
     async def _persist_many(self, session: AsyncSession, items: list[dict]) -> None:
         if not items:
@@ -299,6 +335,35 @@ class CatalogService:
                     items.append(item)
         return items
 
+    async def _bangumi_ranked(self, limit: int) -> list[dict]:
+        page_size = 100
+        requests = [
+            self._client.get(
+                f"{_BANGUMI_API}/v0/subjects",
+                headers=self._bangumi_headers(),
+                params={
+                    "type": 2,
+                    "sort": "rank",
+                    "limit": min(page_size, limit - offset),
+                    "offset": offset,
+                },
+            )
+            for offset in range(0, limit, page_size)
+        ]
+        responses = await asyncio.gather(*requests, return_exceptions=True)
+        items: list[dict] = []
+        for response in responses:
+            if isinstance(response, Exception) or response.status_code != 200:
+                continue
+            payload = response.json()
+            for raw in payload.get("data", []) if isinstance(payload, dict) else []:
+                if not isinstance(raw, dict) or raw.get("nsfw") is True:
+                    continue
+                item = self._subject_from_bangumi(raw)
+                if item is not None:
+                    items.append(item)
+        return items
+
     async def _bangumi_detail(self, provider_id: str) -> dict | None:
         subject_response, episodes_response = await asyncio.gather(
             self._client.get(
@@ -332,6 +397,7 @@ class CatalogService:
         item["episodes"] = episodes
         if episodes:
             item["total_episodes"] = max(ep["number"] for ep in episodes)
+        item["detail_complete"] = True
         return item
 
     def _subject_from_bangumi(self, raw: dict) -> dict | None:
@@ -404,17 +470,33 @@ class CatalogService:
         items.sort(key=lambda item: item.get("popularity", 0), reverse=True)
         return items[:limit]
 
-    async def _tmdb_trending(self, media_type: str) -> list[dict]:
-        response = await self._tmdb_get(f"/trending/{media_type}/week")
-        if response.status_code != 200:
-            return []
-        return [
-            item
-            for raw in response.json().get("results", [])
-            if isinstance(raw, dict)
-            for item in [self._subject_from_tmdb(raw, media_type)]
-            if item is not None
+    async def _tmdb_home(self, media_type: str, limit: int) -> list[dict]:
+        current_path = "/on_the_air" if media_type == "tv" else "/now_playing"
+        paths = [
+            f"/trending/{media_type}/week",
+            f"/{media_type}/popular",
+            f"/{media_type}/top_rated",
+            f"/{media_type}{current_path}",
         ]
+        groups: list[list[dict]] = [[] for _ in paths]
+        for page in range(1, 7):
+            responses = await asyncio.gather(
+                *(self._tmdb_get(path, page=page) for path in paths),
+                return_exceptions=True,
+            )
+            for index, response in enumerate(responses):
+                if isinstance(response, Exception) or response.status_code != 200:
+                    continue
+                for raw in response.json().get("results", []):
+                    if not isinstance(raw, dict) or raw.get("adult") is True:
+                        continue
+                    item = self._subject_from_tmdb(raw, media_type)
+                    if item is not None:
+                        groups[index].append(item)
+            merged = _interleave_unique(groups)
+            if len(merged) >= limit:
+                return merged[:limit]
+        return _interleave_unique(groups)[:limit]
 
     async def _tmdb_detail(self, media_type: str, provider_id: str) -> dict | None:
         response = await self._tmdb_get(
@@ -430,6 +512,7 @@ class CatalogService:
             {"number": number, "title": "", "airdate": "", "duration": "", "summary": ""}
             for number in range(1, total + 1)
         ]
+        item["detail_complete"] = True
         return item
 
     async def _tmdb_get(self, path: str, **params) -> httpx.Response:

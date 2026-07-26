@@ -83,6 +83,17 @@ flutter:
     - assets/brand/anime_logo_mark_512.png
     - assets/shaders/anime4k/
     - assets/data/sources_catalog.json
+    - assets/fonts/OFL-NotoSerifSC.txt
+    # Deferred fonts: injected via FontLoader after first frame so the web
+    # engine's blocking font download stays at the single 400-weight sans.
+    - assets/fonts/NotoSansSC-600.ttf
+    - assets/fonts/NotoSerifSC-SemiBold.ttf
+
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-400.ttf
+          weight: 400
 
   # To add assets to your application, add an assets section, like this:
   # assets:

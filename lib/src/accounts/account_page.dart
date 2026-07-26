@@ -382,7 +382,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                     ? '首次创建账号后，当前游客的收藏、追番、历史、下载和私密源配置会安全迁移进新账号，游客空间随后清空。'
                     : '新账号会从空白资料开始，不会看到其他账号的收藏、历史和个人偏好。',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: AppColors.muted,
+                  color: context.inkMuted,
                   height: 1.45,
                 ),
               ),
@@ -804,7 +804,7 @@ class _AccountStatusCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: AppColors.text,
+                    color: context.ink,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -816,7 +816,7 @@ class _AccountStatusCard extends StatelessWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: AppColors.muted,
+                    color: context.inkMuted,
                     height: 1.35,
                   ),
                 ),
@@ -871,7 +871,7 @@ class _KnownAccountsCard extends StatelessWidget {
                       radius: 20,
                       backgroundColor: account.id == currentId
                           ? AppColors.primary
-                          : AppColors.panelHigh,
+                          : Theme.of(context).colorScheme.surfaceContainerHigh,
                       child: Text(
                         account.avatarText,
                         style: const TextStyle(
@@ -891,7 +891,7 @@ class _KnownAccountsCard extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.labelLarge
                                 ?.copyWith(
-                                  color: AppColors.text,
+                                  color: context.ink,
                                   fontWeight: FontWeight.w900,
                                 ),
                           ),
@@ -900,7 +900,7 @@ class _KnownAccountsCard extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: AppColors.muted),
+                                ?.copyWith(color: context.inkMuted),
                           ),
                         ],
                       ),
@@ -908,7 +908,7 @@ class _KnownAccountsCard extends StatelessWidget {
                     if (account.id == currentId)
                       const SmallBadge(label: '当前', active: true)
                     else
-                      const Icon(Icons.login_rounded, color: AppColors.muted),
+                      Icon(Icons.login_rounded, color: context.inkMuted),
                   ],
                 ),
               ),
@@ -934,7 +934,7 @@ class _LocalOnlyNotice extends StatelessWidget {
             child: Text(
               '当前是本机账号系统：账号和数据只保存在这台设备，不会上传，也暂不支持跨设备同步。邮箱仅作登录标识，忘记密码无法通过邮件找回；密码用于应用内分区，不会加密设备文件。',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: AppColors.muted,
+                color: context.inkMuted,
                 height: 1.45,
               ),
             ),
@@ -970,7 +970,7 @@ class _PendingCleanupNotice extends StatelessWidget {
                 Text(
                   '有账号文件尚未清理完成',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: AppColors.text,
+                    color: context.ink,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -979,7 +979,7 @@ class _PendingCleanupNotice extends StatelessWidget {
                   '通常是文件正被其他程序占用；这不会阻止你使用或创建其他账号。',
                   style: Theme.of(
                     context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                  ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
                 ),
                 const SizedBox(height: 10),
                 OutlinedButton.icon(
@@ -1048,14 +1048,14 @@ class _AccountAction extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
-    this.color = AppColors.text,
+    this.color,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final VoidCallback? onTap;
-  final Color color;
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -1066,7 +1066,7 @@ class _AccountAction extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
           children: [
-            Icon(icon, color: color),
+            Icon(icon, color: color ?? context.ink),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -1075,7 +1075,7 @@ class _AccountAction extends StatelessWidget {
                   Text(
                     title,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: color,
+                      color: color ?? context.ink,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
@@ -1084,12 +1084,12 @@ class _AccountAction extends StatelessWidget {
                     subtitle,
                     style: Theme.of(
                       context,
-                    ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+                    ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
                   ),
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right_rounded, color: AppColors.muted),
+            Icon(Icons.chevron_right_rounded, color: context.inkMuted),
           ],
         ),
       ),

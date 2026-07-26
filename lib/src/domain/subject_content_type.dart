@@ -29,6 +29,8 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
 
   if (source.startsWith('cinemeta:series:') ||
       source.startsWith('tmdb:series:') ||
+      source == 'tmdb:tv' ||
+      source.startsWith('tmdb:tv:') ||
       source.startsWith('tvmaze')) {
     return SubjectContentType.series;
   }

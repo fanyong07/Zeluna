@@ -7,6 +7,7 @@ import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/anime4k_shader_manager.dart';
 import '../shared_ui/app_chrome.dart';
+import '../shared_ui/settings_ui.dart';
 import '../shared_ui/app_navigation.dart';
 
 class SettingsHubPage extends ConsumerWidget {
@@ -64,7 +65,7 @@ class SettingsHubPage extends ConsumerWidget {
             children: [
               if (!compact) ...[
                 AppPanel(
-                  borderColor: AppColors.borderBright,
+                  borderColor: Theme.of(context).colorScheme.outline,
                   child: const Row(
                     children: [
                       Icon(Icons.settings_outlined, color: AppColors.primary),
@@ -147,7 +148,7 @@ class _SettingsHubTile extends StatelessWidget {
           horizontal: compact ? 12 : 16,
           vertical: compact ? 12 : 16,
         ),
-        color: AppColors.panelHigh,
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
         child: Row(
           children: [
             Icon(icon, color: AppColors.primary, size: compact ? 24 : 30),
@@ -184,9 +185,9 @@ class _SettingsHubTile extends StatelessWidget {
             ),
             if (compact) ...[
               const SizedBox(width: 8),
-              const Icon(
+              Icon(
                 Icons.chevron_right_rounded,
-                color: AppColors.faint,
+                color: context.inkFaint,
                 size: 22,
               ),
             ],
@@ -257,7 +258,7 @@ class _SettingsHubRailLine extends StatelessWidget {
             child: Text(
               label,
               style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: AppColors.text,
+                color: context.ink,
                 fontWeight: FontWeight.w800,
               ),
             ),
@@ -292,7 +293,7 @@ class _SettingsHubNote extends StatelessWidget {
               text,
               style: Theme.of(
                 context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.muted),
+              ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
             ),
           ),
         ],
@@ -347,7 +348,6 @@ class PlaybackSettingsView extends StatelessWidget {
     final narrow = compact || MediaQuery.sizeOf(context).width < 620;
     final superResolutionSupport = Anime4KShaderManager.currentPlatformSupport;
     return Scaffold(
-      backgroundColor: const Color(0xFF090A0D),
       body: SafeArea(
         child: ListView(
           padding: EdgeInsets.fromLTRB(
@@ -366,7 +366,7 @@ class PlaybackSettingsView extends StatelessWidget {
                   children: [
                     _SettingsTitle(onBack: onBack, compact: compact),
                     if (compact) ...[
-                      _SettingsDisclosure(
+                      SettingsDisclosure(
                         icon: Icons.info_outline_rounded,
                         title: '播放信息',
                         subtitle: '查看当前内容与播放状态',
@@ -380,7 +380,7 @@ class PlaybackSettingsView extends StatelessWidget {
                       ),
                       const SizedBox(height: 12),
                     ],
-                    _SettingsDisclosure(
+                    SettingsDisclosure(
                       icon: Icons.keyboard_alt_outlined,
                       title: '按键说明',
                       subtitle: '查看并管理播放器键盘操作',
@@ -404,9 +404,9 @@ class PlaybackSettingsView extends StatelessWidget {
                       icon: Icons.tune_rounded,
                       title: '画面与速度',
                       subtitle: '实时调整画质、显示比例和播放速度',
-                      child: _SettingsCard(
+                      child: SettingsCard(
                         children: [
-                          _SwitchRow(
+                          SettingsSwitchRow(
                             title: '超分辨率',
                             subtitle: superResolutionSupport.supported
                                 ? '使用 Anime4K 实时增强画面清晰度'
@@ -421,7 +421,7 @@ class PlaybackSettingsView extends StatelessWidget {
                           ),
                           if (settings.superResolution &&
                               superResolutionSupport.supported)
-                            _ChoiceRow<String>(
+                            SettingsChoiceRow<String>(
                               title: '超分模式',
                               subtitle: '画质越高，对显卡性能要求越高',
                               value: settings.superResolutionProfile,
@@ -437,7 +437,7 @@ class PlaybackSettingsView extends StatelessWidget {
                                 ),
                               ),
                             ),
-                          _ChoiceRow<String>(
+                          SettingsChoiceRow<String>(
                             title: '画面尺寸',
                             subtitle: '选择视频在播放器中的显示方式',
                             value: settings.videoScale,
@@ -453,7 +453,7 @@ class PlaybackSettingsView extends StatelessWidget {
                             onChanged: (value) =>
                                 onChanged(settings.copyWith(videoScale: value)),
                           ),
-                          _ChoiceRow<double>(
+                          SettingsChoiceRow<double>(
                             title: '播放速度',
                             subtitle: '立即应用到当前播放内容',
                             value: settings.speed,
@@ -477,9 +477,9 @@ class PlaybackSettingsView extends StatelessWidget {
                       icon: Icons.fast_forward_rounded,
                       title: '进度跳转',
                       subtitle: '设置播放器每次快退和快进的时长',
-                      child: _SettingsCard(
+                      child: SettingsCard(
                         children: [
-                          _ChoiceRow<int>(
+                          SettingsChoiceRow<int>(
                             title: '快退时间',
                             subtitle: '每次快退操作跳过的时长',
                             value: settings.rewindSeconds,
@@ -489,7 +489,7 @@ class PlaybackSettingsView extends StatelessWidget {
                               settings.copyWith(rewindSeconds: value),
                             ),
                           ),
-                          _ChoiceRow<int>(
+                          SettingsChoiceRow<int>(
                             title: '快进时间',
                             subtitle: '每次快进操作跳过的时长',
                             value: settings.forwardSeconds,
@@ -506,16 +506,16 @@ class PlaybackSettingsView extends StatelessWidget {
                       icon: Icons.playlist_play_rounded,
                       title: '播放行为',
                       subtitle: '管理连续播放、失败恢复和全屏行为',
-                      child: _SettingsCard(
+                      child: SettingsCard(
                         children: [
-                          _SwitchRow(
+                          SettingsSwitchRow(
                             title: '自动续播',
                             subtitle: '当前内容结束后自动播放下一集',
                             value: settings.autoNext,
                             onChanged: (value) =>
                                 onChanged(settings.copyWith(autoNext: value)),
                           ),
-                          _SwitchRow(
+                          SettingsSwitchRow(
                             title: '自动换线',
                             subtitle: '播放失败时自动尝试其他可用线路',
                             value: settings.autoSwitchLine,
@@ -523,7 +523,7 @@ class PlaybackSettingsView extends StatelessWidget {
                               settings.copyWith(autoSwitchLine: value),
                             ),
                           ),
-                          _SwitchRow(
+                          SettingsSwitchRow(
                             title: '自动全屏',
                             subtitle: '首次进入播放页面时自动切换全屏',
                             value: settings.autoFullscreen,
@@ -580,7 +580,7 @@ class _SettingsTitle extends StatelessWidget {
                 Text(
                   title,
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                    color: Colors.white,
+                    color: context.ink,
                     fontWeight: FontWeight.w800,
                     letterSpacing: -0.5,
                   ),
@@ -591,7 +591,7 @@ class _SettingsTitle extends StatelessWidget {
                     subtitle,
                     style: Theme.of(
                       context,
-                    ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
+                    ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
                   ),
                 ],
               ],
@@ -630,13 +630,13 @@ class _SettingsSection extends StatelessWidget {
               children: [
                 DecoratedBox(
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.08),
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
                     borderRadius: BorderRadius.circular(9),
                   ),
                   child: SizedBox(
                     width: 34,
                     height: 34,
-                    child: Icon(icon, size: 19, color: Colors.white70),
+                    child: Icon(icon, size: 19, color: context.inkMuted),
                   ),
                 ),
                 const SizedBox(width: 11),
@@ -648,16 +648,16 @@ class _SettingsSection extends StatelessWidget {
                         title,
                         style: Theme.of(context).textTheme.titleMedium
                             ?.copyWith(
-                              color: Colors.white,
+                              color: context.ink,
                               fontWeight: FontWeight.w800,
                             ),
                       ),
                       const SizedBox(height: 2),
                       Text(
                         subtitle,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: context.inkMuted,
+                        ),
                       ),
                     ],
                   ),
@@ -713,7 +713,7 @@ class _PlaybackInfoContent extends StatelessWidget {
             Text(
               '播放信息',
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: Colors.white,
+                color: context.ink,
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -731,7 +731,7 @@ class _PlaybackInfoContent extends StatelessWidget {
                       row.label,
                       style: Theme.of(
                         context,
-                      ).textTheme.bodySmall?.copyWith(color: Colors.white38),
+                      ).textTheme.bodySmall?.copyWith(color: context.inkFaint),
                     ),
                   ),
                   Expanded(
@@ -741,7 +741,7 @@ class _PlaybackInfoContent extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(
                         context,
-                      ).textTheme.bodyMedium?.copyWith(color: Colors.white70),
+                      ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
                     ),
                   ),
                 ],
@@ -779,7 +779,7 @@ class _ShortcutHelpContent extends StatelessWidget {
                   child: Text(
                     '按键说明',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: Colors.white,
+                      color: context.ink,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -787,21 +787,24 @@ class _ShortcutHelpContent extends StatelessWidget {
                 Text(
                   enabled ? '已启用' : '已关闭',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: enabled ? Colors.white70 : Colors.white38,
+                    color: enabled ? context.inkMuted : context.inkFaint,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 12),
           ],
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用键盘控制',
             subtitle: '允许桌面端播放器响应键盘操作',
             value: enabled,
             onChanged: (value) =>
                 onChanged(settings.copyWith(keyboardShortcutsEnabled: value)),
           ),
-          const Divider(height: 1, color: Color(0xFF2B2E34)),
+          Divider(
+            height: 1,
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
           _ShortcutControlRow(
             keys: const ['Space', 'K'],
             title: '播放与暂停',
@@ -912,7 +915,7 @@ class _ShortcutControlRow extends StatelessWidget {
                     Text(
                       title,
                       style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: Colors.white,
+                        color: context.ink,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -921,7 +924,7 @@ class _ShortcutControlRow extends StatelessWidget {
                       subtitle,
                       style: Theme.of(
                         context,
-                      ).textTheme.bodySmall?.copyWith(color: Colors.white54),
+                      ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
                     ),
                   ],
                 ),
@@ -971,7 +974,7 @@ class _ShortcutReferenceRow extends StatelessWidget {
               child: Text(
                 title,
                 style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: Colors.white70,
+                  color: context.inkMuted,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -992,16 +995,16 @@ class _KeyCap extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFF272A30),
+        color: Theme.of(context).colorScheme.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white12),
+        border: Border.all(color: context.inkFaint),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         child: Text(
           label,
           style: Theme.of(context).textTheme.labelMedium?.copyWith(
-            color: Colors.white,
+            color: context.ink,
             fontWeight: FontWeight.w800,
           ),
         ),
@@ -1051,9 +1054,9 @@ class _VolumeCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFF17191E),
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF292C33)),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
       child: Padding(
         padding: const EdgeInsets.fromLTRB(16, 14, 12, 12),
@@ -1065,14 +1068,14 @@ class _VolumeCard extends StatelessWidget {
                   child: Text(
                     '音量增强',
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: Colors.white,
+                      color: context.ink,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
                 DecoratedBox(
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.08),
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Padding(
@@ -1083,7 +1086,7 @@ class _VolumeCard extends StatelessWidget {
                     child: Text(
                       '+${(settings.volumeBoost * 100).round()}%',
                       style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: Colors.white,
+                        color: context.ink,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
@@ -1113,441 +1116,18 @@ class _VolumeCard extends StatelessWidget {
                   '不增强',
                   style: Theme.of(
                     context,
-                  ).textTheme.labelSmall?.copyWith(color: Colors.white38),
+                  ).textTheme.labelSmall?.copyWith(color: context.inkFaint),
                 ),
                 const Spacer(),
                 Text(
                   '最高 +100%',
                   style: Theme.of(
                     context,
-                  ).textTheme.labelSmall?.copyWith(color: Colors.white38),
+                  ).textTheme.labelSmall?.copyWith(color: context.inkFaint),
                 ),
               ],
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SettingsCard extends StatelessWidget {
-  const _SettingsCard({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFF17191E),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Color(0xFF292C33)),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        child: Column(
-          children: [
-            for (var i = 0; i < children.length; i++) ...[
-              children[i],
-              if (i != children.length - 1)
-                const Divider(
-                  height: 1,
-                  indent: 10,
-                  endIndent: 10,
-                  color: Color(0xFF292C33),
-                ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SettingsDisclosure extends StatefulWidget {
-  const _SettingsDisclosure({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.child,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final Widget child;
-
-  @override
-  State<_SettingsDisclosure> createState() => _SettingsDisclosureState();
-}
-
-class _SettingsDisclosureState extends State<_SettingsDisclosure> {
-  var _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFF17191E),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: _expanded
-              ? Colors.white.withValues(alpha: 0.2)
-              : const Color(0xFF292C33),
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        children: [
-          InkWell(
-            key: ValueKey('settings_disclosure_${widget.title}'),
-            onTap: () => setState(() => _expanded = !_expanded),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 14, 14),
-              child: Row(
-                children: [
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: SizedBox(
-                      width: 38,
-                      height: 38,
-                      child: Icon(widget.icon, color: Colors.white70, size: 21),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          widget.title,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800,
-                              ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          widget.subtitle,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: Colors.white54),
-                        ),
-                      ],
-                    ),
-                  ),
-                  AnimatedRotation(
-                    turns: _expanded ? 0.5 : 0,
-                    duration: const Duration(milliseconds: 180),
-                    curve: Curves.easeOutCubic,
-                    child: const Icon(
-                      Icons.keyboard_arrow_down_rounded,
-                      color: Colors.white54,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          AnimatedSize(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.topCenter,
-            child: _expanded
-                ? Column(
-                    children: [
-                      const Divider(height: 1, color: Color(0xFF292C33)),
-                      widget.child,
-                    ],
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ActionRow extends StatelessWidget {
-  const _ActionRow({required this.title, this.subtitle, this.onTap});
-
-  final String title;
-  final String? subtitle;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: SizedBox(
-        height: subtitle == null ? 62 : 78,
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  if (subtitle != null) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle!,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodyMedium?.copyWith(color: Colors.white54),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (onTap != null)
-              const Icon(Icons.chevron_right, color: Colors.white54),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ChoiceRow<T> extends StatelessWidget {
-  const _ChoiceRow({
-    required this.title,
-    required this.value,
-    required this.options,
-    required this.labelOf,
-    required this.onChanged,
-    this.subtitle,
-  });
-
-  final String title;
-  final String? subtitle;
-  final T value;
-  final List<T> options;
-  final String Function(T value) labelOf;
-  final ValueChanged<T> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      key: ValueKey('setting_choice_$title'),
-      borderRadius: BorderRadius.circular(12),
-      onTap: () => _showChoiceSheet(context),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: subtitle == null ? 58 : 68),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle!,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: Colors.white54),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                labelOf(value),
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  color: Colors.white70,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(width: 6),
-              const Icon(
-                Icons.chevron_right_rounded,
-                color: Colors.white38,
-                size: 21,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showChoiceSheet(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      backgroundColor: const Color(0xFF17191E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) {
-        return SafeArea(
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
-                child: Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              for (final option in options)
-                ListTile(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  title: Text(labelOf(option)),
-                  trailing: option == value
-                      ? Icon(
-                          Icons.check,
-                          color: Theme.of(context).colorScheme.primary,
-                        )
-                      : null,
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    onChanged(option);
-                  },
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _SwitchRow extends StatelessWidget {
-  const _SwitchRow({
-    required this.title,
-    required this.value,
-    this.onChanged,
-    this.subtitle,
-  });
-
-  final String title;
-  final String? subtitle;
-  final bool value;
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onChanged != null;
-    return Opacity(
-      opacity: enabled ? 1 : 0.48,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: enabled ? () => onChanged!(!value) : null,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(minHeight: subtitle == null ? 58 : 68),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      if (subtitle != null) ...[
-                        const SizedBox(height: 3),
-                        Text(
-                          subtitle!,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: Colors.white54),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Switch(
-                  key: ValueKey('setting_switch_$title'),
-                  value: value,
-                  onChanged: onChanged,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BackPill extends StatelessWidget {
-  const _BackPill({required this.onBack});
-
-  final VoidCallback onBack;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(30),
-      onTap: onBack,
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: const Color(0xE6252525),
-          borderRadius: BorderRadius.circular(30),
-          boxShadow: const [
-            BoxShadow(color: Colors.black54, blurRadius: 26, spreadRadius: 5),
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 10),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.arrow_back, color: Colors.white70, size: 28),
-              Text(
-                '返回',
-                style: Theme.of(
-                  context,
-                ).textTheme.labelMedium?.copyWith(color: Colors.white70),
-              ),
-            ],
-          ),
         ),
       ),
     );
@@ -1566,7 +1146,6 @@ class ServiceSettingsPage extends ConsumerWidget {
         final settings = state.services;
         final controller = ref.read(animeControllerProvider.notifier);
         return Scaffold(
-          backgroundColor: Colors.black,
           body: SafeArea(
             child: Stack(
               children: [
@@ -1608,7 +1187,7 @@ class ServiceSettingsPage extends ConsumerWidget {
                   right: 0,
                   bottom: 24,
                   child: Center(
-                    child: _BackPill(
+                    child: BackPill(
                       onBack: () =>
                           safeNavigateBack(context, fallbackRoute: '/settings'),
                     ),
@@ -1632,16 +1211,16 @@ class ServiceSettingsPage extends ConsumerWidget {
         lines: ['免登录只能读取公开数据；写入云端历史一定需要账号授权。', '当前支持公开片单读取和本机播放记录，不需要授权配置。'],
       ),
       const SizedBox(height: 12),
-      _SettingsCard(
+      SettingsCard(
         children: [
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用公开收藏同步',
             value: settings.publicCollectionSyncEnabled,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(publicCollectionSyncEnabled: value),
             ),
           ),
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '自动记录播放历史',
             value: settings.publicCollectionSyncEnabled,
             onChanged: (value) => controller.updateServices(
@@ -1668,9 +1247,9 @@ class ServiceSettingsPage extends ConsumerWidget {
         ],
       ),
       const SizedBox(height: 12),
-      _SettingsCard(
+      SettingsCard(
         children: [
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用聚合后端',
             subtitle: endpoint.isEmpty ? '请先配置服务器地址' : endpoint,
             value: settings.playbackBackendEnabled,
@@ -1686,7 +1265,7 @@ class ServiceSettingsPage extends ConsumerWidget {
               );
             },
           ),
-          _ActionRow(
+          SettingsActionRow(
             title: '服务器地址',
             subtitle: endpoint.isEmpty ? '未配置' : endpoint,
             onTap: () =>
@@ -1710,23 +1289,23 @@ class ServiceSettingsPage extends ConsumerWidget {
         ],
       ),
       const SizedBox(height: 12),
-      _SettingsCard(
+      SettingsCard(
         children: [
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用 Bilibili 字幕',
             value: settings.bilibiliSubtitleEnabled,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(bilibiliSubtitleEnabled: value),
             ),
           ),
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '自动匹配字幕',
             value: settings.autoMatchSubtitle,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(autoMatchSubtitle: value),
             ),
           ),
-          _ChoiceRow<String>(
+          SettingsChoiceRow<String>(
             title: '默认字幕语言',
             value: settings.subtitleLanguage,
             options: const ['zh-CN', 'zh-TW', 'ja-JP', 'en-US'],
@@ -1755,9 +1334,9 @@ class ServiceSettingsPage extends ConsumerWidget {
         ],
       ),
       const SizedBox(height: 12),
-      _SettingsCard(
+      SettingsCard(
         children: [
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用弹弹play弹幕',
             subtitle: settings.dandanplayAppId.trim().isEmpty
                 ? '需要填写开放平台 AppId / AppSecret'
@@ -1767,35 +1346,35 @@ class ServiceSettingsPage extends ConsumerWidget {
               settings.copyWith(dandanplayDanmakuEnabled: value),
             ),
           ),
-          _ActionRow(
+          SettingsActionRow(
             title: '弹弹play开放平台',
             subtitle: settings.dandanplayAppId.trim().isEmpty
                 ? '未填写'
                 : settings.dandanplayAppId,
             onTap: () => _showDandanplayEditor(context, settings, controller),
           ),
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用 Bilibili 弹幕',
             value: settings.bilibiliDanmakuEnabled,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(bilibiliDanmakuEnabled: value),
             ),
           ),
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '启用自建弹幕库',
             value: settings.customDanmakuEnabled,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(customDanmakuEnabled: value),
             ),
           ),
-          _ActionRow(
+          SettingsActionRow(
             title: '自建接口地址',
             subtitle: settings.customDanmakuEndpoint.isEmpty
                 ? '未填写'
                 : settings.customDanmakuEndpoint,
             onTap: () => _showEndpointEditor(context, settings, controller),
           ),
-          _SwitchRow(
+          SettingsSwitchRow(
             title: '弹幕时间轴同步',
             value: settings.danmakuTimelineSync,
             onChanged: (value) => controller.updateServices(
@@ -1817,7 +1396,6 @@ class ServiceSettingsPage extends ConsumerWidget {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF151515),
       builder: (context) {
         return SafeArea(
           child: Padding(
@@ -1869,7 +1447,6 @@ class ServiceSettingsPage extends ConsumerWidget {
     final text = TextEditingController(text: settings.customDanmakuEndpoint);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: const Color(0xFF151515),
       builder: (context) {
         return SafeArea(
           child: Padding(
@@ -1915,7 +1492,6 @@ class ServiceSettingsPage extends ConsumerWidget {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF151515),
       builder: (sheetContext) {
         return SafeArea(
           child: Padding(
@@ -1992,7 +1568,7 @@ class _InfoCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFF202020),
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(7),
       ),
       child: Padding(
@@ -2003,7 +1579,7 @@ class _InfoCard extends StatelessWidget {
             Text(
               title,
               style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: Colors.white,
+                color: context.ink,
                 fontWeight: FontWeight.w900,
               ),
             ),
@@ -2014,7 +1590,7 @@ class _InfoCard extends StatelessWidget {
                 child: Text(
                   line,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Colors.white70,
+                    color: context.inkMuted,
                     height: 1.35,
                   ),
                 ),

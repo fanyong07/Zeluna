@@ -204,8 +204,6 @@ final danmakuRepositoryProvider = Provider<DanmakuRepository>((ref) {
   return repository;
 });
 
-
-
 final chineseMetadataRepositoryProvider = Provider<ChineseMetadataRepository>(
   (ref) => ChineseMetadataRepository(
     bangumiRepository: ref.read(bangumiMetadataRepositoryProvider),
@@ -359,7 +357,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   static const _homeFeedCacheKey = 'metadata.cache.home';
   static const _homeFeedCacheVersion = 4;
   static const _homeFeedCacheTtl = Duration(hours: 1);
-  static const _metadataCacheVersion = 10;
+  static const _metadataCacheVersion = 11;
   static const _metadataCacheLimit = 1200;
   static const _metadataCacheTtl = Duration(hours: 8);
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
@@ -630,7 +628,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   /// The unified backend only ships subject + episodes today. Characters,
   /// staff, recommendations and tags come straight from the public metadata
   /// services; failures leave the base bundle untouched.
-  Future<AnimeDetailBundle> _enrichSparseDetail(AnimeDetailBundle bundle) async {
+  Future<AnimeDetailBundle> _enrichSparseDetail(
+    AnimeDetailBundle bundle,
+  ) async {
     if (bundle.characters.isNotEmpty ||
         bundle.staff.isNotEmpty ||
         bundle.recommendations.isNotEmpty) {
@@ -960,7 +960,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       episode,
       cancellationToken: token,
     )) {
-      if (accountContextVersion != _accountContextVersion || token.isCancelled) {
+      if (accountContextVersion != _accountContextVersion ||
+          token.isCancelled) {
         return;
       }
       yield PlaybackLineLookupUpdate(
@@ -1649,6 +1650,49 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .read(externalServiceRepositoryProvider)
         .syncLocalHistory(subject, episode, current.services);
     return isAccountContextCurrent(accountContextVersion);
+  }
+
+  /// Persists the in-episode playback position onto the matching history
+  /// entry. Near-complete positions (>=98% or within the final 15s) reset to
+  /// zero so "continue watching" never resumes into credits.
+  Future<void> updatePlaybackProgress(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required Duration position,
+    required Duration duration,
+    int? expectedAccountContextVersion,
+  }) async {
+    final accountContextVersion =
+        expectedAccountContextVersion ?? _accountContextVersion;
+    if (!isAccountContextCurrent(accountContextVersion)) return;
+    final current = state.value;
+    if (current == null) return;
+    var positionSeconds = position.inSeconds;
+    final durationSeconds = duration.inSeconds;
+    if (positionSeconds < 5) return;
+    if (durationSeconds > 0 &&
+        (positionSeconds >= durationSeconds - 15 ||
+            positionSeconds / durationSeconds >= 0.98)) {
+      positionSeconds = 0;
+    }
+    var changed = false;
+    final next = current.history
+        .map((item) {
+          if (!sameSubjectIdentity(item.subject, subject) ||
+              item.episode?.id != episode.id) {
+            return item;
+          }
+          changed = true;
+          return item.copyWith(
+            positionSeconds: positionSeconds,
+            durationSeconds: durationSeconds,
+            updatedAt: DateTime.now(),
+          );
+        })
+        .toList(growable: false);
+    if (!changed) return;
+    state = AsyncData(current.copyWith(history: next));
+    await _writeEntries('history', next);
   }
 
   Future<String> queueOffline(
@@ -3148,7 +3192,6 @@ String _stableRuleRepositoryId(String value) {
   }
   return hash.toRadixString(16).padLeft(8, '0');
 }
-
 
 class _HomeFeedCacheSnapshot {
   const _HomeFeedCacheSnapshot({this.feed, this.fresh = false});

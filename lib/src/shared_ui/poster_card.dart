@@ -6,6 +6,14 @@ import 'package:flutter/material.dart';
 import '../domain/anime_models.dart';
 import 'app_design.dart';
 
+/// Whether a subject's rating deserves pixels. Backend fallbacks emit a
+/// uniform 10.0 with no vote count; those placeholders stay hidden.
+bool shouldShowPosterRating({double? score, int? ratingTotal}) {
+  if (score == null || score <= 0 || score > 10) return false;
+  if (score >= 10 && (ratingTotal == null || ratingTotal <= 0)) return false;
+  return true;
+}
+
 class PosterCard extends StatefulWidget {
   const PosterCard({
     super.key,
@@ -95,15 +103,6 @@ class _PosterCardState extends State<PosterCard> {
                               top: AppSpacing.sm,
                               child: _MediaPill(text: status),
                             ),
-                          if (widget.subject.ratingScore != null)
-                            Positioned(
-                              left: AppSpacing.sm,
-                              bottom: AppSpacing.sm,
-                              child: _RatingBadge(
-                                score: widget.subject.ratingScore!
-                                    .toStringAsFixed(1),
-                              ),
-                            ),
                           if (_hovered)
                             const Positioned.fill(
                               child: Center(child: _HoverPlayButton()),
@@ -138,15 +137,38 @@ class _PosterCardState extends State<PosterCard> {
                             ],
                           ),
                           const SizedBox(height: AppSpacing.xxs),
-                          Text(
-                            widget.subject.subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(
-                                  color: scheme.onSurfaceVariant,
-                                  height: 1.25,
+                          Row(
+                            children: [
+                              if (shouldShowPosterRating(
+                                score: widget.subject.ratingScore,
+                                ratingTotal: widget.subject.ratingTotal,
+                              )) ...[
+                                Text(
+                                  '★ ${widget.subject.ratingScore!.toStringAsFixed(1)}',
+                                  style: Theme.of(context).textTheme.labelSmall
+                                      ?.copyWith(
+                                        color: context.isDarkMode
+                                            ? AppColors.primary2
+                                            : AppColors.accentDeep,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: 0,
+                                      ),
                                 ),
+                                const SizedBox(width: AppSpacing.xs),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  widget.subject.subtitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.bodySmall
+                                      ?.copyWith(
+                                        color: scheme.onSurfaceVariant,
+                                        height: 1.25,
+                                      ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -293,21 +315,16 @@ class BackdropArt extends StatelessWidget {
             ),
           ),
         ),
-        const ColoredBox(color: Color(0x70070A11)),
-        Align(
-          alignment: Alignment.centerRight,
+        const ColoredBox(color: Color(0x701B1A18)),
+        Center(
           child: FractionallySizedBox(
-            widthFactor: 0.40,
-            heightFactor: 0.90,
-            child: Padding(
-              padding: const EdgeInsets.only(right: AppSpacing.lg),
-              child: PosterArt(
-                coverUrl: poster,
-                title: title,
-                fit: BoxFit.contain,
-                alignment: Alignment.centerRight,
-                allowHtmlFallback: false,
-              ),
+            widthFactor: 0.72,
+            heightFactor: 0.86,
+            child: PosterArt(
+              coverUrl: poster,
+              title: title,
+              fit: BoxFit.contain,
+              allowHtmlFallback: false,
             ),
           ),
         ),
@@ -392,11 +409,22 @@ class _RetryingNetworkImageState extends State<_RetryingNetworkImage> {
           ? WebHtmlElementStrategy.fallback
           : WebHtmlElementStrategy.never,
       frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-        if (wasSynchronouslyLoaded || frame != null) return child;
-        return PosterPlaceholder(
-          color: widget.fallbackColor,
-          title: widget.title,
-          loading: true,
+        if (wasSynchronouslyLoaded) return child;
+        if (frame == null) {
+          return PosterPlaceholder(
+            color: widget.fallbackColor,
+            title: widget.title,
+            loading: true,
+          );
+        }
+        if (MediaQuery.disableAnimationsOf(context)) return child;
+        return TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: AppMotion.standard,
+          curve: Curves.easeOut,
+          child: child,
+          builder: (context, opacity, child) =>
+              Opacity(opacity: opacity, child: child),
         );
       },
       errorBuilder: (context, error, stackTrace) {
@@ -552,40 +580,6 @@ class _MediaPill extends StatelessWidget {
             color: Colors.white,
             fontWeight: FontWeight.w800,
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RatingBadge extends StatelessWidget {
-  const _RatingBadge({required this.score});
-
-  final String score;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppColors.overlay,
-        borderRadius: BorderRadius.circular(AppRadius.pill),
-        border: Border.all(color: AppColors.borderBright),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.star_rounded, size: 14, color: AppColors.warning),
-            const SizedBox(width: AppSpacing.xxs),
-            Text(
-              score,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ],
         ),
       ),
     );

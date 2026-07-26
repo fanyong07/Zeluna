@@ -9,6 +9,24 @@ import 'package:http/testing.dart';
 
 const _testToken = 'tmdb_test_read_access_token_not_a_real_secret_1234567890';
 
+const _seriesSubject = AnimeSubject(
+  id: 42,
+  title: '测试剧集',
+  originalTitle: 'Test Series',
+  summary: '',
+  coverUrl: null,
+  bannerUrl: null,
+  date: null,
+  platform: 'Series',
+  language: '中文',
+  region: '中国大陆',
+  status: '',
+  categories: [],
+  tags: [],
+  totalEpisodes: 0,
+  source: 'tmdb:series:42',
+);
+
 void main() {
   test('validates a TMDB v4 read token with bearer authentication', () async {
     final repository = ExternalServiceRepository(
@@ -142,28 +160,9 @@ void main() {
         return _resultsResponse(const []);
       }),
     );
-    const subject = AnimeSubject(
-      id: 42,
-      title: '测试剧集',
-      originalTitle: 'Test Series',
-      summary: '',
-      coverUrl: null,
-      bannerUrl: null,
-      date: null,
-      platform: 'Series',
-      language: '中文',
-      region: '中国大陆',
-      status: '',
-      categories: [],
-      tags: [],
-      totalEpisodes: 0,
-      source: 'tmdb:series:42',
-    );
 
     expect(await repository.tmdbSearch('测试'), isEmpty);
-    expect(await repository.tmdbSeriesFeed(), isEmpty);
-    expect(await repository.tmdbMovieFeed(), isEmpty);
-    expect(await repository.tmdbDetail(subject), isNull);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
     expect(requestCount, 0);
   });
 
@@ -191,7 +190,7 @@ void main() {
     expect(await search, isEmpty);
     expect(requestCount, 2);
     expect(rejectionCount, 1);
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
     expect(requestCount, 2);
   });
 
@@ -214,15 +213,15 @@ void main() {
       }),
     );
 
-    final oldRequest = repository.tmdbMovieFeed(pages: 1);
+    final oldRequest = repository.tmdbDetail(_seriesSubject);
     await Future<void>.delayed(Duration.zero);
     activeToken = replacementToken;
     repository.resetTmdbAccessTokenState();
     oldResponse.complete(http.Response('', 401));
 
-    expect(await oldRequest, isEmpty);
+    expect(await oldRequest, isNull);
     expect(rejectionCount, 0);
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
     expect(requests.last.headers['authorization'], 'Bearer $replacementToken');
   });
 
@@ -240,13 +239,13 @@ void main() {
       }),
     );
 
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
     expect(requestCount, 1);
     expect(rejectionCount, 0);
 
     repository.resetTmdbAccessTokenState();
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
     expect(requestCount, 2);
     expect(rejectionCount, 0);
   });
@@ -261,8 +260,8 @@ void main() {
       }),
     );
 
-    expect(await repository.tmdbMovieFeed(pages: 1), isEmpty);
-    expect(await repository.tmdbSeriesFeed(pages: 3), isEmpty);
+    expect(await repository.tmdbDetail(_seriesSubject), isNull);
+    expect(await repository.tmdbSearch('冷却中'), isEmpty);
     expect(requestCount, 1);
   });
 

@@ -193,6 +193,19 @@ void main() {
     expect(find.byType(ImageFiltered), findsNothing);
     expect(find.byType(BackdropFilter), findsNothing);
   });
+  group('shouldShowPosterRating', () {
+    test('无评分或占位满分（无投票）不显示', () {
+      expect(shouldShowPosterRating(score: null, ratingTotal: null), isFalse);
+      expect(shouldShowPosterRating(score: 0, ratingTotal: 10), isFalse);
+      expect(shouldShowPosterRating(score: 10.0, ratingTotal: null), isFalse);
+      expect(shouldShowPosterRating(score: 10.0, ratingTotal: 0), isFalse);
+    });
+
+    test('真实评分显示，包括有投票的满分', () {
+      expect(shouldShowPosterRating(score: 8.7, ratingTotal: null), isTrue);
+      expect(shouldShowPosterRating(score: 10.0, ratingTotal: 812), isTrue);
+    });
+  });
 }
 
 void _noop() {}
