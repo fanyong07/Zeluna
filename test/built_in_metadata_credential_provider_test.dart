@@ -13,6 +13,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'support/fake_cloud_account_service.dart';
+
 const _builtInTmdbToken =
     'tmdb_built_in_provider_test_token_not_a_real_secret_1234567890';
 const _storedTmdbToken =
@@ -267,6 +269,9 @@ void main() {
       final tmdbClient = MockClient((_) async => _tmdbResultsResponse());
       final container = ProviderContainer(
         overrides: [
+          cloudAccountServiceProvider.overrideWithValue(
+            FakeCloudAccountService(),
+          ),
           bangumiBuiltInAccessTokenProvider.overrideWithValue(
             _builtInBangumiToken,
           ),
@@ -309,6 +314,7 @@ void main() {
         email: 'built-in-policy-a@example.com',
         nickname: 'Built-in policy A',
         password: 'built-in-policy-password-a',
+        verificationCode: '123456',
       );
       final firstAccountId = container
           .read(animeControllerProvider)
@@ -320,6 +326,7 @@ void main() {
         email: 'built-in-policy-b@example.com',
         nickname: 'Built-in policy B',
         password: 'built-in-policy-password-b',
+        verificationCode: '123456',
       );
       await Hive.box<dynamic>(
         'anime.settings.v2',

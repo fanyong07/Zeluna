@@ -19,6 +19,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'support/fake_cloud_account_service.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -116,6 +118,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          cloudAccountServiceProvider.overrideWithValue(
+            FakeCloudAccountService(),
+          ),
           bangumiCredentialStoreProvider.overrideWithValue(
             BangumiCredentialStore(backend: _MemoryCredentialBackend()),
           ),
@@ -143,6 +148,7 @@ void main() {
         email: 'first@example.com',
         nickname: '第一位用户',
         password: 'first-password',
+        verificationCode: '123456',
       );
       state = container.read(animeControllerProvider).requireValue;
       expect(state.accountSession.current?.email, 'first@example.com');
@@ -161,7 +167,10 @@ void main() {
       expect(state.danmaku.opacity, 0.4);
       expect(state.misc.keepScreenOn, isFalse);
       expect(state.services.bangumiEnabled, isFalse);
-      expect(state.rulePlugins.customRules, isEmpty);
+      expect(
+        state.rulePlugins.customRules.map((rule) => rule.id),
+        contains('private-rule'),
+      );
       final firstAccountId = state.accountSession.current!.id;
       final migratedSettings = await Hive.openBox<dynamic>('anime.settings.v2');
       final migratedLibrary = await Hive.openBox<dynamic>('anime.library.v2');
@@ -185,7 +194,11 @@ void main() {
       );
       expect(
         migratedSettings.containsKey('account.$firstAccountId.sourceEnabled'),
-        isFalse,
+        isTrue,
+      );
+      expect(
+        migratedSettings.containsKey('account.$firstAccountId.rulePlugins'),
+        isTrue,
       );
       expect(
         migratedLibrary.containsKey('account.$firstAccountId.offlineTasks'),
@@ -196,6 +209,7 @@ void main() {
         email: 'second@example.com',
         nickname: '第二位用户',
         password: 'second-password',
+        verificationCode: '123456',
       );
       state = container.read(animeControllerProvider).requireValue;
       expect(state.accountSession.current?.email, 'second@example.com');
@@ -241,7 +255,10 @@ void main() {
       expect(state.danmaku.enabled, isFalse);
       expect(state.misc.keepScreenOn, isFalse);
       expect(state.services.bangumiEnabled, isFalse);
-      expect(state.rulePlugins.customRules, isEmpty);
+      expect(
+        state.rulePlugins.customRules.map((rule) => rule.id),
+        contains('private-rule'),
+      );
 
       await controller.signOutAccount();
       state = container.read(animeControllerProvider).requireValue;
@@ -284,6 +301,39 @@ void main() {
         migratedLibrary.containsKey('account.$secondAccountId.favorites'),
         isFalse,
       );
+
+      await controller.loginAccount(
+        email: 'first@example.com',
+        password: 'first-password',
+      );
+      await controller.resetAccountPassword(
+        email: 'FIRST@example.com ',
+        verificationCode: '123456',
+        newPassword: 'first-password-reset',
+      );
+      state = container.read(animeControllerProvider).requireValue;
+      expect(state.accountSession.isSignedIn, isFalse);
+      expect(state.profile.nickname, '游客');
+      await expectLater(
+        controller.loginAccount(
+          email: 'first@example.com',
+          password: 'first-password',
+        ),
+        throwsA(isA<AccountException>()),
+      );
+      await controller.loginAccount(
+        email: 'first@example.com',
+        password: 'first-password-reset',
+      );
+      expect(
+        container
+            .read(animeControllerProvider)
+            .requireValue
+            .accountSession
+            .current
+            ?.email,
+        'first@example.com',
+      );
     },
   );
 
@@ -303,17 +353,24 @@ void main() {
       await library.put('favorites', [
         LibraryEntry(subject: _subject, updatedAt: DateTime(2026)).toJson(),
       ]);
-      final pending = await LocalAccountRepository(accounts).beginRegistration(
-        email: 'recover@example.com',
-        nickname: '恢复用户',
-        password: 'recover-password',
+      final now = DateTime.now().toUtc();
+      const recoveredId = 'cloud-recover-account';
+      await LocalAccountRepository(accounts).beginCloudRegistration(
+        account: LocalAccount(
+          id: recoveredId,
+          email: 'recover@example.com',
+          nickname: '恢复用户',
+          createdAt: now,
+          lastLoginAt: now,
+          cloudAuthenticated: true,
+        ),
         importGuestData: true,
       );
-      await LocalAccountRepository(accounts).completeRegistration(pending.id);
+      await LocalAccountRepository(accounts).completeRegistration(recoveredId);
       expect(LocalAccountRepository(accounts).currentAccount(), isNull);
       expect(
         LocalAccountRepository(accounts).pendingRegistration()?.account.id,
-        pending.id,
+        recoveredId,
       );
       await settings.close();
       await library.close();
@@ -321,6 +378,9 @@ void main() {
 
       final container = ProviderContainer(
         overrides: [
+          cloudAccountServiceProvider.overrideWithValue(
+            FakeCloudAccountService(),
+          ),
           bangumiCredentialStoreProvider.overrideWithValue(
             BangumiCredentialStore(backend: _MemoryCredentialBackend()),
           ),
@@ -339,7 +399,7 @@ void main() {
       });
 
       final state = await container.read(animeControllerProvider.future);
-      expect(state.accountSession.current?.id, pending.id);
+      expect(state.accountSession.current?.id, recoveredId);
       expect(state.accountSession.current?.email, 'recover@example.com');
       expect(state.favorites.single.subject.title, _subject.title);
       final recoveredSettings = await Hive.openBox<dynamic>(
@@ -374,6 +434,9 @@ void main() {
     backend.failNextWrite = true;
     final firstContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(credentialStore),
         tmdbCredentialStoreProvider.overrideWithValue(
           TmdbCredentialStore(backend: _MemoryCredentialBackend()),
@@ -397,6 +460,7 @@ void main() {
       email: 'credential-retry@example.com',
       nickname: '凭据迁移用户',
       password: 'credential-password',
+      verificationCode: '123456',
     );
     final accountId = firstContainer
         .read(animeControllerProvider)
@@ -414,6 +478,9 @@ void main() {
     Hive.init(root.path);
     secondContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(credentialStore),
         tmdbCredentialStoreProvider.overrideWithValue(
           TmdbCredentialStore(backend: _MemoryCredentialBackend()),
@@ -452,6 +519,9 @@ void main() {
       await tmdbStore.saveToken(token: token);
       final container = ProviderContainer(
         overrides: [
+          cloudAccountServiceProvider.overrideWithValue(
+            FakeCloudAccountService(),
+          ),
           bangumiCredentialStoreProvider.overrideWithValue(
             BangumiCredentialStore(backend: _MemoryCredentialBackend()),
           ),
@@ -473,6 +543,7 @@ void main() {
         email: 'tmdb-first@example.com',
         nickname: 'TMDB User',
         password: 'tmdb-password',
+        verificationCode: '123456',
       );
       final accountId = container
           .read(animeControllerProvider)
@@ -519,6 +590,9 @@ void main() {
     backend.failNextWrite = true;
     final firstContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(
           BangumiCredentialStore(backend: _MemoryCredentialBackend()),
         ),
@@ -542,6 +616,7 @@ void main() {
       email: 'tmdb-retry@example.com',
       nickname: 'TMDB Retry',
       password: 'tmdb-password',
+      verificationCode: '123456',
     );
     final accountId = firstContainer
         .read(animeControllerProvider)
@@ -559,6 +634,9 @@ void main() {
     Hive.init(root.path);
     secondContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(
           BangumiCredentialStore(backend: _MemoryCredentialBackend()),
         ),
@@ -618,6 +696,9 @@ void main() {
       );
       final container = ProviderContainer(
         overrides: [
+          cloudAccountServiceProvider.overrideWithValue(
+            FakeCloudAccountService(),
+          ),
           bangumiCredentialStoreProvider.overrideWithValue(
             BangumiCredentialStore(backend: _MemoryCredentialBackend()),
           ),
@@ -644,6 +725,7 @@ void main() {
         email: 'tmdb-account-a@example.com',
         nickname: 'TMDB Account A',
         password: 'tmdb-password-a',
+        verificationCode: '123456',
       );
       final firstAccountId = container
           .read(animeControllerProvider)
@@ -657,6 +739,7 @@ void main() {
         email: 'tmdb-account-b@example.com',
         nickname: 'TMDB Account B',
         password: 'tmdb-password-b',
+        verificationCode: '123456',
       );
       final secondAccountId = container
           .read(animeControllerProvider)
@@ -723,6 +806,9 @@ void main() {
     );
     final firstContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(
           BangumiCredentialStore(backend: _MemoryCredentialBackend()),
         ),
@@ -752,6 +838,7 @@ void main() {
       email: 'delete@example.com',
       nickname: '待删除用户',
       password: 'delete-password',
+      verificationCode: '123456',
     );
     final accountId = firstContainer
         .read(animeControllerProvider)
@@ -790,6 +877,9 @@ void main() {
     recoveryService = MediaDownloadService(backend: _FileDeleteBackend());
     secondContainer = ProviderContainer(
       overrides: [
+        cloudAccountServiceProvider.overrideWithValue(
+          FakeCloudAccountService(),
+        ),
         bangumiCredentialStoreProvider.overrideWithValue(
           BangumiCredentialStore(backend: _MemoryCredentialBackend()),
         ),

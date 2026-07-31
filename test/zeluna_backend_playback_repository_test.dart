@@ -59,6 +59,14 @@ void main() {
             'headers': const <String, String>{},
             'cached': false,
           },
+          {
+            'url': '',
+            'title': '如意',
+            'source': 'maccms:如意',
+            'available': false,
+            'status': 'not_found',
+            'message': '当前站点没有匹配到这部作品',
+          },
         ]);
       }
       return http.Response('not found', 404);
@@ -68,26 +76,27 @@ void main() {
       baseUrl: 'https://backend.example.com/',
       client: client,
     );
+    expect(repository.requestTimeout, const Duration(seconds: 18));
 
     final lines = await repository.linesForEpisode(subject, episode);
 
     expect(requestedStableId, 'bangumi:1');
-    expect(lines, hasLength(2));
+    expect(lines, hasLength(3));
     expect(
       lines.map((line) => line.providerName),
-      containsAll(['Zeluna · iKun', 'Zeluna · 魔都']),
+      containsAll(['在线服务 · iKun', '在线服务 · 魔都']),
     );
     expect(lines, everyElement(isA<PlaybackLine>()));
-    expect(
-      lines,
-      everyElement(predicate<PlaybackLine>((line) => line.available)),
-    );
+    expect(lines.where((line) => line.available), hasLength(2));
     expect(
       lines,
       everyElement(predicate<PlaybackLine>((line) => !line.publicHttpOnly)),
     );
     expect(lines.first.headers['Referer'], 'https://player.example.com/');
-    expect(lines.first.message, '聚合后端缓存线路');
+    expect(lines.first.message, '来自在线服务（已缓存）');
+    expect(lines.last.available, isFalse);
+    expect(lines.last.url, isNull);
+    expect(lines.last.message, '当前站点没有匹配到这部作品');
   });
 
   test('后端线路不会被 Clash Fake-IP 的 drpy 防护误杀', () async {
@@ -123,6 +132,70 @@ void main() {
 
     expect(lines.single.publicHttpOnly, isFalse);
     expect(verified.available, isTrue);
+  });
+
+  test('服务器受限线路会在客户端完成清单和首段验证', () async {
+    final expiresAt =
+        DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+        1000;
+    final backendClient = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'https://1.1.1.1/index.m3u8',
+          'title': '客户端候选',
+          'format': 'hls',
+          'source': 'crawler:dm706',
+          'headers': {'Referer': 'https://source.example/watch/1'},
+          'available': false,
+          'status': 'client_probe_required',
+          'expires_at': expiresAt,
+        },
+      ]);
+    });
+    final mediaClient = MockClient((request) async {
+      expect(request.headers['Referer'], 'https://source.example/watch/1');
+      if (request.url.path.endsWith('index.m3u8')) {
+        return http.Response(
+          '#EXTM3U\n#EXTINF:4,\nsegment.ts\n',
+          200,
+          headers: const {'content-type': 'application/vnd.apple.mpegurl'},
+        );
+      }
+      expect(request.url.path, '/segment.ts');
+      final transportStream = List<int>.filled(188 * 2, 0);
+      transportStream[0] = 0x47;
+      transportStream[188] = 0x47;
+      return http.Response.bytes(
+        transportStream,
+        206,
+        headers: const {'content-type': 'video/mp2t'},
+      );
+    });
+    addTearDown(backendClient.close);
+    addTearDown(mediaClient.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: backendClient,
+    );
+
+    final candidate = (await repository.linesForEpisode(
+      subject,
+      episode,
+    )).single;
+    expect(candidate.available, isFalse);
+    expect(candidate.serverVerified, isFalse);
+    expect(candidate.requiresClientProbe, isTrue);
+    expect(candidate.publicHttpOnly, isTrue);
+    expect(candidate.expiresAt, isNotNull);
+
+    final verified = await RulePlaybackResolver(
+      client: mediaClient,
+    ).verifyPlaybackLine(line: candidate, enrichMetadata: false);
+
+    expect(verified.available, isTrue);
+    expect(verified.clientVerified, isTrue);
+    expect(verified.requiresClientProbe, isFalse);
+    expect(verified.serverVerified, isFalse);
   });
 
   test('不受支持的旧来源不会再触发后端或本地规则查源', () async {

@@ -19,8 +19,19 @@ import asyncio
 import re
 import sys
 import time
+from pathlib import Path
+from urllib.parse import urljoin
 
 import httpx
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # 默认实测「当前生产清单」里的全部站点——在 VPS 上直接跑，即可看清
 # 每个已部署站点从本机出口的真实可播情况(哪个跑不通就从清单删掉)。
@@ -62,18 +73,43 @@ def parse_first_m3u8(raw: str) -> str:
 
 async def _m3u8_reachable(client: httpx.AsyncClient, url: str) -> bool:
     try:
-        async with client.stream(
-            "GET", url, headers={"User-Agent": _UA, "Range": "bytes=0-4095"}
-        ) as resp:
-            if resp.status_code >= 400:
+        response = await client.get(
+            url, headers={"User-Agent": _UA, "Range": "bytes=0-16383"}
+        )
+        if response.status_code >= 400:
+            return False
+        text = response.text.lstrip()
+        if not text.startswith("#EXTM3U"):
+            return False
+        references = [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if not references:
+            return False
+        media_url = urljoin(str(response.url), references[0])
+        if "#EXT-X-STREAM-INF" in text:
+            child = await client.get(
+                media_url,
+                headers={"User-Agent": _UA, "Range": "bytes=0-16383"},
+            )
+            child_text = child.text.lstrip()
+            if child.status_code >= 400 or not child_text.startswith("#EXTM3U"):
                 return False
-            head = b""
-            async for chunk in resp.aiter_bytes():
-                head += chunk
-                if len(head) >= 512:
-                    break
-            text = head.decode("utf-8", errors="ignore").lstrip()
-            return text.startswith("#EXTM3U")
+            references = [
+                line.strip()
+                for line in child_text.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            if not references:
+                return False
+            media_url = urljoin(str(child.url), references[0])
+        segment = await client.get(
+            media_url,
+            headers={"User-Agent": _UA, "Range": "bytes=0-2047"},
+        )
+        return segment.status_code < 400 and bool(segment.content)
     except Exception:
         return False
 
@@ -174,6 +210,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    if sys.platform.startswith("win"):
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

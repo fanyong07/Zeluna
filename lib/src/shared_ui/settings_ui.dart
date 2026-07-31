@@ -263,7 +263,9 @@ class SettingsReadonlyRow extends StatelessWidget {
   }
 }
 
-class SettingsChoiceRow<T> extends StatelessWidget {
+enum SettingsChoicePresentation { sheet, inline }
+
+class SettingsChoiceRow<T> extends StatefulWidget {
   const SettingsChoiceRow({
     super.key,
     required this.title,
@@ -272,6 +274,7 @@ class SettingsChoiceRow<T> extends StatelessWidget {
     required this.labelOf,
     required this.onChanged,
     this.subtitle,
+    this.presentation = SettingsChoicePresentation.sheet,
   });
 
   final String title;
@@ -280,64 +283,147 @@ class SettingsChoiceRow<T> extends StatelessWidget {
   final List<T> options;
   final String Function(T value) labelOf;
   final ValueChanged<T> onChanged;
+  final SettingsChoicePresentation presentation;
+
+  @override
+  State<SettingsChoiceRow<T>> createState() => _SettingsChoiceRowState<T>();
+}
+
+class _SettingsChoiceRowState<T> extends State<SettingsChoiceRow<T>> {
+  var _expanded = false;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      key: ValueKey('setting_choice_$title'),
-      borderRadius: BorderRadius.circular(AppRadius.md),
-      onTap: () => _showChoiceSheet(context),
-      child: ConstrainedBox(
-        constraints: BoxConstraints(minHeight: subtitle == null ? 58 : 68),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: scheme.onSurface,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (subtitle != null) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        subtitle!,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
+    final inline = widget.presentation == SettingsChoicePresentation.inline;
+    return Column(
+      children: [
+        InkWell(
+          key: ValueKey('setting_choice_${widget.title}'),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          onTap: () {
+            if (inline) {
+              setState(() => _expanded = !_expanded);
+            } else {
+              _showChoiceSheet(context);
+            }
+          },
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: widget.subtitle == null ? 58 : 68,
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.title,
+                          style: Theme.of(context).textTheme.bodyLarge
+                              ?.copyWith(
+                                color: scheme.onSurface,
+                                fontWeight: FontWeight.w600,
+                              ),
                         ),
-                      ),
-                    ],
-                  ],
-                ),
+                        if (widget.subtitle != null) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            widget.subtitle!,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: scheme.onSurfaceVariant),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Text(
+                    widget.labelOf(widget.value),
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  AnimatedRotation(
+                    turns: inline && _expanded ? 0.25 : 0,
+                    duration: AppMotion.quick,
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      color: scheme.onSurfaceVariant,
+                      size: 21,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Text(
-                labelOf(value),
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                Icons.chevron_right_rounded,
-                color: scheme.onSurfaceVariant,
-                size: 21,
-              ),
-            ],
+            ),
           ),
         ),
-      ),
+        if (inline)
+          AnimatedSize(
+            duration: AppMotion.quick,
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: _expanded
+                ? Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: scheme.surfaceContainerHighest.withValues(
+                          alpha: 0.55,
+                        ),
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                      ),
+                      child: Column(
+                        children: [
+                          for (
+                            var index = 0;
+                            index < widget.options.length;
+                            index++
+                          ) ...[
+                            InkWell(
+                              onTap: () {
+                                widget.onChanged(widget.options[index]);
+                                setState(() => _expanded = false);
+                              },
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 13,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        widget.labelOf(widget.options[index]),
+                                      ),
+                                    ),
+                                    if (widget.options[index] == widget.value)
+                                      Icon(
+                                        Icons.check_rounded,
+                                        color: scheme.primary,
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            if (index != widget.options.length - 1)
+                              Divider(height: 1, color: scheme.outlineVariant),
+                          ],
+                        ],
+                      ),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
+      ],
     );
   }
 
@@ -354,22 +440,22 @@ class SettingsChoiceRow<T> extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
                 child: Text(
-                  title,
+                  widget.title,
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
-              for (final option in options)
+              for (final option in widget.options)
                 ListTile(
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(AppRadius.md),
                   ),
-                  title: Text(labelOf(option)),
-                  trailing: option == value
+                  title: Text(widget.labelOf(option)),
+                  trailing: option == widget.value
                       ? Icon(Icons.check, color: scheme.primary)
                       : null,
                   onTap: () {
                     Navigator.of(context).pop();
-                    onChanged(option);
+                    widget.onChanged(option);
                   },
                 ),
             ],

@@ -63,9 +63,123 @@ class AppColors {
   // same warm dark room regardless of the browsing theme.
   static const theaterBg = Color(0xFF171614);
   static const theaterPanel = Color(0xFF211F1D);
+  static const theaterPanelHigh = Color(0xFF2A2724);
   static const theaterInk = Color(0xFFEFEDE6);
   static const theaterMuted = Color(0xB3EFEDE6);
   static const theaterFaint = Color(0x66EFEDE6);
+  static const theaterBorder = Color(0xFF3B3833);
+  static const theaterBorderBright = Color(0xFF4E4A44);
+  // Scrim base matches overlay ink; prefer [AppOverlays] helpers over raw alphas.
+  static const theaterScrim = Color(0xFF1B1A18);
+}
+
+/// Shared scrims and media washes. Prefer these over page-local `0x1B1A18`
+/// gradients so light/dark browsing stays on one temperature.
+class AppOverlays {
+  const AppOverlays._();
+
+  static Color scrim([double opacity = 0.72]) =>
+      AppColors.theaterScrim.withValues(alpha: opacity.clamp(0.0, 1.0));
+
+  static Color scrimSoft([double opacity = 0.40]) => scrim(opacity);
+
+  static Color scrimStrong([double opacity = 0.88]) => scrim(opacity);
+
+  static Color theaterBar([double opacity = 0.78]) =>
+      AppColors.theaterBg.withValues(alpha: opacity.clamp(0.0, 1.0));
+
+  /// Bottom-heavy wash for posters and hero art (gallery surfaces).
+  static const posterBottom = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [
+      Color(0x001B1A18),
+      Color(0x661B1A18),
+      Color(0xE61B1A18),
+    ],
+    stops: [0.35, 0.72, 1],
+  );
+
+  /// Two-stop caption plate used on history / library cards.
+  static const mediaCaption = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0x001B1A18), Color(0xEE1B1A18)],
+  );
+
+  /// Top + bottom control wash for the player (theater only).
+  static const playerChromeVertical = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [
+      Color(0xD9171614),
+      Color(0x00171614),
+      Color(0x00171614),
+      Color(0xE6171614),
+    ],
+    stops: [0, 0.22, 0.62, 1],
+  );
+
+  static const playerTopFade = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0xE6171614), Color(0x8F171614), Color(0x00171614)],
+  );
+
+  static const playerBottomFade = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0x00171614), Color(0x78171614), Color(0xD9171614)],
+  );
+
+  /// Left-heavy wash for wide heroes (catalog rail / profile banner).
+  static const heroLeading = LinearGradient(
+    begin: Alignment.centerLeft,
+    end: Alignment.centerRight,
+    colors: [Color(0xF01B1A18), Color(0xCC1B1A18), Color(0x551B1A18)],
+  );
+
+  /// Softer left wash used on profile hero cards.
+  static const heroLeadingSoft = LinearGradient(
+    begin: Alignment.centerLeft,
+    end: Alignment.centerRight,
+    colors: [Color(0xEE1B1A18), Color(0x661B1A18)],
+  );
+
+  /// Compact detail hero (bottom-up).
+  static const heroCompact = LinearGradient(
+    begin: Alignment.bottomCenter,
+    end: Alignment.topCenter,
+    colors: [Color(0xE61B1A18), Color(0xB81B1A18)],
+  );
+
+  /// Wide detail hero (leading edge).
+  static const heroDetailWide = LinearGradient(
+    begin: Alignment.centerLeft,
+    end: Alignment.centerRight,
+    colors: [Color(0xF21B1A18), Color(0xAA1B1A18), Color(0x441B1A18)],
+  );
+
+  /// Category card overlay (top → bottom).
+  static const categoryCard = LinearGradient(
+    begin: Alignment.topCenter,
+    end: Alignment.bottomCenter,
+    colors: [Color(0x661B1A18), Color(0xCC1B1A18)],
+  );
+
+  /// Solid-ish label plate on small posters.
+  static Color labelPlate([double opacity = 0.65]) =>
+      AppColors.theaterScrim.withValues(alpha: opacity.clamp(0.0, 1.0));
+}
+
+/// Line / task status colors used on both gallery and theater surfaces.
+class AppStatusColors {
+  const AppStatusColors._();
+
+  static const available = AppColors.success;
+  static const probing = AppColors.warning;
+  static const failed = AppColors.danger;
+  static const selected = AppColors.primary2;
 }
 
 /// Typography roles that pages may reference directly. The serif family is

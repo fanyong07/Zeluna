@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:anime/src/app/anime_app.dart';
@@ -33,7 +34,7 @@ void main() {
     expect(find.text('ANIME'), findsNothing);
   });
 
-  test('platform display names use Zeluna while technical ids stay stable', () {
+  test('platform display names and Windows binary use Zeluna', () {
     const visibleBrandFiles = {
       'android/app/src/main/AndroidManifest.xml': 'android:label="Zeluna"',
       'web/index.html': '<title>Zeluna</title>',
@@ -68,11 +69,50 @@ void main() {
     );
     expect(
       File('windows/CMakeLists.txt').readAsStringSync(),
-      contains('set(BINARY_NAME "anime")'),
+      allOf(
+        contains('project(Zeluna LANGUAGES CXX)'),
+        contains('set(BINARY_NAME "Zeluna")'),
+      ),
+    );
+    expect(
+      File('windows/runner/Runner.rc').readAsStringSync(),
+      contains('"OriginalFilename", "Zeluna.exe"'),
     );
     expect(
       File('linux/CMakeLists.txt').readAsStringSync(),
       contains('set(APPLICATION_ID "app.anime.anime")'),
+    );
+  });
+
+  testWidgets('startup loading state uses the selected Zeluna artwork', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1080, 1920);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_LoadingBrandTestController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey<String>('zeluna-startup-image')),
+      findsOneWidget,
+    );
+    expect(File(ZelunaStartupView.assetPath).existsSync(), isTrue);
+    expect(
+      File(
+        'android/app/src/main/res/drawable-nodpi/'
+        'zeluna_launch_background.png',
+      ).existsSync(),
+      isTrue,
     );
   });
 }
@@ -81,4 +121,11 @@ class _BrandTestController extends AnimeController {
   @override
   Future<AnimeState> build() async =>
       AnimeState(homeFeed: BangumiMetadataRepository().fallbackHomeFeed());
+}
+
+class _LoadingBrandTestController extends AnimeController {
+  final Completer<AnimeState> _state = Completer<AnimeState>();
+
+  @override
+  Future<AnimeState> build() => _state.future;
 }

@@ -20,6 +20,7 @@ MACCMS_SITES: list[dict] = [
     # 随时用 tools/probe_maccms.py 在 VPS 复测，运行时每条线路仍会实测并淘汰失效站。
     # —— 第一梯队：VPS 实测番剧 / 剧集 / 电影 三类全可播 ——
     {"name": "iKun", "api": "https://ikunzyapi.com/api.php/provide/vod", "weight": 100, "precache": True},
+    {"name": "光速", "api": "https://api.guangsuapi.com/api.php/provide/vod", "weight": 99, "precache": True},
     {"name": "如意", "api": "https://cj.rycjapi.com/api.php/provide/vod", "weight": 98, "precache": True},
     {"name": "豪华", "api": "https://hhzyapi.com/api.php/provide/vod", "weight": 96, "precache": True},
     {"name": "极速", "api": "https://jszyapi.com/api.php/provide/vod", "weight": 94, "precache": True},
@@ -35,7 +36,16 @@ MACCMS_SITES: list[dict] = [
     {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "weight": 78, "precache": False},  # 番剧/电影
     {"name": "量子", "api": "https://cj.lziapi.com/api.php/provide/vod", "weight": 76, "precache": False},  # 番剧/电影
     {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "weight": 74, "precache": False},  # 番剧/剧集
-    {"name": "金鹰", "api": "https://jyzyapi.com/api.php/provide/vod", "weight": 72, "precache": False},  # 剧集
+    # —— 第三梯队：三类内容均能完成搜索、详情和媒体候选解析；当前本机
+    #    Fake-IP 出口无法做服务端首分片定论，因此只作为客户端复验候选，
+    #    不参与预爬，且始终排在 VPS 已实播来源之后。 ——
+    {"name": "暴风", "api": "https://bfzyapi.com/api.php/provide/vod", "weight": 72, "precache": False},
+    {"name": "百度", "api": "https://api.apibdzy.com/api.php/provide/vod", "weight": 70, "precache": False},
+    {"name": "无尽", "api": "https://api.wujinapi.me/api.php/provide/vod", "weight": 68, "precache": False},
+    {"name": "最大", "api": "https://api.zuidapi.com/api.php/provide/vod", "weight": 66, "precache": False},
+    {"name": "360", "api": "https://360zy.com/api.php/provide/vod", "weight": 64, "precache": False},
+    # 洛杉矶 VPS 三类实播均通过，但国内客户端直连明显较慢；只作末位地区备用。
+    {"name": "虎牙", "api": "https://www.huyaapi.com/api.php/provide/vod", "weight": 62, "precache": False},
 ]
 
 

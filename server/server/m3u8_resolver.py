@@ -26,13 +26,6 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-# 已知的通用 M3U8 解析服务
-# 这些服务接收一个视频站URL，返回解析后的 m3u8 直链
-M3U8_PARSE_SERVICES = [
-    "https://app.emmmm.eu.org.cdn.cloudflare.net/parse/m3u8/xp/{vid}",
-    "https://m3u8.cyz.app/kuais/{vid}",
-]
-
 # 已知的免费影视搜索 API
 FREE_SEARCH_APIS = [
     {
@@ -90,7 +83,6 @@ class M3U8Resolver:
             },
             timeout=12,
             follow_redirects=True,
-            verify=False,
         )
         self._url_cache: dict[str, list[dict]] = {}
         self._seen_urls: set[str] = set()
@@ -177,45 +169,12 @@ class M3U8Resolver:
 
     async def resolve_via_parse_services(self, target_url: str) -> list[dict]:
         """
-        通过通用 M3U8 解析服务获取视频 URL。
+        接受已经解析出的公开媒体 URL，不再转交第三方聚合解析服务。
 
-        这些服务接收一个视频页面 URL，解析后返回 m3u8 直链。
+        页面抓取和播放解析必须由对应站点适配器完成；这里仅复用媒体
+        URL 提取和格式识别，避免把外部聚合接口伪装成自有来源。
         """
-        results = []
-        vid = quote(target_url, safe='')
-
-        for service_url_tpl in M3U8_PARSE_SERVICES:
-            try:
-                service_url = service_url_tpl.format(vid=vid)
-                resp = await self._client.get(service_url)
-                if resp.status_code == 200:
-                    text = resp.text
-                    # 解析服务可能直接返回 m3u8 内容，也可能返回 JSON
-                    if text.strip().startswith("#EXTM3U"):
-                        results.append({
-                            "url": service_url,
-                            "format": "hls",
-                            "source": "parse_service",
-                        })
-                    elif text.strip().startswith("{"):
-                        try:
-                            data = json.loads(text)
-                            m3u8_url = data.get("url", data.get("m3u8", ""))
-                            if m3u8_url:
-                                results.append({
-                                    "url": m3u8_url,
-                                    "format": "hls",
-                                    "source": "parse_service",
-                                })
-                        except json.JSONDecodeError:
-                            pass
-                    # 也检查返回文本中是否有其他 URL
-                    extra = await self.resolve_from_text(text)
-                    results.extend(extra)
-            except Exception:
-                continue
-
-        return results
+        return await self.resolve_from_text(target_url)
 
     async def search_and_resolve(
         self, keyword: str, content_type: str = "tv"
@@ -277,18 +236,6 @@ class M3U8Resolver:
             except Exception as e:
                 logger.warning(f"Search+resolve error [{api['name']}]: {e}")
 
-        # 策略2: 尝试通用解析服务
-        if len(all_urls) < 5:
-            for parse_url_tpl in M3U8_PARSE_SERVICES:
-                try:
-                    service_url = parse_url_tpl.format(vid=quote(keyword, safe=''))
-                    resp = await self._client.get(service_url)
-                    if resp.status_code == 200:
-                        extra = await self.resolve_from_text(resp.text)
-                        all_urls.extend(extra)
-                except Exception:
-                    continue
-
         # 去重
         seen = set()
         unique = []
@@ -307,6 +254,9 @@ class M3U8Resolver:
             return resp.status_code < 400
         except Exception:
             return False
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 # 全局解析器实例

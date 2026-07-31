@@ -2,6 +2,16 @@ import '../domain/anime_models.dart';
 
 enum PlaybackLineValidationAction { keep, open, stop }
 
+const playbackLineFailureThreshold = 2;
+
+int nextPlaybackLineFailureCount(int currentCount, {bool definitive = false}) {
+  return definitive ? playbackLineFailureThreshold : currentCount + 1;
+}
+
+bool shouldRetryPlaybackLineAfterFailure(int failureCount) {
+  return failureCount < playbackLineFailureThreshold;
+}
+
 class PlaybackLineValidationDecision {
   const PlaybackLineValidationDecision({
     required this.action,
@@ -16,9 +26,22 @@ class PlaybackLineValidationDecision {
 
 bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
   if (!line.available) return false;
+  // Zeluna's backend only returns lines after a manifest/segment probe. Doing
+  // the same work again on the client delays first paint and makes cached
+  // playback feel slower than the backend response itself.
+  if (line.providerId.startsWith('zeluna:')) return false;
   final rawUrl = line.url?.trim() ?? '';
   final uri = Uri.tryParse(rawUrl);
   return uri?.scheme.toLowerCase() != 'file';
+}
+
+/// Trusted backend and already client-verified lines may be handed to the
+/// player immediately. Their inventory probe runs in the background so route
+/// timing never blocks the first frame.
+bool playbackLineCanStartImmediately(PlaybackLine line) {
+  if (line.serverVerified || line.clientVerified) return true;
+  final rawUrl = line.url?.trim() ?? '';
+  return Uri.tryParse(rawUrl)?.scheme.toLowerCase() == 'file';
 }
 
 List<PlaybackLine> initialPlaybackLinesForDisplay(PlaybackLine? line) {
@@ -83,22 +106,95 @@ List<PlaybackLine> selectablePlaybackLinesForDisplay(
   );
 }
 
+List<PlaybackLine> allPlaybackLinesForDisplay(Iterable<PlaybackLine> lines) {
+  return sortPlaybackLinesForDisplay(lines);
+}
+
 List<PlaybackLine> mergePlaybackLineSnapshot({
   required Iterable<PlaybackLine> currentLines,
   required Iterable<PlaybackLine> snapshotLines,
   String? replacedProviderId,
   bool authoritative = false,
 }) {
+  final currentById = <String, PlaybackLine>{
+    for (final line in currentLines) line.id: line,
+  };
   final snapshot = snapshotLines.toList(growable: false);
-  if (authoritative) return List<PlaybackLine>.unmodifiable(snapshot);
+  final enrichedSnapshot = snapshot
+      .map(
+        (line) => preservePlaybackLineProbeMetadata(
+          previous: currentById[line.id],
+          incoming: line,
+        ),
+      )
+      .toList(growable: false);
+  if (authoritative) {
+    return List<PlaybackLine>.unmodifiable(enrichedSnapshot);
+  }
 
   final merged = <String, PlaybackLine>{
     for (final line in currentLines)
       if (replacedProviderId == null || line.providerId != replacedProviderId)
         line.id: line,
-    for (final line in snapshot) line.id: line,
+    for (final line in enrichedSnapshot) line.id: line,
   };
   return List<PlaybackLine>.unmodifiable(merged.values);
+}
+
+PlaybackLine preservePlaybackLineProbeMetadata({
+  required PlaybackLine? previous,
+  required PlaybackLine incoming,
+}) {
+  if (previous == null ||
+      previous.url?.trim() != incoming.url?.trim() ||
+      incoming.url?.trim().isEmpty != false) {
+    return incoming;
+  }
+  return PlaybackLine(
+    id: incoming.id,
+    episodeId: incoming.episodeId,
+    providerId: incoming.providerId,
+    providerName: incoming.providerName,
+    title: incoming.title,
+    quality: incoming.quality,
+    format: incoming.format,
+    url: incoming.url,
+    headers: incoming.headers,
+    latency: incoming.latency ?? previous.latency,
+    sizeLabel: incoming.sizeLabel ?? previous.sizeLabel,
+    sizeBytes: incoming.sizeBytes ?? previous.sizeBytes,
+    sizeEstimated: incoming.sizeBytes == null
+        ? previous.sizeEstimated
+        : incoming.sizeEstimated,
+    videoWidth: incoming.videoWidth ?? previous.videoWidth,
+    videoHeight: incoming.videoHeight ?? previous.videoHeight,
+    bitrate: incoming.bitrate ?? previous.bitrate,
+    codecs: incoming.codecs ?? previous.codecs,
+    isLive: incoming.isLive || previous.isLive,
+    adaptive: incoming.adaptive || previous.adaptive,
+    publicHttpOnly: incoming.publicHttpOnly,
+    serverVerified: incoming.serverVerified,
+    requiresClientProbe: previous.clientVerified
+        ? false
+        : incoming.requiresClientProbe,
+    clientVerified: incoming.clientVerified || previous.clientVerified,
+    expiresAt: incoming.expiresAt ?? previous.expiresAt,
+    available: previous.clientVerified
+        ? previous.available
+        : incoming.available,
+    message: previous.clientVerified ? previous.message : incoming.message,
+  );
+}
+
+Duration playbackRecoveryPosition(Duration position) {
+  return position > const Duration(seconds: 2) ? position : Duration.zero;
+}
+
+bool shouldSwitchAfterPlaybackInterruption({
+  required Duration position,
+  required bool hasAlternative,
+}) {
+  return hasAlternative && playbackRecoveryPosition(position) > Duration.zero;
 }
 
 bool nativePlaybackHasFirstFrame({
@@ -119,11 +215,17 @@ bool nativePlaybackReachedFirstFrame({
 
 bool nativePlaybackShouldSwitchAtSoftTimeout({
   required Duration position,
+  required Duration buffer,
+  required bool buffering,
   required bool hasAlternative,
 }) {
   // A slow HLS stream may need more than seven seconds for its first segment.
-  // Only abandon it early when another playable line is already available.
-  return position <= Duration.zero && hasAlternative;
+  // Buffer progress is evidence that the current line is alive, even before
+  // media_kit advances the playback position.
+  return position <= Duration.zero &&
+      buffer <= Duration.zero &&
+      !buffering &&
+      hasAlternative;
 }
 
 bool webPlaybackStartupTimedOut({required bool waitingForReady}) {
@@ -355,7 +457,41 @@ int _stableHash(String value) {
 
 String playbackLineLatencyLabel(PlaybackLine line) {
   final latency = line.latency;
-  return latency == null ? '延迟未知' : '${latency.inMilliseconds}ms';
+  if (latency != null) return '${latency.inMilliseconds}ms';
+  if (line.requiresClientProbe) return '检查中';
+  if (line.serverVerified && !line.clientVerified) return '测速中';
+  if (line.clientVerified) return '可用';
+  return '速度未知';
+}
+
+String playbackLineFailureLabel(PlaybackLine line) {
+  final message = (line.message ?? '').toLowerCase();
+  String reason;
+  if (message.contains('403') || message.contains('拒绝')) {
+    reason = '访问被拒绝';
+  } else if (message.contains('404') || message.contains('失效')) {
+    reason = '线路失效';
+  } else if (message.contains('超时') || message.contains('timeout')) {
+    reason = '连接超时';
+  } else if (message.contains('分片') || message.contains('segment')) {
+    reason = '视频加载失败';
+  } else if (message.contains('清单') || message.contains('manifest')) {
+    reason = '线路无效';
+  } else if (message.contains('网页') || message.contains('媒体内容')) {
+    reason = '不是视频';
+  } else if (message.contains('验证码')) {
+    reason = '需要验证';
+  } else if (message.contains('执行器') || message.contains('不支持')) {
+    reason = '当前不支持';
+  } else if (message.contains('未匹配') || message.contains('没有找到')) {
+    reason = '未找到匹配';
+  } else if (message.contains('无法访问') || message.contains('网络')) {
+    reason = '网络异常';
+  } else {
+    reason = '暂时不可用';
+  }
+  final latency = line.latency;
+  return latency == null ? reason : '$reason · ${latency.inMilliseconds}ms';
 }
 
 String playbackLineMediaLabel(PlaybackLine line) {

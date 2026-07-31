@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/animeko_webview_sniffer.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -1834,6 +1835,287 @@ segment-1.ts
     expect(lines.single.quality, '1080P');
     expect(lines.single.headers['Cookie'], 'quality=1080');
   });
+
+  test('Animeko web selector falls back to WebView network sniffing', () async {
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/anime/02.m3u8':
+          return _playableHls();
+        case '/anime/segment-1.ts':
+          return _playableSegment();
+        case '/search':
+          return _html('''
+            <div class="result">
+              <a title="测试番剧" href="/detail/anime.html">测试番剧</a>
+            </div>
+          ''');
+        case '/detail/anime.html':
+          return _html('''
+            <div class="playlist"><a href="/play/2.html">第2集</a></div>
+          ''');
+        case '/play/2.html':
+          return _html('<div id="player">JavaScript player</div>');
+      }
+      return http.Response('not found', 404);
+    });
+    final sniffer = _FakeAnimekoWebViewSniffer(
+      observedUrl: 'https://cdn.example.com/anime/02.m3u8',
+      cookieHeader: 'session=active',
+    );
+    final resolver = RulePlaybackResolver(
+      client: client,
+      animekoWebViewSniffer: sniffer,
+    );
+
+    final lines = await resolver.resolveRule(
+      rule: _animekoRule,
+      subject: _animeSubject,
+      episode: _episode2,
+    );
+
+    expect(sniffer.calls, 1);
+    expect(lines.single.available, isTrue);
+    expect(lines.single.url, 'https://cdn.example.com/anime/02.m3u8');
+    expect(lines.single.headers['Cookie'], 'quality=1080; session=active');
+  });
+
+  test(
+    'Aikanbot API resolves the selected episode without loading its player',
+    () async {
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/search':
+            expect(request.url.queryParameters['q'], _animeSubject.title);
+            return _html('''
+            <div class="media">
+              <a class="title-text" href="/play/722004">${_animeSubject.title} 2022</a>
+            </div>
+          ''');
+          case '/play/722004':
+            return _html('''
+            <input id="current_id" value="722004"/>
+            <input id="e_token" value="abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"/>
+            <input id="mtype" value="18"/>
+          ''');
+          case '/api/getResN':
+            expect(request.url.queryParameters['videoId'], '722004');
+            expect(request.url.queryParameters['mtype'], '18');
+            expect(request.url.queryParameters['token'], isNotEmpty);
+            return http.Response(
+              '{"state":1,"data":{"list":[{"resData":"[{\\"url\\":\\"第01集\$https://cdn.example.com/aikan/01.m3u8#第02集\$https://cdn.example.com/aikan/02.m3u8\\"}]"}]}}',
+              200,
+              headers: const {
+                'content-type': 'application/json; charset=utf-8',
+              },
+            );
+          case '/aikan/02.m3u8':
+            return _playableHls();
+          case '/aikan/segment-1.ts':
+            return _playableSegment();
+        }
+        return http.Response('not found', 404);
+      });
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _aikanbotRule,
+        subject: _animeSubject,
+        episode: _episode2,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isTrue);
+      expect(lines.single.url, 'https://cdn.example.com/aikan/02.m3u8');
+      expect(
+        lines.single.headers['Referer'],
+        'https://example.com/play/722004',
+      );
+    },
+  );
+
+  test('DBKU XBPQ rule decodes its page-provided HLS address', () async {
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/vodsearch/-------------.html':
+          return _html('''
+            <li class="clearfix">
+              <a class="searchkey" href="/voddetail/4209.html">测试番剧</a>
+            </li>
+          ''');
+        case '/voddetail/4209.html':
+          return _html('''
+            <ul class="myui-content__list"><li><a href="/vodplay/4209-1-1.html">正片</a></li></ul>
+          ''');
+        case '/vodplay/4209-1-1.html':
+          return _html('''
+            <script>
+              var player_test={"encrypt":2,"url":"aHR0cHMlM0ElMkYlMkZjZG4uZXhhbXBsZS5jb20lMkZkYmt1JTJGaW5kZXgubTN1OA=="};
+            </script>
+          ''');
+        case '/dbku/index.m3u8':
+          return _playableHls();
+        case '/dbku/segment-1.ts':
+          return _playableSegment();
+      }
+      return http.Response('not found', 404);
+    });
+
+    final lines = await RulePlaybackResolver(
+      client: client,
+    ).resolveRule(rule: _dbkuRule, subject: _animeSubject, episode: _episode2);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isTrue);
+    expect(lines.single.url, 'https://cdn.example.com/dbku/index.m3u8');
+  });
+
+  test('Nivod XBPQ rule probes its page-provided HLS playlist', () async {
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/s/-------------/':
+          return _html('''
+            <div class="module-card-item-title"><a href="/nivod/55947/"><strong>测试番剧</strong></a></div>
+          ''');
+        case '/nivod/55947/':
+          return _html('''
+            <div class="module-play-list-content"><a class="module-play-list-link" href="/niplay/55947-1-1/"><span>正片</span></a></div>
+          ''');
+        case '/niplay/55947-1-1/':
+          return _html('''
+            <script>var player_test={"encrypt":0,"url":"https://cdn.example.com/nivod/index"};</script>
+          ''');
+        case '/nivod/index':
+          return _playableHls();
+        case '/nivod/segment-1.ts':
+          return _playableSegment();
+      }
+      return http.Response('not found', 404);
+    });
+
+    final lines = await RulePlaybackResolver(
+      client: client,
+    ).resolveRule(rule: _nivodRule, subject: _animeSubject, episode: _episode2);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isTrue);
+    expect(lines.single.url, 'https://cdn.example.com/nivod/index');
+  });
+
+  test(
+    'Sorani API resolves a fresh HLS playlist for the selected episode',
+    () async {
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/api/video':
+            expect(request.url.queryParameters['keyword'], _animeSubject.title);
+            expect(request.headers['origin'], 'https://www.sorani.net');
+            return _json('''
+            {"data":{"records":[{"id":4550,"title":"测试番剧","alias":"Test Anime"}]}}
+          ''');
+          case '/api/video/4550':
+            return _json('''
+            {"data":{"episodes":[
+              {"episodeId":10,"episodeOrder":1,"isVip":false},
+              {"episodeId":20,"episodeOrder":2,"isVip":false}
+            ]}}
+          ''');
+          case '/api/video/episode/20/play':
+            expect(request.url.queryParameters['lineCode'], 'anime_jp_m3u8');
+            return _json('''
+            {"data":{"canPlay":true,"playUrl":"https://cdn.example.com/sorani/02.m3u8"}}
+          ''');
+          case '/sorani/02.m3u8':
+            return _playableHls();
+          case '/sorani/segment-1.ts':
+            return _playableSegment();
+        }
+        return http.Response('not found', 404);
+      });
+
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _soraniRule,
+        subject: _animeSubject,
+        episode: _episode2,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isTrue);
+      expect(lines.single.url, 'https://cdn.example.com/sorani/02.m3u8');
+      expect(lines.single.headers['Referer'], 'https://www.sorani.net/');
+    },
+  );
+
+  test(
+    'Animeko json-path-indexed search resolves the current episode',
+    () async {
+      final client = MockClient((request) async {
+        switch (request.url.path) {
+          case '/anime/02.m3u8':
+            return _playableHls();
+          case '/anime/segment-1.ts':
+            return _playableSegment();
+          case '/api/videos/search':
+            expect(request.url.query, contains('q='));
+            return http.Response(
+              '{"data":{"videos":['
+              '{"name":"测试番剧","slug":"anime"},'
+              '{"name":"其他作品","slug":"other"}'
+              ']}}',
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          case '/video/anime':
+            return _html('''
+            <div class="playlist">
+              <a href="/play/1.html">第1集</a>
+              <a href="/play/2.html">第2集</a>
+            </div>
+          ''');
+          case '/play/2.html':
+            return _html('''
+            <script>
+              window.player = {url: "https://cdn.example.com/anime/02.m3u8"};
+            </script>
+          ''');
+        }
+        return http.Response('not found', 404);
+      });
+
+      final resolver = RulePlaybackResolver(client: client);
+      final lines = await resolver.resolveRule(
+        rule: _animekoJsonRule,
+        subject: _animeSubject,
+        episode: _episode2,
+      );
+
+      expect(lines, hasLength(1));
+      expect(lines.single.available, isTrue);
+      expect(lines.single.url, 'https://cdn.example.com/anime/02.m3u8');
+    },
+  );
+}
+
+class _FakeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
+  _FakeAnimekoWebViewSniffer({
+    required this.observedUrl,
+    this.cookieHeader = '',
+  });
+
+  final String observedUrl;
+  final String cookieHeader;
+  int calls = 0;
+
+  @override
+  bool get supported => true;
+
+  @override
+  Future<AnimekoWebViewSniffResult?> sniff(
+    AnimekoWebViewSniffRequest request,
+  ) async {
+    calls += 1;
+    return AnimekoWebViewSniffResult(
+      videoUrl: request.matchVideo(observedUrl, request.pageUrl.toString()),
+      cookieHeader: cookieHeader,
+    );
+  }
 }
 
 const _playableHlsManifest = '''
@@ -1905,6 +2187,12 @@ http.Response _html(String body) => http.Response(
   body,
   200,
   headers: {'content-type': 'text/html; charset=utf-8'},
+);
+
+http.Response _json(String body) => http.Response(
+  body,
+  200,
+  headers: {'content-type': 'application/json; charset=utf-8'},
 );
 
 Future<PlaybackLine> _resolveSinglePlayableLine(
@@ -2184,6 +2472,127 @@ final _animekoRule = RulePlugin(
     ),
     matchVideoUrl: r'url:\s*"(?<v>https?:\/\/.+\.(m3u8|mp4))"',
     cookies: 'quality=1080',
+  ),
+);
+
+final _aikanbotRule = RulePlugin(
+  id: 'custom:aikanbot:test',
+  name: 'AikanbotTest',
+  version: '1.0',
+  source: RuleSourceKind.custom,
+  contentType: RuleContentType.anime,
+  engine: 'aikanbot-api',
+  updatedAt: _date,
+  qualityScore: 100,
+  tags: const ['web'],
+  baseUrl: 'https://example.com',
+  searchUrl: 'https://example.com/search?q={keyword}',
+  searchable: true,
+  quickSearch: true,
+  filterable: false,
+);
+
+final _dbkuRule = RulePlugin(
+  id: 'custom:dbku:test',
+  name: 'DBKUTest',
+  version: '1.0',
+  source: RuleSourceKind.custom,
+  contentType: RuleContentType.movie,
+  engine: 'XBPQ',
+  updatedAt: _date,
+  qualityScore: 88,
+  tags: const ['movie'],
+  baseUrl: 'https://example.com',
+  searchUrl: 'https://example.com/vodsearch/-------------.html?wd={wd}',
+  searchable: true,
+  quickSearch: true,
+  filterable: false,
+  xbpq: const XbpqParserConfig(
+    searchArray: '<li class="clearfix">&&</li>',
+    searchTitle: '">&&</a>',
+    searchLink: 'href="&&"',
+    playArray: '<ul class="myui-content__list&&</ul>',
+    playList: '<li&&</li>',
+    playTitle: '">&&</a>',
+    playLink: 'href="&&"',
+  ),
+);
+
+final _nivodRule = RulePlugin(
+  id: 'custom:nivod:test',
+  name: 'NivodTest',
+  version: '1.0',
+  source: RuleSourceKind.custom,
+  contentType: RuleContentType.movie,
+  engine: 'XBPQ',
+  updatedAt: _date,
+  qualityScore: 87,
+  tags: const ['movie'],
+  baseUrl: 'https://example.com',
+  searchUrl: 'https://example.com/s/-------------/?wd={wd}',
+  searchable: true,
+  quickSearch: true,
+  filterable: false,
+  xbpq: const XbpqParserConfig(
+    searchArray: 'class="module-card-item-title">&&</div>',
+    searchTitle: '<strong>&&</strong>',
+    searchLink: 'href="&&"',
+    playArray: '<div class="module-play-list-content&&</div>',
+    playList: '<a&&</a>',
+    playTitle: '><span>&&</span>',
+    playLink: 'href="&&"',
+  ),
+);
+
+final _soraniRule = RulePlugin(
+  id: 'custom:sorani:test',
+  name: 'SoraniTest',
+  version: '1.0',
+  source: RuleSourceKind.custom,
+  contentType: RuleContentType.anime,
+  engine: 'sorani-api',
+  updatedAt: _date,
+  qualityScore: 90,
+  tags: const ['web'],
+  baseUrl: 'https://example.com',
+  searchUrl: 'https://www.sorani.net/',
+  searchable: true,
+  quickSearch: true,
+  filterable: false,
+  rawConfig: const {'lineCode': 'anime_jp_m3u8'},
+);
+
+final _animekoJsonRule = RulePlugin(
+  id: 'custom:animeko:json',
+  name: 'AnimekoJsonTest',
+  version: '2',
+  source: RuleSourceKind.custom,
+  contentType: RuleContentType.anime,
+  engine: 'animeko-web-selector',
+  updatedAt: _date,
+  qualityScore: 80,
+  tags: ['Animeko', 'JSON'],
+  baseUrl: 'https://example.com/',
+  searchUrl: 'https://example.com/api/videos/search?q={keyword}',
+  searchable: true,
+  quickSearch: true,
+  filterable: false,
+  animeko: AnimekoWebSelectorConfig(
+    searchUrl: 'https://example.com/api/videos/search?q={keyword}',
+    rawBaseUrl: 'https://example.com/video/',
+    subjectFormatId: 'json-path-indexed',
+    channelFormatId: 'index-grouped',
+    defaultResolution: '1080P',
+    subjectJsonPathIndexed: AnimekoSubjectJsonPathIndexedConfig(
+      selectNames: r'$.data.videos[*].name',
+      selectLinks: r'$.data.videos[*].slug',
+    ),
+    channelFlattened: AnimekoChannelFlattenedConfig(
+      selectEpisodeLists: '.playlist',
+      selectEpisodesFromList: 'a',
+      matchEpisodeSortFromName: r'第\s*(?<ep>\d+)',
+    ),
+    matchVideoUrl: r'url:\s*"(?<v>https?:\/\/.+\.(m3u8|mp4))"',
   ),
 );
 

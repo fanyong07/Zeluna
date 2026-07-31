@@ -14,21 +14,43 @@ from fastapi import Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE
+from .config import (
+    SECRET_KEY,
+    JWT_ALGORITHM,
+    ACCESS_TOKEN_EXPIRE,
+    LEGACY_ACCOUNT_API_ENABLED,
+)
 from .database import User, UserToken
 
 
+_BCRYPT_SHA256_PREFIX = "$bcrypt-sha256$"
+
+
+def _password_bytes(password: str) -> bytes:
+    return hashlib.sha256(password.encode("utf-8")).digest()
+
+
 def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    hashed = bcrypt.hashpw(_password_bytes(password), bcrypt.gensalt()).decode()
+    return _BCRYPT_SHA256_PREFIX + hashed
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode(), hashed.encode())
+    try:
+        if hashed.startswith(_BCRYPT_SHA256_PREFIX):
+            digest = hashed.removeprefix(_BCRYPT_SHA256_PREFIX)
+            return bcrypt.checkpw(_password_bytes(password), digest.encode())
+        # Compatibility for accounts created before the SHA-256 pre-hash was
+        # introduced. New passwords always use the versioned format above.
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode())
+    except ValueError:
+        return False
 
 
 def create_jwt(user_id: int) -> str:
     payload = {
         "user_id": user_id,
+        "jti": secrets.token_urlsafe(16),
         "exp": int(time.time()) + ACCESS_TOKEN_EXPIRE,
         "iat": int(time.time()),
     }
@@ -126,22 +148,19 @@ async def get_current_user(
     if parsed is None:
         return None
 
-    # 先尝试从数据库找 token
-    stmt = select(UserToken).where(UserToken.token == parsed.token)
+    # New sessions are stored as SHA-256 digests so a database leak cannot be
+    # replayed as a bearer token. Raw legacy tokens are accepted only when the
+    # old account API is explicitly enabled.
+    token_digest = "v1:" + hashlib.sha256(parsed.token.encode()).hexdigest()
+    accepted_tokens = [token_digest]
+    if LEGACY_ACCOUNT_API_ENABLED:
+        accepted_tokens.append(parsed.token)
+    stmt = select(UserToken).where(UserToken.token.in_(accepted_tokens))
     result = await session.execute(stmt)
     user_token = result.scalar_one_or_none()
     if user_token:
         stmt = select(User).where(User.id == user_token.user_id)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
-
-    # 再尝试 JWT 解码
-    payload = decode_jwt(parsed.token)
-    if payload:
-        user_id = payload.get("user_id")
-        if user_id:
-            stmt = select(User).where(User.id == user_id)
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none()
 
     return None

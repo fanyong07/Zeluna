@@ -45,8 +45,8 @@ class SettingsHubPage extends ConsumerWidget {
           ),
           _SettingsHubTile(
             icon: Icons.dns_outlined,
-            title: '聚合后端',
-            value: state.services.playbackBackendEnabled ? '已启用' : '未启用',
+            title: '在线服务',
+            value: state.services.playbackBackendEnabled ? '已连接' : '未连接',
             onTap: () => context.push('/settings/services/playback'),
           ),
         ];
@@ -215,11 +215,11 @@ class _SettingsHubRail extends StatelessWidget {
               const SectionTitle(title: '当前状态'),
               const SizedBox(height: 14),
               _SettingsHubRailLine(
-                label: '内容线路',
-                value: state.services.playbackBackendEnabled ? '统一后端' : '未连接',
+                label: '在线内容',
+                value: state.services.playbackBackendEnabled ? '已连接' : '未连接',
               ),
               _SettingsHubRailLine(
-                label: '缓存任务',
+                label: '下载任务',
                 value: '${state.offlineTasks.length}',
               ),
             ],
@@ -230,10 +230,10 @@ class _SettingsHubRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SectionTitle(title: '管理范围'),
+              SectionTitle(title: '说明'),
               SizedBox(height: 12),
-              _SettingsHubNote(text: '番剧、电视剧和电影统一由后端目录与线路服务提供'),
-              _SettingsHubNote(text: '客户端不再导入或执行第三方播放规则'),
+              _SettingsHubNote(text: '番剧、电视剧和电影的资料与播放由在线服务统一提供'),
+              _SettingsHubNote(text: '日常使用无需自行添加或配置播放来源'),
             ],
           ),
         ),
@@ -332,6 +332,7 @@ class PlaybackSettingsView extends StatelessWidget {
     this.episode,
     this.line,
     this.playbackMessage,
+    this.superResolutionStatus,
   });
 
   final PlaybackSettings settings;
@@ -342,6 +343,7 @@ class PlaybackSettingsView extends StatelessWidget {
   final AnimeEpisode? episode;
   final PlaybackLine? line;
   final String? playbackMessage;
+  final Widget? superResolutionStatus;
 
   @override
   Widget build(BuildContext context) {
@@ -420,15 +422,27 @@ class PlaybackSettingsView extends StatelessWidget {
                                 : null,
                           ),
                           if (settings.superResolution &&
+                              superResolutionSupport.supported &&
+                              superResolutionStatus != null)
+                            superResolutionStatus!,
+                          if (settings.superResolution &&
                               superResolutionSupport.supported)
                             SettingsChoiceRow<String>(
+                              presentation: compact
+                                  ? SettingsChoicePresentation.inline
+                                  : SettingsChoicePresentation.sheet,
                               title: '超分模式',
-                              subtitle: '画质越高，对显卡性能要求越高',
+                              subtitle: _superResolutionProfileDescription(
+                                settings.superResolutionProfile,
+                              ),
                               value: settings.superResolutionProfile,
                               options: const [
-                                'performance',
-                                'balanced',
-                                'quality',
+                                'auto',
+                                'clear',
+                                'soft',
+                                'low_resolution',
+                                'strong',
+                                'advanced',
                               ],
                               labelOf: _superResolutionProfileLabel,
                               onChanged: (value) => onChanged(
@@ -437,7 +451,21 @@ class PlaybackSettingsView extends StatelessWidget {
                                 ),
                               ),
                             ),
+                          if (settings.superResolution &&
+                              superResolutionSupport.supported &&
+                              settings.superResolutionProfile == 'advanced')
+                            _Anime4KShaderPicker(
+                              selected: settings.superResolutionCustomShaders,
+                              onChanged: (value) => onChanged(
+                                settings.copyWith(
+                                  superResolutionCustomShaders: value,
+                                ),
+                              ),
+                            ),
                           SettingsChoiceRow<String>(
+                            presentation: compact
+                                ? SettingsChoicePresentation.inline
+                                : SettingsChoicePresentation.sheet,
                             title: '画面尺寸',
                             subtitle: '选择视频在播放器中的显示方式',
                             value: settings.videoScale,
@@ -454,6 +482,9 @@ class PlaybackSettingsView extends StatelessWidget {
                                 onChanged(settings.copyWith(videoScale: value)),
                           ),
                           SettingsChoiceRow<double>(
+                            presentation: compact
+                                ? SettingsChoicePresentation.inline
+                                : SettingsChoicePresentation.sheet,
                             title: '播放速度',
                             subtitle: '立即应用到当前播放内容',
                             value: settings.speed,
@@ -480,6 +511,9 @@ class PlaybackSettingsView extends StatelessWidget {
                       child: SettingsCard(
                         children: [
                           SettingsChoiceRow<int>(
+                            presentation: compact
+                                ? SettingsChoicePresentation.inline
+                                : SettingsChoicePresentation.sheet,
                             title: '快退时间',
                             subtitle: '每次快退操作跳过的时长',
                             value: settings.rewindSeconds,
@@ -490,6 +524,9 @@ class PlaybackSettingsView extends StatelessWidget {
                             ),
                           ),
                           SettingsChoiceRow<int>(
+                            presentation: compact
+                                ? SettingsChoicePresentation.inline
+                                : SettingsChoicePresentation.sheet,
                             title: '快进时间',
                             subtitle: '每次快进操作跳过的时长',
                             value: settings.forwardSeconds,
@@ -516,7 +553,7 @@ class PlaybackSettingsView extends StatelessWidget {
                                 onChanged(settings.copyWith(autoNext: value)),
                           ),
                           SettingsSwitchRow(
-                            title: '自动换线',
+                            title: '失败时自动换线',
                             subtitle: '播放失败时自动尝试其他可用线路',
                             value: settings.autoSwitchLine,
                             onChanged: (value) => onChanged(
@@ -597,6 +634,13 @@ class _SettingsTitle extends StatelessWidget {
               ],
             ),
           ),
+          if (compact)
+            IconButton(
+              key: const ValueKey('playback_settings_close'),
+              tooltip: '关闭',
+              onPressed: onBack,
+              icon: const Icon(Icons.close_rounded),
+            ),
         ],
       ),
     );
@@ -1240,24 +1284,24 @@ class ServiceSettingsPage extends ConsumerWidget {
     final endpoint = settings.playbackBackendEndpoint.trim();
     return [
       const _InfoCard(
-        title: 'Zeluna 聚合后端',
+        title: '在线内容服务',
         lines: [
-          '番剧、电视剧和电影统一读取自建后端；后端不可用时会明确提示，不再回退到本地规则。',
-          '地址只接受 HTTP 或 HTTPS，不要填写账号、密码或带参数的链接。',
+          '番剧、电视剧和电影的资料与播放地址由在线服务提供；服务不可用时会明确提示。',
+          '地址只接受网页链接（http 或 https），不要填写账号、密码或带额外参数的链接。',
         ],
       ),
       const SizedBox(height: 12),
       SettingsCard(
         children: [
           SettingsSwitchRow(
-            title: '启用聚合后端',
-            subtitle: endpoint.isEmpty ? '请先配置服务器地址' : endpoint,
+            title: '使用在线服务',
+            subtitle: endpoint.isEmpty ? '请先填写服务地址' : endpoint,
             value: settings.playbackBackendEnabled,
             onChanged: (value) {
               if (value && endpoint.isEmpty) {
                 ScaffoldMessenger.of(
                   context,
-                ).showSnackBar(const SnackBar(content: Text('请先填写聚合后端地址')));
+                ).showSnackBar(const SnackBar(content: Text('请先填写服务地址')));
                 return;
               }
               controller.updateServices(
@@ -1266,7 +1310,7 @@ class ServiceSettingsPage extends ConsumerWidget {
             },
           ),
           SettingsActionRow(
-            title: '服务器地址',
+            title: '服务地址',
             subtitle: endpoint.isEmpty ? '未配置' : endpoint,
             onTap: () =>
                 _showPlaybackBackendEditor(context, settings, controller),
@@ -1510,8 +1554,8 @@ class ServiceSettingsPage extends ConsumerWidget {
                   keyboardType: TextInputType.url,
                   autocorrect: false,
                   decoration: const InputDecoration(
-                    labelText: '聚合后端地址',
-                    hintText: 'https://anime.example.com',
+                    labelText: '服务地址',
+                    hintText: 'https://api.example.com',
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -1603,11 +1647,174 @@ class _InfoCard extends StatelessWidget {
 }
 
 String _superResolutionProfileLabel(String value) {
-  return switch (value) {
-    'performance' => '性能',
-    'quality' => '高质量',
-    _ => '均衡',
-  };
+  return Anime4KProfile.fromSetting(value).label;
+}
+
+String _superResolutionProfileDescription(String value) {
+  return Anime4KProfile.fromSetting(value).description;
+}
+
+class _Anime4KShaderPicker extends StatelessWidget {
+  const _Anime4KShaderPicker({required this.selected, required this.onChanged});
+
+  final List<String> selected;
+  final ValueChanged<List<String>> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final validCount = selected
+        .where(Anime4KShaderManager.availableShaderFileNames.contains)
+        .length;
+    return InkWell(
+      key: const ValueKey('setting_choice_高级着色器'),
+      onTap: () => _showPicker(context),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 68),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '高级着色器',
+                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                        color: scheme.onSurface,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      validCount == 0 ? '尚未选择' : '已选择 $validCount 个',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: validCount == 0
+                            ? scheme.error
+                            : scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                '$validCount/${Anime4KShaderManager.availableShaderFileNames.length}',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: scheme.onSurfaceVariant,
+                size: 21,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showPicker(BuildContext context) async {
+    final result = await showModalBottomSheet<List<String>>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (context) {
+        final chosen = selected
+            .where(Anime4KShaderManager.availableShaderFileNames.contains)
+            .toSet();
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final categories = <String, List<String>>{};
+            for (final shader
+                in Anime4KShaderManager.availableShaderFileNames) {
+              categories
+                  .putIfAbsent(
+                    Anime4KShaderManager.shaderCategory(shader),
+                    () => <String>[],
+                  )
+                  .add(shader);
+            }
+            return FractionallySizedBox(
+              heightFactor: 0.9,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '高级着色器',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: chosen.isEmpty
+                              ? null
+                              : () => setModalState(chosen.clear),
+                          child: const Text('清空'),
+                        ),
+                        const SizedBox(width: 6),
+                        FilledButton(
+                          onPressed: () => Navigator.of(context).pop(
+                            Anime4KShaderManager.availableShaderFileNames
+                                .where(chosen.contains)
+                                .toList(growable: false),
+                          ),
+                          child: Text('完成 (${chosen.length})'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      children: [
+                        for (final category in categories.entries) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 18, 20, 6),
+                            child: Text(
+                              category.key,
+                              style: Theme.of(context).textTheme.titleSmall
+                                  ?.copyWith(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          for (final shader in category.value)
+                            CheckboxListTile(
+                              value: chosen.contains(shader),
+                              title: Text(
+                                Anime4KShaderManager.shaderLabel(shader),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              onChanged: (enabled) => setModalState(() {
+                                if (enabled == true) {
+                                  chosen.add(shader);
+                                } else {
+                                  chosen.remove(shader);
+                                }
+                              }),
+                            ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (result != null) onChanged(result);
+  }
 }
 
 String _speedLabel(double value) {

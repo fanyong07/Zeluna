@@ -13,6 +13,8 @@ import 'app_design.dart';
 import 'poster_card.dart';
 
 export 'app_design.dart';
+export 'app_empty_state.dart';
+export 'section_scaffold.dart' show EmptyState, ErrorState, LoadingState;
 
 class AppChrome extends StatelessWidget {
   const AppChrome({
@@ -22,6 +24,8 @@ class AppChrome extends StatelessWidget {
     this.searchController,
     this.onSearch,
     this.trailing,
+    this.compactAction,
+    this.showCompactTrailing = true,
     this.rightRail,
     this.bottomPlayer,
     this.title,
@@ -35,6 +39,8 @@ class AppChrome extends StatelessWidget {
   final TextEditingController? searchController;
   final ValueChanged<String>? onSearch;
   final Widget? trailing;
+  final Widget? compactAction;
+  final bool showCompactTrailing;
   final Widget? rightRail;
   final Widget? bottomPlayer;
   final String? title;
@@ -78,6 +84,8 @@ class AppChrome extends StatelessWidget {
                           onSearch: onSearch,
                           title: title,
                           trailing: trailing,
+                          compactAction: compactAction,
+                          showCompactTrailing: showCompactTrailing,
                           showSearch: showSearch,
                           onBack: onBack,
                           onOpenSuggestion: onOpenSuggestion,
@@ -960,6 +968,8 @@ class _TopBar extends StatelessWidget {
     required this.onSearch,
     required this.title,
     required this.trailing,
+    required this.compactAction,
+    required this.showCompactTrailing,
     required this.showSearch,
     required this.onBack,
     required this.onOpenSuggestion,
@@ -969,6 +979,8 @@ class _TopBar extends StatelessWidget {
   final ValueChanged<String>? onSearch;
   final String? title;
   final Widget? trailing;
+  final Widget? compactAction;
+  final bool showCompactTrailing;
   final bool showSearch;
   final VoidCallback? onBack;
   final ValueChanged<AnimeSubject>? onOpenSuggestion;
@@ -1006,14 +1018,14 @@ class _TopBar extends StatelessWidget {
                 ),
         ),
         const SizedBox(width: AppSpacing.md),
+        if (compact && compactAction != null) ...[
+          compactAction!,
+          const SizedBox(width: AppSpacing.sm),
+        ],
         const _ThemeModeButton(),
         if (!compact && trailing != null) ...[
           const SizedBox(width: AppSpacing.lg),
           trailing!,
-        ],
-        if (width >= AppBreakpoints.extraWide) ...[
-          const SizedBox(width: AppSpacing.lg),
-          const _AvatarChip(),
         ],
       ],
     );
@@ -1035,7 +1047,10 @@ class _TopBar extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             SizedBox(height: compact ? 46 : 48, child: mainRow),
-            if (compact && trailing != null) ...[
+            if (compact &&
+                trailing != null &&
+                compactAction == null &&
+                showCompactTrailing) ...[
               const SizedBox(height: AppSpacing.sm),
               SizedBox(
                 width: double.infinity,
@@ -1432,50 +1447,6 @@ class _ThemeModeButton extends ConsumerWidget {
                     appearance.copyWith(followSystem: false, darkMode: !dark),
                   );
             },
-    );
-  }
-}
-
-class _AvatarChip extends StatelessWidget {
-  const _AvatarChip();
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      color: scheme.surfaceContainerHigh,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppRadius.pill),
-        side: BorderSide(color: scheme.outlineVariant),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => context.push('/profile'),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(6, 5, 12, 5),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              CircleAvatar(
-                radius: 16,
-                backgroundColor: scheme.primary,
-                child: Icon(
-                  Icons.person_rounded,
-                  size: 18,
-                  color: scheme.onPrimary,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              Text(
-                '我的',
-                style: Theme.of(
-                  context,
-                ).textTheme.labelLarge?.copyWith(color: scheme.onSurface),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

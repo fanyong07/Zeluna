@@ -19,7 +19,7 @@ from sqlalchemy import select, func, delete, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import ADMIN_TOKEN, CORS_ORIGINS
+from .config import ADMIN_TOKEN, CORS_ORIGINS, LEGACY_ACCOUNT_API_ENABLED
 from .database import (
     async_session, init_db,
     User, UserToken, VerifyCode,
@@ -42,10 +42,12 @@ from .aggregator import aggregator
 from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service, parse_stable_id
 from .playback import playback_service
+from .account_api import router as account_router
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zeluna API", version="3.0.0")
+app.include_router(account_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +71,7 @@ async def shutdown():
     await scheduler.stop()
     await aggregator.aclose()
     await catalog_service.aclose()
+    await m3u8_resolver.aclose()
 
 
 async def get_session():
@@ -83,11 +86,16 @@ async def require_admin(request: Request):
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def require_legacy_account_api():
+    if not LEGACY_ACCOUNT_API_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 # ────────────────────────────────────────────────────────────
 # 账户
 # ────────────────────────────────────────────────────────────
 
-@app.post("/login")
+@app.post("/login", dependencies=[Depends(require_legacy_account_api)])
 async def login(request: Request, session: AsyncSession = Depends(get_session)):
     """登录 — protobuf 响应."""
     body = await request.body()
@@ -109,7 +117,7 @@ async def login(request: Request, session: AsyncSession = Depends(get_session)):
     return _pb_bytes(pb.encode_login_response(user_dict, jwt_token))
 
 
-@app.post("/code")
+@app.post("/code", dependencies=[Depends(require_legacy_account_api)])
 async def send_code(request: Request, session: AsyncSession = Depends(get_session)):
     """发送验证码."""
     try:
@@ -128,11 +136,10 @@ async def send_code(request: Request, session: AsyncSession = Depends(get_sessio
     session.add(vc)
     await session.commit()
 
-    print(f"[CODE] {email} -> {code}")  # 生产环境应发送邮件
     return JSONResponse({"error": False, "message": "验证码已发送"})
 
 
-@app.post("/register")
+@app.post("/register", dependencies=[Depends(require_legacy_account_api)])
 async def register(request: Request, session: AsyncSession = Depends(get_session)):
     """注册 — protobuf 响应."""
     body = await request.body()
@@ -185,7 +192,7 @@ async def register(request: Request, session: AsyncSession = Depends(get_session
     return _pb_bytes(pb.encode_login_response(user_dict, jwt_token))
 
 
-@app.post("/user/check")
+@app.post("/user/check", dependencies=[Depends(require_legacy_account_api)])
 async def check_user(request: Request, session: AsyncSession = Depends(get_session)):
     """检查邮箱/用户名可用性."""
     try:
@@ -207,7 +214,7 @@ async def check_user(request: Request, session: AsyncSession = Depends(get_sessi
     return JSONResponse({"error": False, "message": "可用"})
 
 
-@app.post("/change_password")
+@app.post("/change_password", dependencies=[Depends(require_legacy_account_api)])
 async def change_password(request: Request, session: AsyncSession = Depends(get_session)):
     """修改密码."""
     body = await request.body()
@@ -239,7 +246,7 @@ async def change_password(request: Request, session: AsyncSession = Depends(get_
     return JSONResponse({"error": False, "message": "密码修改成功"})
 
 
-@app.get("/init")
+@app.get("/init", dependencies=[Depends(require_legacy_account_api)])
 async def init_user(request: Request, session: AsyncSession = Depends(get_session)):
     """获取用户信息 — protobuf 响应."""
     token_header = request.headers.get("_", "")
@@ -1236,24 +1243,18 @@ def _pb_login_request(data: bytes) -> dict:
 async def _seed_data():
     """初始化一些示例数据."""
     async with async_session() as session:
+        # Remove the historical fixed-password demo identity. Production
+        # account creation is exclusively handled by the email API.
+        demo_user = await session.scalar(
+            select(User).where(User.email == "admin@anich.local")
+        )
+        if demo_user is not None:
+            await session.delete(demo_user)
+            await session.commit()
         # 检查是否已有数据
-        result = await session.execute(select(func.count(User.id)))
+        result = await session.execute(select(func.count(Bangumi.id)))
         if result.scalar() > 0:
             return
-
-        # 创建管理员
-        admin = User(
-            email="admin@anich.local",
-            name="admin",
-            password_hash=hash_password("admin123"),
-            role="admin",
-            sex="保密",
-            exp=1000,
-            coin=100,
-            color="#FF6B6B",
-        )
-        session.add(admin)
-        await session.flush()
 
         # 创建示例番剧
         anime_data = [

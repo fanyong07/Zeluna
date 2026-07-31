@@ -1,9 +1,12 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock
 
+import httpx
+
 from server.scrapers.base import SubjectResult
 from server.scrapers.maccms import MacCmsScraper, parse_vod_play_url
-from server.scrapers.maccms_sites import precache_sites
+from server.scrapers.maccms_sites import MACCMS_SITES, precache_sites
 
 
 class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
@@ -52,13 +55,58 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_search_limits_site_concurrency(self):
+        self.scraper._sites = [
+            {"name": f"站点{index}", "api": f"https://site{index}.example"}
+            for index in range(20)
+        ]
+        active = 0
+        peak = 0
+
+        async def fake_get(url, params):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return httpx.Response(
+                200,
+                json={"list": []},
+                request=httpx.Request("GET", url, params=params),
+            )
+
+        self.scraper._client.get = AsyncMock(side_effect=fake_get)
+        await self.scraper.search("测试")
+
+        self.assertLessEqual(peak, 10)
+
     def test_precache_uses_only_explicit_stable_sites(self):
         sites = precache_sites()
 
         self.assertTrue(sites)
         self.assertTrue(all(site.get("precache") is True for site in sites))
         self.assertEqual(sites[0]["name"], "iKun")
+        self.assertEqual(sites[1]["name"], "光速")
 
+    def test_github_candidates_keep_expected_priority_and_precache_policy(self):
+        configured = {site["name"]: site for site in MACCMS_SITES}
+
+        self.assertTrue(configured["光速"]["precache"])
+        self.assertGreater(configured["光速"]["weight"], configured["如意"]["weight"])
+        self.assertFalse(configured["虎牙"]["precache"])
+        self.assertLess(configured["虎牙"]["weight"], configured["360"]["weight"])
+
+    def test_client_probe_candidates_do_not_enter_precache(self):
+        client_probe_names = {"暴风", "百度", "无尽", "最大", "360"}
+        configured = {
+            site["name"]: site for site in MACCMS_SITES
+            if site["name"] in client_probe_names
+        }
+
+        self.assertEqual(set(configured), client_probe_names)
+        self.assertTrue(
+            all(site.get("precache") is False for site in configured.values())
+        )
 
 if __name__ == "__main__":
     unittest.main()

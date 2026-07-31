@@ -12,7 +12,7 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
   ZelunaBackendPlaybackRepository({
     required String baseUrl,
     http.Client? client,
-    this.requestTimeout = const Duration(seconds: 6),
+    this.requestTimeout = const Duration(seconds: 18),
   }) : _baseUri = normalizeBaseUrl(baseUrl),
        _client = client ?? http.Client(),
        _ownsClient = client == null;
@@ -132,9 +132,27 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final json = item.cast<Object?, Object?>();
         final url = json['url']?.toString().trim() ?? '';
         final mediaUri = Uri.tryParse(url);
-        if (mediaUri == null ||
-            !mediaUri.hasAuthority ||
-            (mediaUri.scheme != 'http' && mediaUri.scheme != 'https')) {
+        final hasPlayableUrl =
+            mediaUri != null &&
+            mediaUri.hasAuthority &&
+            (mediaUri.scheme == 'http' || mediaUri.scheme == 'https');
+        final status = json['status']?.toString().trim().toLowerCase() ?? '';
+        final requiresClientProbe =
+            status == 'client_probe_required' && hasPlayableUrl;
+        final serverVerified =
+            hasPlayableUrl &&
+            (status == 'server_verified' ||
+                status == 'playable' ||
+                (status.isEmpty && json['available'] != false));
+        final available = serverVerified && json['available'] != false;
+        if (json['available'] != false && !hasPlayableUrl) {
+          continue;
+        }
+        final expiresAt = _epochDateTime(json['expires_at']);
+        if (expiresAt != null &&
+            expiresAt.isBefore(
+              DateTime.now().add(const Duration(seconds: 15)),
+            )) {
           continue;
         }
         final source = json['source']?.toString().trim() ?? '';
@@ -150,24 +168,32 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final cached = json['cached'] == true;
         lines.add(
           PlaybackLine(
-            id: 'zeluna:${_stableHash('$stableId|${episode.number}|$url')}',
+            id: 'zeluna:${_stableHash('$stableId|${episode.number}|$source|$url|$index')}',
             episodeId: episode.id,
-            providerId: 'zeluna:$stableId',
+            providerId: _providerKey(source, stableId),
             providerName: _providerName(source),
             title: json['title']?.toString().trim().isNotEmpty == true
                 ? json['title'].toString().trim()
                 : '聚合线路${index + 1}',
             quality: json['quality']?.toString().trim() ?? '',
             format: json['format']?.toString().trim() ?? 'auto',
-            url: url,
+            url: hasPlayableUrl ? url : null,
             headers: Map<String, String>.unmodifiable(headers),
-            // Zeluna is the trusted backend boundary and already validates
-            // every media URL before returning it. Reusing the drpy-only DNS
-            // guard here breaks legitimate CDN hosts on Clash/TUN clients,
-            // where public domains resolve to 198.18.0.0/15 fake IPs.
-            publicHttpOnly: false,
-            available: true,
-            message: cached ? '聚合后端缓存线路' : '聚合后端已验证线路',
+            // Server-verified lines crossed the trusted backend boundary.
+            // Candidate-only lines must repeat public-address, manifest and
+            // first-segment validation from the user's own network.
+            publicHttpOnly: requiresClientProbe,
+            serverVerified: serverVerified,
+            requiresClientProbe: requiresClientProbe,
+            expiresAt: expiresAt,
+            available: available,
+            message: available
+                ? (cached ? '来自在线服务（已缓存）' : '在线服务已确认可播')
+                : requiresClientProbe
+                ? '正在用你的网络确认是否可播'
+                : (json['message']?.toString().trim().isNotEmpty == true
+                      ? json['message'].toString().trim()
+                      : '暂时没有可播放的线路'),
           ),
         );
       }
@@ -195,6 +221,13 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
   }
 }
 
+DateTime? _epochDateTime(Object? value) {
+  final raw = int.tryParse(value?.toString() ?? '');
+  if (raw == null || raw <= 0) return null;
+  final milliseconds = raw > 10000000000 ? raw : raw * 1000;
+  return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+}
+
 String? _stableSubjectId(AnimeSubject subject) {
   final source = subject.source.trim().toLowerCase();
   if (source == 'bangumi') return 'bangumi:${subject.id}';
@@ -213,7 +246,13 @@ String _providerName(String source) {
   final value = source.isNotEmpty ? source : 'Zeluna';
   final parts = value.split(':');
   final site = parts.length >= 2 ? parts[1].trim() : value.trim();
-  return site.isEmpty ? 'Zeluna 聚合后端' : 'Zeluna · $site';
+  return site.isEmpty ? '在线服务' : '在线服务 · $site';
+}
+
+String _providerKey(String source, String stableId) {
+  final parts = source.split(':');
+  final site = parts.length >= 2 ? parts[1].trim() : '';
+  return site.isEmpty ? 'zeluna:$stableId' : 'zeluna:site:$site';
 }
 
 String _stableHash(String value) {

@@ -61,7 +61,8 @@ class VerifyCode(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255))
-    code: Mapped[str] = mapped_column(String(6))
+    # New account endpoints store an HMAC digest, never the plaintext code.
+    code: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
     expires_at: Mapped[float] = mapped_column(Float)
 

@@ -1,34 +1,41 @@
-"""
-GiriGiriLove (girigirilove.net) 爬虫
+"""GiriGiri 独立动漫站适配器。
 
-提供大量番剧的 m3u8 直链，支持多语言字幕。
+搜索、详情、剧集和播放页均直接访问 GiriGiri 内容站。播放地址只从
+``player_aaaa`` 页面数据中解析，不调用 AniCh 或其它聚合解析服务。
 """
+
+from __future__ import annotations
 
 import re
-import logging
 from typing import Optional
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
-from ..base import (
-    BaseScraper, SubjectResult, SubjectDetail,
-    EpisodeInfo, VideoLine,
-)
+from ..base import BaseScraper, EpisodeInfo, SubjectDetail, SubjectResult, VideoLine
+from .html_direct import HtmlDirectAnimeScraper
 
-logger = logging.getLogger(__name__)
+
+_DETAIL_ID_RE = re.compile(r"^(?:GV)?(\d+)$", re.IGNORECASE)
+_DETAIL_PATH_RE = re.compile(r"^/GV(\d+)/?$", re.IGNORECASE)
+_PLAY_PATH_RE = re.compile(r"^/playGV(\d+)-(\d+)-(\d+)/?$", re.IGNORECASE)
 
 
 class GiriGiriScraper(BaseScraper):
-    """GiriGiriLove 爬虫"""
+    """Direct adapter for ``ani.girigirilove.com``."""
 
-    BASE = "https://ai.girigirilove.net"
+    BASE_URL = "https://ani.girigirilove.com"
 
-    def __init__(self, base_url: str = None):
+    def __init__(
+        self,
+        base_url: str | None = None,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         super().__init__()
         self._name = "girigiri"
-        self._base_url = base_url or self.BASE
+        self._base_url = (base_url or self.BASE_URL).rstrip("/")
         self._client = httpx.AsyncClient(
             headers={
                 "User-Agent": (
@@ -36,10 +43,10 @@ class GiriGiriScraper(BaseScraper):
                     "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
                 ),
                 "Accept-Language": "zh-CN,zh;q=0.9",
-                "Accept": "application/json, text/plain, */*",
             },
             timeout=15,
             follow_redirects=True,
+            transport=transport,
         )
 
     @property
@@ -51,160 +58,203 @@ class GiriGiriScraper(BaseScraper):
         return self._base_url
 
     async def search(self, keyword: str) -> list[SubjectResult]:
-        results = []
+        keyword = keyword.strip()
+        if not keyword:
+            return []
+        response = await self._client.get(
+            f"{self.base_url}/ajax/suggest",
+            params={"mid": 1, "wd": keyword},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if response.status_code != 200:
+            return []
         try:
-            # GiriGiriLove 使用 API
-            resp = await self._client.get(
-                f"{self._base_url}/zijian/anime",
-                params={"keyword": keyword},
-            )
-            if resp.status_code != 200:
-                # 尝试另一个 API 端点
-                resp = await self._client.get(
-                    f"{self._base_url}/api/search",
-                    params={"q": keyword},
+            payload = response.json()
+        except ValueError:
+            return []
+        items = payload.get("list", []) if isinstance(payload, dict) else []
+        results: list[SubjectResult] = []
+        seen: set[str] = set()
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            source_id = self._source_number(str(item.get("id", "")))
+            title = str(item.get("name", "")).strip()
+            if not source_id or not title or source_id in seen:
+                continue
+            seen.add(source_id)
+            results.append(
+                SubjectResult(
+                    source_id=source_id,
+                    title=title,
+                    cover_url=urljoin(
+                        self.base_url + "/", str(item.get("pic", ""))
+                    ),
+                    type="anime",
+                    lang="ja",
                 )
-            if resp.status_code != 200:
-                return results
-
-            try:
-                data = resp.json()
-                if isinstance(data, list):
-                    items = data
-                elif isinstance(data, dict):
-                    items = data.get("data", data.get("results", []))
-                else:
-                    return results
-
-                for item in items[:30]:
-                    item_id = str(item.get("id", item.get("anime_id", "")))
-                    title = item.get("title", item.get("name", ""))
-                    cover = item.get("cover", item.get("image", item.get("poster", "")))
-                    summary = item.get("description", item.get("summary", ""))
-                    ep_count = item.get("episodes", item.get("total_episodes", 0))
-
-                    results.append(SubjectResult(
-                        source_id=item_id,
-                        title=title,
-                        cover_url=cover,
-                        summary=summary,
-                        type="tv",
-                        lang="ja",
-                        episode_count=int(ep_count) if ep_count else 0,
-                        tags=item.get("tags", []) or [],
-                        genres=item.get("genres", []) or [],
-                    ))
-
-            except (ValueError, KeyError):
-                pass
-
-        except Exception as e:
-            logger.error(f"GiriGiri search error: {e}")
-
+            )
         return results
 
     async def get_detail(self, source_id: str) -> Optional[SubjectDetail]:
-        try:
-            resp = await self._client.get(
-                f"{self._base_url}/zijian/anime/{source_id}",
-            )
-            if resp.status_code != 200:
-                resp = await self._client.get(
-                    f"{self._base_url}/api/anime/{source_id}",
-                )
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-
-            episodes = []
-            ep_list = data.get("episodes", data.get("eps", []))
-            if isinstance(ep_list, list):
-                for ep in ep_list:
-                    if isinstance(ep, dict):
-                        episodes.append(EpisodeInfo(
-                            number=int(ep.get("ep", ep.get("number", 0))),
-                            title=ep.get("title", ep.get("name", "")),
-                            source_episode_id=str(ep.get("id", ep.get("play_id", ""))),
-                        ))
-                    elif isinstance(ep, (int, str)):
-                        episodes.append(EpisodeInfo(
-                            number=int(ep) if isinstance(ep, (int, str)) and str(ep).isdigit() else len(episodes) + 1,
-                            source_episode_id=source_id,
-                        ))
-
-            # 如果没有剧集列表，创建一个默认的
-            if not episodes:
-                ep_count = data.get("episodes", data.get("total_episodes", 12))
-                for i in range(1, int(ep_count) + 1):
-                    episodes.append(EpisodeInfo(
-                        number=i,
-                        source_episode_id=source_id,
-                    ))
-
-            return SubjectDetail(
-                source_id=source_id,
-                title=data.get("title", data.get("name", "")),
-                cover_url=data.get("cover", data.get("image", "")),
-                summary=data.get("description", data.get("summary", "")),
-                type="tv",
-                lang="ja",
-                episodes=episodes,
-                tags=data.get("tags", []) or [],
-                genres=data.get("genres", []) or [],
-                rating=float(data.get("rating", data.get("score", 0))),
-            )
-
-        except Exception as e:
-            logger.error(f"GiriGiri detail error: {e}")
+        source_number = self._source_number(source_id)
+        if not source_number:
             return None
+        response = await self._client.get(
+            f"{self.base_url}/GV{source_number}/"
+        )
+        if response.status_code != 200:
+            return None
+        soup = BeautifulSoup(response.text, "lxml")
+        title_element = soup.select_one(".slide-info-title, h1")
+        title = title_element.get_text(" ", strip=True) if title_element else ""
+        if not title:
+            title = self._meta_content(soup, "og:title").split("-")[0].strip()
+
+        cover = self._meta_content(soup, "og:image")
+        if not cover:
+            image = soup.select_one(
+                ".slide-pic img, .detail-pic img, .vod-pic img, img.lazy"
+            )
+            if image:
+                cover = str(
+                    image.get("data-original", "")
+                    or image.get("data-src", "")
+                    or image.get("src", "")
+                )
+
+        episodes: dict[int, EpisodeInfo] = {}
+        for link in soup.select('.anthology-list-box a[href], a[href*="playGV"]'):
+            match = _PLAY_PATH_RE.match(str(link.get("href", "")))
+            if not match or match.group(1) != source_number:
+                continue
+            number = int(match.group(3))
+            episodes.setdefault(
+                number,
+                EpisodeInfo(
+                    number=number,
+                    title=link.get_text(" ", strip=True) or f"第{number}集",
+                    source_episode_id=str(link.get("href", "")),
+                ),
+            )
+
+        summary = self._meta_name_content(soup, "description")
+        return SubjectDetail(
+            source_id=source_number,
+            title=title,
+            cover_url=urljoin(str(response.url), cover),
+            summary=summary,
+            type="anime",
+            lang="ja",
+            episodes=list(episodes.values()),
+            extra={"url": str(response.url)},
+        )
 
     async def get_video_urls(
         self, source_id: str, episode: int = 1
     ) -> list[VideoLine]:
-        lines = []
-        try:
-            # GiriGiriLove 的 m3u8 路径模式
-            # /zijian/anime/{year}/{month}/{day}/{title}/{ep}/playlist.m3u8
-            # 或者 /zijian/oldanime/{year}/{month}/{title}/{ep}/playlist.m3u8
+        source_number = self._source_number(source_id)
+        if not source_number:
+            return []
+        detail_response = await self._client.get(
+            f"{self.base_url}/GV{source_number}/"
+        )
+        if detail_response.status_code != 200:
+            return []
+        soup = BeautifulSoup(detail_response.text, "lxml")
+        play_paths: list[tuple[int, str]] = []
+        seen_paths: set[str] = set()
+        for link in soup.select('a[href*="playGV"]'):
+            path = str(link.get("href", ""))
+            match = _PLAY_PATH_RE.match(path)
+            if (
+                not match
+                or match.group(1) != source_number
+                or int(match.group(3)) != max(1, episode)
+                or path in seen_paths
+            ):
+                continue
+            seen_paths.add(path)
+            play_paths.append((int(match.group(2)), path))
 
-            detail = await self.get_detail(source_id)
-            if not detail:
-                return lines
-
-            # 尝试常见的路径模式
-            paths_to_try = [
-                f"{self._base_url}/api/anime/{source_id}/episode/{episode}/playlist",
-                f"{self._base_url}/api/anime/{source_id}/ep/{episode}/stream",
-            ]
-
-            for path in paths_to_try:
-                try:
-                    resp = await self._client.get(path)
-                    if resp.status_code == 200:
-                        try:
-                            data = resp.json()
-                            url = data.get("url", data.get("playlist", data.get("stream", "")))
-                            if url and ("m3u8" in url or "mp4" in url or "/video/" in url):
-                                lines.append(VideoLine(
-                                    url=url,
-                                    title=f"GiriGiri 线路{len(lines)+1}",
-                                    format="hls" if "m3u8" in url else "mp4",
-                                    source_name=self.name,
-                                ))
-                        except ValueError:
-                            # 可能是直接的 m3u8 文本
-                            if resp.text.strip().startswith("#EXTM3U"):
-                                lines.append(VideoLine(
-                                    url=path.replace("/playlist", ".m3u8"),
-                                    title=f"GiriGiri 线路{len(lines)+1}",
-                                    format="hls",
-                                    source_name=self.name,
-                                ))
-                except Exception:
+        lines: list[VideoLine] = []
+        seen_urls: set[str] = set()
+        for source_index, path in play_paths:
+            play_url = urljoin(str(detail_response.url), path)
+            response = await self._client.get(play_url)
+            if response.status_code != 200:
+                continue
+            for media_url in HtmlDirectAnimeScraper._player_urls(response.text):
+                if media_url in seen_urls:
                     continue
-
-        except Exception as e:
-            logger.error(f"GiriGiri video_urls error: {e}")
-
+                seen_urls.add(media_url)
+                lines.append(
+                    VideoLine(
+                        url=media_url,
+                        title=f"GiriGiri 线路{source_index}",
+                        format=HtmlDirectAnimeScraper._media_format(media_url),
+                        headers={
+                            "Referer": str(response.url),
+                            "Origin": self.base_url,
+                        },
+                        source_name=self.name,
+                    )
+                )
         return lines
+
+    async def get_latest(self, page: int = 1) -> list[SubjectResult]:
+        if page != 1:
+            return []
+        response = await self._client.get(f"{self.base_url}/")
+        if response.status_code != 200:
+            return []
+        soup = BeautifulSoup(response.text, "lxml")
+        results: list[SubjectResult] = []
+        seen: set[str] = set()
+        for link in soup.select("a[href]"):
+            match = _DETAIL_PATH_RE.match(str(link.get("href", "")))
+            if not match or match.group(1) in seen:
+                continue
+            image = link.select_one("img")
+            title = str(link.get("title", "")).strip()
+            if not title and image:
+                title = str(image.get("alt", "")).strip()
+            if not title:
+                title = link.get_text(" ", strip=True)
+            if not title:
+                continue
+            seen.add(match.group(1))
+            cover = ""
+            if image:
+                cover = str(
+                    image.get("data-original", "")
+                    or image.get("data-src", "")
+                    or image.get("src", "")
+                )
+            results.append(
+                SubjectResult(
+                    source_id=match.group(1),
+                    title=title,
+                    cover_url=urljoin(str(response.url), cover),
+                    type="anime",
+                    lang="ja",
+                )
+            )
+            if len(results) >= 30:
+                break
+        return results
+
+    @staticmethod
+    def _source_number(source_id: str) -> str:
+        match = _DETAIL_ID_RE.fullmatch(source_id.strip())
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _meta_content(soup: BeautifulSoup, property_name: str) -> str:
+        element = soup.select_one(f'meta[property="{property_name}"]')
+        return str(element.get("content", "")).strip() if element else ""
+
+    @staticmethod
+    def _meta_name_content(soup: BeautifulSoup, name: str) -> str:
+        element = soup.select_one(f'meta[name="{name}"]')
+        return str(element.get("content", "")).strip() if element else ""

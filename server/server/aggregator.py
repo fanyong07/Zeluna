@@ -1,7 +1,7 @@
 """
 统一聚合层
 
-整合所有视频源（AniCh API + TVBox + TVMaze + TMDB + M3U8解析），
+整合独立站点适配器、MacCMS、TVBox、TVMaze、TMDB 与媒体解析器，
 提供统一的搜索、详情和视频源获取接口。
 
 所有内容仅存储元数据和 URL，不存储视频文件。
@@ -12,25 +12,38 @@ import time
 import logging
 import asyncio
 import ipaddress
+import re
 import socket
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin, urlparse
 
 import httpx
 
 from .m3u8_resolver import resolver as m3u8_resolver
 from .scrapers.maccms import MacCmsScraper
-from .scrapers.maccms_sites import site_priority
+from .scrapers.maccms_sites import MACCMS_SITES, site_priority
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
+from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
-from .scrapers.anime.agefans import AgeFansScraper
+from .scrapers.anime.age import AgeScraper
+from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
-from .scrapers.anime.yhdm import YhdmScraper
+from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
+from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.base import BaseScraper
 from .config import SOURCE_MAX_CONCURRENCY
 
 logger = logging.getLogger(__name__)
+
+SERVER_VERIFIED = "server_verified"
+CLIENT_PROBE_REQUIRED = "client_probe_required"
+UNAVAILABLE = "unavailable"
+
+# Direct sites that passed search/detail/manifest/key/segment checks from the
+# production VPS.  The bonus keeps these direct candidates ahead of
+# lower-confidence bulk collection sites when the per-title result cap applies.
+DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 
 
 def _normalized_match_title(value: str) -> str:
@@ -40,6 +53,26 @@ def _normalized_match_title(value: str) -> str:
     cleaned = re.sub(r"第\s*\d+\s*[季部期]", "", cleaned)
     cleaned = re.sub(r"\bseason\s*\d+\b", "", cleaned)
     return "".join(char for char in cleaned if char.isalnum())
+
+
+def _is_safe_short_title_variant(candidate: str, target: str) -> bool:
+    """Allow short CJK titles only when the remaining suffix is an edition tag."""
+    import re
+
+    if len(target) < 3 or not candidate.startswith(target):
+        return False
+    suffix = candidate[len(target):]
+    return bool(
+        suffix
+        and re.fullmatch(
+            r"(?:"
+            r"第?[一二三四五六七八九十\d]+[季部期]"
+            r"|season\d+|s\d+"
+            r"|特别版|完整版|导演剪辑版|国语|粤语|日语|英语"
+            r")+",
+            suffix,
+        )
+    )
 
 
 def _source_match_score(
@@ -63,6 +96,11 @@ def _source_match_score(
             normalized in target or target in normalized
         ):
             score = max(score, 72)
+        elif _is_safe_short_title_variant(normalized, target):
+            # Keep this below the normal partial-match score. A matching year
+            # lifts first-season/edition variants above the acceptance gate,
+            # while a different season year remains below it.
+            score = max(score, 68)
     if expected_type and candidate_type:
         normalized_expected = "tv" if expected_type == "series" else expected_type
         score += 8 if candidate_type == normalized_expected else -25
@@ -107,6 +145,26 @@ async def _is_public_http_url(url: str) -> bool:
     return _is_public_ip(host)
 
 
+def _is_client_probe_candidate_url(url: str) -> bool:
+    """Allow only HTTP(S) candidates that cannot directly name local hosts.
+
+    DNS is deliberately re-checked by the client's public-only HTTP stack.
+    This keeps Clash/TUN fake-IP environments usable without allowing a source
+    adapter to hand the player a literal loopback or private address.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname.strip().lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return _is_public_ip(host)
+
+
 @dataclass
 class AggregatedSubject:
     """聚合后的条目"""
@@ -148,6 +206,7 @@ class AggregatedVideoLine:
     format: str = ""           # hls, mp4
     source: str = ""           # 来源标识
     headers: dict = field(default_factory=dict)
+    verification_status: str = "unverified"
 
 
 @dataclass
@@ -166,7 +225,7 @@ class ContentAggregator:
     内容聚合器
 
     统一搜索入口，自动从多个源聚合结果:
-      - anime:  AniCh API + TVBox + M3U8解析
+      - anime:  独立动漫站适配器 + MacCMS + TVBox
       - series: TVMaze + TVBox + M3U8解析
       - movie:  TMDB + TVBox + M3U8解析
     """
@@ -182,41 +241,31 @@ class ContentAggregator:
         self._vod = CommonVodScraper()
         self._crawler_scrapers = (
             {
-                "agefans": AgeFansScraper(),
+                "age": AgeScraper(),
+                "dm706": Dm706Scraper(),
                 "girigiri": GiriGiriScraper(),
-                "yhdm": YhdmScraper(),
+                "xgcartoon": XgCartoonScraper(),
+                **create_html_direct_anime_scrapers(),
+                "nivod": NivodScraper(),
+                "ppnix": PpnixScraper(),
+                "dbku": DbkuScraper(),
             }
             if crawler_scrapers is None
             else dict(crawler_scrapers)
         )
-        self._anich_client = None  # lazy init (可选外部 AniCh 客户端)
         self._line_http_transport = line_http_transport
 
-    async def _get_anich_client(self):
-        """
-        延迟加载可选的 AniCh 外部客户端。
+    @property
+    def source_inventory(self) -> tuple[tuple[str, str], ...]:
+        """Return independently queried sources as ``(provider, name)`` pairs."""
+        return (
+            *(("maccms", site["name"]) for site in MACCMS_SITES),
+            *(("crawler", name) for name in self._crawler_scrapers),
+        )
 
-        通过环境变量 ANICH_PIPELINE_PATH 指定 extracted_pipeline 目录。
-        未配置或加载失败时返回 None (优雅降级) —— 动漫源改走 MacCMS。
-        VPS 部署通常不配置此项。
-        """
-        if self._anich_client is None:
-            import os
-            pipeline_path = os.environ.get("ANICH_PIPELINE_PATH", "").strip()
-            if not pipeline_path:
-                self._anich_client = False
-                return None
-            try:
-                import sys
-                if pipeline_path not in sys.path:
-                    sys.path.insert(0, pipeline_path)
-                from anich_client import AniChConfig, AniChClient
-                config = AniChConfig.discover()
-                self._anich_client = AniChClient(config)
-            except Exception as e:
-                logger.warning(f"AniCh client init failed: {e}")
-                self._anich_client = False
-        return self._anich_client if self._anich_client is not False else None
+    @property
+    def configured_source_names(self) -> frozenset[str]:
+        return frozenset(name for _, name in self.source_inventory)
 
     async def aclose(self) -> None:
         await asyncio.gather(
@@ -242,8 +291,10 @@ class ContentAggregator:
 
         matches: dict[str, SourceMatch] = {}
         if provider == "maccms":
+            # MacCMS 都是中文聚合站，首选标题的命中率最高。只查一次可避免
+            # 站点数 × 别名数造成瞬时连接洪峰；其它独立站仍保留多别名尝试。
             result_groups = await asyncio.gather(
-                *(scraper.search(alias) for alias in aliases[:3]),
+                *(scraper.search(alias) for alias in aliases[:1]),
                 return_exceptions=True,
             )
         else:
@@ -289,62 +340,13 @@ class ContentAggregator:
                     score=(
                         score + site_priority(source_name) // 10
                         if provider == "maccms"
-                        else score
+                        else score + DIRECT_SOURCE_PRIORITIES.get(provider, 0)
                     ),
                 )
                 previous = matches.get(source_id)
                 if previous is None or candidate.score > previous.score:
                     matches[source_id] = candidate
         return list(matches.values())
-
-    async def _discover_anich_matches(
-        self,
-        aliases: list[str],
-        *,
-        content_type: str,
-        year: int,
-    ) -> list[SourceMatch]:
-        if content_type not in {"", "anime"}:
-            return []
-        client = await self._get_anich_client()
-        if not client:
-            return []
-
-        def search() -> list[SourceMatch]:
-            matches: dict[str, SourceMatch] = {}
-            for alias in aliases[:3]:
-                for item in client.search(alias) or []:
-                    item_id = str(item.get("id", "")).strip()
-                    title = str(item.get("title", "")).strip()
-                    if not item_id or not title:
-                        continue
-                    score = _source_match_score(
-                        title,
-                        aliases,
-                        candidate_type="anime",
-                        expected_type=content_type,
-                        candidate_year=int(item.get("year") or 0),
-                        expected_year=year,
-                    )
-                    if score < 65:
-                        continue
-                    source_id = f"anich:{item_id}"
-                    matches[source_id] = SourceMatch(
-                        source_id=source_id,
-                        source_name="AniCh",
-                        title=title,
-                        content_type="anime",
-                        year=int(item.get("year") or 0),
-                        episode_count=int(item.get("episodes_total") or 0),
-                        score=score,
-                    )
-            return list(matches.values())
-
-        try:
-            return await asyncio.to_thread(search)
-        except Exception as error:
-            logger.debug("AniCh discovery failed: %s", type(error).__name__)
-            return []
 
     async def discover_source_matches(
         self,
@@ -369,7 +371,14 @@ class ContentAggregator:
         providers: list[tuple[str, BaseScraper, float]] = [
             ("maccms", self._maccms, 8),
             ("tvbox", self._tvbox, 2),
-            *((name, scraper, 2) for name, scraper in self._crawler_scrapers.items()),
+            *(
+                (
+                    name,
+                    scraper,
+                    5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+                )
+                for name, scraper in self._crawler_scrapers.items()
+            ),
         ]
         jobs = [
             asyncio.wait_for(
@@ -384,16 +393,6 @@ class ContentAggregator:
             )
             for name, scraper, timeout in providers
         ]
-        jobs.append(
-            asyncio.wait_for(
-                self._discover_anich_matches(
-                    clean_aliases,
-                    content_type=content_type,
-                    year=year,
-                ),
-                timeout=2,
-            )
-        )
         groups = await asyncio.gather(*jobs, return_exceptions=True)
         matches: dict[str, SourceMatch] = {}
         for group in groups:
@@ -422,36 +421,68 @@ class ContentAggregator:
         *,
         episode: int,
         verify: bool = True,
-    ) -> tuple[list[AggregatedVideoLine], dict[str, bool]]:
-        """低并发解析多站线路，并返回每个站点本轮健康结果。"""
+    ) -> tuple[list[AggregatedVideoLine], dict[str, str]]:
+        """低并发解析多站线路，并区分服务器实播与客户端候选。"""
         semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
 
         async def resolve_one(match: SourceMatch):
             async with semaphore:
-                lines = await self.get_video_urls(match.source_id, episode)
-                if verify and lines:
+                raw_lines = await self.get_video_urls(match.source_id, episode)
+                if not verify:
+                    return match, raw_lines
+                lines: list[AggregatedVideoLine] = []
+                if raw_lines:
                     checks = await asyncio.gather(
-                        *(self._line_reachable(line) for line in lines),
+                        *(self._line_verification_status(line) for line in raw_lines),
                         return_exceptions=True,
                     )
-                    lines = [
-                        line for line, ok in zip(lines, checks) if ok is True
-                    ]
+                    for line, status in zip(raw_lines, checks):
+                        if status == SERVER_VERIFIED:
+                            lines.append(replace(
+                                line,
+                                verification_status=SERVER_VERIFIED,
+                            ))
+                        elif (
+                            status == CLIENT_PROBE_REQUIRED
+                            and _is_client_probe_candidate_url(line.url)
+                        ):
+                            # Some public CDNs reject datacenter IPs but work
+                            # from residential clients. Return the candidate
+                            # without claiming it playable; the client repeats
+                            # the full manifest + first-segment probe.
+                            lines.append(replace(
+                                line,
+                                verification_status=CLIENT_PROBE_REQUIRED,
+                            ))
                 return match, lines
 
         groups = await asyncio.gather(
             *(resolve_one(match) for match in matches),
             return_exceptions=True,
         )
-        health: dict[str, bool] = {}
+        health: dict[str, str] = {}
         unique: dict[str, AggregatedVideoLine] = {}
         for group in groups:
             if isinstance(group, Exception):
                 continue
             match, lines = group
-            health[match.source_name] = bool(lines)
+            statuses = {line.verification_status for line in lines}
+            health[match.source_name] = (
+                SERVER_VERIFIED
+                if SERVER_VERIFIED in statuses
+                else (
+                    CLIENT_PROBE_REQUIRED
+                    if CLIENT_PROBE_REQUIRED in statuses
+                    else UNAVAILABLE
+                )
+            )
             for line in lines:
-                unique.setdefault(line.url, line)
+                previous = unique.get(line.url)
+                if previous is None or (
+                    previous.verification_status != SERVER_VERIFIED
+                    and line.verification_status == SERVER_VERIFIED
+                ):
+                    unique[line.url] = line
         return list(unique.values()), health
 
     async def search(
@@ -509,7 +540,9 @@ class ContentAggregator:
                 # 若 orig_id 已是带源前缀的完整可反查 ID (maccms:/tvbox:/intl:),
                 # 直接用它作为对外 id, 使 /api/v2/vod 能据此反查线路。
                 # 否则退回 display hash (仅用于展示)。
-                if orig_id and orig_id.split(":", 1)[0] in ("maccms", "tvbox", "intl", "anich"):
+                if source_label.startswith("crawler:") and orig_id:
+                    display_id = f"{source_label}:{orig_id}"
+                elif orig_id and orig_id.split(":", 1)[0] in ("maccms", "tvbox", "intl"):
                     display_id = orig_id
                 else:
                     display_id = f"{source_label}:{abs(hash(title_lower)) % 10**10}"
@@ -546,24 +579,29 @@ class ContentAggregator:
                 logger.warning(f"MacCMS search failed: {e}")
         tasks.append(search_maccms())
 
-        # 1. AniCh (动漫, 可选外部客户端)
+        # 1. 独立动漫站适配器：每个站点直接搜索，不经过其它聚合服务。
         if "anime" in content_types:
-            async def search_anich():
-                client = await self._get_anich_client()
-                if not client:
-                    return
-                try:
-                    results = client.search(keyword)
-                    await add_results("anich", [
-                        {"title": r["title"], "cover_url": r.get("image", ""),
-                         "type": "anime", "lang": "ja",
-                         "year": 2024, "summary": r.get("tagline", "")}
-                        for r in results[:10]
-                    ], "anime",
-                    orig_ids=[str(r["id"]) for r in results[:10]])
-                except Exception as e:
-                    logger.warning(f"AniCh search failed: {e}")
-            tasks.append(search_anich())
+            for provider, scraper in self._crawler_scrapers.items():
+                async def search_crawler(
+                    provider_name: str = provider,
+                    provider_scraper: BaseScraper = scraper,
+                ):
+                    try:
+                        results = await provider_scraper.search(keyword)
+                        await add_results(f"crawler:{provider_name}", [
+                            {"title": r.title, "cover_url": r.cover_url,
+                             "type": "anime", "lang": r.lang,
+                             "year": r.year, "summary": r.summary}
+                            for r in results[:10]
+                        ], "anime",
+                        orig_ids=[r.source_id for r in results[:10]])
+                    except Exception as e:
+                        logger.warning(
+                            "Crawler search failed [%s]: %s",
+                            provider_name,
+                            type(e).__name__,
+                        )
+                tasks.append(search_crawler())
 
         # 2. TVBox (国产剧+电影+动漫)
         if any(ct in content_types for ct in ["tv", "movie", "anime"]):
@@ -655,22 +693,7 @@ class ContentAggregator:
                 ]
             return []
 
-        if source == "anich":
-            client = await self._get_anich_client()
-            if client:
-                try:
-                    eps = client.get_episodes(int(sid))
-                    return [
-                        AggregatedEpisode(
-                            number=ep.get("sort", i + 1),
-                            title=ep.get("title", f"第{i+1}集"),
-                        )
-                        for i, ep in enumerate(eps)
-                    ]
-                except Exception:
-                    pass
-
-        elif source == "tvbox":
+        if source == "tvbox":
             # sid 可能是 display hash, 也可能是 tvbox:源名:vod_id 格式
             # 尝试直接作为 source_id 使用
             lookup_id = subject_id
@@ -717,7 +740,7 @@ class ContentAggregator:
         获取视频播放地址（多条线路）。
 
         subject_id 格式:
-          - anich:12345 → AniCh API
+          - crawler:agefans:12345 → 独立站点适配器
           - tvbox:暴风:47131 → TVBox 源
           - intl:tvmaze_123 → 国际源
         """
@@ -730,30 +753,6 @@ class ContentAggregator:
                     url=l.url, title=l.title,
                     format=l.format, source=l.source_name,
                 ))
-
-        elif subject_id.startswith("anich:"):
-            sid = subject_id.split(":", 1)[1]
-            try:
-                bid = int(sid) if sid.isdigit() else int(sid) if sid.lstrip('-').isdigit() else None
-            except ValueError:
-                bid = None
-
-            if bid:
-                client = await self._get_anich_client()
-                if client:
-                    try:
-                        sources = client.get_video_sources(bid, episode)
-                        for s in sources:
-                            url = s.get("decoded_url", "")
-                            if url:
-                                all_lines.append(AggregatedVideoLine(
-                                    url=url,
-                                    title=s.get("caption", ""),
-                                    format=s.get("type", "auto"),
-                                    source="anich",
-                                ))
-                    except Exception as e:
-                        logger.error(f"AniCh VOD error: {e}")
 
         elif subject_id.startswith("tvbox:"):
             lines = await self._tvbox.get_video_urls(subject_id, episode)
@@ -811,20 +810,25 @@ class ContentAggregator:
                 unique.append(line)
         return unique
 
-    async def _line_reachable(self, line: "AggregatedVideoLine") -> bool:
+    async def _line_verification_status(
+        self, line: "AggregatedVideoLine"
+    ) -> str:
         """
         校验一条线路是否真能播:
-          - m3u8: 清单有效，并且首个媒体分片可读取
+          - m3u8: 清单有效，加密密钥（如有）和首个媒体分片均可读取
           - mp4/其它: HEAD 或 GET, 状态码 < 400 且非 HTML
         """
         url = line.url
         if not url.lower().startswith(("http://", "https://")):
-            return False
+            return UNAVAILABLE
         headers = {"User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
         ), "Accept": "application/vnd.apple.mpegurl,video/*,*/*;q=0.8",
            "Range": "bytes=0-65535"}
+        for name, value in (line.headers or {}).items():
+            if str(name).lower() in {"referer", "origin"} and str(value):
+                headers[str(name)] = str(value)
         try:
             async with httpx.AsyncClient(
                 follow_redirects=False,
@@ -832,11 +836,17 @@ class ContentAggregator:
                 headers=headers,
                 transport=self._line_http_transport,
             ) as c:
+                client_probe_sentinel = object()
+
                 async def fetch(target: str):
                     current = target
                     for _ in range(6):
                         if not await _is_public_http_url(current):
-                            return None
+                            return (
+                                client_probe_sentinel
+                                if _is_client_probe_candidate_url(current)
+                                else None
+                            )
                         async with c.stream("GET", current) as resp:
                             if resp.status_code in (301, 302, 303, 307, 308):
                                 location = resp.headers.get("location", "").strip()
@@ -863,18 +873,24 @@ class ContentAggregator:
                 current = url
                 for depth in range(4):
                     response = await fetch(current)
+                    if response is client_probe_sentinel:
+                        return CLIENT_PROBE_REQUIRED
                     if response is None:
-                        return False
+                        return UNAVAILABLE
                     response_url, status, content_type, body = response
                     if status >= 400:
-                        return False
+                        return (
+                            CLIENT_PROBE_REQUIRED
+                            if status in {401, 403, 429, 451}
+                            else UNAVAILABLE
+                        )
                     body_head = body[:512].decode("utf-8", errors="ignore").lstrip()
                     looks_html = (
                         "text/html" in content_type
                         or body_head.lower().startswith(("<html", "<!doctype html"))
                     )
                     if looks_html:
-                        return False
+                        return UNAVAILABLE
                     is_hls = (
                         "m3u8" in current.lower()
                         or line.format.lower() == "hls"
@@ -882,42 +898,106 @@ class ContentAggregator:
                         or "mpegurl" in content_type
                     )
                     if not is_hls:
-                        return status in (200, 206) and bool(body)
+                        return (
+                            SERVER_VERIFIED
+                            if status in (200, 206) and bool(body)
+                            else UNAVAILABLE
+                        )
                     if not body_head.startswith("#EXTM3U"):
-                        return False
+                        return UNAVAILABLE
+                    manifest_text = body.decode("utf-8", errors="ignore")
                     media_reference = next(
                         (
                             item.strip()
-                            for item in body.decode("utf-8", errors="ignore").splitlines()
+                            for item in manifest_text.splitlines()
                             if item.strip() and not item.lstrip().startswith("#")
                         ),
                         "",
                     )
                     if not media_reference:
-                        return False
+                        return UNAVAILABLE
                     media_url = urljoin(response_url, media_reference)
                     if media_reference.lower().split("?", 1)[0].endswith(".m3u8"):
                         if depth == 3:
-                            return False
+                            return UNAVAILABLE
                         current = media_url
                         continue
+                    key_reference = ""
+                    for manifest_line in manifest_text.splitlines():
+                        stripped_line = manifest_line.strip()
+                        if not stripped_line.upper().startswith("#EXT-X-KEY:"):
+                            continue
+                        attributes = stripped_line.split(":", 1)[1]
+                        if re.search(
+                            r"(?:^|,)\s*METHOD\s*=\s*NONE(?:,|$)",
+                            attributes,
+                            re.I,
+                        ):
+                            continue
+                        key_match = re.search(
+                            r"(?:^|,)\s*URI\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^,\s]+))",
+                            attributes,
+                            re.I,
+                        )
+                        if key_match:
+                            key_reference = next(
+                                value
+                                for value in key_match.groups()
+                                if value is not None
+                            ).strip()
+                            break
+                    if key_reference:
+                        key_response = await fetch(
+                            urljoin(response_url, key_reference)
+                        )
+                        if key_response is client_probe_sentinel:
+                            return CLIENT_PROBE_REQUIRED
+                        if key_response is None:
+                            return UNAVAILABLE
+                        _, key_status, key_type, key_body = key_response
+                        if key_status >= 400:
+                            return (
+                                CLIENT_PROBE_REQUIRED
+                                if key_status in {401, 403, 429, 451}
+                                else UNAVAILABLE
+                            )
+                        key_head = key_body[:512].decode(
+                            "utf-8", errors="ignore"
+                        ).lstrip().lower()
+                        if (
+                            len(key_body) < 16
+                            or "text/html" in key_type
+                            or key_head.startswith(("<html", "<!doctype html"))
+                        ):
+                            return UNAVAILABLE
                     sample = await fetch(media_url)
+                    if sample is client_probe_sentinel:
+                        return CLIENT_PROBE_REQUIRED
                     if sample is None:
-                        return False
+                        return UNAVAILABLE
                     _, sample_status, sample_type, sample_body = sample
-                    if sample_status >= 400 or len(sample_body) < 188:
-                        return False
+                    if sample_status >= 400:
+                        return (
+                            CLIENT_PROBE_REQUIRED
+                            if sample_status in {401, 403, 429, 451}
+                            else UNAVAILABLE
+                        )
+                    if len(sample_body) < 188:
+                        return UNAVAILABLE
                     sample_head = sample_body[:512].decode(
                         "utf-8", errors="ignore"
                     ).lstrip().lower()
                     if "text/html" in sample_type or sample_head.startswith(
                         ("<html", "<!doctype html")
                     ):
-                        return False
-                    return True
-                return False
+                        return UNAVAILABLE
+                    return SERVER_VERIFIED
+                return UNAVAILABLE
         except Exception:
-            return False
+            return UNAVAILABLE
+
+    async def _line_reachable(self, line: "AggregatedVideoLine") -> bool:
+        return await self._line_verification_status(line) == SERVER_VERIFIED
 
     async def resolve_verified_lines(
         self, subject_id: str, episode: int = 1, title_hint: str = "",
@@ -948,24 +1028,29 @@ class ContentAggregator:
             "movies_trending": [],
         }
 
-        # 从 AniCh 获取动漫推荐
-        client = await self._get_anich_client()
-        if client:
-            try:
-                resp = client._request("GET", "/bangumi/recommend")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    carousel = data.get("carousel", [])
-                    for item in carousel[:10]:
-                        result["anime_trending"].append({
-                            "id": f"anich:{item['id']}",
-                            "title": item.get("title", ""),
-                            "cover_url": item.get("image", ""),
-                            "type": "anime",
-                            "summary": item.get("overview", ""),
-                        })
-            except Exception:
-                pass
+        # 独立动漫站分别取最新列表，再统一归一化；不依赖外部聚合服务。
+        providers = list(self._crawler_scrapers.items())
+        latest_groups = await asyncio.gather(
+            *(scraper.get_latest(page=1) for _, scraper in providers),
+            return_exceptions=True,
+        )
+        seen_anime: set[tuple[str, str]] = set()
+        for (provider, _), items in zip(providers, latest_groups):
+            if isinstance(items, BaseException):
+                continue
+            for item in items[:10]:
+                key = (provider, item.source_id)
+                if not item.title or key in seen_anime:
+                    continue
+                seen_anime.add(key)
+                result["anime_trending"].append({
+                    "id": f"crawler:{provider}:{item.source_id}",
+                    "title": item.title,
+                    "cover_url": item.cover_url,
+                    "type": "anime",
+                    "summary": item.summary,
+                    "source": provider,
+                })
 
         # 从 TVBox 获取最新
         try:

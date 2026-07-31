@@ -70,7 +70,7 @@ class RuleImporter {
   RuleImportBundle importFromText(String text, {String sourceUrl = ''}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) throw const FormatException('导入内容为空。');
-    final decoded = jsonDecode(trimmed);
+    final decoded = _decodeRuleJson(trimmed);
     final name = _repositoryName(decoded, sourceUrl);
     final rules = _parseRules(decoded, sourceUrl)
         .where(
@@ -256,6 +256,11 @@ class RuleImporter {
         ? (searchConfig['selectorSubjectFormatIndexed'] as Map)
               .cast<String, dynamic>()
         : <String, dynamic>{};
+    final subjectJsonPathIndexed =
+        searchConfig['selectorSubjectFormatJsonPathIndexed'] is Map
+        ? (searchConfig['selectorSubjectFormatJsonPathIndexed'] as Map)
+              .cast<String, dynamic>()
+        : <String, dynamic>{};
     final channelFlattened =
         searchConfig['selectorChannelFormatFlattened'] is Map
         ? (searchConfig['selectorChannelFormatFlattened'] as Map)
@@ -287,6 +292,9 @@ class RuleImporter {
       defaultResolution: searchConfig['defaultResolution']?.toString() ?? '',
       subjectA: AnimekoSubjectAConfig.fromJson(subjectA),
       subjectIndexed: AnimekoSubjectIndexedConfig.fromJson(subjectIndexed),
+      subjectJsonPathIndexed: AnimekoSubjectJsonPathIndexedConfig.fromJson(
+        subjectJsonPathIndexed,
+      ),
       channelFlattened: AnimekoChannelFlattenedConfig.fromJson(
         channelFlattened,
       ),
@@ -730,6 +738,88 @@ class RuleImporter {
     if (supportsDirectLookup) return const ['anime', 'series', 'movie'];
     return [_contentTypeFromText(text)];
   }
+}
+
+Object? _decodeRuleJson(String text) {
+  try {
+    return jsonDecode(text);
+  } on FormatException {
+    return jsonDecode(_sanitizeTvBoxJson(text));
+  }
+}
+
+String _sanitizeTvBoxJson(String text) {
+  final output = StringBuffer();
+  var inString = false;
+  var escaped = false;
+  var index = text.startsWith('\uFEFF') ? 1 : 0;
+
+  while (index < text.length) {
+    final char = text[index];
+    if (inString) {
+      if (escaped) {
+        output.write(char);
+        escaped = false;
+      } else if (char == r'\') {
+        output.write(char);
+        escaped = true;
+      } else if (char == '"') {
+        output.write(char);
+        inString = false;
+      } else if (char.codeUnitAt(0) < 0x20) {
+        output.write(
+          '\\u${char.codeUnitAt(0).toRadixString(16).padLeft(4, '0')}',
+        );
+      } else {
+        output.write(char);
+      }
+      index++;
+      continue;
+    }
+    if (char == '"') {
+      output.write(char);
+      inString = true;
+      index++;
+      continue;
+    }
+    if (char == '/' && index + 1 < text.length) {
+      final next = text[index + 1];
+      if (next == '/') {
+        index += 2;
+        while (index < text.length &&
+            text[index] != '\n' &&
+            text[index] != '\r') {
+          index++;
+        }
+        continue;
+      }
+      if (next == '*') {
+        index += 2;
+        while (index + 1 < text.length &&
+            !(text[index] == '*' && text[index + 1] == '/')) {
+          if (text[index] == '\n' || text[index] == '\r') {
+            output.write(text[index]);
+          }
+          index++;
+        }
+        index = index + 1 < text.length ? index + 2 : text.length;
+        continue;
+      }
+    }
+    if (char == ',') {
+      var next = index + 1;
+      while (next < text.length && text[next].trim().isEmpty) {
+        next++;
+      }
+      if (next < text.length && (text[next] == '}' || text[next] == ']')) {
+        index++;
+        continue;
+      }
+    }
+    output.write(char);
+    index++;
+  }
+  return output.toString();
 }
 
 bool _isGitHubHtmlPage(Uri uri) {

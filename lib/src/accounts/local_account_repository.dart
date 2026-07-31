@@ -12,6 +12,7 @@ class LocalAccount {
     required this.nickname,
     required this.createdAt,
     required this.lastLoginAt,
+    this.cloudAuthenticated = false,
   });
 
   final String id;
@@ -19,6 +20,7 @@ class LocalAccount {
   final String nickname;
   final DateTime createdAt;
   final DateTime lastLoginAt;
+  final bool cloudAuthenticated;
 
   String get shortId {
     final normalized = id.replaceAll('-', '').toUpperCase();
@@ -39,6 +41,7 @@ class LocalAccount {
       nickname: nickname ?? this.nickname,
       createdAt: createdAt,
       lastLoginAt: lastLoginAt ?? this.lastLoginAt,
+      cloudAuthenticated: cloudAuthenticated,
     );
   }
 
@@ -48,6 +51,7 @@ class LocalAccount {
     'nickname': nickname,
     'createdAt': createdAt.toUtc().toIso8601String(),
     'lastLoginAt': lastLoginAt.toUtc().toIso8601String(),
+    'authSource': cloudAuthenticated ? 'cloud' : 'local',
   };
 
   factory LocalAccount.fromJson(Map<String, dynamic> json) {
@@ -59,6 +63,7 @@ class LocalAccount {
       createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ?? now,
       lastLoginAt:
           DateTime.tryParse(json['lastLoginAt']?.toString() ?? '') ?? now,
+      cloudAuthenticated: json['authSource'] == 'cloud',
     );
   }
 }
@@ -164,6 +169,10 @@ class LocalAccountRepository {
     return List.unmodifiable(accounts);
   }
 
+  List<LocalAccount> listCloudAccounts() => List.unmodifiable(
+    listAccounts().where((account) => account.cloudAuthenticated),
+  );
+
   LocalAccount? currentAccount() {
     final id = _box.get(_activeAccountKey)?.toString() ?? '';
     if (id.isEmpty) return null;
@@ -171,6 +180,50 @@ class LocalAccountRepository {
     final stored = _readStored(id);
     if (stored != null) return stored.account;
     return null;
+  }
+
+  LocalAccount? currentCloudAccount() {
+    final account = currentAccount();
+    return account?.cloudAuthenticated == true ? account : null;
+  }
+
+  Future<LocalAccount> beginCloudRegistration({
+    required LocalAccount account,
+    required bool importGuestData,
+  }) async {
+    if (!account.cloudAuthenticated ||
+        account.id.isEmpty ||
+        account.email.isEmpty ||
+        account.nickname.isEmpty) {
+      throw const AccountException('云端账号信息不完整');
+    }
+    if (pendingRegistration() != null) {
+      throw const AccountException('上一个账号仍在完成初始化，请重启应用后再试');
+    }
+    final stored = _StoredLocalAccount.cloud(account);
+    await _box.put(_pendingRegistrationKey, {
+      ...stored.toJson(),
+      'importGuestData': importGuestData,
+    });
+    return account;
+  }
+
+  Future<LocalAccount> rememberCloudAccount(LocalAccount account) async {
+    if (!account.cloudAuthenticated) {
+      throw const AccountException('无法保存非云端账号');
+    }
+    for (final stored in _storedAccounts().toList(growable: false)) {
+      if (stored.account.cloudAuthenticated &&
+          stored.account.email.toLowerCase() == account.email.toLowerCase() &&
+          stored.account.id != account.id) {
+        await _box.delete(_recordKey(stored.account.id));
+      }
+    }
+    await _box.put(
+      _recordKey(account.id),
+      _StoredLocalAccount.cloud(account).toJson(),
+    );
+    return account;
   }
 
   PendingLocalAccountRegistration? pendingRegistration() {
@@ -516,6 +569,15 @@ class _StoredLocalAccount {
     required this.passwordIterations,
   });
 
+  factory _StoredLocalAccount.cloud(LocalAccount account) =>
+      _StoredLocalAccount(
+        account: account,
+        passwordAlgorithm: '',
+        passwordSalt: '',
+        passwordHash: '',
+        passwordIterations: 0,
+      );
+
   final LocalAccount account;
   final String passwordAlgorithm;
   final String passwordSalt;
@@ -534,10 +596,12 @@ class _StoredLocalAccount {
 
   Map<String, dynamic> toJson() => {
     ...account.toJson(),
-    'passwordAlgorithm': passwordAlgorithm,
-    'passwordSalt': passwordSalt,
-    'passwordHash': passwordHash,
-    'passwordIterations': passwordIterations,
+    if (!account.cloudAuthenticated) ...{
+      'passwordAlgorithm': passwordAlgorithm,
+      'passwordSalt': passwordSalt,
+      'passwordHash': passwordHash,
+      'passwordIterations': passwordIterations,
+    },
   };
 
   factory _StoredLocalAccount.fromJson(Map<String, dynamic> json) {
@@ -554,8 +618,11 @@ class _StoredLocalAccount {
       passwordHash: json['passwordHash']?.toString() ?? '',
       passwordIterations: iterations,
     );
-    if (stored.account.id.isEmpty ||
-        stored.passwordSalt.isEmpty ||
+    if (stored.account.id.isEmpty) {
+      throw const FormatException('Invalid local account record');
+    }
+    if (stored.account.cloudAuthenticated) return stored;
+    if (stored.passwordSalt.isEmpty ||
         stored.passwordHash.isEmpty ||
         stored.passwordIterations < 10000 ||
         stored.passwordIterations >

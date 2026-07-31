@@ -81,6 +81,9 @@ class MacCmsScraper(BaseScraper):
         )
         # 记录站点健康度, 连续失败的降优先级
         self._failures: dict[str, int] = {}
+        # 来源增多后仍限制一次最多 10 个站点同时发起搜索，避免小型 VPS
+        # 因稳定 ID 的多别名绑定出现瞬时连接洪峰。
+        self._search_semaphore = asyncio.Semaphore(10)
 
     @property
     def content_types(self) -> list[str]:
@@ -103,10 +106,12 @@ class MacCmsScraper(BaseScraper):
 
     async def _site_search(self, site: dict, keyword: str) -> list[SubjectResult]:
         try:
-            resp = await self._client.get(
-                site["api"],
-                params={"ac": "detail", "wd": keyword},
-            )
+            async with self._search_semaphore:
+                resp = await self._client.get(
+                    site["api"],
+                    params={"ac": "detail", "wd": keyword},
+                    timeout=httpx.Timeout(4, connect=3),
+                )
             if resp.status_code != 200:
                 self._failures[site["name"]] = self._failures.get(site["name"], 0) + 1
                 return []

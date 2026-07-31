@@ -13,7 +13,7 @@ void main() {
         home: Scaffold(
           body: SectionScaffold(
             title: '番剧',
-            subtitle: 'Bangumi 元数据 · 播放源待接入',
+            subtitle: '在线资料与播放',
             actions: [
               FilledButton.icon(
                 onPressed: () {},

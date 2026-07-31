@@ -226,6 +226,29 @@ void main() {
       expect(bundle.rules.single.engine, 'repository-link');
     }
   });
+
+  test('rule importer accepts common lax TVBox JSON syntax', () {
+    const importer = RuleImporter();
+    final bundle = importer.importFromText('''
+      \uFEFF// repository note
+      {
+        /* TVBox clients commonly allow comments and trailing commas. */
+        "sites": [
+          {
+            "key": "json-api",
+            "name": "TVBox
+API",
+            "type": 1,
+            "api": "https://example.com/api.php/provide/vod/",
+          },
+        ],
+      }
+    ''');
+
+    expect(bundle.rules, hasLength(3));
+    expect(bundle.rules.first.engine, 'tvbox-json-api');
+    expect(bundle.rules.first.baseUrl, contains('https://example.com/'));
+  });
 }
 
 String _ruleWithExtraLink(String link) => jsonEncode({

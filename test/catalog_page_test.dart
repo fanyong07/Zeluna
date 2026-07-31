@@ -490,7 +490,7 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('我的'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('观看记录').first);
     await tester.pumpAndSettle();
@@ -602,7 +602,7 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('我的'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
     expect(find.text('个人中心'), findsOneWidget);
 
@@ -642,7 +642,7 @@ void main() {
     expect(find.text('外部源目录'), findsNothing);
     expect(find.text('弹幕设置'), findsOneWidget);
     expect(find.text('播放设置'), findsOneWidget);
-    expect(find.text('聚合后端'), findsOneWidget);
+    expect(find.text('在线服务'), findsOneWidget);
 
     await tester.ensureVisible(find.text('播放设置'));
     await tester.tap(find.text('播放设置'));
@@ -710,17 +710,39 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byTooltip('我的'));
+      await tester.tap(find.text('我的'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('播放规则').first);
+      await tester.tap(find.text('扩展来源').first);
       await tester.pumpAndSettle();
 
-      expect(find.text('播放规则'), findsWidgets);
-      expect(find.text('播放规则插件'), findsOneWidget);
-      expect(find.text('自动规则包'), findsOneWidget);
+      expect(find.text('扩展来源'), findsWidgets);
+      expect(find.text('扩展播放来源'), findsOneWidget);
+      expect(find.text('自动来源包'), findsOneWidget);
       expect(find.text('测试 TVBox'), findsOneWidget);
       expect(find.text('提供 2 条可执行播放规则'), findsOneWidget);
       expect(find.text('番剧规则'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('ruleGroupRefresh:anime')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ruleGroupToggle:anime')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ruleGroupRefresh:series')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ruleGroupToggle:movie')),
+        findsOneWidget,
+      );
+      final expandAnimeRules = find.byTooltip('展开番剧规则');
+      expect(expandAnimeRules, findsOneWidget);
+      await tester.ensureVisible(expandAnimeRules);
+      await tester.tap(expandAnimeRules);
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('收起番剧规则'), findsOneWidget);
       expect(find.text('全部启用'), findsOneWidget);
       expect(find.text('全部关闭'), findsOneWidget);
       final executableRule = find.byKey(
@@ -758,10 +780,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('粘贴 GitHub 仓库或 raw JSON'), findsOneWidget);
       expect(find.text('新建规则'), findsOneWidget);
-      await tester.tap(find.text('从规则仓库导入'));
+      await tester.tap(find.text('从来源合集导入'));
       await tester.pumpAndSettle();
 
-      expect(find.text('规则仓库'), findsWidgets);
+      expect(find.text('来源合集'), findsWidgets);
       expect(find.text('omofun03'), findsOneWidget);
       expect(find.text('内置番剧规则'), findsOneWidget);
       expect(find.textContaining('已内置 22 条规则目录'), findsOneWidget);
@@ -785,7 +807,7 @@ void main() {
 
       await tester.tap(find.byTooltip('返回'));
       await tester.pumpAndSettle();
-      expect(find.text('播放规则'), findsWidgets);
+      expect(find.text('扩展来源'), findsWidgets);
 
       await tester.tap(find.byTooltip('更多操作').first);
       await tester.pumpAndSettle();
@@ -798,10 +820,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('删除规则'), findsNothing);
 
-      await tester.tap(find.text('打开规则仓库'));
+      await tester.tap(find.text('打开来源合集'));
       await tester.pumpAndSettle();
 
-      expect(find.text('规则仓库'), findsWidgets);
+      expect(find.text('来源合集'), findsWidgets);
       expect(find.text('omofun03'), findsOneWidget);
       expect(find.text('韩剧看看'), findsNothing);
       expect(find.text('电影先生'), findsNothing);
@@ -889,7 +911,7 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('我的'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('播放设置').first);
     await tester.pumpAndSettle();
@@ -901,6 +923,38 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(_FakeAnimeController.lastSettings.speed, 1.5);
+  });
+
+  testWidgets('mobile metadata filters stay collapsed until requested', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.movie),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byKey(const ValueKey('mobileMetadataFilters')), findsOneWidget);
+    expect(find.byType(FilterChip), findsNothing);
+
+    await tester.tap(find.text('筛选'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(FilterChip), findsWidgets);
+    expect(find.byKey(const ValueKey('mobileFilter-年份')), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }
 

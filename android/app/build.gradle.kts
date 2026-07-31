@@ -226,6 +226,12 @@ android {
     }
 }
 
+configurations.configureEach {
+    // integration_test brings kxml2, while the CSP WebDAV runtime already
+    // supplies the same XmlPull API through xpp3.
+    exclude(group = "net.sf.kxml", module = "kxml2")
+}
+
 dependencies {
     // Runtime ABI dependencies used by the pinned gao TVBox Spider DEX.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

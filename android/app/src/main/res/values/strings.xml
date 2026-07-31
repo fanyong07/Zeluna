@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Zeluna</string>
+    <string name="zeluna_startup_description">Zeluna 正在启动</string>
+</resources>

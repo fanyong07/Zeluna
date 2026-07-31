@@ -166,6 +166,7 @@ class EmptyState extends StatelessWidget {
     required this.message,
     this.action,
     this.compact = false,
+    this.onTheater = false,
   });
 
   final IconData icon;
@@ -173,6 +174,7 @@ class EmptyState extends StatelessWidget {
   final String message;
   final Widget? action;
   final bool compact;
+  final bool onTheater;
 
   @override
   Widget build(BuildContext context) {
@@ -182,6 +184,7 @@ class EmptyState extends StatelessWidget {
       message: message,
       action: action,
       compact: compact,
+      onTheater: onTheater,
     );
   }
 }
@@ -218,6 +221,7 @@ class ErrorState extends StatelessWidget {
     this.onRetry,
     this.retryLabel = '重新加载',
     this.compact = false,
+    this.onTheater = false,
   });
 
   final String title;
@@ -225,6 +229,7 @@ class ErrorState extends StatelessWidget {
   final VoidCallback? onRetry;
   final String retryLabel;
   final bool compact;
+  final bool onTheater;
 
   @override
   Widget build(BuildContext context) {
@@ -233,6 +238,7 @@ class ErrorState extends StatelessWidget {
       title: title,
       message: message,
       compact: compact,
+      onTheater: onTheater,
       tone: AppStateTone.error,
       action: onRetry == null
           ? null
@@ -257,6 +263,7 @@ class AppStateView extends StatelessWidget {
     this.compact = false,
     this.progress = false,
     this.tone = AppStateTone.neutral,
+    this.onTheater = false,
   });
 
   final IconData icon;
@@ -267,10 +274,23 @@ class AppStateView extends StatelessWidget {
   final bool progress;
   final AppStateTone tone;
 
+  /// When true, ink stays on fixed theater tokens (player panels).
+  final bool onTheater;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final accent = _toneColor(context, tone);
+    final accent = onTheater
+        ? switch (tone) {
+            AppStateTone.error => AppStatusColors.failed,
+            AppStateTone.warning => AppStatusColors.probing,
+            AppStateTone.success => AppStatusColors.available,
+            _ => AppColors.primary2,
+          }
+        : _toneColor(context, tone);
+    final titleColor = onTheater ? AppColors.theaterInk : scheme.onSurface;
+    final bodyColor =
+        onTheater ? AppColors.theaterMuted : scheme.onSurfaceVariant;
     final content = ConstrainedBox(
       constraints: BoxConstraints(maxWidth: compact ? 360 : 440),
       child: Column(
@@ -300,7 +320,7 @@ class AppStateView extends StatelessWidget {
             title,
             style: Theme.of(
               context,
-            ).textTheme.titleLarge?.copyWith(color: scheme.onSurface),
+            ).textTheme.titleLarge?.copyWith(color: titleColor),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: AppSpacing.sm),
@@ -308,7 +328,7 @@ class AppStateView extends StatelessWidget {
             message,
             style: Theme.of(
               context,
-            ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+            ).textTheme.bodyMedium?.copyWith(color: bodyColor),
             textAlign: TextAlign.center,
           ),
           if (action != null) ...[
@@ -326,10 +346,16 @@ class AppStateView extends StatelessWidget {
             ? content
             : DecoratedBox(
                 decoration: BoxDecoration(
-                  color: scheme.surfaceContainer.withValues(alpha: 0.74),
+                  color: onTheater
+                      ? AppColors.theaterPanel.withValues(alpha: 0.92)
+                      : scheme.surfaceContainer.withValues(alpha: 0.74),
                   borderRadius: BorderRadius.circular(AppRadius.xl),
-                  border: Border.all(color: scheme.outlineVariant),
-                  boxShadow: AppShadows.panel,
+                  border: Border.all(
+                    color: onTheater
+                        ? AppColors.theaterBorder
+                        : scheme.outlineVariant,
+                  ),
+                  boxShadow: onTheater ? const [] : AppShadows.panel,
                 ),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(

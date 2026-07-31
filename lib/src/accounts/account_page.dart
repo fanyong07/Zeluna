@@ -7,7 +7,7 @@ import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import 'local_account_repository.dart';
 
-enum _AccountPageMode { manage, login, register, password }
+enum _AccountPageMode { manage, login, register, resetPassword, password }
 
 class AccountSettingsPage extends ConsumerStatefulWidget {
   const AccountSettingsPage({super.key});
@@ -22,6 +22,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
   final _nickname = TextEditingController();
   final _password = TextEditingController();
   final _confirmPassword = TextEditingController();
+  final _verificationCode = TextEditingController();
   final _currentPassword = TextEditingController();
   final _newPassword = TextEditingController();
   final _confirmNewPassword = TextEditingController();
@@ -41,6 +42,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
     _nickname.dispose();
     _password.dispose();
     _confirmPassword.dispose();
+    _verificationCode.dispose();
     _currentPassword.dispose();
     _newPassword.dispose();
     _confirmNewPassword.dispose();
@@ -105,6 +107,8 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                         _buildManage(state)
                       else if (_mode == _AccountPageMode.register)
                         _buildRegister(state)
+                      else if (_mode == _AccountPageMode.resetPassword)
+                        _buildResetPassword(state)
                       else if (_mode == _AccountPageMode.password &&
                           state.accountSession.isSignedIn)
                         _buildChangePassword()
@@ -164,7 +168,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             children: [
               const SectionTitle(
                 title: '登录与安全',
-                subtitle: '密码经过加盐派生后保存在本机，不会保存明文',
+                subtitle: '密码由云端验证，登录状态保存在系统安全凭据中',
                 icon: Icons.shield_outlined,
               ),
               const SizedBox(height: 12),
@@ -210,8 +214,8 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
               ),
               _AccountAction(
                 icon: Icons.delete_forever_outlined,
-                title: '删除本机账号',
-                subtitle: '删除账号及其本机数据，需要再次输入密码',
+                title: '清除此设备的账号数据',
+                subtitle: '云端账号会保留，本机收藏与历史将被删除',
                 color: Colors.redAccent,
                 onTap: _busy ? null : () => _confirmDeleteAccount(account),
               ),
@@ -240,13 +244,13 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             children: [
               SectionTitle(
                 title: state.accountSession.isSignedIn ? '切换账号' : '登录',
-                subtitle: '登录本机已注册的账号',
+                subtitle: '使用邮箱和密码登录云端账号',
                 icon: Icons.login_rounded,
               ),
               const SizedBox(height: 18),
               _AccountTextField(
                 controller: _email,
-                label: '登录邮箱（仅作本机标识）',
+                label: '邮箱',
                 hint: 'name@example.com',
                 enabled: !_busy,
                 keyboardType: TextInputType.emailAddress,
@@ -292,6 +296,17 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                           },
                     child: const Text('创建新账号'),
                   ),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () {
+                            _verificationCode.clear();
+                            _newPassword.clear();
+                            _confirmNewPassword.clear();
+                            _selectMode(_AccountPageMode.resetPassword);
+                          },
+                    child: const Text('忘记密码'),
+                  ),
                   if (state.accountSession.isSignedIn)
                     TextButton(
                       onPressed: _busy
@@ -314,7 +329,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
           ),
         ],
         const SizedBox(height: 14),
-        const _LocalOnlyNotice(),
+        const _CloudAccountNotice(),
       ],
     );
   }
@@ -330,7 +345,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             children: [
               const SectionTitle(
                 title: '创建账号',
-                subtitle: '为不同使用者建立独立空间',
+                subtitle: '通过邮箱验证码创建云端账号',
                 icon: Icons.person_add_alt_1_rounded,
               ),
               const SizedBox(height: 18),
@@ -345,7 +360,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
               const SizedBox(height: 12),
               _AccountTextField(
                 controller: _email,
-                label: '登录邮箱（仅作本机标识）',
+                label: '邮箱',
                 hint: 'name@example.com',
                 enabled: !_busy,
                 keyboardType: TextInputType.emailAddress,
@@ -354,6 +369,31 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                   AutofillHints.email,
                 ],
                 textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: _AccountTextField(
+                      controller: _verificationCode,
+                      label: '邮箱验证码',
+                      hint: '6 位数字',
+                      enabled: !_busy,
+                      keyboardType: TextInputType.number,
+                      autofillHints: const [AutofillHints.oneTimeCode],
+                      textInputAction: TextInputAction.next,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: OutlinedButton(
+                      onPressed: _busy ? null : _requestRegistrationCode,
+                      child: const Text('发送验证码'),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               _AccountTextField(
@@ -417,7 +457,123 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
           ),
         ),
         const SizedBox(height: 14),
-        const _LocalOnlyNotice(),
+        const _CloudAccountNotice(),
+      ],
+    );
+  }
+
+  Widget _buildResetPassword(AnimeState state) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        AppPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle(
+                title: '重置密码',
+                subtitle: '通过注册邮箱验证身份并设置新密码',
+                icon: Icons.lock_reset_rounded,
+              ),
+              const SizedBox(height: 18),
+              _AccountTextField(
+                controller: _email,
+                label: '邮箱',
+                hint: 'name@example.com',
+                enabled: !_busy,
+                keyboardType: TextInputType.emailAddress,
+                autofillHints: const [
+                  AutofillHints.username,
+                  AutofillHints.email,
+                ],
+                textInputAction: TextInputAction.next,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Expanded(
+                    child: _AccountTextField(
+                      controller: _verificationCode,
+                      label: '邮箱验证码',
+                      hint: '6 位数字',
+                      enabled: !_busy,
+                      keyboardType: TextInputType.number,
+                      autofillHints: const [AutofillHints.oneTimeCode],
+                      textInputAction: TextInputAction.next,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: OutlinedButton(
+                      onPressed: _busy ? null : _requestPasswordResetCode,
+                      child: const Text('发送验证码'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _AccountTextField(
+                controller: _newPassword,
+                label: '新密码',
+                hint: '至少 8 个字符',
+                enabled: !_busy,
+                obscureText: !_showPassword,
+                autofillHints: const [AutofillHints.newPassword],
+                textInputAction: TextInputAction.next,
+                suffixIcon: _passwordVisibilityButton(),
+              ),
+              const SizedBox(height: 12),
+              _AccountTextField(
+                controller: _confirmNewPassword,
+                label: '确认新密码',
+                enabled: !_busy,
+                obscureText: !_showPassword,
+                autofillHints: const [AutofillHints.newPassword],
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _resetPassword(),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                '重置成功后，该账号在其他设备上的登录状态会全部失效，需要使用新密码重新登录。',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: context.inkMuted,
+                  height: 1.45,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _busy ? null : _resetPassword,
+                    icon: _busy
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.lock_reset_rounded),
+                    label: Text(_busy ? '正在重置' : '确认重置'),
+                  ),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => state.accountSession.isSignedIn
+                              ? _returnToManage(state.accountSession.current!)
+                              : _selectMode(_AccountPageMode.login),
+                    child: Text(
+                      state.accountSession.isSignedIn ? '取消' : '返回登录',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        const _CloudAccountNotice(),
       ],
     );
   }
@@ -579,9 +735,52 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             email: _email.text,
             nickname: _nickname.text,
             password: _password.text,
+            verificationCode: _verificationCode.text,
           ),
       success: '账号已创建并登录',
       successMode: _AccountPageMode.manage,
+      clearPasswords: true,
+    );
+  }
+
+  Future<void> _requestRegistrationCode() async {
+    await _runAccountAction(
+      action: () => ref
+          .read(animeControllerProvider.notifier)
+          .requestRegistrationCode(_email.text),
+      success: '验证码已发送，请检查邮箱（10 分钟内有效）',
+      successMode: _AccountPageMode.register,
+    );
+  }
+
+  Future<void> _requestPasswordResetCode() async {
+    await _runAccountAction(
+      action: () => ref
+          .read(animeControllerProvider.notifier)
+          .requestPasswordResetCode(_email.text),
+      success: '验证码已发送，请检查邮箱（10 分钟内有效）',
+      successMode: _AccountPageMode.resetPassword,
+    );
+  }
+
+  Future<void> _resetPassword() async {
+    if (_newPassword.text != _confirmNewPassword.text) {
+      setState(() {
+        _error = '两次输入的新密码不一致';
+        _message = null;
+      });
+      return;
+    }
+    await _runAccountAction(
+      action: () => ref
+          .read(animeControllerProvider.notifier)
+          .resetAccountPassword(
+            email: _email.text,
+            verificationCode: _verificationCode.text,
+            newPassword: _newPassword.text,
+          ),
+      success: '密码已重置，请使用新密码登录',
+      successMode: _AccountPageMode.login,
       clearPasswords: true,
     );
   }
@@ -648,14 +847,16 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
     final confirmedPassword = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('删除本机账号？'),
+        title: const Text('清除此设备的账号数据？'),
         content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('将永久删除“${account.nickname}”的收藏、历史、偏好、下载记录和私密源配置。这个操作无法撤销。'),
+              Text(
+                '将删除“${account.nickname}”保存在此设备上的收藏、历史、偏好、下载记录和私密源配置，并退出登录。云端账号不会被删除。',
+              ),
               const SizedBox(height: 16),
               TextField(
                 controller: _deletePassword,
@@ -685,7 +886,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                 Navigator.of(dialogContext).pop(_deletePassword.text);
               }
             },
-            child: const Text('永久删除'),
+            child: const Text('确认清除'),
           ),
         ],
       ),
@@ -697,7 +898,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
       action: () => ref
           .read(animeControllerProvider.notifier)
           .deleteCurrentAccount(password: confirmedPassword),
-      success: '账号及其本机数据已删除',
+      success: '此设备上的账号数据已清除，云端账号仍然保留',
       successMode: _AccountPageMode.login,
       clearPasswords: true,
     );
@@ -756,6 +957,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
   void _clearPasswords() {
     _password.clear();
     _confirmPassword.clear();
+    _verificationCode.clear();
     _currentPassword.clear();
     _newPassword.clear();
     _confirmNewPassword.clear();
@@ -826,7 +1028,7 @@ class _AccountStatusCard extends StatelessWidget {
           if (!veryCompact) ...[
             const SizedBox(width: 10),
             SmallBadge(
-              label: account == null ? '未登录' : '本机账号',
+              label: account == null ? '未登录' : '云端账号',
               active: account != null,
             ),
           ],
@@ -854,7 +1056,7 @@ class _KnownAccountsCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SectionTitle(
-            title: '本机账号',
+            title: '此设备保存的账号',
             subtitle: '共 ${accounts.length} 个，切换时仍需输入密码',
             icon: Icons.people_outline_rounded,
           ),
@@ -919,8 +1121,8 @@ class _KnownAccountsCard extends StatelessWidget {
   }
 }
 
-class _LocalOnlyNotice extends StatelessWidget {
-  const _LocalOnlyNotice();
+class _CloudAccountNotice extends StatelessWidget {
+  const _CloudAccountNotice();
 
   @override
   Widget build(BuildContext context) {
@@ -928,11 +1130,11 @@ class _LocalOnlyNotice extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.devices_outlined, color: AppColors.primary),
+          const Icon(Icons.cloud_done_outlined, color: AppColors.primary),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              '当前是本机账号系统：账号和数据只保存在这台设备，不会上传，也暂不支持跨设备同步。邮箱仅作登录标识，忘记密码无法通过邮件找回；密码用于应用内分区，不会加密设备文件。',
+              '账号由 Zeluna 云端统一验证，可在安卓和 Windows 使用同一邮箱登录。登录令牌保存在系统安全凭据中；收藏和历史目前仍保存在当前设备，云端同步会在后续版本接入。',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: context.inkMuted,
                 height: 1.45,

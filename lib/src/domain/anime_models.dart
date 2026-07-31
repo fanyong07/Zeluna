@@ -220,6 +220,10 @@ class PlaybackLine {
     this.isLive = false,
     this.adaptive = false,
     this.publicHttpOnly = false,
+    this.serverVerified = false,
+    this.requiresClientProbe = false,
+    this.clientVerified = false,
+    this.expiresAt,
     this.available = false,
     this.message,
   });
@@ -247,6 +251,10 @@ class PlaybackLine {
   /// Keeps untrusted rule output on public HTTP(S) addresses during every
   /// resolver-side verification, including manifest child resources.
   final bool publicHttpOnly;
+  final bool serverVerified;
+  final bool requiresClientProbe;
+  final bool clientVerified;
+  final DateTime? expiresAt;
   final bool available;
   final String? message;
 }
@@ -1103,7 +1111,8 @@ class PlaybackSettings {
   const PlaybackSettings({
     this.volumeBoost = 0.26,
     this.superResolution = false,
-    this.superResolutionProfile = 'balanced',
+    this.superResolutionProfile = 'auto',
+    this.superResolutionCustomShaders = const [],
     this.videoScale = '适应',
     this.speed = 1.0,
     this.defaultSpeed = 1.0,
@@ -1128,6 +1137,7 @@ class PlaybackSettings {
   final double volumeBoost;
   final bool superResolution;
   final String superResolutionProfile;
+  final List<String> superResolutionCustomShaders;
   final String videoScale;
   final double speed;
   final double defaultSpeed;
@@ -1152,6 +1162,7 @@ class PlaybackSettings {
     double? volumeBoost,
     bool? superResolution,
     String? superResolutionProfile,
+    List<String>? superResolutionCustomShaders,
     String? videoScale,
     double? speed,
     double? defaultSpeed,
@@ -1177,6 +1188,8 @@ class PlaybackSettings {
       superResolution: superResolution ?? this.superResolution,
       superResolutionProfile:
           superResolutionProfile ?? this.superResolutionProfile,
+      superResolutionCustomShaders:
+          superResolutionCustomShaders ?? this.superResolutionCustomShaders,
       videoScale: videoScale ?? this.videoScale,
       speed: speed ?? this.speed,
       defaultSpeed: defaultSpeed ?? this.defaultSpeed,
@@ -1204,6 +1217,7 @@ class PlaybackSettings {
     'volumeBoost': volumeBoost,
     'superResolution': superResolution,
     'superResolutionProfile': superResolutionProfile,
+    'superResolutionCustomShaders': superResolutionCustomShaders,
     'videoScale': videoScale,
     'speed': speed,
     'defaultSpeed': defaultSpeed,
@@ -1232,6 +1246,9 @@ class PlaybackSettings {
       superResolutionProfile: _normalizeSuperResolutionProfile(
         json['superResolutionProfile'],
       ),
+      superResolutionCustomShaders: _stringListFromJson(
+        json['superResolutionCustomShaders'],
+      ),
       videoScale: json['videoScale'] as String? ?? '适应',
       speed: (json['speed'] as num?)?.toDouble() ?? 1.0,
       defaultSpeed: (json['defaultSpeed'] as num?)?.toDouble() ?? 1.0,
@@ -1257,12 +1274,18 @@ class PlaybackSettings {
 
   static String _normalizeSuperResolutionProfile(Object? value) {
     final profile = value?.toString();
-    if (profile == 'performance' ||
-        profile == 'balanced' ||
-        profile == 'quality') {
+    if (profile == 'performance') return 'low_resolution';
+    if (profile == 'balanced') return 'auto';
+    if (profile == 'quality') return 'clear';
+    if (profile == 'auto' ||
+        profile == 'clear' ||
+        profile == 'soft' ||
+        profile == 'low_resolution' ||
+        profile == 'strong' ||
+        profile == 'advanced') {
       return profile!;
     }
-    return 'balanced';
+    return 'auto';
   }
 }
 

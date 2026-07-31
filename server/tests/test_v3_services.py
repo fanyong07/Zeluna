@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -5,10 +6,17 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from server.aggregator import AggregatedVideoLine, SourceMatch
+from server.aggregator import (
+    CLIENT_PROBE_REQUIRED,
+    SERVER_VERIFIED,
+    AggregatedVideoLine,
+    SourceMatch,
+    aggregator,
+)
 from server.catalog import CatalogService
 from server.database import Base, CatalogSubject, PlaybackCache, SourceBinding
 from server.playback import PlaybackService
+from server.scrapers.maccms_sites import MACCMS_SITES
 
 
 class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -231,6 +239,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 title="线路1",
                 format="hls",
                 source="maccms:iKun",
+                verification_status=SERVER_VERIFIED,
             )
         ]
         metadata = {
@@ -262,6 +271,13 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first[0]["cached"])
         self.assertTrue(second[0]["cached"])
+        self.assertEqual(len(first), len(aggregator.source_inventory))
+        self.assertEqual(
+            {item["source"].split(":", 1)[1] for item in first},
+            aggregator.configured_source_names,
+        )
+        self.assertIn("crawler:dm706", {item["source"] for item in first})
+        self.assertEqual(sum(item["available"] for item in first), 1)
         self.assertEqual(discover.await_count, 1)
         self.assertEqual(resolve.await_count, 1)
         async with self.sessions() as session:
@@ -269,6 +285,90 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             binding_count = await session.scalar(select(func.count(SourceBinding.id)))
         self.assertEqual(cache_count, 1)
         self.assertEqual(binding_count, 2)
+
+    async def test_partial_positive_cache_expires_before_stable_cache(self):
+        now = time.time()
+        async with self.sessions() as session:
+            session.add_all(
+                [
+                    PlaybackCache(
+                        subject_id="bangumi:partial",
+                        episode=1,
+                        title="Partial",
+                        lines_json='[{"source":"maccms:iKun","available":true}]',
+                        line_count=1,
+                        verified_at=now - 11 * 60,
+                    ),
+                    PlaybackCache(
+                        subject_id="bangumi:stable",
+                        episode=1,
+                        title="Stable",
+                        lines_json='[{"source":"maccms:iKun","available":true}]',
+                        line_count=4,
+                        verified_at=now - 11 * 60,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        async with self.sessions() as session:
+            partial = await self.service._cached_lines(
+                session, "bangumi:partial", 1, force=False
+            )
+            stable = await self.service._cached_lines(
+                session, "bangumi:stable", 1, force=False
+            )
+
+        self.assertIsNone(partial)
+        self.assertIsNotNone(stable)
+
+    def test_client_probe_candidate_keeps_url_headers_and_expiry(self):
+        expires_at = int(time.time()) + 3600
+        item = self.service._line_dict(
+            AggregatedVideoLine(
+                url=f"https://cdn.example/video.m3u8?expires={expires_at}",
+                title="住宅网络候选",
+                format="hls",
+                source="crawler:dm706",
+                headers={"Referer": "https://source.example/watch/1"},
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+        )
+
+        self.assertFalse(item["available"])
+        self.assertEqual(item["status"], CLIENT_PROBE_REQUIRED)
+        self.assertEqual(item["expires_at"], expires_at)
+        self.assertEqual(
+            item["headers"]["Referer"],
+            "https://source.example/watch/1",
+        )
+
+    async def test_expired_signed_candidate_is_removed_from_cache(self):
+        async with self.sessions() as session:
+            session.add(
+                PlaybackCache(
+                    subject_id="bangumi:expired",
+                    episode=1,
+                    title="Expired",
+                    lines_json=(
+                        '[{"url":"https://cdn.example/old.m3u8",'
+                        '"source":"crawler:dm706","available":false,'
+                        f'"status":"{CLIENT_PROBE_REQUIRED}",'
+                        f'"expires_at":{int(time.time()) - 60}}}]'
+                    ),
+                    line_count=0,
+                    verified_at=time.time(),
+                )
+            )
+            await session.commit()
+
+        async with self.sessions() as session:
+            items = await self.service._cached_lines(
+                session, "bangumi:expired", 1, force=False
+            )
+
+        self.assertIsNotNone(items)
+        self.assertFalse(any(item.get("url") for item in items))
 
 
 if __name__ == "__main__":

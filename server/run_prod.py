@@ -13,12 +13,20 @@ import os
 import uvicorn
 
 if __name__ == "__main__":
-    required = {
+    long_secrets = {
         "TMDB_READ_ACCESS_TOKEN": os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip(),
         "ADMIN_TOKEN": os.getenv("ADMIN_TOKEN", "").strip(),
         "SECRET_KEY": os.getenv("SECRET_KEY", "").strip(),
     }
-    missing = [name for name, value in required.items() if len(value) < 32]
+    required_values = {
+        "SMTP_HOST": os.getenv("SMTP_HOST", "").strip(),
+        "SMTP_FROM_EMAIL": os.getenv("SMTP_FROM_EMAIL", "").strip(),
+    }
+    missing = [name for name, value in long_secrets.items() if len(value) < 32]
+    missing.extend(name for name, value in required_values.items() if not value)
+    smtp_username = os.getenv("SMTP_USERNAME", "").strip()
+    if smtp_username and not os.getenv("SMTP_PASSWORD", ""):
+        missing.append("SMTP_PASSWORD")
     if missing:
         raise SystemExit(
             "Production configuration missing or too short: " + ", ".join(missing)

@@ -11,7 +11,8 @@ class RulePluginRepository {
 
   final List<RulePlugin> extraRules;
 
-  _RuleCollection get _collection => _collectRules(_curatedRules, extraRules);
+  _RuleCollection get _collection =>
+      _collectRules(_verifiedBuiltInRules, extraRules);
 
   List<RulePlugin> get allRules => _collection.rules;
 
@@ -350,7 +351,155 @@ const _xbpq = 'XBPQ';
 const _xyq = 'XYQHiker';
 const _drpy = 'drpy-js';
 
-final _curatedRules = <RulePlugin>[
+/// Sources in this list are only promoted after an end-to-end media probe.
+/// They remain ordinary rules: users can disable them in rule management and
+/// the runtime health cache will demote a source after repeated failures.
+final _verifiedBuiltInRules = <RulePlugin>[
+  RulePlugin(
+    id: 'zeluna:recommended:fantuan',
+    name: '饭团动漫(替换)',
+    version: '2026-07-28',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.anime,
+    engine: 'animeko-web-selector',
+    updatedAt: _date(2026, 7, 28),
+    qualityScore: 100,
+    tags: const ['推荐', 'Animeko', '已验证'],
+    baseUrl: 'https://acgpost.com/',
+    searchUrl: 'https://acgpost.com/search.html?wd={keyword}',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    installedByDefault: true,
+    priority: 0,
+    animeko: const AnimekoWebSelectorConfig(
+      searchUrl: 'https://acgpost.com/search.html?wd={keyword}',
+      searchRemoveSpecial: true,
+      subjectFormatId: 'a',
+      channelFormatId: 'index-grouped',
+      defaultResolution: '720P',
+      subjectA: AnimekoSubjectAConfig(
+        selectLists: 'body > main > div > div.mt-2-5 > div > div > div > a',
+        preferShorterName: true,
+      ),
+      channelFlattened: AnimekoChannelFlattenedConfig(
+        selectChannelNames:
+            'body > main > div > div.row.mt-1-25.mb-5 > div > div > div > ul > li > button',
+        matchChannelName: r'^(?<ch>.+?)(\d+)?$',
+        selectEpisodeLists: '.anime-episode',
+        selectEpisodesFromList: 'a',
+        matchEpisodeSortFromName: r'第\s*(?<ep>.+)\s*[话集]',
+      ),
+      enableNestedUrl: true,
+      matchNestedUrl: r'^.+(m3u8|vip|xigua\.php).+\?',
+      matchVideoUrl:
+          r'(^http(s)?:\/\/(?!.*http(s)?:\/\/)(?!.*google-analytics).+((\.mp4)|(\.mkv)|(m3u8)).*(\?.+)?)|(akamaized)|(bilivideo.com)|(.+player\/\?url=(?<v>.+))',
+      cookies: 'quality=1080',
+      videoUserAgent:
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
+    ),
+  ),
+  RulePlugin(
+    id: 'zeluna:recommended:aikanbot',
+    name: '爱看机器人',
+    version: '2026-07-28',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.anime,
+    engine: 'aikanbot-api',
+    updatedAt: _date(2026, 7, 28),
+    qualityScore: 92,
+    tags: const ['推荐', '网页聚合', '已验证'],
+    baseUrl: 'https://www1.aikanbot.com',
+    searchUrl: 'https://www1.aikanbot.com/search?q={keyword}',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    installedByDefault: true,
+    priority: 1,
+    requestHeaders: const {'Referer': 'https://www1.aikanbot.com/'},
+    note: '通过站点公开的页面播放清单接口获取 HLS，客户端不加载广告播放器。',
+  ),
+  RulePlugin(
+    id: 'zeluna:recommended:sorani',
+    name: '青空次元',
+    version: '2026-07-28',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.anime,
+    engine: 'sorani-api',
+    updatedAt: _date(2026, 7, 28),
+    qualityScore: 90,
+    tags: const ['推荐', '番剧', '已验证'],
+    baseUrl: 'https://api.sorani.cc/sorani-cms',
+    searchUrl: 'https://www.sorani.net/',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    installedByDefault: true,
+    priority: 2,
+    rawConfig: const {'lineCode': 'anime_jp_m3u8'},
+    note: '播放时从公开接口获取短时 HLS 清单，并在客户端验证媒体分片。',
+  ),
+  RulePlugin(
+    id: 'zeluna:recommended:dbku',
+    name: '独播库',
+    version: '2026-07-28',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.movie,
+    engine: _xbpq,
+    updatedAt: _date(2026, 7, 28),
+    qualityScore: 88,
+    tags: const ['推荐', '电影', '已验证'],
+    baseUrl: 'https://www.dbku.tv',
+    searchUrl: 'https://www.dbku.tv/vodsearch/-------------.html?wd={wd}',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    installedByDefault: true,
+    priority: 3,
+    xbpq: const XbpqParserConfig(
+      searchArray: '<li class="clearfix">&&</li>',
+      searchTitle: '">&&</a>',
+      searchLink: 'href="&&"',
+      playArray: '<ul class="myui-content__list&&</ul>',
+      playList: '<li&&</li>',
+      playTitle: '">&&</a>',
+      playLink: 'href="&&"',
+    ),
+    note: '播放页提供经页面编码的 HLS 地址，客户端会先解码并验证清单与分片。',
+  ),
+  RulePlugin(
+    id: 'zeluna:recommended:nivod',
+    name: '泥视频',
+    version: '2026-07-28',
+    source: RuleSourceKind.custom,
+    contentType: RuleContentType.movie,
+    engine: _xbpq,
+    updatedAt: _date(2026, 7, 28),
+    qualityScore: 87,
+    tags: const ['推荐', '电影', '已验证'],
+    baseUrl: 'https://www.nivod.vip',
+    searchUrl: 'https://www.nivod.vip/s/-------------/?wd={wd}',
+    searchable: true,
+    quickSearch: true,
+    filterable: false,
+    installedByDefault: true,
+    priority: 4,
+    xbpq: const XbpqParserConfig(
+      searchArray: 'class="module-card-item-title">&&</div>',
+      searchTitle: '<strong>&&</strong>',
+      searchLink: 'href="&&"',
+      playArray: '<div class="module-play-list-content&&</div>',
+      playList: '<a&&</a>',
+      playTitle: '><span>&&</span>',
+      playLink: 'href="&&"',
+    ),
+    note: '播放页提供 HLS 清单地址，客户端会验证清单与首个媒体分片。',
+  ),
+];
+
+@Deprecated('Built-in playback sites are served by the backend.')
+final legacyCuratedRuleDefinitions = <RulePlugin>[
   RulePlugin(
     id: 'kazumi:omofun03',
     name: 'omofun03',

@@ -12,7 +12,6 @@ import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
-import '../shared_ui/section_scaffold.dart';
 import '../shared_ui/settings_ui.dart';
 
 class ProfilePage extends ConsumerWidget {
@@ -79,13 +78,7 @@ class _ProfileBanner extends StatelessWidget {
                 title: state.profile.nickname,
               ),
               const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Color(0xEE1B1A18), Color(0x661B1A18)],
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                  ),
-                ),
+                decoration: BoxDecoration(gradient: AppOverlays.heroLeadingSoft),
               ),
               Padding(
                 padding: EdgeInsets.all(compact ? 16 : 24),
@@ -137,7 +130,7 @@ class _ProfileBanner extends StatelessWidget {
                                 const SizedBox(width: 10),
                                 SmallBadge(
                                   label: state.accountSession.isSignedIn
-                                      ? '本机账号'
+                                      ? '云端账号'
                                       : '游客',
                                   active: state.accountSession.isSignedIn,
                                 ),
@@ -210,9 +203,9 @@ class _BannerMetric extends StatelessWidget {
         children: [
           Text(
             value,
-            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-              color: context.ink,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.headlineSmall?.copyWith(color: context.ink),
           ),
           const SizedBox(height: 4),
           Text(
@@ -306,13 +299,7 @@ class _PlaylistCard extends StatelessWidget {
                   title: title,
                 ),
                 const DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0xEE1B1A18)],
-                    ),
-                  ),
+                  decoration: BoxDecoration(gradient: AppOverlays.mediaCaption),
                 ),
                 Positioned(
                   left: 12,
@@ -333,9 +320,9 @@ class _PlaylistCard extends StatelessWidget {
                       const SizedBox(height: 3),
                       Text(
                         '已加入追番 · 打开详情',
-                        style: Theme.of(
-                          context,
-                        ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.theaterMuted,
+                        ),
                       ),
                     ],
                   ),
@@ -415,7 +402,7 @@ class _ProfileShortcutSection extends StatelessWidget {
                 ),
                 _ShortcutTile(
                   icon: Icons.rss_feed,
-                  title: '订阅源',
+                  title: '扩展来源',
                   value: '${state.rulePlugins.customRules.length}',
                   onTap: () => context.push('/profile/rules'),
                 ),
@@ -460,7 +447,9 @@ class _ShortcutTile extends StatelessWidget {
         decoration: BoxDecoration(
           color: Theme.of(context).colorScheme.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
         ),
         child: Padding(
           padding: EdgeInsets.symmetric(
@@ -608,13 +597,7 @@ class _HistoryCard extends StatelessWidget {
                   title: entry.title,
                 ),
                 const DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0xEE1B1A18)],
-                    ),
-                  ),
+                  decoration: BoxDecoration(gradient: AppOverlays.mediaCaption),
                 ),
                 Positioned(
                   left: 10,
@@ -793,7 +776,9 @@ class DownloadManagementPage extends ConsumerWidget {
               120,
             ),
             child: tasks.isEmpty
-                ? const EmptyState(icon: Icons.inbox_outlined, compact: true,
+                ? const EmptyState(
+                    icon: Icons.inbox_outlined,
+                    compact: true,
                     title: '还没有下载任务',
                     message: '在详情页点击下载后，任务会显示在这里。',
                   )
@@ -832,10 +817,10 @@ class _DownloadTaskCard extends ConsumerWidget {
         ? 1.0
         : task.progress;
     final statusColor = switch (task.status) {
-      MediaDownloadTaskStatus.completed => AppColors.success,
-      MediaDownloadTaskStatus.failed => Colors.redAccent,
+      MediaDownloadTaskStatus.completed => AppStatusColors.available,
+      MediaDownloadTaskStatus.failed => AppStatusColors.failed,
       MediaDownloadTaskStatus.cancelled => context.inkMuted,
-      MediaDownloadTaskStatus.paused => Colors.orangeAccent,
+      MediaDownloadTaskStatus.paused => AppStatusColors.probing,
       _ => AppColors.primary,
     };
     return AppPanel(
@@ -1035,7 +1020,7 @@ class _ProfileRightRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '本机账号数据'),
+              const SectionTitle(title: '账号与数据'),
               const SizedBox(height: 12),
               _DeviceRow(
                 icon: Icons.devices_rounded,
@@ -1045,8 +1030,8 @@ class _ProfileRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 state.accountSession.isSignedIn
-                    ? '当前账号的数据已与其他本机账号隔离；暂不支持跨设备同步。'
-                    : '登录或创建本机账号后，可将收藏、追番、历史和偏好与其他使用者分开。',
+                    ? '当前已登录云端账号；收藏、追番和历史暂时保存在此设备，并与其他账号隔离。'
+                    : '登录或创建云端账号后，可在安卓和 Windows 使用同一邮箱；本机资料会按账号隔离。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
@@ -1209,7 +1194,12 @@ class LibraryPage extends ConsumerWidget {
                   icon: const Icon(Icons.delete_outline),
                 ),
           child: entries.isEmpty
-              ? EmptyState(icon: Icons.inbox_outlined, compact: true, title: emptyTitle, message: emptyMessage)
+              ? EmptyState(
+                  icon: Icons.inbox_outlined,
+                  compact: true,
+                  title: emptyTitle,
+                  message: emptyMessage,
+                )
               : ListView.separated(
                   padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
                   itemCount: entries.length,
@@ -1257,7 +1247,9 @@ class HistoryPage extends ConsumerWidget {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
             child: entries.isEmpty
-                ? const EmptyState(icon: Icons.inbox_outlined, compact: true,
+                ? const EmptyState(
+                    icon: Icons.inbox_outlined,
+                    compact: true,
                     title: '还没有观看记录',
                     message: '从详情页播放任意一集后，这里会记录番剧和集数。',
                   )
@@ -1357,7 +1349,9 @@ class _HistoryListTile extends StatelessWidget {
                       value: progress,
                       minHeight: 4,
                       borderRadius: BorderRadius.circular(4),
-                      backgroundColor: Theme.of(context).colorScheme.outlineVariant,
+                      backgroundColor: Theme.of(
+                        context,
+                      ).colorScheme.outlineVariant,
                       color: AppColors.primary,
                     ),
                   ],
@@ -1624,8 +1618,11 @@ class MiscSettingsPage extends ConsumerWidget {
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
-                  const SettingsReadonlyRow(title: '离线下载', value: '支持单文件与未加密 HLS VOD'),
-                  const SettingsReadonlyRow(title: '自动更新', value: '等待配置正式发布源'),
+                  const SettingsReadonlyRow(
+                    title: '离线下载',
+                    value: '支持常见视频文件与未加密点播流',
+                  ),
+                  const SettingsReadonlyRow(title: '自动更新', value: '正式版发布后可开启'),
                   const SettingsReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
               ),
@@ -1653,7 +1650,10 @@ class VersionInfoPage extends StatelessWidget {
             children: [
               SettingsCard(
                 children: [
-                  SettingsReadonlyRow(title: '应用', value: info?.appName ?? 'Zeluna'),
+                  SettingsReadonlyRow(
+                    title: '应用',
+                    value: info?.appName ?? 'Zeluna',
+                  ),
                   SettingsReadonlyRow(
                     title: '版本',
                     value: info == null
@@ -1662,15 +1662,15 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                   const SettingsReadonlyRow(
                     title: '内容资料',
-                    value: '番剧 / 剧集 / 电影 / 中文资料增强',
+                    value: '番剧 / 剧集 / 电影',
                   ),
                   const SettingsReadonlyRow(
                     title: '播放能力',
-                    value: '统一聚合后端 / 网络直链 / 本地文件',
+                    value: '在线播放 / 网络直链 / 本地文件',
                   ),
                   const SettingsReadonlyRow(
                     title: '播放器',
-                    value: 'media_kit · YouTube/B站式控制层',
+                    value: '进度条、倍速、弹幕与全屏控制',
                   ),
                 ],
               ),
@@ -1748,7 +1748,9 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
             ),
             const SizedBox(height: 14),
             if (state.feedbacks.isEmpty)
-              const EmptyState(icon: Icons.inbox_outlined, compact: true,
+              const EmptyState(
+                icon: Icons.inbox_outlined,
+                compact: true,
                 title: '还没有反馈记录',
                 message: '提交后会保存在本地，方便你后续整理问题。',
               )
@@ -1777,7 +1779,6 @@ class _FeedbackPageState extends ConsumerState<FeedbackPage> {
     _showToast(context, '已保存到本地反馈箱');
   }
 }
-
 
 class _ProfileScaffold extends StatelessWidget {
   const _ProfileScaffold({
@@ -1876,7 +1877,11 @@ class _ProfileMiniRail extends StatelessWidget {
       width: 72,
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: Border(right: BorderSide(color: Theme.of(context).colorScheme.outlineVariant)),
+        border: Border(
+          right: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
       ),
       child: Column(
         children: [
@@ -1898,10 +1903,6 @@ class _ProfileMiniRail extends StatelessWidget {
     );
   }
 }
-
-
-
-
 
 class _SliderRow extends StatelessWidget {
   const _SliderRow({
@@ -2039,10 +2040,7 @@ class _LibraryTile extends StatelessWidget {
             entry.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: context.ink,
-              fontWeight: FontWeight.w800,
-            ),
+            style: TextStyle(color: context.ink, fontWeight: FontWeight.w800),
           ),
           subtitle: Text(
             entry.note.isEmpty
@@ -2073,7 +2071,6 @@ class _PosterThumb extends StatelessWidget {
     );
   }
 }
-
 
 class _KeywordEditor extends ConsumerStatefulWidget {
   const _KeywordEditor({required this.settings});
@@ -2112,7 +2109,11 @@ class _KeywordEditorState extends ConsumerState<_KeywordEditor> {
             decoration: const InputDecoration(labelText: '屏蔽词，用逗号分隔'),
           ),
         ),
-        SettingsActionRow(icon: Icons.save_outlined, title: '保存屏蔽词', onTap: _save),
+        SettingsActionRow(
+          icon: Icons.save_outlined,
+          title: '保存屏蔽词',
+          onTap: _save,
+        ),
       ],
     );
   }

@@ -1,4 +1,8 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -191,17 +195,83 @@ class AsyncAnimeGate extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(animeControllerProvider);
     return async.when(
-      data: (state) => builder(context, state),
-      loading: () => const Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator()),
-      ),
+      data: (state) => _RestoreStartupSystemUi(child: builder(context, state)),
+      loading: () => const ZelunaStartupView(),
       error: (error, stackTrace) => Scaffold(
         backgroundColor: Colors.black,
         body: Center(
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 360),
             child: const Text('内容暂时加载失败，请稍后重试。', textAlign: TextAlign.center),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+bool _startupSystemUiRestored = false;
+
+class _RestoreStartupSystemUi extends StatefulWidget {
+  const _RestoreStartupSystemUi({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_RestoreStartupSystemUi> createState() =>
+      _RestoreStartupSystemUiState();
+}
+
+class _RestoreStartupSystemUiState extends State<_RestoreStartupSystemUi> {
+  @override
+  void initState() {
+    super.initState();
+    if (_startupSystemUiRestored) return;
+    _startupSystemUiRestored = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (kIsWeb ||
+          (defaultTargetPlatform != TargetPlatform.android &&
+              defaultTargetPlatform != TargetPlatform.iOS)) {
+        return;
+      }
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+class ZelunaStartupView extends StatelessWidget {
+  const ZelunaStartupView({super.key});
+
+  static const assetPath = 'assets/brand/splash/zeluna_android_splash.png';
+
+  @override
+  Widget build(BuildContext context) {
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Color(0xFF14181D),
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+        systemNavigationBarColor: Color(0xFF14181D),
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
+        backgroundColor: const Color(0xFF14181D),
+        body: Semantics(
+          label: 'Zeluna 正在启动',
+          image: true,
+          child: const SizedBox.expand(
+            child: Image(
+              key: ValueKey<String>('zeluna-startup-image'),
+              image: AssetImage(assetPath),
+              fit: BoxFit.cover,
+              alignment: Alignment.center,
+              filterQuality: FilterQuality.high,
+              gaplessPlayback: true,
+            ),
           ),
         ),
       ),

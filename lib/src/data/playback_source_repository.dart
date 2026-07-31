@@ -205,12 +205,12 @@ class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
         id: 'placeholder:${subject.id}:${episode.id}',
         episodeId: episode.id,
         providerId: 'custom',
-        providerName: '待接入源',
+        providerName: '暂无来源',
         title: '${subject.title} - 第${episode.number}集',
-        quality: '待接入',
-        format: 'HLS/MP4',
+        quality: '暂无',
+        format: '视频',
         available: false,
-        message: '这里是播放源接入点。后续只需要按当前 episode 返回线路列表即可。',
+        message: '暂时没有可用的播放地址。',
       ),
     ];
   }

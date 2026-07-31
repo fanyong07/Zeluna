@@ -153,6 +153,8 @@ class RulePlugin {
       'drpy-js' ||
       'android-csp' ||
       'animeko-web-selector' ||
+      'aikanbot-api' ||
+      'sorani-api' ||
       'tvbox-json-api' ||
       'tvbox-xml-api' => true,
       _ => false,
@@ -168,6 +170,8 @@ class RulePlugin {
       'drpy-js' => _hasCompleteDrpyConfig(this),
       'android-csp' => _hasCompleteAndroidCspConfig(this),
       'animeko-web-selector' => _hasCompleteAnimekoConfig(this),
+      'aikanbot-api' => _hasHttpEndpoint(baseUrl),
+      'sorani-api' => _hasHttpEndpoint(baseUrl),
       'tvbox-json-api' || 'tvbox-xml-api' => _hasHttpEndpoint(baseUrl),
       _ => false,
     };
@@ -397,6 +401,10 @@ bool _hasCompleteAnimekoConfig(RulePlugin rule) {
       config.subjectIndexed.selectNames,
       config.subjectIndexed.selectLinks,
     ]),
+    'json-path-indexed' => _allPresent([
+      config.subjectJsonPathIndexed.selectNames,
+      config.subjectJsonPathIndexed.selectLinks,
+    ]),
     _ => config.subjectA.selectLists.trim().isNotEmpty,
   };
   final hasEpisodeSelector = switch (config.channelFormatId.toLowerCase()) {
@@ -448,6 +456,7 @@ class AnimekoWebSelectorConfig {
     this.defaultResolution = '',
     this.subjectA = const AnimekoSubjectAConfig(),
     this.subjectIndexed = const AnimekoSubjectIndexedConfig(),
+    this.subjectJsonPathIndexed = const AnimekoSubjectJsonPathIndexedConfig(),
     this.channelFlattened = const AnimekoChannelFlattenedConfig(),
     this.channelNoChannel = const AnimekoChannelNoChannelConfig(),
     this.enableNestedUrl = false,
@@ -467,6 +476,7 @@ class AnimekoWebSelectorConfig {
   final String defaultResolution;
   final AnimekoSubjectAConfig subjectA;
   final AnimekoSubjectIndexedConfig subjectIndexed;
+  final AnimekoSubjectJsonPathIndexedConfig subjectJsonPathIndexed;
   final AnimekoChannelFlattenedConfig channelFlattened;
   final AnimekoChannelNoChannelConfig channelNoChannel;
   final bool enableNestedUrl;
@@ -487,6 +497,7 @@ class AnimekoWebSelectorConfig {
     'defaultResolution': defaultResolution,
     'subjectA': subjectA.toJson(),
     'subjectIndexed': subjectIndexed.toJson(),
+    'subjectJsonPathIndexed': subjectJsonPathIndexed.toJson(),
     'channelFlattened': channelFlattened.toJson(),
     'channelNoChannel': channelNoChannel.toJson(),
     'enableNestedUrl': enableNestedUrl,
@@ -500,6 +511,7 @@ class AnimekoWebSelectorConfig {
   factory AnimekoWebSelectorConfig.fromJson(Map<String, dynamic> json) {
     final subjectAJson = json['subjectA'];
     final subjectIndexedJson = json['subjectIndexed'];
+    final subjectJsonPathIndexedJson = json['subjectJsonPathIndexed'];
     final channelFlattenedJson = json['channelFlattened'];
     final channelNoChannelJson = json['channelNoChannel'];
     return AnimekoWebSelectorConfig(
@@ -519,6 +531,11 @@ class AnimekoWebSelectorConfig {
               subjectIndexedJson.cast<String, dynamic>(),
             )
           : const AnimekoSubjectIndexedConfig(),
+      subjectJsonPathIndexed: subjectJsonPathIndexedJson is Map
+          ? AnimekoSubjectJsonPathIndexedConfig.fromJson(
+              subjectJsonPathIndexedJson.cast<String, dynamic>(),
+            )
+          : const AnimekoSubjectJsonPathIndexedConfig(),
       channelFlattened: channelFlattenedJson is Map
           ? AnimekoChannelFlattenedConfig.fromJson(
               channelFlattenedJson.cast<String, dynamic>(),
@@ -580,6 +597,34 @@ class AnimekoSubjectIndexedConfig {
 
   factory AnimekoSubjectIndexedConfig.fromJson(Map<String, dynamic> json) {
     return AnimekoSubjectIndexedConfig(
+      selectNames: json['selectNames']?.toString() ?? '',
+      selectLinks: json['selectLinks']?.toString() ?? '',
+      preferShorterName: _boolFromJson(json['preferShorterName']),
+    );
+  }
+}
+
+class AnimekoSubjectJsonPathIndexedConfig {
+  const AnimekoSubjectJsonPathIndexedConfig({
+    this.selectNames = '',
+    this.selectLinks = '',
+    this.preferShorterName = false,
+  });
+
+  final String selectNames;
+  final String selectLinks;
+  final bool preferShorterName;
+
+  Map<String, dynamic> toJson() => {
+    'selectNames': selectNames,
+    'selectLinks': selectLinks,
+    'preferShorterName': preferShorterName,
+  };
+
+  factory AnimekoSubjectJsonPathIndexedConfig.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    return AnimekoSubjectJsonPathIndexedConfig(
       selectNames: json['selectNames']?.toString() ?? '',
       selectLinks: json['selectLinks']?.toString() ?? '',
       preferShorterName: _boolFromJson(json['preferShorterName']),

@@ -70,6 +70,14 @@ void main() {
     expect(tester.takeException(), isNull);
     final unifiedScroll = find.byKey(const ValueKey('detailUnifiedScroll'));
     final hero = find.byKey(const ValueKey('detailHero'));
+    final heroRect = tester.getRect(hero);
+    expect(heroRect.left, closeTo(14, 0.1));
+    expect(430 - heroRect.right, closeTo(14, 0.1));
+    final heroTitle = find.descendant(
+      of: hero,
+      matching: find.text(_subject.title),
+    );
+    expect(tester.getCenter(heroTitle.last).dx, closeTo(215, 1));
     await tester.drag(unifiedScroll, const Offset(0, -520));
     await tester.pumpAndSettle();
 

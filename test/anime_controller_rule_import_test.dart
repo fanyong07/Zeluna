@@ -1265,6 +1265,25 @@ https://stream.example/live/cctv1.m3u8
             .toSet();
         expect(state.rulePlugins.enabledIds, executableInstalledIds);
         expect(state.rulePlugins.enabledIds, isNot(contains(rule.id)));
+
+        final oneExecutableId = executableInstalledIds.first;
+        await controller.setInstalledRulePluginsEnabled({
+          oneExecutableId,
+        }, false);
+        state = container.read(animeControllerProvider).requireValue;
+        expect(state.rulePlugins.enabledIds, isNot(contains(oneExecutableId)));
+        expect(
+          state.rulePlugins.enabledIds,
+          containsAll(executableInstalledIds.difference({oneExecutableId})),
+        );
+
+        await controller.setInstalledRulePluginsEnabled({
+          oneExecutableId,
+          rule.id,
+        }, true);
+        state = container.read(animeControllerProvider).requireValue;
+        expect(state.rulePlugins.enabledIds, contains(oneExecutableId));
+        expect(state.rulePlugins.enabledIds, isNot(contains(rule.id)));
       },
     );
 
@@ -1444,7 +1463,132 @@ https://stream.example/live/cctv1.m3u8
         );
       },
     );
-  }, skip: 'v3 已改为统一后端目录与播放，不再运行客户端规则或直连元数据 API');
+  }, skip: 'v3 已改为统一后端目录与播放，不再运行旧的客户端元数据链路');
+
+  test('startup preserves imported rules and enabled state', () async {
+    final tempDirectory = await Directory.systemTemp.createTemp(
+      'anime-controller-rule-persistence-',
+    );
+    Hive.init(tempDirectory.path);
+    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+    final rule = _duplicateImportRule(
+      id: 'custom:persisted',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 27),
+    );
+    await settings.put('services', _offlineServices.toJson());
+    await settings.put(
+      'rulePlugins',
+      RulePluginState(
+        installedIds: {rule.id},
+        enabledIds: {rule.id},
+        customRules: [rule],
+        repositories: [
+          RuleRepositoryRecord(
+            id: 'url:persisted',
+            name: '持久化仓库',
+            url: 'https://persisted.example/rules.json',
+            importedAt: DateTime(2026, 7, 27),
+            ruleCount: 1,
+          ),
+        ],
+      ).toJson(),
+    );
+    await settings.put('sourceEnabled', {'persisted': true});
+    await settings.close();
+
+    final container = ProviderContainer(
+      overrides: [
+        bangumiMetadataRepositoryProvider.overrideWithValue(
+          _FakeBangumiMetadataRepository(),
+        ),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _EmptySourceCatalogRepository(),
+        ),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      await Hive.close();
+      if (await tempDirectory.exists()) {
+        await tempDirectory.delete(recursive: true);
+      }
+    });
+
+    final state = await container.read(animeControllerProvider.future);
+
+    expect(
+      state.rulePlugins.customRules.map((item) => item.id),
+      contains(rule.id),
+    );
+    expect(state.rulePlugins.installedIds, contains(rule.id));
+    expect(state.rulePlugins.enabledIds, contains(rule.id));
+    expect(state.rulePlugins.repositories.single.name, '持久化仓库');
+    expect(Hive.box<dynamic>('anime.settings.v2').get('sourceEnabled'), {
+      'persisted': true,
+    });
+  });
+
+  test('group bulk switch only changes rules in the requested group', () async {
+    final tempDirectory = await Directory.systemTemp.createTemp(
+      'anime-controller-rule-group-switch-',
+    );
+    Hive.init(tempDirectory.path);
+    final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+    final animeRule = _duplicateImportRule(
+      id: 'custom:anime-group',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 28),
+    );
+    final movieRule = _duplicateImportRule(
+      id: 'custom:movie-group',
+      version: '1.0',
+      updatedAt: DateTime(2026, 7, 28),
+    ).copyWith(contentType: RuleContentType.movie);
+    await settings.put('services', _offlineServices.toJson());
+    await settings.put(
+      'rulePlugins',
+      RulePluginState(
+        installedIds: {animeRule.id, movieRule.id},
+        enabledIds: {animeRule.id, movieRule.id},
+        customRules: [animeRule, movieRule],
+      ).toJson(),
+    );
+    await settings.close();
+
+    final container = ProviderContainer(
+      overrides: [
+        bangumiMetadataRepositoryProvider.overrideWithValue(
+          _FakeBangumiMetadataRepository(),
+        ),
+        sourceCatalogRepositoryProvider.overrideWithValue(
+          const _EmptySourceCatalogRepository(),
+        ),
+      ],
+    );
+    addTearDown(() async {
+      container.dispose();
+      await Hive.close();
+      if (await tempDirectory.exists()) {
+        await tempDirectory.delete(recursive: true);
+      }
+    });
+
+    await container.read(animeControllerProvider.future);
+    final controller = container.read(animeControllerProvider.notifier);
+    await controller.setInstalledRulePluginsEnabled({animeRule.id}, false);
+
+    var state = container.read(animeControllerProvider).requireValue;
+    expect(state.rulePlugins.enabledIds, isNot(contains(animeRule.id)));
+    expect(state.rulePlugins.enabledIds, contains(movieRule.id));
+
+    await controller.setInstalledRulePluginsEnabled({animeRule.id}, true);
+    state = container.read(animeControllerProvider).requireValue;
+    expect(
+      state.rulePlugins.enabledIds,
+      containsAll({animeRule.id, movieRule.id}),
+    );
+  });
 }
 
 RulePlugin _duplicateImportRule({

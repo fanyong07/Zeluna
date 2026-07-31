@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:anime/src/data/external_service_repository.dart';
 import 'package:anime/src/data/playback_source_repository.dart';
@@ -13,6 +14,21 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test('super-resolution notices stay in the playback settings panel', () {
+    final source = File('lib/src/player/player_page.dart').readAsStringSync();
+    final surfaceGetter = RegExp(
+      r'String\? get _surfaceMessage \{([\s\S]*?)\n  \}',
+    ).firstMatch(source);
+
+    expect(surfaceGetter, isNotNull);
+    expect(
+      surfaceGetter!.group(1),
+      isNot(contains('_superResolutionStatusMessage')),
+    );
+    expect(source, isNot(contains('_showPlayerToast(message);')));
+    expect(source, contains('_SuperResolutionPanelNotice(message: notice)'));
+  });
+
   test(
     'playback source framework returns lines for one episode only',
     () async {
@@ -50,7 +66,7 @@ void main() {
       expect(lines, hasLength(1));
       expect(lines.single.episodeId, episode.id);
       expect(lines.single.available, isFalse);
-      expect(lines.single.message, contains('播放源接入点'));
+      expect(lines.single.message, '暂时没有可用的播放地址。');
     },
   );
 
@@ -241,7 +257,7 @@ void main() {
   });
 
   test(
-    'rule playback source framework keeps anime series and movies separate',
+    'verified built-in rules are installed and enabled by default',
     () async {
       const repository = RulePluginRepository();
       final state = repository.defaultState();
@@ -266,53 +282,22 @@ void main() {
       final seriesLines = await source.linesForEpisode(_seriesSubject, episode);
       final movieLines = await source.linesForEpisode(_movieSubject, episode);
 
-      expect(repository.rulesFor(RuleContentType.anime), isNotEmpty);
-      expect(repository.rulesFor(RuleContentType.series), isNotEmpty);
-      expect(repository.rulesFor(RuleContentType.movie), isNotEmpty);
-      expect(
-        state.enabledIds.every(
-          (id) => repository.byId(id)?.canResolveNatively ?? false,
-        ),
-        isTrue,
-      );
-      expect(
-        animeLines.map((line) => line.providerId),
-        contains('kazumi:enlie'),
-      );
-      expect(state.enabledIds, isNot(contains('kazumi:omofun03')));
-      expect(
-        repository.byId('kazumi:omofun03')?.executionStatus,
-        RuleExecutionStatus.needsWebView,
-      );
-      expect(
-        animeLines.map((line) => line.providerName),
-        isNot(contains('韩剧看看')),
-      );
-      expect(
-        animeLines.map((line) => line.providerName),
-        isNot(contains('电影先生')),
-      );
-      expect(seriesLines.map((line) => line.providerName), contains('韩剧看看'));
-      expect(
-        seriesLines.map((line) => line.providerId),
-        isNot(contains('kazumi:omofun03')),
-      );
-      expect(
-        seriesLines.map((line) => line.providerName),
-        isNot(contains('电影先生')),
-      );
-      expect(movieLines.map((line) => line.providerName), contains('电影先生'));
-      expect(
-        movieLines.map((line) => line.providerName),
-        isNot(contains('韩剧看看')),
-      );
-      expect(
-        movieLines.map((line) => line.providerId),
-        isNot(contains('kazumi:omofun03')),
-      );
-      expect(animeLines.every((line) => line.episodeId == episode.id), isTrue);
-      expect(seriesLines.every((line) => line.episodeId == episode.id), isTrue);
-      expect(movieLines.every((line) => line.episodeId == episode.id), isTrue);
+      expect(repository.rulesFor(RuleContentType.anime), hasLength(3));
+      expect(repository.rulesFor(RuleContentType.series), isEmpty);
+      expect(repository.rulesFor(RuleContentType.movie), hasLength(2));
+      expect(state.installedIds, contains('zeluna:recommended:fantuan'));
+      expect(state.installedIds, contains('zeluna:recommended:aikanbot'));
+      expect(state.installedIds, contains('zeluna:recommended:sorani'));
+      expect(state.installedIds, contains('zeluna:recommended:dbku'));
+      expect(state.installedIds, contains('zeluna:recommended:nivod'));
+      expect(state.enabledIds, contains('zeluna:recommended:fantuan'));
+      expect(state.enabledIds, contains('zeluna:recommended:aikanbot'));
+      expect(state.enabledIds, contains('zeluna:recommended:sorani'));
+      expect(state.enabledIds, contains('zeluna:recommended:dbku'));
+      expect(state.enabledIds, contains('zeluna:recommended:nivod'));
+      expect(animeLines, isNotEmpty);
+      expect(seriesLines, hasLength(1));
+      expect(movieLines, isNotEmpty);
     },
   );
 

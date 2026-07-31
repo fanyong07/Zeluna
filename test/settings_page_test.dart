@@ -53,7 +53,9 @@ void main() {
   testWidgets('播放设置开关和选择器会写回 PlaybackSettings', (tester) async {
     final changes = <PlaybackSettings>[];
     await _setViewport(tester, const Size(430, 900));
-    await tester.pumpWidget(_SettingsHarness(onChanged: changes.add));
+    await tester.pumpWidget(
+      _SettingsHarness(compact: true, onChanged: changes.add),
+    );
 
     final superResolution = find.byKey(const ValueKey('setting_switch_超分辨率'));
     await tester.ensureVisible(superResolution);
@@ -66,9 +68,10 @@ void main() {
     await tester.ensureVisible(profile);
     await tester.tap(profile);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('高质量').last);
+    expect(find.byType(BottomSheet), findsNothing);
+    await tester.tap(find.text('动画清晰').last);
     await tester.pumpAndSettle();
-    expect(changes.last.superResolutionProfile, 'quality');
+    expect(changes.last.superResolutionProfile, 'clear');
 
     final autoFullscreen = find.byKey(const ValueKey('setting_switch_自动全屏'));
     await tester.ensureVisible(autoFullscreen);
@@ -80,6 +83,7 @@ void main() {
     await tester.ensureVisible(forward);
     await tester.tap(forward);
     await tester.pumpAndSettle();
+    expect(find.byType(BottomSheet), findsNothing);
     await tester.tap(find.text('30 秒').last);
     await tester.pumpAndSettle();
     expect(changes.last.forwardSeconds, 30);
@@ -120,6 +124,58 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('高级超分可以选择并保存着色器组合', (tester) async {
+    final changes = <PlaybackSettings>[];
+    await _setViewport(tester, const Size(430, 900));
+    await tester.pumpWidget(
+      _SettingsHarness(
+        initialSettings: const PlaybackSettings(
+          superResolution: true,
+          superResolutionProfile: 'advanced',
+        ),
+        onChanged: changes.add,
+      ),
+    );
+
+    final picker = find.byKey(const ValueKey('setting_choice_高级着色器'));
+    await tester.ensureVisible(picker);
+    await tester.tap(picker);
+    await tester.pumpAndSettle();
+    expect(find.text('完成 (0)'), findsOneWidget);
+
+    await tester.tap(find.text('Clamp Highlights'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('完成 (1)'));
+    await tester.pumpAndSettle();
+
+    expect(changes, isNotEmpty);
+    expect(changes.last.superResolutionProfile, 'advanced');
+    expect(changes.last.superResolutionCustomShaders, [
+      'Anime4K_Clamp_Highlights.glsl',
+    ]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('播放器超分状态只显示在右侧播放设置面板', (tester) async {
+    await _setViewport(tester, const Size(430, 900));
+    await tester.pumpWidget(
+      const _SettingsHarness(
+        compact: true,
+        initialSettings: PlaybackSettings(superResolution: true),
+        superResolutionStatus: Text(
+          '画质修复中 · 片源 1920×1080 · 显示区域 1080×608 · '
+          '仅画质修复 · 59.94fps · 动画清晰 · 标准',
+        ),
+      ),
+    );
+
+    expect(find.textContaining('画质修复中'), findsOneWidget);
+    expect(find.textContaining('片源 1920×1080'), findsOneWidget);
+    expect(find.textContaining('显示区域 1080×608'), findsOneWidget);
+    expect(find.textContaining('仅画质修复'), findsOneWidget);
+    expect(find.textContaining('59.94fps'), findsOneWidget);
+  });
+
   testWidgets('移动端和桌面端布局均无溢出', (tester) async {
     await _setViewport(tester, const Size(360, 640));
     await tester.pumpWidget(const _SettingsHarness(compact: true));
@@ -153,12 +209,14 @@ class _SettingsHarness extends StatefulWidget {
     this.compact = false,
     this.line,
     this.onChanged,
+    this.superResolutionStatus,
   });
 
   final PlaybackSettings initialSettings;
   final bool compact;
   final PlaybackLine? line;
   final ValueChanged<PlaybackSettings>? onChanged;
+  final Widget? superResolutionStatus;
 
   @override
   State<_SettingsHarness> createState() => _SettingsHarnessState();
@@ -175,6 +233,7 @@ class _SettingsHarnessState extends State<_SettingsHarness> {
         compact: widget.compact,
         settings: settings,
         line: widget.line,
+        superResolutionStatus: widget.superResolutionStatus,
         onBack: () {},
         onChanged: (value) {
           setState(() => settings = value);

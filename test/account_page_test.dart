@@ -30,8 +30,15 @@ void main() {
     expect(find.text('尚未登录，当前使用独立的游客空间'), findsOneWidget);
     expect(find.text('登录'), findsWidgets);
     expect(find.text('创建新账号'), findsOneWidget);
-    expect(find.textContaining('当前是本机账号系统'), findsOneWidget);
+    expect(find.text('忘记密码'), findsOneWidget);
+    expect(find.textContaining('账号由 Zeluna 云端统一验证'), findsOneWidget);
     expect(find.textContaining('fanyong'), findsNothing);
+
+    await tester.tap(find.text('忘记密码'));
+    await tester.pumpAndSettle();
+    expect(find.text('重置密码'), findsOneWidget);
+    expect(find.text('确认重置'), findsOneWidget);
+    expect(find.textContaining('其他设备上的登录状态会全部失效'), findsOneWidget);
   });
 
   testWidgets('signed-in account page shows profile and security actions', (
@@ -60,27 +67,27 @@ void main() {
     expect(find.text('修改密码'), findsOneWidget);
     expect(find.text('切换账号'), findsOneWidget);
     expect(find.text('退出登录'), findsOneWidget);
-    expect(find.text('删除本机账号'), findsOneWidget);
+    expect(find.text('清除此设备的账号数据'), findsOneWidget);
 
-    await tester.ensureVisible(find.text('删除本机账号'));
+    await tester.ensureVisible(find.text('清除此设备的账号数据'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('删除本机账号'));
+    await tester.tap(find.text('清除此设备的账号数据'));
     await tester.pumpAndSettle();
-    expect(find.text('删除本机账号？'), findsOneWidget);
-    expect(find.text('永久删除'), findsOneWidget);
+    expect(find.text('清除此设备的账号数据？'), findsOneWidget);
+    expect(find.text('确认清除'), findsOneWidget);
     expect(find.text('输入当前密码确认'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
-    expect(find.text('删除本机账号？'), findsNothing);
+    expect(find.text('清除此设备的账号数据？'), findsNothing);
 
-    await tester.tap(find.text('删除本机账号'));
+    await tester.tap(find.text('清除此设备的账号数据'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField).last, 'wrong-password');
-    await tester.tap(find.text('永久删除'));
+    await tester.tap(find.text('确认清除'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(find.text('密码不正确，账号没有删除'), findsOneWidget);
-    expect(find.text('密码不正确，账号没有删除').hitTestable(), findsOneWidget);
+    expect(find.text('密码不正确，数据没有清除'), findsOneWidget);
+    expect(find.text('密码不正确，数据没有清除').hitTestable(), findsOneWidget);
   });
 
   testWidgets('pending account cleanup is visible and retryable', (
@@ -120,7 +127,7 @@ class _SignedInAnimeController extends AnimeController {
 
   @override
   Future<void> deleteCurrentAccount({required String password}) async {
-    throw const AccountException('密码不正确，账号没有删除');
+    throw const AccountException('密码不正确，数据没有清除');
   }
 }
 
@@ -139,6 +146,7 @@ final _account = LocalAccount(
   nickname: '星野',
   createdAt: _now,
   lastLoginAt: _now,
+  cloudAuthenticated: true,
 );
 
 const _subject = AnimeSubject(

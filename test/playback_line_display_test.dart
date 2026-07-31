@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/playback_line_display.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -96,6 +97,30 @@ void main() {
     },
   );
 
+  test('full inventory display keeps unavailable site status visible', () {
+    final inventory = [
+      _line('ready', latencyMs: 120),
+      _line('not-found', available: false),
+    ];
+
+    expect(allPlaybackLinesForDisplay(inventory).map((line) => line.id), [
+      'ready',
+      'not-found',
+    ]);
+  });
+
+  test('one runtime failure retries before the line is quarantined', () {
+    final first = nextPlaybackLineFailureCount(0);
+    final second = nextPlaybackLineFailureCount(first);
+
+    expect(shouldRetryPlaybackLineAfterFailure(first), isTrue);
+    expect(shouldRetryPlaybackLineAfterFailure(second), isFalse);
+    expect(
+      nextPlaybackLineFailureCount(0, definitive: true),
+      playbackLineFailureThreshold,
+    );
+  });
+
   test('local initial line is displayable without a network probe', () async {
     final local = _line('local', url: 'file:///C:/videos/episode.mp4');
     var verificationCalls = 0;
@@ -112,6 +137,71 @@ void main() {
     expect(verified, [local]);
     expect(verificationCalls, 0);
   });
+
+  test(
+    'trusted Zeluna backend line skips duplicate client verification',
+    () async {
+      final line = _line('backend', providerId: 'zeluna:site:iKun');
+      var verificationCalls = 0;
+
+      final verified = await verifyPlaybackLinesBeforeDisplay(
+        [line],
+        verify: (candidate) async {
+          verificationCalls++;
+          return candidate;
+        },
+      );
+
+      expect(verified, [line]);
+      expect(verificationCalls, 0);
+    },
+  );
+
+  test('server verified line can start before background latency probe', () {
+    final trusted = _line('trusted', serverVerified: true);
+    final pendingCandidate = _line(
+      'pending',
+      available: false,
+      requiresClientProbe: true,
+    );
+
+    expect(playbackLineCanStartImmediately(trusted), isTrue);
+    expect(playbackLineCanStartImmediately(pendingCandidate), isFalse);
+    expect(playbackLineLatencyLabel(trusted), '测速中');
+    expect(playbackLineLatencyLabel(pendingCandidate), '检查中');
+  });
+
+  test(
+    'progressive probing checks every line with bounded concurrency',
+    () async {
+      final candidates = List.generate(
+        7,
+        (index) => _line('candidate-$index', available: false),
+      );
+      var active = 0;
+      var maxActive = 0;
+      final verifiedIds = <String>[];
+
+      final results = await probePlaybackLinesProgressively(
+        candidates,
+        maxConcurrent: 3,
+        verify: (line) async {
+          active++;
+          if (active > maxActive) maxActive = active;
+          await Future<void>.delayed(
+            Duration(milliseconds: 8 + (line.id.hashCode.abs() % 4)),
+          );
+          verifiedIds.add(line.id);
+          active--;
+          return _line(line.id, latencyMs: 25);
+        },
+      ).toList();
+
+      expect(results, hasLength(7));
+      expect(verifiedIds.toSet(), candidates.map((line) => line.id).toSet());
+      expect(maxActive, 3);
+    },
+  );
 
   test(
     'verified network line is inserted only after the probe result arrives',
@@ -165,6 +255,102 @@ void main() {
     expect(merged.where((line) => line.id == 'old-a'), isEmpty);
   });
 
+  test(
+    'authoritative refresh keeps measured metadata for the same media URL',
+    () {
+      final measured = _line(
+        'backend-line',
+        latencyMs: 186,
+        clientVerified: true,
+        sizeBytes: 32 * 1024 * 1024,
+        width: 1920,
+        height: 1080,
+        bitrate: 4 * 1000 * 1000,
+        codecs: 'avc1.640028',
+        format: 'HLS',
+        adaptive: true,
+      );
+      final refreshed = _line(
+        'backend-line',
+        format: 'hls',
+        serverVerified: true,
+      );
+
+      final merged = mergePlaybackLineSnapshot(
+        currentLines: [measured],
+        snapshotLines: [refreshed],
+        authoritative: true,
+      );
+
+      expect(merged.single.latency, const Duration(milliseconds: 186));
+      expect(merged.single.sizeBytes, 32 * 1024 * 1024);
+      expect(merged.single.videoWidth, 1920);
+      expect(merged.single.videoHeight, 1080);
+      expect(merged.single.bitrate, 4 * 1000 * 1000);
+      expect(merged.single.codecs, 'avc1.640028');
+      expect(merged.single.adaptive, isTrue);
+      expect(merged.single.serverVerified, isTrue);
+      expect(merged.single.clientVerified, isTrue);
+      expect(merged.single.requiresClientProbe, isFalse);
+    },
+  );
+
+  test('metadata from an expired URL is not copied to its replacement', () {
+    final measured = _line(
+      'backend-line',
+      latencyMs: 186,
+      url: 'https://old.example.com/index.m3u8',
+    );
+    final refreshed = _line(
+      'backend-line',
+      url: 'https://new.example.com/index.m3u8',
+    );
+
+    final merged = mergePlaybackLineSnapshot(
+      currentLines: [measured],
+      snapshotLines: [refreshed],
+      authoritative: true,
+    );
+
+    expect(merged.single.latency, isNull);
+  });
+
+  test(
+    'mid-play interruption switches lines and preserves useful progress',
+    () {
+      const position = Duration(minutes: 18, seconds: 24);
+
+      expect(playbackRecoveryPosition(position), position);
+      expect(
+        shouldSwitchAfterPlaybackInterruption(
+          position: position,
+          hasAlternative: true,
+        ),
+        isTrue,
+      );
+      expect(
+        shouldSwitchAfterPlaybackInterruption(
+          position: position,
+          hasAlternative: false,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('startup failures do not seek or quarantine a line immediately', () {
+    const position = Duration(seconds: 1);
+
+    expect(playbackRecoveryPosition(position), Duration.zero);
+    expect(
+      shouldSwitchAfterPlaybackInterruption(
+        position: position,
+        hasAlternative: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('complete lookup snapshot is authoritative', () {
     final merged = mergePlaybackLineSnapshot(
       currentLines: [_line('optimistic', providerId: 'provider-a')],
@@ -213,6 +399,8 @@ void main() {
     expect(
       nativePlaybackShouldSwitchAtSoftTimeout(
         position: Duration.zero,
+        buffer: Duration.zero,
+        buffering: false,
         hasAlternative: true,
       ),
       isTrue,
@@ -220,6 +408,8 @@ void main() {
     expect(
       nativePlaybackShouldSwitchAtSoftTimeout(
         position: Duration.zero,
+        buffer: Duration.zero,
+        buffering: false,
         hasAlternative: false,
       ),
       isFalse,
@@ -227,6 +417,26 @@ void main() {
     expect(
       nativePlaybackShouldSwitchAtSoftTimeout(
         position: const Duration(milliseconds: 1),
+        buffer: Duration.zero,
+        buffering: false,
+        hasAlternative: true,
+      ),
+      isFalse,
+    );
+    expect(
+      nativePlaybackShouldSwitchAtSoftTimeout(
+        position: Duration.zero,
+        buffer: const Duration(milliseconds: 1),
+        buffering: false,
+        hasAlternative: true,
+      ),
+      isFalse,
+    );
+    expect(
+      nativePlaybackShouldSwitchAtSoftTimeout(
+        position: Duration.zero,
+        buffer: Duration.zero,
+        buffering: true,
         hasAlternative: true,
       ),
       isFalse,
@@ -418,8 +628,28 @@ void main() {
       playbackLineMediaLabel(line),
       '约 50.0 MB · 最高 1920×1080 · HLS · 5.0 Mbps · H.264/AAC',
     );
-    expect(playbackLineLatencyLabel(_line('unknown')), '延迟未知');
+    expect(playbackLineLatencyLabel(_line('unknown')), '速度未知');
     expect(playbackLineMediaLabel(_line('unknown')), contains('大小未知'));
+  });
+
+  test('failed playback labels retain the exact reason and measured delay', () {
+    expect(
+      playbackLineFailureLabel(
+        _line(
+          'forbidden',
+          available: false,
+          latencyMs: 218,
+          message: '视频 CDN 拒绝访问，可能有防盗链或地区限制。',
+        ),
+      ),
+      '访问被拒绝 · 218ms',
+    );
+    expect(
+      playbackLineFailureLabel(
+        _line('segment', available: false, message: '首个媒体分片无法访问'),
+      ),
+      '视频加载失败',
+    );
   });
   group('playbackProviderLabel', () {
     test('内部规则 ID 不会出现在界面，映射为稳定别名', () {
@@ -488,6 +718,10 @@ PlaybackLine _line(
   bool adaptive = false,
   bool estimated = false,
   String? url,
+  bool serverVerified = false,
+  bool requiresClientProbe = false,
+  bool clientVerified = false,
+  String? message,
 }) {
   return PlaybackLine(
     id: id,
@@ -506,6 +740,10 @@ PlaybackLine _line(
     bitrate: bitrate,
     codecs: codecs,
     adaptive: adaptive,
+    serverVerified: serverVerified,
+    requiresClientProbe: requiresClientProbe,
+    clientVerified: clientVerified,
     available: available,
+    message: message,
   );
 }

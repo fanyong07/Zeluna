@@ -14,7 +14,12 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # CORS 允许所有来源（客户端可以是任意设备）
-CORS_ORIGINS = ["*"]
+_cors_value = os.getenv("CORS_ORIGINS", "").strip()
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in _cors_value.split(",")
+    if origin.strip()
+]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -38,6 +43,12 @@ TMDB_READ_ACCESS_TOKEN = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
 
 CATALOG_CACHE_HOURS = max(1, int(os.getenv("CATALOG_CACHE_HOURS", "24")))
 PLAYBACK_CACHE_HOURS = max(1, int(os.getenv("PLAYBACK_CACHE_HOURS", "6")))
+PLAYBACK_PARTIAL_CACHE_MINUTES = max(
+    1, int(os.getenv("PLAYBACK_PARTIAL_CACHE_MINUTES", "10"))
+)
+PLAYBACK_STABLE_LINE_COUNT = max(
+    1, int(os.getenv("PLAYBACK_STABLE_LINE_COUNT", "4"))
+)
 PLAYBACK_NEGATIVE_CACHE_MINUTES = max(
     1, int(os.getenv("PLAYBACK_NEGATIVE_CACHE_MINUTES", "5"))
 )
@@ -46,3 +57,15 @@ SOURCE_MAX_CONCURRENCY = max(1, min(4, int(os.getenv("SOURCE_MAX_CONCURRENCY", "
 
 # 生产环境必须设置。管理端点在未配置时直接不可用，而不是公开暴露。
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+
+# Email account delivery. Credentials belong only in the server environment.
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = max(1, int(os.getenv("SMTP_PORT", "587")))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", "").strip()
+SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Zeluna").strip() or "Zeluna"
+SMTP_USE_TLS = _env_bool("SMTP_USE_TLS", True)
+SMTP_USE_SSL = _env_bool("SMTP_USE_SSL", False)
+EMAIL_DELIVERY_ENABLED = bool(SMTP_HOST and SMTP_FROM_EMAIL)
+LEGACY_ACCOUNT_API_ENABLED = _env_bool("LEGACY_ACCOUNT_API_ENABLED", False)

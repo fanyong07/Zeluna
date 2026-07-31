@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'dart:ui';
 
@@ -16,7 +17,6 @@ import '../domain/subject_content_type.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
-import '../shared_ui/section_scaffold.dart';
 import '../sources/external_source_adapters.dart';
 import 'subject_playability.dart';
 import 'search_ranking.dart';
@@ -211,13 +211,13 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
             selected: _tab,
             onChanged: (tab) => setState(() => _tab = tab),
             onSchedule: () => context.push('/schedule'),
-            onProfile: () => context.push('/profile'),
           ),
-          rightRail: _HomeRightRail(
-            feed: state.homeFeed,
-            state: state,
-            onOpen: _openDetail,
+          compactAction: AppIconButton(
+            icon: Icons.calendar_month_outlined,
+            tooltip: '周期表',
+            onPressed: () => context.push('/schedule'),
           ),
+          rightRail: _HomeRightRail(feed: state.homeFeed, onOpen: _openDetail),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
             progress: _watchProgress(state.history),
@@ -501,6 +501,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
             onChanged: (value) => setState(() => _type = value),
             onRefresh: _reloadSubjects,
           ),
+          showCompactTrailing: false,
           rightRail: _MetadataRightRail(
             state: state,
             kind: widget.kind,
@@ -1022,17 +1023,7 @@ class _MetadataHeader extends StatelessWidget {
               else
                 const ColoredBox(color: AppColors.panel),
               const DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                    colors: [
-                      Color(0xF01B1A18),
-                      Color(0xCC1B1A18),
-                      Color(0x551B1A18),
-                    ],
-                  ),
-                ),
+                decoration: BoxDecoration(gradient: AppOverlays.heroLeading),
               ),
               Padding(
                 padding: EdgeInsets.fromLTRB(
@@ -1239,45 +1230,56 @@ class _InlineFilterPanel extends StatelessWidget {
       for (var y = DateTime.now().year; y >= 2013; y--) '$y年',
     ];
     final compact = MediaQuery.sizeOf(context).width < 760;
+    final rows = <Widget>[
+      _FilterRow(
+        label: '类型',
+        values: typeValues,
+        selected: type,
+        onChanged: onTypeChanged,
+      ),
+      _FilterRow(
+        label: '语言',
+        values: languageValues,
+        selected: language,
+        onChanged: onLanguageChanged,
+      ),
+      _FilterRow(
+        label: '年份',
+        values: years,
+        selected: year,
+        onChanged: onYearChanged,
+      ),
+      _FilterRow(
+        label: '播放',
+        values: _PlaybackFilter.values
+            .map((value) => value.label)
+            .toList(growable: false),
+        selected: playbackFilter.label,
+        onChanged: (value) => onPlaybackFilterChanged(
+          _PlaybackFilter.values.firstWhere((item) => item.label == value),
+        ),
+      ),
+    ];
+    if (compact) {
+      return AppPanel(
+        padding: EdgeInsets.zero,
+        child: ExpansionTile(
+          key: const ValueKey('mobileMetadataFilters'),
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+          title: const Text('筛选'),
+          subtitle: Text(
+            '$type · $language · $year · ${playbackFilter.label}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          children: rows,
+        ),
+      );
+    }
     return AppPanel(
-      padding: EdgeInsets.fromLTRB(
-        compact ? 10 : 14,
-        compact ? 6 : 10,
-        compact ? 10 : 14,
-        compact ? 6 : 10,
-      ),
-      child: Column(
-        children: [
-          _FilterRow(
-            label: '类型',
-            values: typeValues,
-            selected: type,
-            onChanged: onTypeChanged,
-          ),
-          _FilterRow(
-            label: '语言',
-            values: languageValues,
-            selected: language,
-            onChanged: onLanguageChanged,
-          ),
-          _FilterRow(
-            label: '年份',
-            values: years,
-            selected: year,
-            onChanged: onYearChanged,
-          ),
-          _FilterRow(
-            label: '播放',
-            values: _PlaybackFilter.values
-                .map((value) => value.label)
-                .toList(growable: false),
-            selected: playbackFilter.label,
-            onChanged: (value) => onPlaybackFilterChanged(
-              _PlaybackFilter.values.firstWhere((item) => item.label == value),
-            ),
-          ),
-        ],
-      ),
+      padding: EdgeInsets.fromLTRB(14, 10, 14, 10),
+      child: Column(children: rows),
     );
   }
 }
@@ -2090,6 +2092,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         final historyEntry = animeState?.history
             .where((item) => sameSubjectIdentity(item.subject, bundle.subject))
             .firstOrNull;
+        final compact = MediaQuery.sizeOf(context).width < 760;
 
         Future<void> play(AnimeEpisode episode) async {
           final controller = ref.read(animeControllerProvider.notifier);
@@ -2148,7 +2151,12 @@ class _DetailPageState extends ConsumerState<DetailPage> {
               children: [
                 _BlurredBackdrop(subject: bundle.subject),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 6, 0, 24),
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 14 : 24,
+                    compact ? 2 : 6,
+                    compact ? 14 : 0,
+                    24,
+                  ),
                   child: NestedScrollView(
                     key: const ValueKey('detailUnifiedScroll'),
                     headerSliverBuilder: (context, innerBoxIsScrolled) => [
@@ -2212,9 +2220,9 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                         ),
                       ),
                       const SliverToBoxAdapter(child: SizedBox(height: 14)),
-                      const SliverPersistentHeader(
+                      SliverPersistentHeader(
                         pinned: true,
-                        delegate: _DetailTabsHeaderDelegate(),
+                        delegate: _DetailTabsHeaderDelegate(compact: compact),
                       ),
                     ],
                     body: snapshot.connectionState == ConnectionState.waiting
@@ -2262,13 +2270,11 @@ class _HomeToolbar extends StatelessWidget {
     required this.selected,
     required this.onChanged,
     required this.onSchedule,
-    required this.onProfile,
   });
 
   final AnimeHomeTab selected;
   final ValueChanged<AnimeHomeTab> onChanged;
   final VoidCallback onSchedule;
-  final VoidCallback onProfile;
 
   @override
   Widget build(BuildContext context) {
@@ -2304,12 +2310,6 @@ class _HomeToolbar extends StatelessWidget {
           icon: Icons.calendar_month_outlined,
           tooltip: '周期表',
           onTap: onSchedule,
-        ),
-        const SizedBox(width: 8),
-        _ChromeIconButton(
-          icon: Icons.person_outline,
-          tooltip: '我的',
-          onTap: onProfile,
         ),
       ],
     );
@@ -2354,14 +2354,9 @@ class _ChromeIconButton extends StatelessWidget {
 }
 
 class _HomeRightRail extends StatelessWidget {
-  const _HomeRightRail({
-    required this.feed,
-    required this.state,
-    required this.onOpen,
-  });
+  const _HomeRightRail({required this.feed, required this.onOpen});
 
   final AnimeHomeFeed feed;
-  final AnimeState state;
   final ValueChanged<AnimeSubject> onOpen;
 
   @override
@@ -2369,30 +2364,6 @@ class _HomeRightRail extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
       children: [
-        AppPanel(
-          child: Column(
-            children: [
-              const SectionTitle(title: '我的内容'),
-              const SizedBox(height: 12),
-              _PlaylistRow(
-                image: state.following.firstOrNull?.subject.coverUrl,
-                title: '追番',
-                count: state.following.length,
-              ),
-              _PlaylistRow(
-                image: state.favorites.firstOrNull?.subject.coverUrl,
-                title: '收藏',
-                count: state.favorites.length,
-              ),
-              _PlaylistRow(
-                image: state.history.firstOrNull?.subject.coverUrl,
-                title: '观看记录',
-                count: state.history.length,
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
         AppPanel(
           child: Column(
             children: [
@@ -2417,56 +2388,6 @@ class _HomeRightRail extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _PlaylistRow extends StatelessWidget {
-  const _PlaylistRow({
-    required this.image,
-    required this.title,
-    required this.count,
-  });
-
-  final String? image;
-  final String title;
-  final int count;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: SizedBox(
-              width: 46,
-              height: 32,
-              child: PosterArt(coverUrl: image, title: title),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: context.ink,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-          Text(
-            '$count',
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-              color: context.inkMuted,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -2820,13 +2741,7 @@ class _CategoryShortcut extends StatelessWidget {
                   title: label,
                 ),
                 const DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Color(0x661B1A18), Color(0xCC1B1A18)],
-                    ),
-                  ),
+                  decoration: BoxDecoration(gradient: AppOverlays.categoryCard),
                 ),
                 Padding(
                   padding: const EdgeInsets.all(12),
@@ -3148,8 +3063,8 @@ class _TileCloud<T> extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   PosterArt(coverUrl: imageOf(item), title: labelOf(item)),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(color: Color(0xA61B1A18)),
+                  DecoratedBox(
+                    decoration: BoxDecoration(color: AppOverlays.labelPlate(0.65)),
                   ),
                   Align(
                     alignment: Alignment.bottomLeft,
@@ -3247,11 +3162,12 @@ class _HeroCarousel extends StatelessWidget {
                   ],
                 ),
               ),
-              if (safeSubjects.length > 1)
+              // Desktop / wide layout keeps arrow controls; phones rely on
+              // swipe + dots so the poster art stays unobstructed.
+              if (!compact && safeSubjects.length > 1)
                 Positioned(
-                  right: compact ? 12 : 18,
-                  top: compact ? 14 : null,
-                  bottom: compact ? null : 16,
+                  right: 18,
+                  bottom: 16,
                   child: Row(
                     children: [
                       _HeroArrowButton(
@@ -3538,31 +3454,28 @@ class _FilterRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final options = Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (final value in values)
-          FilterChip(
-            label: Text(value),
-            selected: selected == value,
-            onSelected: (_) => onChanged(value),
-            showCheckmark: false,
-            backgroundColor: scheme.surfaceContainerHigh,
-            selectedColor: scheme.primary,
-            side: BorderSide(
-              color: selected == value ? scheme.primary : scheme.outlineVariant,
-              width: selected == value ? 1.4 : 1,
-            ),
-            labelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: selected == value ? scheme.onPrimary : scheme.onSurface,
-              fontWeight: selected == value ? FontWeight.w900 : FontWeight.w700,
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    final chips = <Widget>[
+      for (final value in values)
+        FilterChip(
+          label: Text(value),
+          selected: selected == value,
+          onSelected: (_) => onChanged(value),
+          showCheckmark: false,
+          backgroundColor: scheme.surfaceContainerHigh,
+          selectedColor: scheme.primary,
+          side: BorderSide(
+            color: selected == value ? scheme.primary : scheme.outlineVariant,
+            width: selected == value ? 1.4 : 1,
           ),
-      ],
-    );
+          labelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+            color: selected == value ? scheme.onPrimary : scheme.onSurface,
+            fontWeight: selected == value ? FontWeight.w900 : FontWeight.w700,
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+    ];
+    final options = Wrap(spacing: 8, runSpacing: 8, children: chips);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
@@ -3586,9 +3499,26 @@ class _FilterRow extends StatelessWidget {
             ),
           );
           if (constraints.maxWidth < 620) {
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [labelChip, const SizedBox(height: 9), options],
+            return Row(
+              children: [
+                labelChip,
+                const SizedBox(width: 10),
+                Expanded(
+                  child: SingleChildScrollView(
+                    key: ValueKey('mobileFilter-$label'),
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (var index = 0; index < chips.length; index++) ...[
+                          chips[index],
+                          if (index != chips.length - 1)
+                            const SizedBox(width: 8),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             );
           }
           return Row(
@@ -3637,13 +3567,19 @@ class _DetailHero extends StatelessWidget {
       if (displaySubject.region.isNotEmpty) displaySubject.region,
       if (subject.totalEpisodes > 0) '${subject.totalEpisodes}集全',
     ].join('  |  ');
-    Widget badges() => Wrap(
+    final summary = displaySubject.summary.trim();
+    // Same rule as the home hero: placeholder blurbs never earn banner space.
+    final hasSummary = summary.isNotEmpty && !summary.startsWith('暂无');
+    Widget badges({required bool compact}) => Wrap(
+      alignment: compact ? WrapAlignment.center : WrapAlignment.start,
       spacing: 8,
       runSpacing: 8,
       children: [
         if (backendManaged || subjectPlaybackLabel(subject).isNotEmpty)
           SmallBadge(
-            label: backendManaged ? '统一片源' : subjectPlaybackLabel(subject),
+            label: backendManaged
+                ? '在线可播'
+                : subjectPlaybackLabel(subject),
             active: backendManaged || directlyPlayable,
           ),
         SmallBadge(
@@ -3659,12 +3595,13 @@ class _DetailHero extends StatelessWidget {
     );
 
     Widget actions({required bool compact}) => Wrap(
+      alignment: compact ? WrapAlignment.center : WrapAlignment.start,
       spacing: 10,
       runSpacing: 8,
       children: [
         AccentButton(
           icon: Icons.play_arrow_rounded,
-          label: directlyPlayable ? '立即播放' : '查找自定义线路',
+          label: directlyPlayable ? '立即播放' : '查找线路',
           onTap: onPlay,
           compact: compact,
         ),
@@ -3693,14 +3630,17 @@ class _DetailHero extends StatelessWidget {
     );
 
     Widget information({required bool compact}) => Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: compact
+          ? CrossAxisAlignment.center
+          : CrossAxisAlignment.start,
       children: [
-        badges(),
+        badges(compact: compact),
         const SizedBox(height: 12),
         Text(
           subject.title,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
+          textAlign: compact ? TextAlign.center : TextAlign.start,
           style:
               (compact
                       ? Theme.of(context).textTheme.headlineMedium
@@ -3715,21 +3655,25 @@ class _DetailHero extends StatelessWidget {
           metadata,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
+          textAlign: compact ? TextAlign.center : TextAlign.start,
           style: Theme.of(context).textTheme.titleSmall?.copyWith(
             color: AppColors.theaterMuted,
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(height: 10),
-        Text(
-          displaySubject.summary,
-          maxLines: compact ? 2 : 3,
-          overflow: TextOverflow.ellipsis,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: AppColors.theaterInk,
-            height: 1.45,
+        if (hasSummary) ...[
+          const SizedBox(height: 10),
+          Text(
+            summary,
+            maxLines: compact ? 2 : 3,
+            overflow: TextOverflow.ellipsis,
+            textAlign: compact ? TextAlign.center : TextAlign.start,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: AppColors.theaterInk,
+              height: 1.45,
+            ),
           ),
-        ),
+        ],
         const Spacer(),
         actions(compact: compact),
       ],
@@ -3738,14 +3682,19 @@ class _DetailHero extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 720;
+        final textScale = MediaQuery.textScalerOf(context).scale(1);
+        // Without a real summary the banner can sit tighter on phones.
+        final compactHeight = (hasSummary
+                ? 360 + math.max(0, textScale - 1) * 72
+                : 300 + math.max(0, textScale - 1) * 56)
+            .toDouble();
         return SizedBox(
-          height: compact ? 360 : 292,
+          height: compact ? compactHeight : 292,
           child: AppPanel(
             padding: EdgeInsets.zero,
-            borderColor: AppColors.borderBright,
-            color: AppColors.panel.withValues(alpha: 0.72),
+            borderColor: Theme.of(context).colorScheme.outlineVariant,
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(AppRadius.lg),
               child: Stack(
                 fit: StackFit.expand,
                 children: [
@@ -3758,21 +3707,9 @@ class _DetailHero extends StatelessWidget {
                   ),
                   DecoratedBox(
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: compact
-                            ? const [Color(0xE61B1A18), Color(0xB81B1A18)]
-                            : const [
-                                Color(0xF21B1A18),
-                                Color(0xAA1B1A18),
-                                Color(0x441B1A18),
-                              ],
-                        begin: compact
-                            ? Alignment.bottomCenter
-                            : Alignment.centerLeft,
-                        end: compact
-                            ? Alignment.topCenter
-                            : Alignment.centerRight,
-                      ),
+                      gradient: compact
+                          ? AppOverlays.heroCompact
+                          : AppOverlays.heroDetailWide,
                     ),
                   ),
                   Padding(
@@ -3786,7 +3723,9 @@ class _DetailHero extends StatelessWidget {
                                 width: 154,
                                 height: 220,
                                 child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(8),
+                                  borderRadius: BorderRadius.circular(
+                                    AppRadius.md,
+                                  ),
                                   child: PosterArt(
                                     coverUrl: subject.coverUrl,
                                     title: subject.title,
@@ -3892,25 +3831,38 @@ class _DetailRightRail extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 14),
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '简介'),
-              const SizedBox(height: 10),
-              Text(
-                _publicSubjectMetadata(context, bundle.subject).summary,
-                maxLines: 7,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: context.inkMuted,
-                  height: 1.45,
+        Builder(
+          builder: (context) {
+            final railSummary =
+                _publicSubjectMetadata(context, bundle.subject).summary.trim();
+            final hasRailSummary =
+                railSummary.isNotEmpty && !railSummary.startsWith('暂无');
+            if (!hasRailSummary) return const SizedBox.shrink();
+            return Column(
+              children: [
+                AppPanel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SectionTitle(title: '简介'),
+                      const SizedBox(height: 10),
+                      Text(
+                        railSummary,
+                        maxLines: 7,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: context.inkMuted,
+                          height: 1.45,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
+                const SizedBox(height: 14),
+              ],
+            );
+          },
         ),
-        const SizedBox(height: 14),
         AppPanel(
           child: Column(
             children: [
@@ -3937,29 +3889,62 @@ class _DetailTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AppPanel(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      color: AppColors.panel.withValues(alpha: 0.86),
-      child: const TabBar(
-        isScrollable: true,
-        tabAlignment: TabAlignment.start,
-        dividerColor: Colors.transparent,
-        tabs: [
-          Tab(icon: Icon(Icons.article_outlined), text: '简介'),
-          Tab(icon: Icon(Icons.grid_view_rounded), text: '选集'),
-          Tab(icon: Icon(Icons.person_outline), text: '角色'),
-          Tab(icon: Icon(Icons.badge_outlined), text: '制作人员'),
-          Tab(icon: Icon(Icons.star_outline), text: '推荐'),
-        ],
+    final scheme = Theme.of(context).colorScheme;
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    // Flat underline tabs only — no rounded dark card behind the labels.
+    // That card read as a second bottom bar on phones.
+    return TabBar(
+      isScrollable: true,
+      tabAlignment: TabAlignment.start,
+      dividerColor: scheme.outlineVariant.withValues(alpha: 0.55),
+      indicatorSize: TabBarIndicatorSize.label,
+      indicatorWeight: 2.5,
+      indicatorColor: scheme.primary,
+      labelColor: scheme.primary,
+      unselectedLabelColor: scheme.onSurfaceVariant,
+      overlayColor: WidgetStatePropertyAll(
+        scheme.primary.withValues(alpha: 0.08),
       ),
+      labelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+        fontWeight: FontWeight.w800,
+      ),
+      unselectedLabelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+        fontWeight: FontWeight.w600,
+      ),
+      labelPadding: EdgeInsets.symmetric(horizontal: compact ? 14 : 18),
+      tabs: [
+        Tab(
+          height: compact ? 44 : 52,
+          text: '简介',
+        ),
+        Tab(
+          height: compact ? 44 : 52,
+          text: '选集',
+        ),
+        Tab(
+          height: compact ? 44 : 52,
+          text: '角色',
+        ),
+        Tab(
+          height: compact ? 44 : 52,
+          text: '职员',
+        ),
+        Tab(
+          height: compact ? 44 : 52,
+          text: '推荐',
+        ),
+      ],
     );
   }
 }
 
 class _DetailTabsHeaderDelegate extends SliverPersistentHeaderDelegate {
-  const _DetailTabsHeaderDelegate();
+  const _DetailTabsHeaderDelegate({required this.compact});
 
-  static const _extent = 84.0;
+  final bool compact;
+
+  /// Text-only row; no icon stack, no card chrome.
+  double get _extent => compact ? 48.0 : 56.0;
 
   @override
   double get minExtent => _extent;
@@ -3973,17 +3958,21 @@ class _DetailTabsHeaderDelegate extends SliverPersistentHeaderDelegate {
     double shrinkOffset,
     bool overlapsContent,
   ) {
+    final scheme = Theme.of(context).colorScheme;
+    // Match page background so sticky tabs don't paint a floating slab.
     return ColoredBox(
-      color: Theme.of(context).scaffoldBackgroundColor.withValues(alpha: 0.96),
-      child: const Padding(
-        padding: EdgeInsets.only(bottom: 12),
+      color: scheme.surface.withValues(alpha: overlapsContent ? 0.98 : 0.92),
+      child: const Align(
+        alignment: Alignment.bottomCenter,
         child: _DetailTabs(),
       ),
     );
   }
 
   @override
-  bool shouldRebuild(covariant _DetailTabsHeaderDelegate oldDelegate) => false;
+  bool shouldRebuild(covariant _DetailTabsHeaderDelegate oldDelegate) {
+    return oldDelegate.compact != compact;
+  }
 }
 
 class _DetailInfo extends StatelessWidget {
@@ -3994,39 +3983,62 @@ class _DetailInfo extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final subject = _publicSubjectMetadata(context, bundle.subject);
+    final summary = subject.summary.trim();
+    final hasSummary = summary.isNotEmpty && !summary.startsWith('暂无');
+    final categories = subject.categories
+        .map((item) => item.name.trim())
+        .where((name) => name.isNotEmpty)
+        .toList(growable: false);
+    final tags = subject.tags
+        .map((item) => item.name.trim())
+        .where((name) => name.isNotEmpty)
+        .toList(growable: false);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 0, 8, 120),
       children: [
         AppPanel(
-          child: Text(
-            subject.summary,
-            style: Theme.of(
-              context,
-            ).textTheme.titleMedium?.copyWith(color: context.ink, height: 1.45),
+          child: hasSummary
+              ? Text(
+                  summary,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: context.ink,
+                    height: 1.45,
+                  ),
+                )
+              : EmptyState(
+                  icon: Icons.article_outlined,
+                  title: '暂无简介',
+                  message: '这部作品还没有可用的中文简介。',
+                  compact: true,
+                ),
+        ),
+        if (categories.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          const _BlockTitle('分类'),
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              for (final name in categories) _Chip(label: name, selected: true),
+            ],
           ),
-        ),
-        const SizedBox(height: 18),
-        const _BlockTitle('分类'),
-        Wrap(
-          spacing: 10,
-          runSpacing: 8,
-          children: [
-            for (final category in subject.categories)
-              _Chip(label: category.name, selected: true),
-          ],
-        ),
-        const SizedBox(height: 18),
-        const _BlockTitle('标签'),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final tag in subject.tags.take(32))
-              _Chip(
-                label: tag.count > 0 ? '${tag.name}  ${tag.count}' : tag.name,
-              ),
-          ],
-        ),
+        ],
+        if (tags.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          const _BlockTitle('标签'),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final tag in subject.tags.take(32))
+                _Chip(
+                  label: tag.count > 0
+                      ? '${tag.name}  ${tag.count}'
+                      : tag.name,
+                ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -4040,64 +4052,69 @@ class _EpisodeGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GridView.builder(
-      key: const ValueKey('detailEpisodeGrid'),
-      padding: const EdgeInsets.fromLTRB(0, 0, 8, 120),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: (MediaQuery.sizeOf(context).width / 252).floor().clamp(
-          2,
-          6,
-        ),
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 10,
-        childAspectRatio: 4.2,
-      ),
-      itemCount: bundle.episodes.length,
-      itemBuilder: (context, index) {
-        final episode = bundle.episodes[index];
-        return InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: () => onPlay(episode),
-          child: AppPanel(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            color: index == 0
-                ? Theme.of(context).colorScheme.primaryContainer
-                : AppColors.panel,
-            borderColor: index == 0
-                ? Theme.of(context).colorScheme.primary
-                : AppColors.border,
-            child: Row(
-              children: [
-                Text(
-                  '${episode.number}',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: index == 0
-                        ? Theme.of(context).colorScheme.primary
-                        : Theme.of(context).colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    episode.title.trim().isEmpty
-                        ? '第${episode.number}集'
-                        : episode.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurface,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-                Icon(
-                  Icons.play_arrow_rounded,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-              ],
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = (constraints.maxWidth / 210).floor().clamp(1, 6);
+        return GridView.builder(
+          key: const ValueKey('detailEpisodeGrid'),
+          padding: const EdgeInsets.fromLTRB(0, 0, 0, 120),
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            mainAxisExtent: 58,
           ),
+          itemCount: bundle.episodes.length,
+          itemBuilder: (context, index) {
+            final episode = bundle.episodes[index];
+            final scheme = Theme.of(context).colorScheme;
+            return InkWell(
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              onTap: () => onPlay(episode),
+              child: AppPanel(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                color: index == 0
+                    ? scheme.primaryContainer
+                    : scheme.surfaceContainer,
+                borderColor:
+                    index == 0 ? scheme.primary : scheme.outlineVariant,
+                child: Row(
+                  children: [
+                    Text(
+                      '${episode.number}',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: index == 0
+                            ? scheme.primary
+                            : scheme.onSurfaceVariant,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        episode.title.trim().isEmpty
+                            ? '第${episode.number}集'
+                            : episode.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurface,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      Icons.play_arrow_rounded,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
         );
       },
     );

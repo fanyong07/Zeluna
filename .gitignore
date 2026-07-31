@@ -51,15 +51,26 @@ app.*.map.json
 # Local agent, browser and verification artifacts
 .claude/
 .codex/
+.codex_tmp/
+.codex_tmp_readme_check.txt
+*codex_tmp_readme_check.txt
 .playwright-cli/
 scratchpad/
 artifacts/
 dist/
 output/
+release/
+.vscode/
+
+# Local helper scripts used only while publishing documentation
+tool/_push_readme*.ps1
 
 # Local brand concept iterations; only the selected anime_logo_* assets ship.
 assets/brand/zeluna_anime_logo_app_icon_v*.png
 assets/brand/zeluna_logo_*.png
+assets/brand/zeluna_eye_logo_transparent_v*.png
+assets/brand/splash/**
+!assets/brand/splash/zeluna_android_splash.png
 
 # Local Android/Gradle caches
 android/.gradle/

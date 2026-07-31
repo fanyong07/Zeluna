@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../accounts/local_account_repository.dart';
+import '../accounts/cloud_account_repository.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
@@ -32,6 +33,60 @@ import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
 import 'zeluna_backend_playback_repository.dart';
+
+class RuleRepositoryRefreshResult {
+  const RuleRepositoryRefreshResult({
+    required this.repositoryCount,
+    required this.refreshedCount,
+    required this.failedCount,
+    required this.ruleCount,
+  });
+
+  final int repositoryCount;
+  final int refreshedCount;
+  final int failedCount;
+  final int ruleCount;
+
+  bool get hasRemoteRepositories => repositoryCount > 0;
+}
+
+/// Runs every supplied playback probe with a small concurrency window and
+/// emits each result as soon as it finishes. This keeps a large route
+/// inventory responsive without creating a request burst.
+Stream<PlaybackLine> probePlaybackLinesProgressively(
+  List<PlaybackLine> lines, {
+  int maxConcurrent = 4,
+  RulePlaybackCancellationToken? cancellationToken,
+  required Future<PlaybackLine> Function(PlaybackLine line) verify,
+}) async* {
+  if (lines.isEmpty ||
+      maxConcurrent <= 0 ||
+      cancellationToken?.isCancelled == true) {
+    return;
+  }
+  var nextIndex = 0;
+  final pending = <int, Future<({int index, PlaybackLine line})>>{};
+
+  void fillWindow() {
+    while (nextIndex < lines.length &&
+        pending.length < maxConcurrent &&
+        cancellationToken?.isCancelled != true) {
+      final index = nextIndex++;
+      pending[index] = verify(
+        lines[index],
+      ).then((line) => (index: index, line: line));
+    }
+  }
+
+  fillWindow();
+  while (pending.isNotEmpty && cancellationToken?.isCancelled != true) {
+    final completed = await Future.any(pending.values);
+    pending.remove(completed.index);
+    if (cancellationToken?.isCancelled == true) return;
+    yield completed.line;
+    fillWindow();
+  }
+}
 
 class _CredentialAccountContext {
   String? _accountId;
@@ -158,6 +213,12 @@ final zelunaBackendHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
   ref.onDispose(client.close);
   return client;
+});
+
+final cloudAccountServiceProvider = Provider<CloudAccountService>((ref) {
+  final repository = CloudAccountRepository();
+  ref.onDispose(repository.close);
+  return repository;
 });
 
 final externalServiceHttpClientProvider = Provider<http.Client>((ref) {
@@ -407,8 +468,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       await _resumePendingRegistration(pendingRegistration);
       recoveredRegistration = pendingRegistration.account;
     }
-    _activeAccount =
-        recoveredRegistration ?? _accountRepository.currentAccount();
+    final cachedAccount =
+        recoveredRegistration ?? _accountRepository.currentCloudAccount();
+    final restoredAccount = await ref
+        .read(cloudAccountServiceProvider)
+        .restoreSession(cachedAccount);
+    if (restoredAccount != null) {
+      await _accountRepository.rememberCloudAccount(restoredAccount);
+      if (recoveredRegistration != null) {
+        await _accountRepository.finalizeRegistration(restoredAccount.id);
+      }
+    } else {
+      await _accountRepository.signOut();
+    }
+    _activeAccount = restoredAccount;
     ref
         .read(_bangumiCredentialAccountContextProvider)
         .selectAccount(_activeAccount?.id);
@@ -417,7 +490,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .selectAccount(_activeAccount?.id);
     final accountSession = LocalAccountSession(
       current: _activeAccount,
-      available: _accountRepository.listAccounts(),
+      available: _accountRepository.listCloudAccounts(),
       hasPendingCleanup: _accountRepository.pendingDeletion() != null,
     );
     final settingsJson = _settings.get(_accountSettingsKey('playback'));
@@ -430,11 +503,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final danmakuJson = _settings.get(_accountSettingsKey('danmaku'));
     final miscJson = _settings.get(_accountSettingsKey('misc'));
     final servicesJson = _settings.get(_accountSettingsKey('services'));
-    // v3 统一后端接管全部内容与播放，迁移时清除旧的本地规则/源状态。
-    await Future.wait([
-      _settings.delete(_accountSettingsKey('rulePlugins')),
-      _settings.delete(_accountSettingsKey('sourceEnabled')),
-    ]);
+    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
     final services = _normalizeServices(
       servicesJson is Map
           ? ExternalServiceSettings.fromJson(
@@ -445,7 +514,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
     final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
-    const rulePlugins = RulePluginState();
+    final rulePlugins = _restoreRulePlugins(rulePluginsJson);
     const sourceCatalog = SourceCatalogState();
     final misc = miscJson is Map
         ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
@@ -782,20 +851,43 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) async {
     if (cancellationToken?.isCancelled ?? false) return const [];
     final accountContextVersion = _accountContextVersion;
+    final backendFuture = _backendLinesForEpisode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+    final ruleFuture = _ruleLinesForEpisode(
+      subject,
+      episode,
+      expandAll: expandAll,
+      cancellationToken: cancellationToken,
+    );
+    // A warm Zeluna cache normally responds in well under a second. Let that
+    // verified inventory start playback immediately instead of holding it
+    // behind the client's multi-rule lookup. The progressive lookup stream
+    // keeps enriching the list after first frame.
+    final backendLines = await backendFuture.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => const <PlaybackLine>[],
+    );
+    if (accountContextVersion != _accountContextVersion ||
+        (cancellationToken?.isCancelled ?? false)) {
+      return const <PlaybackLine>[];
+    }
+    if (backendLines.any(
+      (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
+    )) {
+      return _mergePlaybackLines(backendLines);
+    }
     final results = await Future.wait(<Future<List<PlaybackLine>>>[
-      _backendLinesForEpisode(
-        subject,
-        episode,
+      _probeBackendClientCandidates(
+        backendLines,
         cancellationToken: cancellationToken,
       ),
-      _ruleLinesForEpisode(
-        subject,
-        episode,
-        expandAll: expandAll,
-        cancellationToken: cancellationToken,
-      ),
+      ruleFuture,
     ]);
     final merged = _mergePlaybackLines(<PlaybackLine>[
+      ...backendLines,
       ...results[0],
       ...results[1],
     ]);
@@ -822,12 +914,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final repository = ZelunaBackendPlaybackRepository(
       baseUrl: services.playbackBackendEndpoint,
       client: ref.read(zelunaBackendHttpClientProvider),
-      requestTimeout: const Duration(seconds: 4),
+      requestTimeout: const Duration(seconds: 18),
     );
     return repository
         .linesForEpisode(subject, episode, cancellationToken: cancellationToken)
         .timeout(
-          const Duration(seconds: 8),
+          const Duration(seconds: 20),
           onTimeout: () => const <PlaybackLine>[],
         )
         .onError((_, _) => const <PlaybackLine>[]);
@@ -843,7 +935,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     RulePlaybackCancellationToken? cancellationToken,
   }) {
     final ruleState = state.value?.rulePlugins;
-    if (ruleState == null || ruleState.customRules.isEmpty) {
+    if (ruleState == null) {
       return Future.value(const <PlaybackLine>[]);
     }
     final repository = RulePlaybackSourceRepository(
@@ -865,14 +957,97 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   List<PlaybackLine> _mergePlaybackLines(List<PlaybackLine> lines) {
-    final seen = <String>{};
     final merged = <PlaybackLine>[];
+    final indexes = <String, int>{};
     for (final line in lines) {
       final url = line.url ?? '';
       final key = url.isNotEmpty ? url : '${line.providerId}:${line.id}';
-      if (seen.add(key)) merged.add(line);
+      final previousIndex = indexes[key];
+      if (previousIndex == null) {
+        indexes[key] = merged.length;
+        merged.add(line);
+      } else if (!merged[previousIndex].available && line.available) {
+        merged[previousIndex] = line;
+      }
     }
     return merged;
+  }
+
+  Future<List<PlaybackLine>> _probeBackendClientCandidates(
+    List<PlaybackLine> lines, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final now = DateTime.now();
+    final candidates = lines
+        .where(
+          (line) =>
+              line.requiresClientProbe &&
+              (line.url?.trim().isNotEmpty ?? false) &&
+              (line.expiresAt == null ||
+                  line.expiresAt!.isAfter(
+                    now.add(const Duration(seconds: 15)),
+                  )),
+        )
+        .take(4)
+        .toList(growable: false);
+    if (candidates.isEmpty || cancellationToken?.isCancelled == true) {
+      return const <PlaybackLine>[];
+    }
+    final checked = <PlaybackLine>[];
+    await for (final line in probePlaybackLinesProgressively(
+      candidates,
+      maxConcurrent: 4,
+      cancellationToken: cancellationToken,
+      verify: (line) => verifyPlaybackLine(
+        line,
+        enrichMetadata: false,
+        forceRefresh: true,
+        cancellationToken: cancellationToken,
+      ),
+    )) {
+      checked.add(line);
+      // Candidate-only inventories should open on the first proven route;
+      // the remaining inventory is checked by lineUpdatesForEpisode after the
+      // first frame instead of waiting for the slowest probe in this batch.
+      if (line.available) return <PlaybackLine>[line];
+    }
+    return checked;
+  }
+
+  List<PlaybackLine> _backendLinesNeedingBackgroundProbe(
+    List<PlaybackLine> lines,
+  ) {
+    final refreshThreshold = DateTime.now().add(const Duration(seconds: 15));
+    return lines
+        .where(
+          (line) =>
+              (line.url?.trim().isNotEmpty ?? false) &&
+              (line.requiresClientProbe ||
+                  (line.serverVerified &&
+                      !line.clientVerified &&
+                      line.latency == null)) &&
+              (line.expiresAt == null ||
+                  line.expiresAt!.isAfter(refreshThreshold)),
+        )
+        .toList(growable: false);
+  }
+
+  List<PlaybackLine> _replacePlaybackLine(
+    List<PlaybackLine> lines,
+    PlaybackLine replacement,
+  ) {
+    var replaced = false;
+    final result = <PlaybackLine>[];
+    for (final line in lines) {
+      if (line.id == replacement.id) {
+        if (!replaced) result.add(replacement);
+        replaced = true;
+      } else {
+        result.add(line);
+      }
+    }
+    if (!replaced) result.add(replacement);
+    return result;
   }
 
   ZelunaBackendCatalogRepository? _backendCatalogRepository() {
@@ -932,23 +1107,63 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (accountContextVersion != _accountContextVersion || token.isCancelled) {
       return;
     }
+    final baseLines = _mergePlaybackLines(backendLines);
+    final backendProbeCandidates = _backendLinesNeedingBackgroundProbe(
+      baseLines,
+    );
+    final backendProbeTotal = backendProbeCandidates.isEmpty
+        ? 1
+        : backendProbeCandidates.length;
+    yield PlaybackLineLookupUpdate(
+      lines: baseLines,
+      completedRules: 0,
+      totalRules: backendProbeTotal,
+      phase: PlaybackLineLookupPhase.discovery,
+    );
+    var clientCheckedBaseLines = baseLines;
+    var completedBackendProbes = 0;
+    await for (final probedLine in probePlaybackLinesProgressively(
+      backendProbeCandidates,
+      maxConcurrent: 4,
+      cancellationToken: token,
+      verify: (line) => verifyPlaybackLine(
+        line,
+        enrichMetadata: false,
+        cancellationToken: token,
+      ),
+    )) {
+      if (accountContextVersion != _accountContextVersion ||
+          token.isCancelled) {
+        return;
+      }
+      clientCheckedBaseLines = _replacePlaybackLine(
+        clientCheckedBaseLines,
+        probedLine,
+      );
+      completedBackendProbes++;
+      yield PlaybackLineLookupUpdate(
+        lines: clientCheckedBaseLines,
+        completedRules: completedBackendProbes,
+        totalRules: backendProbeTotal,
+        phase: PlaybackLineLookupPhase.discovery,
+      );
+    }
     final ruleState = state.value?.rulePlugins;
     final hasRules = ruleState != null && ruleState.customRules.isNotEmpty;
     if (!hasRules) {
       yield PlaybackLineLookupUpdate(
-        lines: backendLines,
-        completedRules: 1,
-        totalRules: 1,
+        lines: clientCheckedBaseLines,
+        completedRules: backendProbeTotal,
+        totalRules: backendProbeTotal,
         phase: PlaybackLineLookupPhase.complete,
       );
       return;
     }
-    // 先出后端线路(discovery)，再叠加规则仓库的渐进发现/验证流，
-    // 每次快照与后端线路合并去重后向 UI 推送。
+    // 后端线路先返回，再叠加用户规则仓库的渐进发现/验证流。
     yield PlaybackLineLookupUpdate(
-      lines: backendLines,
-      completedRules: 0,
-      totalRules: 0,
+      lines: clientCheckedBaseLines,
+      completedRules: backendProbeTotal,
+      totalRules: backendProbeTotal,
       phase: PlaybackLineLookupPhase.discovery,
     );
     final repository = RulePlaybackSourceRepository(
@@ -966,11 +1181,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       }
       yield PlaybackLineLookupUpdate(
         lines: _mergePlaybackLines(<PlaybackLine>[
-          ...backendLines,
+          ...clientCheckedBaseLines,
           ...update.lines,
         ]),
-        completedRules: update.completedRules,
-        totalRules: update.totalRules,
+        completedRules: update.completedRules + backendProbeTotal,
+        totalRules: update.totalRules + backendProbeTotal,
         phase: update.phase,
         timedOut: update.timedOut,
         resolvedProviderId: update.resolvedProviderId,
@@ -1018,23 +1233,25 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required String email,
     required String nickname,
     required String password,
+    String verificationCode = '000000',
   }) => _runAccountOperation(() async {
     final current = state.value;
     if (current == null) throw const AccountException('应用状态尚未准备好');
-    _accountRepository.validateNewAccount(
-      email: email,
-      nickname: nickname,
-      password: password,
-    );
+    final account = await ref
+        .read(cloudAccountServiceProvider)
+        .register(
+          email: email,
+          nickname: nickname,
+          password: password,
+          verificationCode: verificationCode,
+        );
     await _quiesceDownloadsForAccountChange();
     await _settings.flush();
     await _library.flush();
     final shouldImportGuestData =
         _activeAccount == null && current.accountSession.available.isEmpty;
-    await _accountRepository.beginRegistration(
-      email: email,
-      nickname: nickname,
-      password: password,
+    await _accountRepository.beginCloudRegistration(
+      account: account,
       importGuestData: shouldImportGuestData,
     );
     final pending = _accountRepository.pendingRegistration();
@@ -1044,19 +1261,45 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _accountRepository.finalizeRegistration(pending.account.id);
   });
 
+  Future<void> requestRegistrationCode(String email) =>
+      ref.read(cloudAccountServiceProvider).requestRegistrationCode(email);
+
+  Future<void> requestPasswordResetCode(String email) =>
+      ref.read(cloudAccountServiceProvider).requestPasswordResetCode(email);
+
+  Future<void> resetAccountPassword({
+    required String email,
+    required String verificationCode,
+    required String newPassword,
+  }) => _runAccountOperation(() async {
+    final normalizedEmail = email.trim().toLowerCase();
+    await ref
+        .read(cloudAccountServiceProvider)
+        .resetPassword(
+          email: normalizedEmail,
+          verificationCode: verificationCode,
+          newPassword: newPassword,
+        );
+    if (_activeAccount?.email != normalizedEmail) return;
+    await ref.read(cloudAccountServiceProvider).logout();
+    await _quiesceDownloadsForAccountChange();
+    await _activateAccount(null);
+  });
+
   Future<void> loginAccount({
     required String email,
     required String password,
   }) => _runAccountOperation(() async {
-    final account = await _accountRepository.login(
-      email: email,
-      password: password,
-    );
+    final account = await ref
+        .read(cloudAccountServiceProvider)
+        .login(email: email, password: password);
+    await _accountRepository.rememberCloudAccount(account);
     await _quiesceDownloadsForAccountChange();
     await _activateAccount(account);
   });
 
   Future<void> signOutAccount() => _runAccountOperation(() async {
+    await ref.read(cloudAccountServiceProvider).logout();
     await _quiesceDownloadsForAccountChange();
     await _activateAccount(null);
   });
@@ -1067,11 +1310,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) => _runAccountOperation(() async {
     final account = _activeAccount;
     if (account == null) throw const AccountException('请先登录账号');
-    await _accountRepository.changePassword(
-      accountId: account.id,
-      currentPassword: currentPassword,
-      newPassword: newPassword,
-    );
+    await ref
+        .read(cloudAccountServiceProvider)
+        .changePassword(
+          currentPassword: currentPassword,
+          newPassword: newPassword,
+        );
   });
 
   Future<void> deleteCurrentAccount({required String password}) =>
@@ -1081,10 +1325,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         if (account == null || current == null) {
           throw const AccountException('请先登录账号');
         }
-        await _accountRepository.verifyAccountPassword(
-          accountId: account.id,
-          password: password,
-        );
+        await ref.read(cloudAccountServiceProvider).verifyPassword(password);
+        await ref.read(cloudAccountServiceProvider).logout();
         await _quiesceDownloadsForAccountChange();
         final latest = state.value;
         final ownedDownloads = List<MediaDownloadTask>.from(
@@ -1106,7 +1348,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             state = AsyncData(
               guest.copyWith(
                 accountSession: LocalAccountSession(
-                  available: _accountRepository.listAccounts(),
+                  available: _accountRepository.listCloudAccounts(),
                   hasPendingCleanup:
                       _accountRepository.pendingDeletion() != null,
                 ),
@@ -1125,7 +1367,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       current.copyWith(
         accountSession: LocalAccountSession(
           current: _activeAccount,
-          available: _accountRepository.listAccounts(),
+          available: _accountRepository.listCloudAccounts(),
           hasPendingCleanup: _accountRepository.pendingDeletion() != null,
         ),
       ),
@@ -1152,9 +1394,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         var session = current.accountSession;
         final account = _activeAccount;
         if (account != null) {
-          final updated = await _accountRepository.updateNickname(
-            account.id,
-            profile.nickname,
+          final cloudUpdated = await ref
+              .read(cloudAccountServiceProvider)
+              .updateNickname(profile.nickname);
+          final updated = await _accountRepository.rememberCloudAccount(
+            cloudUpdated,
           );
           if (_activeAccount?.id != account.id) return;
           _activeAccount = updated;
@@ -1164,7 +1408,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           );
           session = LocalAccountSession(
             current: updated,
-            available: _accountRepository.listAccounts(),
+            available: _accountRepository.listCloudAccounts(),
             hasPendingCleanup: _accountRepository.pendingDeletion() != null,
           );
         }
@@ -1363,6 +1607,66 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
+  Future<void> setInstalledRulePluginsEnabled(
+    Iterable<String> ids,
+    bool enabled,
+  ) async {
+    final current = state.value;
+    if (current == null) return;
+    final targets = ids.toSet().intersection(current.rulePlugins.installedIds);
+    if (targets.isEmpty) return;
+    final enabledIds = {...current.rulePlugins.enabledIds};
+    if (enabled) {
+      enabledIds.addAll(targets);
+    } else {
+      enabledIds.removeAll(targets);
+    }
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(enabledIds: enabledIds),
+    );
+  }
+
+  Future<RuleRepositoryRefreshResult> refreshRuleRepositories() async {
+    final current = state.value;
+    if (current == null) {
+      return const RuleRepositoryRefreshResult(
+        repositoryCount: 0,
+        refreshedCount: 0,
+        failedCount: 0,
+        ruleCount: 0,
+      );
+    }
+
+    // Built-in verified rules ship with the app. Refreshing still installs any
+    // newly added recommendations without changing the user's existing
+    // enable/disable choices.
+    await _updateRulePlugins(_installNewRecommendedRules(current.rulePlugins));
+
+    final urls = current.rulePlugins.repositories
+        .map((record) => record.url.trim())
+        .where((url) => url.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    var refreshedCount = 0;
+    var failedCount = 0;
+    var ruleCount = 0;
+    for (final url in urls) {
+      try {
+        final result = await importRuleRepositoryUrl(url);
+        refreshedCount++;
+        ruleCount += result.installedCount;
+      } catch (_) {
+        failedCount++;
+      }
+    }
+    return RuleRepositoryRefreshResult(
+      repositoryCount: urls.length,
+      refreshedCount: refreshedCount,
+      failedCount: failedCount,
+      ruleCount: ruleCount,
+    );
+  }
+
   Future<void> setAllInstalledRulePluginsEnabled(bool enabled) async {
     final accountId = _activeAccount?.id;
     final current = state.value;
@@ -1521,6 +1825,35 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
     final repository = _ruleRepositoryFor(rulePlugins);
     return repository.normalizeState(rulePlugins);
+  }
+
+  RulePluginState _restoreRulePlugins(Object? value) {
+    if (value is! Map) return const RulePluginRepository().defaultState();
+    try {
+      return _installNewRecommendedRules(
+        _normalizeRulePlugins(
+          RulePluginState.fromJson(value.cast<String, dynamic>()),
+        ),
+      );
+    } catch (_) {
+      return const RulePluginRepository().defaultState();
+    }
+  }
+
+  RulePluginState _installNewRecommendedRules(RulePluginState state) {
+    final repository = _ruleRepositoryFor(state);
+    final defaults = repository.defaultState();
+    final missing = defaults.installedIds.difference(state.installedIds);
+    if (missing.isEmpty) return state;
+    return repository.normalizeState(
+      state.copyWith(
+        installedIds: {...state.installedIds, ...missing},
+        enabledIds: {
+          ...state.enabledIds,
+          ...defaults.enabledIds.intersection(missing),
+        },
+      ),
+    );
   }
 
   Future<RuleImportResult> _importRuleBundle(
@@ -2299,10 +2632,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final servicesJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'services'),
     );
-    await Future.wait([
-      _settings.delete(_accountSettingsKeyFor(accountId, 'rulePlugins')),
-      _settings.delete(_accountSettingsKeyFor(accountId, 'sourceEnabled')),
-    ]);
+    final rulePluginsJson = _settings.get(
+      _accountSettingsKeyFor(accountId, 'rulePlugins'),
+    );
     final misc = miscJson is Map
         ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
         : const MiscSettings();
@@ -2313,7 +2645,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             )
           : const ExternalServiceSettings(),
     );
-    const rulePlugins = RulePluginState();
+    final rulePlugins = _restoreRulePlugins(rulePluginsJson);
     const sourceCatalog = SourceCatalogState();
     final offlineTasks = await _readDownloadTasksFor(accountId);
     final current = state.value;
@@ -2335,7 +2667,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _cancelPlaybackPrefetches();
     final session = LocalAccountSession(
       current: account,
-      available: _accountRepository.listAccounts(),
+      available: _accountRepository.listCloudAccounts(),
       hasPendingCleanup: _accountRepository.pendingDeletion() != null,
     );
     state = AsyncData(
@@ -2430,7 +2762,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (accountId == null || accountId.isEmpty) return;
     if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
     final pendingRegistration = _accountRepository.pendingRegistration();
-    final accountExists = _accountRepository.listAccounts().any(
+    final accountExists = _accountRepository.listCloudAccounts().any(
       (account) => account.id == accountId,
     );
     if (!accountExists && pendingRegistration?.account.id != accountId) {
@@ -2451,7 +2783,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (accountId == null || accountId.isEmpty) return;
     if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
     final pendingRegistration = _accountRepository.pendingRegistration();
-    final accountExists = _accountRepository.listAccounts().any(
+    final accountExists = _accountRepository.listCloudAccounts().any(
       (account) => account.id == accountId,
     );
     if (!accountExists && pendingRegistration?.account.id != accountId) {

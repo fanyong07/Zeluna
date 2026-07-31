@@ -36,12 +36,6 @@ class CommonVodScraper(BaseScraper):
     同时支持电视剧和电影。
     """
 
-    # 已知的免费影视 API 端点
-    VOD_APIS = [
-        "https://api.500403.xyz",       # 原 AniCh 备用 API
-        "https://anich.sends.eu.org",    # 当前 AniCh API
-    ]
-
     # TMDB API (免费, 需要 API key)
     TMDB_API = "https://api.themoviedb.org/3"
     TMDB_KEY = ""  # 用户可自行填入
@@ -71,43 +65,27 @@ class CommonVodScraper(BaseScraper):
 
     @property
     def base_url(self) -> str:
-        return self.VOD_APIS[0]
+        return "https://play.xfvod.pro:8088"
 
     async def search(self, keyword: str) -> list[SubjectResult]:
         """跨多个源搜索电视剧和电影"""
         results = []
         seen_ids = set()
 
-        # 1. 从已知 AniCh 类 API 搜索
-        for api in self.VOD_APIS:
-            try:
-                resp = await self._client.get(
-                    f"{api}/bangumi/search",
-                    params={"keyword": keyword},
-                )
-                if resp.status_code == 200 and resp.content:
-                    try:
-                        # 尝试 protobuf 解析
-                        from ...protobuf_encoder import encode_bangumi_list
-                    except ImportError:
-                        pass
-            except Exception:
-                continue
-
-        # 2. TMDB 搜索 (电影+电视剧)
+        # 1. TMDB 搜索 (电影+电视剧)
         if self.TMDB_KEY:
             try:
                 results += await self._search_tmdb(keyword, seen_ids)
             except Exception as e:
                 logger.error(f"TMDB search error: {e}")
 
-        # 3. TVMaze 搜索 (美剧/英剧)
+        # 2. TVMaze 搜索 (美剧/英剧)
         try:
             results += await self._search_tvmaze(keyword, seen_ids)
         except Exception as e:
             logger.error(f"TVMaze search error: {e}")
 
-        # 4. M3U8 通用解析站搜索
+        # 3. 独立影视站搜索
         try:
             results += await self._search_vod_sites(keyword, seen_ids)
         except Exception as e:
@@ -429,20 +407,7 @@ class CommonVodScraper(BaseScraper):
                 tmdb_id = parts[2]
                 title = parts[3] if len(parts) > 3 else ""
 
-                # 尝试从 AniCh 类 API 查找对应的视频源
-                for api in self.VOD_APIS:
-                    try:
-                        resp = await self._client.get(
-                            f"{api}/bangumi/search",
-                            params={"keyword": title or str(tmdb_id)},
-                        )
-                        if resp.status_code == 200 and len(resp.content) > 10:
-                            # 找到了对应的内容
-                            pass
-                    except Exception:
-                        continue
-
-                # 尝试使用通用的免费影视解析
+                # 从独立站点解析播放候选，不依赖任何聚合服务。
                 if media_type == "movie":
                     lines += await self._search_free_movie_sources(title or str(tmdb_id))
                 else:
@@ -477,30 +442,8 @@ class CommonVodScraper(BaseScraper):
         return lines
 
     async def _search_free_movie_sources(self, title: str) -> list[VideoLine]:
-        """搜索免费电影源"""
-        lines = []
-        # 尝试从几个公开的免费解析接口获取
-        # 这些是通用的 m3u8 解析接口
-        parser_urls = [
-            f"https://app.emmmm.eu.org.cdn.cloudflare.net/parse/m3u8/xp/{title}",
-        ]
-
-        for parser_url in parser_urls:
-            try:
-                resp = await self._client.get(parser_url)
-                if resp.status_code == 200:
-                    text = resp.text
-                    if text.strip().startswith("#EXTM3U"):
-                        lines.append(VideoLine(
-                            url=parser_url,
-                            title=f"免费解析",
-                            format="hls",
-                            source_name=self.name,
-                        ))
-            except Exception:
-                continue
-
-        return lines
+        """元数据条目不借用第三方聚合解析服务生成播放线路。"""
+        return []
 
     async def _search_free_series_sources(
         self, title: str, episode: int
