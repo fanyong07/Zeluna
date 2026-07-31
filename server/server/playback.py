@@ -42,6 +42,8 @@ from .database import (
 
 logger = logging.getLogger(__name__)
 
+_QUICK_CANDIDATE_GRACE_SECONDS = 0.35
+
 
 class PlaybackService:
     def __init__(self, *, session_factory=async_session):
@@ -613,9 +615,25 @@ class PlaybackService:
             producer = asyncio.create_task(produce())
             producer_done = False
             found = False
+            first_usable_at: float | None = None
             try:
                 while not producer_done or tasks:
-                    item = await queue.get()
+                    if first_usable_at is None:
+                        item = await queue.get()
+                    else:
+                        remaining = (
+                            _QUICK_CANDIDATE_GRACE_SECONDS
+                            - (time.monotonic() - first_usable_at)
+                        )
+                        if remaining <= 0:
+                            break
+                        try:
+                            item = await asyncio.wait_for(
+                                queue.get(),
+                                timeout=remaining,
+                            )
+                        except asyncio.TimeoutError:
+                            break
                     if item is sentinel:
                         producer_done = True
                         continue
@@ -629,7 +647,13 @@ class PlaybackService:
                         continue
                     if remember_result(match, lines, status):
                         found = True
-                        break
+                        first_usable_at = first_usable_at or time.monotonic()
+                        quick_count = len(self._select_quick_lines([
+                            self._line_dict(line)
+                            for line in resolved.values()
+                        ]))
+                        if quick_count >= PLAYBACK_QUICK_LINE_COUNT:
+                            break
             finally:
                 if not producer.done():
                     producer.cancel()

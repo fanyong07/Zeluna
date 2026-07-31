@@ -495,13 +495,16 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             year=2024,
             score=99,
         )
-        fast_line = AggregatedVideoLine(
-            url="https://fast-cdn.example/video.m3u8",
-            title="Fast route",
-            format="hls",
-            source="maccms:fast",
-            verification_status=CLIENT_PROBE_REQUIRED,
-        )
+        fast_lines = [
+            AggregatedVideoLine(
+                url=f"https://fast-cdn-{index}.example/video.m3u8",
+                title=f"Fast route {index}",
+                format="hls",
+                source="maccms:fast",
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+            for index in range(3)
+        ]
         slow_cancelled = asyncio.Event()
         resolve_verify_values = []
 
@@ -517,7 +520,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 except asyncio.CancelledError:
                     slow_cancelled.set()
                     raise
-            yield fast_match, [fast_line], CLIENT_PROBE_REQUIRED
+            yield fast_match, fast_lines, CLIENT_PROBE_REQUIRED
 
         with (
             patch(
@@ -553,9 +556,12 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(resolve_verify_values, [False, False])
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["url"], fast_line.url)
-        self.assertTrue(items[0]["quick"])
+        self.assertEqual(len(items), 3)
+        self.assertEqual(
+            [item["url"] for item in items],
+            [line.url for line in fast_lines],
+        )
+        self.assertTrue(all(item["quick"] for item in items))
         self.assertTrue(slow_cancelled.is_set())
 
     async def test_quick_refresh_is_not_blocked_by_full_refresh_capacity(self):
