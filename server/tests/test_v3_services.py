@@ -478,34 +478,46 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refresh_calls, 1)
         self.assertEqual(results[0], results[1])
 
-    async def test_quick_cold_lookup_stops_after_first_verified_source(self):
-        match = SourceMatch(
-            source_id="maccms:iKun:1",
-            source_name="iKun",
-            title="测试动画",
+    async def test_quick_cold_lookup_races_sources_and_returns_fastest(self):
+        slow_match = SourceMatch(
+            source_id="maccms:slow:1",
+            source_name="slow",
+            title="Slow Anime",
             content_type="anime",
             year=2024,
             score=100,
         )
-        line = AggregatedVideoLine(
-            url="https://first-cdn.example/video.m3u8",
-            title="首条可播线路",
-            format="hls",
-            source="maccms:iKun",
-            verification_status=SERVER_VERIFIED,
+        fast_match = SourceMatch(
+            source_id="maccms:fast:1",
+            source_name="fast",
+            title="Fast Anime",
+            content_type="anime",
+            year=2024,
+            score=99,
         )
-        yielded_matches = 0
+        fast_line = AggregatedVideoLine(
+            url="https://fast-cdn.example/video.m3u8",
+            title="Fast route",
+            format="hls",
+            source="maccms:fast",
+            verification_status=CLIENT_PROBE_REQUIRED,
+        )
+        slow_cancelled = asyncio.Event()
         resolve_verify_values = []
 
         async def discover(*_args, **_kwargs):
-            nonlocal yielded_matches
-            yielded_matches += 1
-            yield match
-            raise AssertionError("quick lookup continued after a verified route")
+            yield slow_match
+            yield fast_match
 
         async def resolve(matches, **_kwargs):
             resolve_verify_values.append(_kwargs.get("verify"))
-            yield matches[0], [line], SERVER_VERIFIED
+            if matches[0] is slow_match:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+            yield fast_match, [fast_line], CLIENT_PROBE_REQUIRED
 
         with (
             patch(
@@ -534,17 +546,17 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                     "bangumi:quick",
                     1,
                     session,
-                    title="测试动画",
+                    title="Test Anime",
                     original_title="",
                     content_type="anime",
                     year=2024,
                 )
 
-        self.assertEqual(yielded_matches, 1)
-        self.assertEqual(resolve_verify_values, [False])
+        self.assertEqual(resolve_verify_values, [False, False])
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["url"], line.url)
+        self.assertEqual(items[0]["url"], fast_line.url)
         self.assertTrue(items[0]["quick"])
+        self.assertTrue(slow_cancelled.is_set())
 
     async def test_quick_refresh_is_not_blocked_by_full_refresh_capacity(self):
         expected = [{"url": "https://cdn.example/quick.m3u8"}]

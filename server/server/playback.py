@@ -528,6 +528,28 @@ class PlaybackService:
         matches = await self._load_bindings(session, stable_id)
         resolved: dict[str, AggregatedVideoLine] = {}
         health: dict[str, str] = {}
+        quick_candidate_limit = min(
+            6,
+            max(2, PLAYBACK_QUICK_LINE_COUNT * 2),
+        )
+
+        def remember_result(
+            match: SourceMatch,
+            lines: list[AggregatedVideoLine],
+            status: str,
+        ) -> bool:
+            health[match.source_name] = status
+            for line in lines:
+                previous = resolved.get(line.url)
+                if previous is None or (
+                    previous.verification_status != SERVER_VERIFIED
+                    and line.verification_status == SERVER_VERIFIED
+                ):
+                    resolved[line.url] = line
+            # The app performs manifest + first-segment validation for public
+            # client candidates while the full server refresh verifies every
+            # source in the background.
+            return status in {SERVER_VERIFIED, CLIENT_PROBE_REQUIRED}
 
         async def resolve_until_usable(candidates: list[SourceMatch]) -> bool:
             async for match, lines, status in (
@@ -541,34 +563,92 @@ class PlaybackService:
                     verify=False,
                 )
             ):
-                health[match.source_name] = status
-                for line in lines:
-                    previous = resolved.get(line.url)
-                    if previous is None or (
-                        previous.verification_status != SERVER_VERIFIED
-                        and line.verification_status == SERVER_VERIFIED
-                    ):
-                        resolved[line.url] = line
-                # A server-verified line can open immediately. A public client
-                # candidate is also useful on the quick path because the app
-                # performs the same manifest + first-segment probe locally.
-                if status in {SERVER_VERIFIED, CLIENT_PROBE_REQUIRED}:
+                if remember_result(match, lines, status):
                     return True
             return False
 
-        found = bool(matches) and await resolve_until_usable(matches)
+        async def resolve_one(
+            match: SourceMatch,
+        ) -> tuple[SourceMatch, list[AggregatedVideoLine], str]:
+            async for result in aggregator.resolve_source_matches_progressively(
+                [match],
+                episode=episode,
+                verify=False,
+            ):
+                return result
+            return match, [], UNAVAILABLE
+
+        async def discover_until_usable() -> tuple[bool, list[SourceMatch]]:
+            # Discovery and source resolution overlap. Up to six foreground
+            # candidates race; the first usable one wins and the rest are
+            # cancelled. The outer quick semaphore keeps this bounded to one
+            # cold foreground lookup per process.
+            queue: asyncio.Queue[object] = asyncio.Queue()
+            sentinel = object()
+            tasks: set[asyncio.Task] = set()
+            discovered: list[SourceMatch] = []
+
+            def completed(task: asyncio.Task) -> None:
+                queue.put_nowait(task)
+
+            async def produce() -> None:
+                try:
+                    async for match in (
+                        aggregator.discover_source_matches_progressively(
+                            aliases,
+                            content_type=content_type,
+                            year=year,
+                            max_matches=len(aggregator.source_inventory) + 8,
+                        )
+                    ):
+                        discovered.append(match)
+                        task = asyncio.create_task(resolve_one(match))
+                        tasks.add(task)
+                        task.add_done_callback(completed)
+                        if len(discovered) >= quick_candidate_limit:
+                            break
+                finally:
+                    queue.put_nowait(sentinel)
+
+            producer = asyncio.create_task(produce())
+            producer_done = False
+            found = False
+            try:
+                while not producer_done or tasks:
+                    item = await queue.get()
+                    if item is sentinel:
+                        producer_done = True
+                        continue
+                    task = item
+                    if not isinstance(task, asyncio.Task):
+                        continue
+                    tasks.discard(task)
+                    try:
+                        match, lines, status = task.result()
+                    except Exception:
+                        continue
+                    if remember_result(match, lines, status):
+                        found = True
+                        break
+            finally:
+                if not producer.done():
+                    producer.cancel()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    producer,
+                    *tasks,
+                    return_exceptions=True,
+                )
+            return found, discovered
+
+        found = bool(matches) and await resolve_until_usable(
+            matches[:quick_candidate_limit]
+        )
         discovered: list[SourceMatch] = []
         if not found:
-            async for match in aggregator.discover_source_matches_progressively(
-                aliases,
-                content_type=content_type,
-                year=year,
-                max_matches=len(aggregator.source_inventory) + 8,
-            ):
-                discovered.append(match)
-                if await resolve_until_usable([match]):
-                    found = True
-                    break
+            found, discovered = await discover_until_usable()
         if discovered:
             matches = self._merge_matches(matches, discovered)
             await self._store_bindings(session, stable_id, matches)
