@@ -381,7 +381,10 @@ class ContentAggregator:
         expected_type = "series" if content_type == "tv" else content_type
         if expected_type and expected_type not in self._maccms.content_types:
             return []
-        async for results in self._maccms.search_progressively(aliases[0]):
+        async for results in self._maccms.search_progressively(
+            aliases[0],
+            preferred_only=True,
+        ):
             matches = self._score_scraper_results(
                 "maccms",
                 results,

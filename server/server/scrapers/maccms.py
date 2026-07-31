@@ -177,6 +177,8 @@ class MacCmsScraper(BaseScraper):
     async def search_progressively(
         self,
         keyword: str,
+        *,
+        preferred_only: bool = False,
     ) -> AsyncIterator[list[SubjectResult]]:
         """Yield each site's results as soon as that site responds.
 
@@ -185,9 +187,10 @@ class MacCmsScraper(BaseScraper):
         iterator to avoid waiting for the slowest MacCMS endpoint before it
         can resolve the first usable route.
         """
+        sites = precache_sites() if preferred_only else self._sites
         tasks = [
             asyncio.create_task(self._site_search(site, keyword))
-            for site in self._sites
+            for site in sites
         ]
         try:
             for completed in asyncio.as_completed(tasks):

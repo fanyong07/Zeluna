@@ -226,8 +226,9 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
     async def test_progressive_discovery_uses_first_matching_maccms_site(self):
         self.aggregator = ContentAggregator(crawler_scrapers={})
 
-        async def progressive_search(keyword):
+        async def progressive_search(keyword, *, preferred_only=False):
             self.assertEqual(keyword, "Test Anime")
+            self.assertTrue(preferred_only)
             yield [
                 SubjectResult(
                     source_id="maccms:fast:1",

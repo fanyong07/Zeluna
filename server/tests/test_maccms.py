@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -109,6 +109,38 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first[0].source_id, "maccms:fast:1")
         await results.aclose()
         self.assertTrue(slow_cancelled.is_set())
+
+    async def test_progressive_preferred_search_only_queries_precache_sites(self):
+        preferred = {
+            "name": "preferred",
+            "api": "https://preferred.example",
+            "precache": True,
+        }
+        self.scraper._sites = [
+            preferred,
+            {"name": "fallback", "api": "https://fallback.example"},
+        ]
+        self.scraper._site_search = AsyncMock(return_value=[
+            SubjectResult(
+                source_id="maccms:preferred:1",
+                title="Test",
+                type="anime",
+            )
+        ])
+
+        with patch(
+            "server.scrapers.maccms.precache_sites",
+            return_value=[preferred],
+        ):
+            results = self.scraper.search_progressively(
+                "test",
+                preferred_only=True,
+            )
+            first = await asyncio.wait_for(anext(results), timeout=0.2)
+            await results.aclose()
+
+        self.assertEqual(first[0].source_id, "maccms:preferred:1")
+        self.scraper._site_search.assert_awaited_once_with(preferred, "test")
 
     def test_precache_uses_only_explicit_stable_sites(self):
         sites = precache_sites()
