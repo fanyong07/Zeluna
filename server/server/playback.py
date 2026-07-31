@@ -48,6 +48,9 @@ class PlaybackService:
         self._session_factory = session_factory
         self._closing = False
         self._refresh_semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
+        # Foreground first-route discovery must never wait behind long-running
+        # precache or full-refresh work. Keep one small, dedicated lane for it.
+        self._quick_refresh_semaphore = asyncio.Semaphore(1)
         self._refresh_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
         self._quick_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
         self._metrics = {
@@ -280,7 +283,7 @@ class PlaybackService:
         result: list[dict] = []
 
         async def load() -> list[dict]:
-            async with self._refresh_semaphore:
+            async with self._quick_refresh_semaphore:
                 async with self._session_factory() as session:
                     return await self._refresh_quick(
                         stable_id,

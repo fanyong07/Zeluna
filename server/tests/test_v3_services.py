@@ -546,6 +546,33 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["url"], line.url)
         self.assertTrue(items[0]["quick"])
 
+    async def test_quick_refresh_is_not_blocked_by_full_refresh_capacity(self):
+        expected = [{"url": "https://cdn.example/quick.m3u8"}]
+        self.service._refresh_semaphore = asyncio.Semaphore(0)
+
+        with (
+            patch.object(
+                self.service,
+                "_refresh_quick",
+                new=AsyncMock(return_value=expected),
+            ),
+            patch.object(self.service, "_start_full_refresh") as full_refresh,
+        ):
+            result = await asyncio.wait_for(
+                self.service._run_quick_refresh(
+                    "bangumi:foreground",
+                    1,
+                    title="Foreground",
+                    original_title="",
+                    content_type="anime",
+                    year=2025,
+                ),
+                timeout=0.2,
+            )
+
+        self.assertEqual(result, expected)
+        full_refresh.assert_called_once()
+
     def test_quick_inventory_prefers_three_different_hosts(self):
         items = [
             {

@@ -32,7 +32,7 @@ from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
-from .scrapers.base import BaseScraper
+from .scrapers.base import BaseScraper, SubjectResult
 from .config import SOURCE_MAX_CONCURRENCY
 
 logger = logging.getLogger(__name__)
@@ -290,7 +290,6 @@ class ContentAggregator:
         if expected_type and expected_type not in scraper.content_types:
             return []
 
-        matches: dict[str, SourceMatch] = {}
         if provider == "maccms":
             # MacCMS 都是中文聚合站，首选标题的命中率最高。只查一次可避免
             # 站点数 × 别名数造成瞬时连接洪峰；其它独立站仍保留多别名尝试。
@@ -305,6 +304,7 @@ class ContentAggregator:
                     result_groups.append(await scraper.search(alias))
                 except Exception as error:
                     result_groups.append(error)
+        matches: dict[str, SourceMatch] = {}
         for results in result_groups:
             if isinstance(results, BaseException):
                 logger.debug(
@@ -313,41 +313,85 @@ class ContentAggregator:
                     type(results).__name__,
                 )
                 continue
-            for result in results:
-                score = _source_match_score(
-                    result.title,
-                    aliases,
-                    candidate_type=result.type,
-                    expected_type=content_type,
-                    candidate_year=result.year,
-                    expected_year=year,
-                )
-                if score < 65:
-                    continue
-                parts = result.source_id.split(":", 2)
-                if provider in {"maccms", "tvbox"} and len(parts) == 3:
-                    source_name = parts[1]
-                    source_id = result.source_id
-                else:
-                    source_name = provider
-                    source_id = f"crawler:{provider}:{result.source_id}"
-                candidate = SourceMatch(
-                    source_id=source_id,
-                    source_name=source_name,
-                    title=result.title,
-                    content_type=result.type,
-                    year=result.year,
-                    episode_count=result.episode_count,
-                    score=(
-                        score + site_priority(source_name) // 10
-                        if provider == "maccms"
-                        else score + DIRECT_SOURCE_PRIORITIES.get(provider, 0)
-                    ),
-                )
-                previous = matches.get(source_id)
+            for candidate in self._score_scraper_results(
+                provider,
+                results,
+                aliases,
+                content_type=content_type,
+                year=year,
+            ):
+                previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:
-                    matches[source_id] = candidate
+                    matches[candidate.source_id] = candidate
         return list(matches.values())
+
+    @staticmethod
+    def _score_scraper_results(
+        provider: str,
+        results: list[SubjectResult],
+        aliases: list[str],
+        *,
+        content_type: str,
+        year: int,
+    ) -> list[SourceMatch]:
+        matches: dict[str, SourceMatch] = {}
+        for result in results:
+            score = _source_match_score(
+                result.title,
+                aliases,
+                candidate_type=result.type,
+                expected_type=content_type,
+                candidate_year=result.year,
+                expected_year=year,
+            )
+            if score < 65:
+                continue
+            parts = result.source_id.split(":", 2)
+            if provider in {"maccms", "tvbox"} and len(parts) == 3:
+                source_name = parts[1]
+                source_id = result.source_id
+            else:
+                source_name = provider
+                source_id = f"crawler:{provider}:{result.source_id}"
+            candidate = SourceMatch(
+                source_id=source_id,
+                source_name=source_name,
+                title=result.title,
+                content_type=result.type,
+                year=result.year,
+                episode_count=result.episode_count,
+                score=(
+                    score + site_priority(source_name) // 10
+                    if provider == "maccms"
+                    else score + DIRECT_SOURCE_PRIORITIES.get(provider, 0)
+                ),
+            )
+            previous = matches.get(source_id)
+            if previous is None or candidate.score > previous.score:
+                matches[source_id] = candidate
+        return list(matches.values())
+
+    async def _discover_first_maccms_matches(
+        self,
+        aliases: list[str],
+        *,
+        content_type: str,
+        year: int,
+    ) -> list[SourceMatch]:
+        expected_type = "series" if content_type == "tv" else content_type
+        if expected_type and expected_type not in self._maccms.content_types:
+            return []
+        async for results in self._maccms.search_progressively(aliases[0]):
+            matches = self._score_scraper_results(
+                "maccms",
+                results,
+                aliases,
+                content_type=content_type,
+                year=year,
+            )
+            if matches:
+                return matches
+        return []
 
     async def discover_source_matches(
         self,
@@ -437,7 +481,6 @@ class ContentAggregator:
             return
 
         providers: list[tuple[str, BaseScraper, float]] = [
-            ("maccms", self._maccms, 8),
             ("tvbox", self._tvbox, 2),
             *(
                 (
@@ -451,6 +494,18 @@ class ContentAggregator:
         tasks = [
             asyncio.create_task(
                 asyncio.wait_for(
+                    self._discover_first_maccms_matches(
+                        clean_aliases,
+                        content_type=content_type,
+                        year=year,
+                    ),
+                    timeout=8,
+                )
+            )
+        ]
+        tasks.extend(
+            asyncio.create_task(
+                asyncio.wait_for(
                     self._discover_scraper_matches(
                         name,
                         scraper,
@@ -462,7 +517,7 @@ class ContentAggregator:
                 )
             )
             for name, scraper, timeout in providers
-        ]
+        )
         yielded_sites: set[str] = set()
         yielded_count = 0
         try:

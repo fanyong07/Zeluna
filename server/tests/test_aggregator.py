@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -221,6 +222,39 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[0].verification_status, CLIENT_PROBE_REQUIRED)
         self.assertEqual(health, {"quick": CLIENT_PROBE_REQUIRED})
         self.aggregator._line_verification_status.assert_not_awaited()
+
+    async def test_progressive_discovery_uses_first_matching_maccms_site(self):
+        self.aggregator = ContentAggregator(crawler_scrapers={})
+
+        async def progressive_search(keyword):
+            self.assertEqual(keyword, "Test Anime")
+            yield [
+                SubjectResult(
+                    source_id="maccms:fast:1",
+                    title="Test Anime",
+                    type="anime",
+                    year=2025,
+                )
+            ]
+
+        self.aggregator._maccms.search_progressively = progressive_search
+        self.aggregator._maccms.search = AsyncMock(
+            side_effect=AssertionError(
+                "quick discovery must not wait for full search"
+            )
+        )
+        self.aggregator._tvbox.search = AsyncMock(return_value=[])
+
+        iterator = self.aggregator.discover_source_matches_progressively(
+            ["Test Anime"],
+            content_type="anime",
+            year=2025,
+        )
+        first = await asyncio.wait_for(anext(iterator), timeout=0.2)
+        await iterator.aclose()
+
+        self.assertEqual(first.source_id, "maccms:fast:1")
+        self.aggregator._maccms.search.assert_not_awaited()
 
     async def test_definitive_404_is_not_sent_to_the_client_as_a_candidate(self):
         crawler = AsyncMock()

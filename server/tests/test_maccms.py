@@ -80,6 +80,36 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLessEqual(peak, 10)
 
+    async def test_progressive_search_yields_fast_site_without_waiting_for_slow(self):
+        slow = {"name": "slow", "api": "https://slow.example"}
+        fast = {"name": "fast", "api": "https://fast.example"}
+        self.scraper._sites = [slow, fast]
+        release_slow = asyncio.Event()
+        slow_cancelled = asyncio.Event()
+
+        async def fake_search(site, keyword):
+            self.assertEqual(keyword, "test")
+            if site["name"] == "slow":
+                try:
+                    await release_slow.wait()
+                except asyncio.CancelledError:
+                    slow_cancelled.set()
+                    raise
+            return [
+                SubjectResult(
+                    source_id=f"maccms:{site['name']}:1",
+                    title="Test",
+                    type="anime",
+                )
+            ]
+
+        self.scraper._site_search = AsyncMock(side_effect=fake_search)
+        results = self.scraper.search_progressively("test")
+        first = await asyncio.wait_for(anext(results), timeout=0.2)
+        self.assertEqual(first[0].source_id, "maccms:fast:1")
+        await results.aclose()
+        self.assertTrue(slow_cancelled.is_set())
+
     def test_precache_uses_only_explicit_stable_sites(self):
         sites = precache_sites()
 

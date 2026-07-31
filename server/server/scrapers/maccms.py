@@ -17,6 +17,7 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Optional
 from urllib.parse import quote
 
@@ -172,6 +173,37 @@ class MacCmsScraper(BaseScraper):
                 seen.add(key)
                 results.append(r)
         return results
+
+    async def search_progressively(
+        self,
+        keyword: str,
+    ) -> AsyncIterator[list[SubjectResult]]:
+        """Yield each site's results as soon as that site responds.
+
+        Full catalog searches still use :meth:`search` so their ranking and
+        breadth remain unchanged. Foreground playback discovery uses this
+        iterator to avoid waiting for the slowest MacCMS endpoint before it
+        can resolve the first usable route.
+        """
+        tasks = [
+            asyncio.create_task(self._site_search(site, keyword))
+            for site in self._sites
+        ]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                try:
+                    results = await completed
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                if results:
+                    yield results
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _site_detail(self, site_name: str, vod_id: str) -> Optional[SubjectDetail]:
         site = next((s for s in self._sites if s["name"] == site_name), None)

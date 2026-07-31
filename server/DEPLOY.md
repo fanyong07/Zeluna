@@ -67,7 +67,7 @@ PLAYBACK_QUICK_LINE_COUNT=3
 
 ```bash
 sudo systemctl stop zeluna.service
-cd /opt/zeluna/server
+cd /opt/zeluna/app/server
 set -a
 . /etc/zeluna/zeluna.env
 set +a
@@ -90,16 +90,16 @@ Wants=network-online.target
 Type=simple
 User=zeluna
 Group=zeluna
-WorkingDirectory=/opt/zeluna/server
+WorkingDirectory=/opt/zeluna/app/server
 EnvironmentFile=/etc/zeluna/zeluna.env
-ExecStart=/opt/zeluna/venv/bin/python /opt/zeluna/server/run_prod.py
+ExecStart=/opt/zeluna/venv/bin/python /opt/zeluna/app/server/run_prod.py
 Restart=always
 RestartSec=5
 MemoryMax=420M
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/zeluna/server/server
+ReadWritePaths=/opt/zeluna/app/server/server
 
 [Install]
 WantedBy=multi-user.target
