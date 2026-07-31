@@ -69,6 +69,7 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await scheduler.stop()
+    await playback_service.aclose()
     await aggregator.aclose()
     await catalog_service.aclose()
     await m3u8_resolver.aclose()
@@ -1687,6 +1688,7 @@ async def unified_status():
         "version": 3,
         "providers": catalog_service.provider_status,
         "playback": "server-only",
+        "playback_cache": playback_service.cache_metrics,
     })
 
 
@@ -1731,6 +1733,31 @@ async def catalog_subject(
     if item is None:
         raise HTTPException(404, "作品信息暂不可用")
     return JSONResponse(item)
+
+
+@app.get("/api/v3/quick-playback/{stable_id:path}")
+async def quick_stable_playback(
+    stable_id: str,
+    episode: int = Query(1, ge=1),
+    title: str = Query("", max_length=500),
+    original_title: str = Query("", max_length=500),
+    content_type: str = Query("", max_length=20),
+    year: int = Query(0, ge=0, le=9999),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a compact first-play inventory without waiting for a full scan."""
+    if parse_stable_id(stable_id) is None:
+        raise HTTPException(400, "作品 ID 格式不正确")
+    lines = await playback_service.quick_lines(
+        stable_id,
+        episode,
+        session,
+        title=title,
+        original_title=original_title,
+        content_type=content_type,
+        year=year,
+    )
+    return JSONResponse(lines)
 
 
 @app.get("/api/v3/playback/{stable_id:path}")

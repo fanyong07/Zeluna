@@ -19,6 +19,8 @@
 - 全局最多 2 个查源刷新任务。
 - 首次未命中按需抓取，命中后直接返回缓存。
 - 正缓存 6 小时，负缓存 5 分钟，避免失效作品反复拖慢服务器。
+- 轻度过期但真实 URL 尚未失效的正缓存会立即返回，并在后台单飞刷新。
+- 客户端首播走快速接口，只返回最多 3 个不同媒体域名；完整线路在后台扩展。
 - systemd 常驻和崩溃重启，不使用 Docker 和浏览器爬虫。
 
 ## 必需的服务端环境变量
@@ -42,6 +44,12 @@ LEGACY_ACCOUNT_API_ENABLED=false
 PUBLIC_BASE_URL=https://你的后端域名
 PRECACHE_ENABLED=true
 SOURCE_MAX_CONCURRENCY=2
+DATABASE_AUTO_CREATE=false
+SQLITE_BUSY_TIMEOUT_MS=10000
+SQLITE_CONNECT_TIMEOUT_SECONDS=30
+PLAYBACK_STALE_HOURS=24
+PLAYBACK_QUICK_TIMEOUT_SECONDS=4.5
+PLAYBACK_QUICK_LINE_COUNT=3
 ```
 
 - `TMDB_READ_ACCESS_TOKEN`：TMDB v4 Read Access Token，电视剧和电影目录必需。
@@ -51,6 +59,24 @@ SOURCE_MAX_CONCURRENCY=2
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。
 - `CORS_ORIGINS`：只填写正式 Web 客户端域名；安卓和 Windows 客户端不受此项影响。
 - `LEGACY_ACCOUNT_API_ENABLED`：正式环境保持 `false`，避免旧兼容注册接口绕过邮件验证。
+- `DATABASE_AUTO_CREATE`：正式环境必须为 `false`；表结构只通过 Alembic 迁移变更。
+
+## 数据库升级（启动服务前执行）
+
+首次使用此版本或以后存在新迁移时，先停止服务，再显式升级数据库：
+
+```bash
+sudo systemctl stop zeluna.service
+cd /opt/zeluna/server
+set -a
+. /etc/zeluna/zeluna.env
+set +a
+/opt/zeluna/venv/bin/python tools/migrate.py upgrade
+sudo systemctl start zeluna.service
+sudo systemctl --no-pager --full status zeluna.service
+```
+
+升级工具会在 SQLite 数据库旁的 `backups/` 目录先生成一致性备份，再执行到最新版本。普通服务启动只核对 Alembic 版本；数据库未迁移、版本落后或结构未知时会拒绝启动，不会静默改表。开发用的一次性数据库才可以显式设置 `DATABASE_AUTO_CREATE=true`。
 
 ## systemd
 
@@ -102,6 +128,7 @@ flutter build windows --release `
 ```bash
 curl https://你的后端域名/api/v3/status
 curl 'https://你的后端域名/api/v3/catalog/search?query=葬送的芙莉莲'
+curl 'https://你的后端域名/api/v3/quick-playback/bangumi:400602?episode=1&title=葬送的芙莉莲&content_type=anime&year=2023'
 curl 'https://你的后端域名/api/v3/playback/bangumi:400602?episode=1&title=葬送的芙莉莲&content_type=anime&year=2023'
 curl 'https://你的后端域名/api/v3/playback/tmdb:tv:95842?episode=1&title=庆余年&content_type=tv&year=2019'
 curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&title=流浪地球&content_type=movie&year=2019'
@@ -112,6 +139,7 @@ curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&tit
 - `/api/v3/status` 返回 `version: 3`，TMDB 配置状态为 true。
 - 搜索结果只返回稳定作品 ID，不出现采集站内部 ID。
 - 第一次播放完成验证并写缓存；第二次请求返回 `cached: true`。
+- 热缓存快速接口应立即返回主线路，并尽量附带两个不同域名的备用线路；`stale: true` 表示旧线路仍可播且后台正在刷新。
 - App 中不存在播放规则、外部源目录或规则导入入口。
 - 后端不可用时 App 明确显示无线路，不回退本地爬虫。
 

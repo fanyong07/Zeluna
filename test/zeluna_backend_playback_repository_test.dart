@@ -37,7 +37,8 @@ void main() {
   test('聚合后端会保留同一作品的不同站点线路', () async {
     String? requestedStableId;
     final client = MockClient((request) async {
-      if (request.url.pathSegments.take(3).join('/') == 'api/v3/playback') {
+      if (request.url.pathSegments.take(3).join('/') ==
+          'api/v3/quick-playback') {
         requestedStableId = request.url.pathSegments.last;
         expect(request.url.queryParameters['title'], subject.title);
         return _jsonResponse([
@@ -97,6 +98,66 @@ void main() {
     expect(lines.last.available, isFalse);
     expect(lines.last.url, isNull);
     expect(lines.last.message, '当前站点没有匹配到这部作品');
+  });
+
+  test('完整查线使用兼容接口，过期前的旧缓存会明确提示后台更新', () async {
+    final client = MockClient((request) async {
+      expect(request.url.pathSegments.take(3).join('/'), 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': 'https://cdn.example.com/stale/index.m3u8',
+          'source': 'maccms:iKun',
+          'available': true,
+          'status': 'server_verified',
+          'cached': true,
+          'stale': true,
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+    );
+
+    expect(lines.single.available, isTrue);
+    expect(lines.single.message, '来自可用缓存，正在后台更新线路');
+  });
+
+  test('旧服务没有快速接口时会回退完整播放接口', () async {
+    final paths = <String>[];
+    final client = MockClient((request) async {
+      final path = request.url.pathSegments.take(3).join('/');
+      paths.add(path);
+      if (path == 'api/v3/quick-playback') {
+        return http.Response('not found', 404);
+      }
+      expect(path, 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': 'https://cdn.example.com/fallback/index.m3u8',
+          'source': 'maccms:iKun',
+          'available': true,
+          'status': 'server_verified',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+
+    expect(lines.single.available, isTrue);
+    expect(paths, ['api/v3/quick-playback', 'api/v3/playback']);
   });
 
   test('后端线路不会被 Clash Fake-IP 的 drpy 防护误杀', () async {

@@ -65,7 +65,13 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
       if (stableId == null || cancellationToken?.isCancelled == true) {
         return const [];
       }
-      return _loadLines(stableId, subject, episode, cancellationToken);
+      return _loadLines(
+        stableId,
+        subject,
+        episode,
+        cancellationToken,
+        expandAll: expandAll,
+      );
     } on TimeoutException {
       return const [];
     } on http.ClientException {
@@ -100,25 +106,38 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
     String stableId,
     AnimeSubject subject,
     AnimeEpisode episode,
-    RulePlaybackCancellationToken? cancellationToken,
-  ) async {
+    RulePlaybackCancellationToken? cancellationToken, {
+    required bool expandAll,
+  }) async {
     if (cancellationToken?.isCancelled == true) return const [];
-    final uri = _endpoint(
-      ['api', 'v3', 'playback', stableId],
-      query: {
-        'episode': '${episode.number}',
-        'title': subject.title,
-        'original_title': subject.originalTitle,
-        'content_type': switch (subjectContentTypeOf(subject)) {
-          SubjectContentType.anime => 'anime',
-          SubjectContentType.series => 'tv',
-          SubjectContentType.movie => 'movie',
-        },
-        if (subject.year != '未知') 'year': subject.year,
+    final query = {
+      'episode': '${episode.number}',
+      'title': subject.title,
+      'original_title': subject.originalTitle,
+      'content_type': switch (subjectContentTypeOf(subject)) {
+        SubjectContentType.anime => 'anime',
+        SubjectContentType.series => 'tv',
+        SubjectContentType.movie => 'movie',
       },
+      if (subject.year != '未知') 'year': subject.year,
+    };
+    final primaryUri = _endpoint(
+      expandAll
+          ? ['api', 'v3', 'playback', stableId]
+          : ['api', 'v3', 'quick-playback', stableId],
+      query: query,
     );
     try {
-      final response = await _client.get(uri).timeout(requestTimeout);
+      var response = await _client.get(primaryUri).timeout(requestTimeout);
+      // Keep new clients compatible while an older backend is being rolled
+      // forward. A real quick response (including an empty list) is final.
+      if (!expandAll &&
+          (response.statusCode == 404 || response.statusCode == 405) &&
+          cancellationToken?.isCancelled != true) {
+        response = await _client
+            .get(_endpoint(['api', 'v3', 'playback', stableId], query: query))
+            .timeout(requestTimeout);
+      }
       if (response.statusCode != 200 ||
           cancellationToken?.isCancelled == true) {
         return const [];
@@ -166,6 +185,7 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           }
         }
         final cached = json['cached'] == true;
+        final stale = json['stale'] == true;
         lines.add(
           PlaybackLine(
             id: 'zeluna:${_stableHash('$stableId|${episode.number}|$source|$url|$index')}',
@@ -188,7 +208,11 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             expiresAt: expiresAt,
             available: available,
             message: available
-                ? (cached ? '来自在线服务（已缓存）' : '在线服务已确认可播')
+                ? (stale
+                      ? '来自可用缓存，正在后台更新线路'
+                      : cached
+                      ? '来自在线服务（已缓存）'
+                      : '在线服务已确认可播')
                 : requiresClientProbe
                 ? '正在用你的网络确认是否可播'
                 : (json['message']?.toString().trim().isNotEmpty == true

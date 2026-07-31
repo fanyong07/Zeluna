@@ -66,6 +66,25 @@ class PlaybackApiTests(unittest.IsolatedAsyncioTestCase):
             count = await session.scalar(select(func.count(PlaybackCache.id)))
         self.assertEqual(count, 1)
 
+    async def test_quick_playback_route_is_not_captured_by_full_path_route(self):
+        expected = [{
+            "url": "https://cdn.example/quick.m3u8",
+            "available": True,
+            "quick": True,
+        }]
+        with patch(
+            "server.main.playback_service.quick_lines",
+            new=AsyncMock(return_value=expected),
+        ) as quick:
+            response = await self.client.get(
+                "/api/v3/quick-playback/bangumi:123",
+                params={"episode": 2},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), expected)
+        self.assertEqual(quick.await_args.args[:2], ("bangumi:123", 2))
+
 
 if __name__ == "__main__":
     unittest.main()

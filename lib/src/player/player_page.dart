@@ -23,6 +23,7 @@ import 'anime4k_shader_manager.dart';
 import 'app_fullscreen.dart';
 import 'danmaku_overlay.dart';
 import 'playback_line_display.dart';
+import 'playback_performance_trace.dart';
 import 'web_stream_player.dart';
 
 const _nativeResumeSeekMaxAttempts = 15;
@@ -36,12 +37,14 @@ class PlayerPage extends ConsumerStatefulWidget {
   ConsumerState<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends ConsumerState<PlayerPage> {
+class _PlayerPageState extends ConsumerState<PlayerPage>
+    with WidgetsBindingObserver {
   late AnimeEpisode _episode;
   late final Player _player;
   late final VideoController _controller;
   late final WebStreamPlayerController _webPlayerController;
   late final FocusNode _shortcutFocusNode;
+  late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
@@ -98,14 +101,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   var _leaving = false;
   var _lineLookupSerial = 0;
   var _openLineSerial = 0;
+  int? _firstFrameTraceOpenSerial;
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
   Timer? _webLoadTimer;
   Timer? _nativeFirstFrameTimer;
   Timer? _nativeResumeSeekTimer;
+  Timer? _stallWatchdogTimer;
   DateTime? _ignoreNativeErrorsUntil;
-  Timer? _expandedLookupDelayTimer;
+  Timer? _backupLookupDelayTimer;
+  RulePlaybackCancellationToken? _backupLookupCancellationToken;
+  var _backupLookupInProgress = false;
+  var _backupLookupSerial = 0;
+  var _appInForeground = true;
+  Duration _lastPlaybackProgressPosition = Duration.zero;
+  DateTime _lastPlaybackProgressAt = DateTime.now();
+  DateTime? _lastStallRecoveryAt;
+  DateTime? _stallWatchdogSuppressedUntil;
   Duration? _pendingInitialResumePosition;
   Duration? _pendingAutoSwitchResumePosition;
   Duration? _pendingNativeResumePosition;
@@ -130,16 +143,26 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _player = Player();
     _controller = VideoController(_player);
     _webPlayerController = WebStreamPlayerController();
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
+    _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
     _pendingInitialResumePosition = widget.request.resumePosition;
     _loadingLine = _isPlayableLine(_line);
     _lineLookupInProgress = !_loadingLine && !widget.request.offlineOnly;
+    _resetPlaybackStallWatchdog(
+      position: widget.request.resumePosition,
+      grace: const Duration(seconds: 5),
+    );
+    _stallWatchdogTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _checkPlaybackStall(),
+    );
     _bindPlayer();
     _subscriptions.add(
       _appFullscreen.changes.listen((enabled) {
@@ -163,8 +186,38 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
   }
 
+  void _startPlaybackTrace() {
+    _playbackTrace = PlaybackPerformanceTrace();
+    _firstFrameTraceOpenSerial = null;
+    _playbackTrace.record(
+      'play_requested',
+      fields: <String, Object?>{
+        'episode_number': _episode.number,
+        'content_source': widget.request.subject.source,
+        'offline': widget.request.offlineOnly,
+      },
+    );
+  }
+
+  Map<String, Object?> _lineTraceFields(PlaybackLine line) {
+    return <String, Object?>{
+      'provider': line.providerId,
+      'format': line.format,
+      'server_verified': line.serverVerified,
+      'client_verified': line.clientVerified,
+      'requires_client_probe': line.requiresClientProbe,
+    };
+  }
+
+  void _recordFirstFrame(PlaybackLine line) {
+    if (_firstFrameTraceOpenSerial == _openLineSerial) return;
+    _firstFrameTraceOpenSerial = _openLineSerial;
+    _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
@@ -172,7 +225,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
     _nativeResumeSeekTimer?.cancel();
-    _expandedLookupDelayTimer?.cancel();
+    _stallWatchdogTimer?.cancel();
+    _backupLookupDelayTimer?.cancel();
+    _backupLookupCancellationToken?.cancel();
     _superResolutionPerformanceTimer?.cancel();
     _lineLookupCancellationToken?.cancel();
     unawaited(_lineLookupSubscription?.cancel());
@@ -187,6 +242,22 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final inForeground = state == AppLifecycleState.resumed;
+    if (_appInForeground == inForeground) return;
+    _appInForeground = inForeground;
+    _resetPlaybackStallWatchdog(
+      grace: inForeground ? const Duration(seconds: 3) : Duration.zero,
+    );
+    if (inForeground && _playing) {
+      _scheduleSingleBackupLookup();
+    } else {
+      _backupLookupDelayTimer?.cancel();
+      _backupLookupDelayTimer = null;
+    }
   }
 
   @override
@@ -557,10 +628,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _player.stream.playing.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           setState(() => _playing = value);
+          _resetPlaybackStallWatchdog(
+            grace: value ? const Duration(seconds: 2) : Duration.zero,
+          );
           if (value) {
             _scheduleControlsHide();
             unawaited(_refreshSuperResolutionFrameRate());
+            _scheduleSingleBackupLookup();
           } else {
+            _backupLookupDelayTimer?.cancel();
+            _backupLookupDelayTimer = null;
             _controlsHideTimer?.cancel();
             if (!_controlsVisible) setState(() => _controlsVisible = true);
           }
@@ -569,6 +646,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       ..add(
         _player.stream.position.listen((value) {
           if (!mounted || _usesWebPlayer) return;
+          _notePlaybackProgress(value);
           _handleNativeResumeProgress(value);
           final previousPosition = _position;
           final reachedFirstFrame =
@@ -585,6 +663,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
             if (current != null) {
               _clearLineFailure(current.id);
               _preferredProviderId = current.providerId;
+              _recordFirstFrame(current);
             }
           }
           setState(() {
@@ -596,7 +675,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
             }
           });
           if (reachedFirstFrame) {
-            _scheduleExpandedLineLookup();
+            _scheduleSingleBackupLookup();
           }
         }),
       )
@@ -626,7 +705,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       )
       ..add(
         _player.stream.buffering.listen((value) {
-          if (mounted && !_usesWebPlayer) setState(() => _buffering = value);
+          if (!mounted || _usesWebPlayer) return;
+          setState(() => _buffering = value);
+          if (value) {
+            _backupLookupDelayTimer?.cancel();
+            _backupLookupDelayTimer = null;
+          } else if (_playing) {
+            _scheduleSingleBackupLookup();
+          }
         }),
       )
       ..add(
@@ -642,7 +728,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       ..add(
         _player.stream.completed.listen((completed) {
           if (_usesWebPlayer) return;
-          if (completed && _currentSettings.autoNext) _playNextEpisode();
+          if (completed) {
+            _backupLookupDelayTimer?.cancel();
+            _backupLookupDelayTimer = null;
+            _resetPlaybackStallWatchdog();
+            if (_currentSettings.autoNext) _playNextEpisode();
+          }
         }),
       )
       ..add(
@@ -1059,8 +1150,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
     final serial = ++_lineLookupSerial;
-    _expandedLookupDelayTimer?.cancel();
-    _expandedLookupDelayTimer = null;
+    _cancelSingleBackupLookup();
     _lineLookupCancellationToken?.cancel();
     final previousSubscription = _lineLookupSubscription;
     _lineLookupSubscription = null;
@@ -1081,6 +1171,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _playerMessage = null;
       _playbackFailed = false;
     });
+    _playbackTrace.record('line_lookup_started');
     try {
       final discoveredLines = await ref
           .read(animeControllerProvider.notifier)
@@ -1119,6 +1210,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _lineLookupInProgress = available.isEmpty && usesProgressiveLookup;
         _lineLookupMessage = available.isEmpty ? '暂时还没找到可用线路，仍在继续查找…' : null;
       });
+      _playbackTrace.record(
+        'line_lookup_completed',
+        fields: <String, Object?>{
+          'line_count': lines.length,
+          'playable_count': available.length,
+        },
+      );
       if (autoplay && _isPlayableLine(nextLine)) {
         await _openLine(nextLine!, force: true);
       } else if (available.isEmpty && usesProgressiveLookup) {
@@ -1128,6 +1226,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       }
     } catch (error) {
       if (!mounted || serial != _lineLookupSerial) return;
+      _playbackTrace.record(
+        'line_lookup_failed',
+        fields: <String, Object?>{'error_type': error.runtimeType.toString()},
+      );
       setState(() {
         _lines = const [];
         _lineLookupInProgress = false;
@@ -1137,19 +1239,169 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     }
   }
 
-  void _scheduleExpandedLineLookup() {
-    if (!_usesProgressiveRuleLookup(widget.request.subject) ||
-        _lineScanComplete ||
-        _lineScanInProgress ||
-        _lineLookupSubscription != null ||
-        widget.request.offlineOnly) {
+  void _resetPlaybackStallWatchdog({
+    Duration? position,
+    Duration grace = Duration.zero,
+  }) {
+    final now = DateTime.now();
+    _lastPlaybackProgressPosition = position ?? _position;
+    _lastPlaybackProgressAt = now;
+    _stallWatchdogSuppressedUntil = grace > Duration.zero
+        ? now.add(grace)
+        : null;
+  }
+
+  void _notePlaybackProgress(Duration value) {
+    final movedForward = value > _lastPlaybackProgressPosition;
+    final jumpedBackward =
+        _lastPlaybackProgressPosition - value > const Duration(seconds: 1);
+    if (!movedForward && !jumpedBackward) return;
+    _lastPlaybackProgressPosition = value;
+    _lastPlaybackProgressAt = DateTime.now();
+  }
+
+  void _checkPlaybackStall() {
+    if (!mounted ||
+        _leaving ||
+        _pendingNativeResumePosition != null ||
+        _nativeResumeSeekInProgress) {
       return;
     }
-    if (_expandedLookupDelayTimer != null) return;
-    _expandedLookupDelayTimer = Timer(const Duration(milliseconds: 450), () {
-      _expandedLookupDelayTimer = null;
-      _startExpandedLineLookup();
+    final now = DateTime.now();
+    final suppressedUntil = _stallWatchdogSuppressedUntil;
+    if (suppressedUntil != null && now.isBefore(suppressedUntil)) return;
+    final lastRecovery = _lastStallRecoveryAt;
+    final sinceLastRecovery = lastRecovery == null
+        ? const Duration(days: 365)
+        : now.difference(lastRecovery);
+    if (!playbackShouldRecoverFromStall(
+      appInForeground: _appInForeground,
+      playing: _playing,
+      buffering: _buffering,
+      loading: _loadingLine,
+      playbackFailed: _playbackFailed,
+      position: _position,
+      duration: _duration,
+      buffer: _buffer,
+      stalledFor: now.difference(_lastPlaybackProgressAt),
+      sinceLastRecovery: sinceLastRecovery,
+    )) {
+      return;
+    }
+    final current = _line;
+    if (!_isPlayableLine(current)) return;
+    _lastStallRecoveryAt = now;
+    _playbackTrace.record(
+      'stall_detected',
+      fields: <String, Object?>{
+        ..._lineTraceFields(current!),
+        'position_ms': _position.inMilliseconds,
+        'buffer_ahead_ms': playbackBufferedAhead(
+          position: _position,
+          buffer: _buffer,
+        ).inMilliseconds,
+      },
+    );
+    _resetPlaybackStallWatchdog(grace: playbackStallRecoveryCooldown);
+    _handleRuntimeLineFailure(current, message: '播放连续缓冲，正在尝试恢复当前线路。');
+  }
+
+  void _scheduleSingleBackupLookup({
+    Duration delay = playbackBackupProbeDelay,
+  }) {
+    if (!mounted ||
+        widget.request.offlineOnly ||
+        !_usesProgressiveRuleLookup(widget.request.subject) ||
+        _line == null ||
+        _nextPlayableLine() != null ||
+        _backupLookupDelayTimer != null ||
+        _backupLookupInProgress ||
+        _lineScanInProgress ||
+        _lineLookupSubscription != null) {
+      return;
+    }
+    _backupLookupDelayTimer = Timer(delay, () {
+      _backupLookupDelayTimer = null;
+      if (!mounted || _nextPlayableLine() != null) return;
+      final canProbe = playbackShouldPrepareSingleBackup(
+        appInForeground: _appInForeground,
+        playing: _playing,
+        buffering: _buffering,
+        loading: _loadingLine,
+        playbackFailed: _playbackFailed,
+        hasAlternative: _nextPlayableLine() != null,
+        position: _position,
+        buffer: _buffer,
+      );
+      if (!canProbe) {
+        if (_playing && _appInForeground) {
+          _scheduleSingleBackupLookup(delay: const Duration(seconds: 4));
+        }
+        return;
+      }
+      unawaited(_prepareSingleBackupLine());
     });
+  }
+
+  Future<void> _prepareSingleBackupLine() async {
+    final current = _line;
+    if (!mounted ||
+        current == null ||
+        _backupLookupInProgress ||
+        _nextPlayableLine() != null) {
+      return;
+    }
+    final serial = ++_backupLookupSerial;
+    final episodeId = _episode.id;
+    final token = RulePlaybackCancellationToken();
+    _backupLookupCancellationToken?.cancel();
+    _backupLookupCancellationToken = token;
+    _backupLookupInProgress = true;
+    try {
+      final snapshot = await ref
+          .read(animeControllerProvider.notifier)
+          .prepareSingleBackupForEpisode(
+            widget.request.subject,
+            _episode,
+            currentLine: current,
+            cancellationToken: token,
+          );
+      if (!mounted ||
+          serial != _backupLookupSerial ||
+          episodeId != _episode.id ||
+          token.isCancelled ||
+          snapshot.isEmpty) {
+        return;
+      }
+      var merged = mergePlaybackLineSnapshot(
+        currentLines: _lines,
+        snapshotLines: snapshot,
+      );
+      merged = _preserveLoadedLineIfProbeDisagrees(merged);
+      setState(() => _lines = merged);
+      final backup = _nextPlayableLine();
+      if (backup != null) {
+        _playbackTrace.record('backup_ready', fields: _lineTraceFields(backup));
+      }
+    } catch (_) {
+      // Backup preparation is best-effort and must never disturb playback.
+    } finally {
+      if (serial == _backupLookupSerial) {
+        _backupLookupInProgress = false;
+        if (identical(_backupLookupCancellationToken, token)) {
+          _backupLookupCancellationToken = null;
+        }
+      }
+    }
+  }
+
+  void _cancelSingleBackupLookup() {
+    _backupLookupSerial++;
+    _backupLookupDelayTimer?.cancel();
+    _backupLookupDelayTimer = null;
+    _backupLookupCancellationToken?.cancel();
+    _backupLookupCancellationToken = null;
+    _backupLookupInProgress = false;
   }
 
   void _startExpandedLineLookup({bool autoplay = false}) {
@@ -1161,8 +1413,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         _lineLookupSubscription != null) {
       return;
     }
-    _expandedLookupDelayTimer?.cancel();
-    _expandedLookupDelayTimer = null;
+    _cancelSingleBackupLookup();
     final serial = _lineLookupSerial;
     final episodeId = _episode.id;
     final cancellationToken = _lineLookupCancellationToken ??=
@@ -1343,6 +1594,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _cancelPendingNativeResume();
     final serial = ++_openLineSerial;
     _handledFailureOpenSerial = null;
+    _playbackTrace.record(
+      'line_open_requested',
+      fields: _lineTraceFields(line),
+    );
+    _cancelSingleBackupLookup();
+    _resetPlaybackStallWatchdog(
+      position: Duration.zero,
+      grace: const Duration(seconds: 5),
+    );
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
     _ignoreNativeErrorsUntil = null;
@@ -1372,6 +1632,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (!mounted || serial != _openLineSerial) return;
     _lines = upsertPlaybackLine(_lines, line);
     if (!_isPlayableLine(line)) {
+      _playbackTrace.record('line_rejected', fields: _lineTraceFields(line));
       _markLineFailure(line, definitive: true);
       setState(() {
         _line = line;
@@ -1397,6 +1658,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     });
     if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
       if (!mounted || serial != _openLineSerial) return;
+      _playbackTrace.record(
+        'player_open_dispatched',
+        fields: <String, Object?>{..._lineTraceFields(line), 'player': 'web'},
+      );
       unawaited(_player.stop());
       _webLoadTimer = Timer(const Duration(seconds: 7), () {
         if (!mounted ||
@@ -1481,6 +1746,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _ignoreNativeErrorsUntil = DateTime.now().add(
         const Duration(milliseconds: 750),
       );
+      _playbackTrace.record(
+        'player_open_dispatched',
+        fields: <String, Object?>{
+          ..._lineTraceFields(line),
+          'player': 'native',
+        },
+      );
       await _player.open(media, play: true);
       if (requestedResumePosition > Duration.zero) {
         _armNativeResumeSeek(serial, requestedResumePosition);
@@ -1494,6 +1766,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       });
     } catch (error) {
       if (!mounted || serial != _openLineSerial) return;
+      _playbackTrace.record(
+        'line_open_failed',
+        fields: <String, Object?>{
+          ..._lineTraceFields(line),
+          'error_type': error.runtimeType.toString(),
+        },
+      );
       _nativeFirstFrameTimer?.cancel();
       _handleRuntimeLineFailure(
         line,
@@ -1531,6 +1810,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
         position: resumePosition,
         hasAlternative: _nextPlayableLine() != null,
       ),
+    );
+    _playbackTrace.record(
+      'runtime_failure',
+      fields: <String, Object?>{
+        ..._lineTraceFields(line),
+        'position_ms': resumePosition.inMilliseconds,
+        'failure_count': _lineFailureCounts[line.id] ?? 0,
+        'will_switch': shouldSwitch && _currentSettings.autoSwitchLine,
+      },
     );
     setState(() {
       _loadingLine = false;
@@ -1710,6 +1998,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       }
       if (!mounted) return;
       final switchTarget = next;
+      final previous = _line;
+      _playbackTrace.record(
+        'line_switch',
+        fields: <String, Object?>{
+          if (previous != null) 'from_provider': previous.providerId,
+          'to_provider': switchTarget.providerId,
+          'position_ms': targetResumePosition.inMilliseconds,
+        },
+      );
       setState(() {
         _line = switchTarget;
         _playerMessage =
@@ -1778,6 +2075,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     final max = _duration.inMilliseconds;
     final clamped = target.inMilliseconds.clamp(0, max);
     final position = Duration(milliseconds: clamped);
+    _resetPlaybackStallWatchdog(
+      position: position,
+      grace: const Duration(seconds: 5),
+    );
     if (_usesWebPlayer) {
       _webPlayerController.seek(position);
       setState(() => _position = position);
@@ -1882,6 +2183,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     _danmakuRequestedEpisodeId = null;
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
+    _cancelSingleBackupLookup();
+    _resetPlaybackStallWatchdog(
+      position: Duration.zero,
+      grace: const Duration(seconds: 5),
+    );
     _failedLineIds.clear();
     _lineFailureCounts.clear();
     _handledFailureOpenSerial = null;
@@ -1908,6 +2214,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       _remoteDanmaku = const [];
       _episodePanel = false;
     });
+    _startPlaybackTrace();
     unawaited(
       _stopAndResolveSelectedEpisode(
         episodeId: episode.id,
@@ -2123,7 +2430,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
     if (_leaving) return;
     _leaving = true;
     _lineLookupCancellationToken?.cancel();
-    _expandedLookupDelayTimer?.cancel();
+    _cancelSingleBackupLookup();
     await _lineLookupSubscription?.cancel();
     await _restoreSystemUi();
     await _player.stop();
@@ -2379,6 +2686,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
 
   void _handleWebPosition(Duration value) {
     if (!mounted) return;
+    _notePlaybackProgress(value);
     setState(() => _position = value);
   }
 
@@ -2397,14 +2705,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
       return;
     }
     setState(() => _playing = value);
+    _resetPlaybackStallWatchdog(
+      grace: value ? const Duration(seconds: 2) : Duration.zero,
+    );
     if (value) {
       _webLoadTimer?.cancel();
       _webLoadTimer = null;
       if (_line != null) {
         _clearLineFailure(_line!.id);
         _preferredProviderId = _line!.providerId;
+        _recordFirstFrame(_line!);
       }
-      _scheduleExpandedLineLookup();
+      _scheduleSingleBackupLookup();
+    } else {
+      _backupLookupDelayTimer?.cancel();
+      _backupLookupDelayTimer = null;
     }
   }
 

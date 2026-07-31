@@ -3,6 +3,12 @@ import '../domain/anime_models.dart';
 enum PlaybackLineValidationAction { keep, open, stop }
 
 const playbackLineFailureThreshold = 2;
+const playbackStallDetectionWindow = Duration(seconds: 5);
+const playbackStallRecoveryCooldown = Duration(seconds: 8);
+const playbackStallBufferThreshold = Duration(seconds: 2);
+const playbackBackupProbeDelay = Duration(seconds: 12);
+const playbackBackupProbeMinimumPosition = Duration(seconds: 8);
+const playbackBackupProbeMinimumBuffer = Duration(seconds: 8);
 
 int nextPlaybackLineFailureCount(int currentCount, {bool definitive = false}) {
   return definitive ? playbackLineFailureThreshold : currentCount + 1;
@@ -10,6 +16,72 @@ int nextPlaybackLineFailureCount(int currentCount, {bool definitive = false}) {
 
 bool shouldRetryPlaybackLineAfterFailure(int failureCount) {
   return failureCount < playbackLineFailureThreshold;
+}
+
+Duration playbackBufferedAhead({
+  required Duration position,
+  required Duration buffer,
+}) {
+  return buffer > position ? buffer - position : Duration.zero;
+}
+
+bool playbackShouldRecoverFromStall({
+  required bool appInForeground,
+  required bool playing,
+  required bool buffering,
+  required bool loading,
+  required bool playbackFailed,
+  required Duration position,
+  required Duration duration,
+  required Duration buffer,
+  required Duration stalledFor,
+  required Duration sinceLastRecovery,
+}) {
+  if (!appInForeground ||
+      !playing ||
+      loading ||
+      playbackFailed ||
+      position <= Duration.zero ||
+      stalledFor < playbackStallDetectionWindow ||
+      sinceLastRecovery < playbackStallRecoveryCooldown) {
+    return false;
+  }
+  if (duration > Duration.zero &&
+      duration - position <= const Duration(seconds: 3)) {
+    return false;
+  }
+  final bufferedAhead = playbackBufferedAhead(
+    position: position,
+    buffer: buffer,
+  );
+  return buffering || bufferedAhead <= playbackStallBufferThreshold;
+}
+
+bool playbackShouldPrepareSingleBackup({
+  required bool appInForeground,
+  required bool playing,
+  required bool buffering,
+  required bool loading,
+  required bool playbackFailed,
+  required bool hasAlternative,
+  required Duration position,
+  required Duration buffer,
+}) {
+  if (!appInForeground ||
+      !playing ||
+      buffering ||
+      loading ||
+      playbackFailed ||
+      hasAlternative ||
+      position < playbackBackupProbeMinimumPosition) {
+    return false;
+  }
+  // Some media_kit backends do not publish a buffer position. In that case a
+  // sustained period of advancing playback is the best available signal that
+  // a single low-concurrency fallback probe will not delay the current stream.
+  if (buffer <= Duration.zero) return true;
+  return playbackBufferedAhead(position: position, buffer: buffer) >=
+      playbackBackupProbeMinimumBuffer;
 }
 
 class PlaybackLineValidationDecision {

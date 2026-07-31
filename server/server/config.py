@@ -29,6 +29,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Production never mutates the schema during ordinary application startup.
+# Local throwaway environments may opt in explicitly.
+DATABASE_AUTO_CREATE = _env_bool("DATABASE_AUTO_CREATE", False)
+SQLITE_BUSY_TIMEOUT_MS = max(
+    1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
+)
+SQLITE_CONNECT_TIMEOUT_SECONDS = max(
+    1.0, float(os.getenv("SQLITE_CONNECT_TIMEOUT_SECONDS", "30"))
+)
+
+
 # Public source quality varies by network location. Keep speculative background
 # crawling off by default; on-demand playback still verifies and caches lines.
 PRECACHE_ENABLED = _env_bool("PRECACHE_ENABLED", False)
@@ -51,6 +62,13 @@ PLAYBACK_STABLE_LINE_COUNT = max(
 )
 PLAYBACK_NEGATIVE_CACHE_MINUTES = max(
     1, int(os.getenv("PLAYBACK_NEGATIVE_CACHE_MINUTES", "5"))
+)
+PLAYBACK_STALE_HOURS = max(1, int(os.getenv("PLAYBACK_STALE_HOURS", "24")))
+PLAYBACK_QUICK_TIMEOUT_SECONDS = max(
+    0.5, min(8.0, float(os.getenv("PLAYBACK_QUICK_TIMEOUT_SECONDS", "4.5")))
+)
+PLAYBACK_QUICK_LINE_COUNT = max(
+    1, min(5, int(os.getenv("PLAYBACK_QUICK_LINE_COUNT", "3")))
 )
 SOURCE_BINDING_HOURS = max(1, int(os.getenv("SOURCE_BINDING_HOURS", "24")))
 SOURCE_MAX_CONCURRENCY = max(1, min(4, int(os.getenv("SOURCE_MAX_CONCURRENCY", "2"))))

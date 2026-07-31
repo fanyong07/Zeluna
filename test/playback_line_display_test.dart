@@ -204,6 +204,36 @@ void main() {
   );
 
   test(
+    'backup probing is sequential and stops at the first playable line',
+    () async {
+      final candidates = List.generate(
+        5,
+        (index) => _line('backup-$index', available: false),
+      );
+      var active = 0;
+      var maxActive = 0;
+      final calls = <String>[];
+
+      final checked = await probeSinglePlaybackBackupSequentially(
+        candidates,
+        verify: (line) async {
+          active++;
+          if (active > maxActive) maxActive = active;
+          calls.add(line.id);
+          await Future<void>.delayed(const Duration(milliseconds: 5));
+          active--;
+          return _line(line.id, available: line.id == 'backup-1');
+        },
+      );
+
+      expect(maxActive, 1);
+      expect(calls, ['backup-0', 'backup-1']);
+      expect(checked.map((line) => line.id), ['backup-0', 'backup-1']);
+      expect(checked.last.available, isTrue);
+    },
+  );
+
+  test(
     'verified network line is inserted only after the probe result arrives',
     () {
       final verified = _line('verified-network', latencyMs: 120);
@@ -394,6 +424,119 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+    'stall recovery requires sustained foreground playback without buffer',
+    () {
+      expect(
+        playbackShouldRecoverFromStall(
+          appInForeground: true,
+          playing: true,
+          buffering: true,
+          loading: false,
+          playbackFailed: false,
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 24),
+          buffer: const Duration(minutes: 3),
+          stalledFor: playbackStallDetectionWindow,
+          sinceLastRecovery: playbackStallRecoveryCooldown,
+        ),
+        isTrue,
+      );
+      expect(
+        playbackShouldRecoverFromStall(
+          appInForeground: true,
+          playing: true,
+          buffering: false,
+          loading: false,
+          playbackFailed: false,
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 24),
+          buffer: const Duration(minutes: 3, seconds: 10),
+          stalledFor: playbackStallDetectionWindow,
+          sinceLastRecovery: playbackStallRecoveryCooldown,
+        ),
+        isFalse,
+      );
+      expect(
+        playbackShouldRecoverFromStall(
+          appInForeground: false,
+          playing: true,
+          buffering: true,
+          loading: false,
+          playbackFailed: false,
+          position: const Duration(minutes: 3),
+          duration: const Duration(minutes: 24),
+          buffer: const Duration(minutes: 3),
+          stalledFor: playbackStallDetectionWindow,
+          sinceLastRecovery: playbackStallRecoveryCooldown,
+        ),
+        isFalse,
+      );
+      expect(
+        playbackShouldRecoverFromStall(
+          appInForeground: true,
+          playing: true,
+          buffering: true,
+          loading: false,
+          playbackFailed: false,
+          position: const Duration(minutes: 23, seconds: 59),
+          duration: const Duration(minutes: 24),
+          buffer: const Duration(minutes: 24),
+          stalledFor: playbackStallDetectionWindow,
+          sinceLastRecovery: playbackStallRecoveryCooldown,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'single backup probe waits for stable playback and never duplicates',
+    () {
+      expect(
+        playbackShouldPrepareSingleBackup(
+          appInForeground: true,
+          playing: true,
+          buffering: false,
+          loading: false,
+          playbackFailed: false,
+          hasAlternative: false,
+          position: playbackBackupProbeMinimumPosition,
+          buffer:
+              playbackBackupProbeMinimumPosition +
+              playbackBackupProbeMinimumBuffer,
+        ),
+        isTrue,
+      );
+      expect(
+        playbackShouldPrepareSingleBackup(
+          appInForeground: true,
+          playing: true,
+          buffering: true,
+          loading: false,
+          playbackFailed: false,
+          hasAlternative: false,
+          position: const Duration(seconds: 20),
+          buffer: const Duration(seconds: 40),
+        ),
+        isFalse,
+      );
+      expect(
+        playbackShouldPrepareSingleBackup(
+          appInForeground: true,
+          playing: true,
+          buffering: false,
+          loading: false,
+          playbackFailed: false,
+          hasAlternative: true,
+          position: const Duration(seconds: 20),
+          buffer: const Duration(seconds: 40),
+        ),
+        isFalse,
+      );
+    },
+  );
 
   test('native soft timeout switches only when a fallback exists', () {
     expect(

@@ -179,6 +179,49 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[0].headers["Referer"], "https://source.example/watch/1")
         self.assertEqual(health, {"dm706": CLIENT_PROBE_REQUIRED})
 
+    async def test_quick_unverified_lines_are_public_client_candidates_only(self):
+        crawler = AsyncMock()
+        crawler.content_types = ["anime"]
+        crawler.get_video_urls = AsyncMock(return_value=[
+            VideoLine(
+                url="https://cdn.example/quick.m3u8",
+                title="快速候选",
+                format="hls",
+                source_name="quick",
+            ),
+            VideoLine(
+                url="http://127.0.0.1/private.m3u8",
+                title="私网地址",
+                format="hls",
+                source_name="quick",
+            ),
+        ])
+        self.aggregator = ContentAggregator(crawler_scrapers={"quick": crawler})
+        self.aggregator._line_verification_status = AsyncMock(
+            side_effect=AssertionError("quick candidates must not run media probes")
+        )
+
+        lines, health = await self.aggregator.resolve_source_matches(
+            [
+                SourceMatch(
+                    source_id="crawler:quick:1",
+                    source_name="quick",
+                    title="测试动画",
+                    content_type="anime",
+                    year=2025,
+                )
+            ],
+            episode=1,
+            verify=False,
+        )
+
+        self.assertEqual([line.url for line in lines], [
+            "https://cdn.example/quick.m3u8"
+        ])
+        self.assertEqual(lines[0].verification_status, CLIENT_PROBE_REQUIRED)
+        self.assertEqual(health, {"quick": CLIENT_PROBE_REQUIRED})
+        self.aggregator._line_verification_status.assert_not_awaited()
+
     async def test_definitive_404_is_not_sent_to_the_client_as_a_candidate(self):
         crawler = AsyncMock()
         crawler.content_types = ["anime"]

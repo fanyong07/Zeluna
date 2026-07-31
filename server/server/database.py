@@ -3,17 +3,57 @@ SQLAlchemy 异步引擎 + ORM 模型
 """
 
 import datetime
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from pathlib import Path
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from sqlalchemy import event, inspect
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
     String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func,
-    UniqueConstraint, select, text,
+    UniqueConstraint, Index, select, text,
 )
 from sqlalchemy.exc import IntegrityError
 
-from .config import DATABASE_URL
+from .config import (
+    DATABASE_AUTO_CREATE,
+    DATABASE_URL,
+    SQLITE_BUSY_TIMEOUT_MS,
+    SQLITE_CONNECT_TIMEOUT_SECONDS,
+)
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+
+def create_database_engine(database_url: str = DATABASE_URL) -> AsyncEngine:
+    parsed_url = make_url(database_url)
+    engine_options: dict = {"echo": False}
+    if parsed_url.get_backend_name() == "sqlite":
+        engine_options["connect_args"] = {
+            "timeout": SQLITE_CONNECT_TIMEOUT_SECONDS,
+        }
+    database_engine = create_async_engine(database_url, **engine_options)
+    if parsed_url.get_backend_name() == "sqlite":
+
+        @event.listens_for(database_engine.sync_engine, "connect")
+        def _configure_sqlite_connection(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            finally:
+                cursor.close()
+    return database_engine
+
+
+engine = create_database_engine()
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -273,8 +313,11 @@ class PlayHistory(Base):
 class PlaybackCache(Base):
     __tablename__ = "playback_cache"
     __table_args__ = (
-        UniqueConstraint(
-            "subject_id", "episode", name="uq_playback_cache_subject_episode"
+        Index(
+            "uq_playback_cache_subject_episode",
+            "subject_id",
+            "episode",
+            unique=True,
         ),
     )
 
@@ -357,25 +400,43 @@ class SourceHealth(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
 
 
+def migration_head_revision() -> str:
+    server_root = Path(__file__).resolve().parents[1]
+    config = Config(str(server_root / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+    head = script.get_current_head()
+    if not head:
+        raise RuntimeError("Alembic migration head is not configured")
+    return head
+
+
+async def verify_database_schema(database_engine: AsyncEngine | None = None) -> str:
+    selected_engine = database_engine or engine
+    async with selected_engine.begin() as conn:
+        tables = await conn.run_sync(
+            lambda sync_conn: set(inspect(sync_conn).get_table_names())
+        )
+        if "alembic_version" not in tables:
+            raise RuntimeError(
+                "Database schema is not managed by Alembic. "
+                "Run `python tools/migrate.py upgrade` before starting Zeluna."
+            )
+        revision = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+    head = migration_head_revision()
+    if revision != head:
+        raise RuntimeError(
+            f"Database schema revision {revision or 'unknown'} is outdated; "
+            f"expected {head}. Run `python tools/migrate.py upgrade`."
+        )
+    return str(revision)
+
+
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        if conn.dialect.name == "sqlite":
-            # create_all cannot retrofit constraints onto an existing SQLite
-            # table. Keep the newest row for each key before adding the index.
-            await conn.execute(text("""
-                DELETE FROM playback_cache
-                WHERE id NOT IN (
-                    SELECT MAX(id)
-                    FROM playback_cache
-                    GROUP BY subject_id, episode
-                )
-            """))
-            await conn.execute(text("""
-                CREATE UNIQUE INDEX IF NOT EXISTS
-                uq_playback_cache_subject_episode
-                ON playback_cache(subject_id, episode)
-            """))
+    if DATABASE_AUTO_CREATE:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        return
+    await verify_database_schema()
 
 
 async def upsert_playback_cache(

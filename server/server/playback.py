@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -23,6 +24,9 @@ from .config import (
     PLAYBACK_CACHE_HOURS,
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
+    PLAYBACK_QUICK_LINE_COUNT,
+    PLAYBACK_QUICK_TIMEOUT_SECONDS,
+    PLAYBACK_STALE_HOURS,
     PLAYBACK_STABLE_LINE_COUNT,
     SOURCE_BINDING_HOURS,
     SOURCE_MAX_CONCURRENCY,
@@ -34,10 +38,40 @@ from .database import (
     async_session,
     upsert_playback_cache,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
 class PlaybackService:
-    def __init__(self):
-        self._locks: dict[tuple[str, int], asyncio.Lock] = {}
+    def __init__(self, *, session_factory=async_session):
+        self._session_factory = session_factory
+        self._closing = False
         self._refresh_semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
+        self._refresh_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
+        self._quick_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
+        self._metrics = {
+            "fresh_hit": 0,
+            "stale_hit": 0,
+            "miss": 0,
+            "refresh_success": 0,
+            "refresh_failure": 0,
+            "quick_success": 0,
+        }
+
+    @property
+    def cache_metrics(self) -> dict[str, int]:
+        return dict(self._metrics)
+
+    async def aclose(self) -> None:
+        self._closing = True
+        tasks = {*self._refresh_tasks.values(), *self._quick_tasks.values()}
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._refresh_tasks.clear()
+        self._quick_tasks.clear()
 
     async def lines(
         self,
@@ -54,21 +88,130 @@ class PlaybackService:
         if parse_stable_id(stable_id) is None:
             return []
         episode = max(1, episode)
-        cached = await self._cached_lines(session, stable_id, episode, force=force)
-        if cached is not None:
-            return cached
-
-        key = (stable_id, episode)
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        try:
-            async with lock:
-                cached = await self._cached_lines(
-                    session, stable_id, episode, force=force
+        if not force:
+            cache_state, cached = await self._cache_lookup(
+                session,
+                stable_id,
+                episode,
+            )
+            if cache_state == "fresh":
+                self._metrics["fresh_hit"] += 1
+                return cached
+            if cache_state == "stale":
+                self._metrics["stale_hit"] += 1
+                self._start_full_refresh(
+                    stable_id,
+                    episode,
+                    title=title,
+                    original_title=original_title,
+                    content_type=content_type,
+                    year=year,
                 )
-                if cached is not None:
-                    return cached
-                async with self._refresh_semaphore:
-                    return await self._refresh(
+                return cached
+            self._metrics["miss"] += 1
+
+        task = self._start_full_refresh(
+            stable_id,
+            episode,
+            title=title,
+            original_title=original_title,
+            content_type=content_type,
+            year=year,
+        )
+        return await asyncio.shield(task)
+
+    async def quick_lines(
+        self,
+        stable_id: str,
+        episode: int,
+        session: AsyncSession,
+        *,
+        title: str = "",
+        original_title: str = "",
+        content_type: str = "",
+        year: int = 0,
+    ) -> list[dict]:
+        if parse_stable_id(stable_id) is None:
+            return []
+        episode = max(1, episode)
+        cache_state, cached = await self._cache_lookup(
+            session,
+            stable_id,
+            episode,
+        )
+        if cache_state == "fresh":
+            self._metrics["fresh_hit"] += 1
+            return self._select_quick_lines(cached)
+        if cache_state == "stale":
+            self._metrics["stale_hit"] += 1
+            self._start_full_refresh(
+                stable_id,
+                episode,
+                title=title,
+                original_title=original_title,
+                content_type=content_type,
+                year=year,
+            )
+            return self._select_quick_lines(cached)
+
+        self._metrics["miss"] += 1
+        task = self._start_quick_refresh(
+            stable_id,
+            episode,
+            title=title,
+            original_title=original_title,
+            content_type=content_type,
+            year=year,
+        )
+        return await asyncio.shield(task)
+
+    def _start_full_refresh(
+        self,
+        stable_id: str,
+        episode: int,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> asyncio.Task[list[dict]]:
+        key = (stable_id, episode)
+        current = self._refresh_tasks.get(key)
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(
+            self._run_full_refresh(
+                stable_id,
+                episode,
+                title=title,
+                original_title=original_title,
+                content_type=content_type,
+                year=year,
+            )
+        )
+        self._refresh_tasks[key] = task
+
+        def remove(completed: asyncio.Task[list[dict]]) -> None:
+            if self._refresh_tasks.get(key) is completed:
+                self._refresh_tasks.pop(key, None)
+
+        task.add_done_callback(remove)
+        return task
+
+    async def _run_full_refresh(
+        self,
+        stable_id: str,
+        episode: int,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> list[dict]:
+        try:
+            async with self._refresh_semaphore:
+                async with self._session_factory() as session:
+                    result = await self._refresh(
                         stable_id,
                         episode,
                         session,
@@ -77,9 +220,107 @@ class PlaybackService:
                         content_type=content_type,
                         year=year,
                     )
+            self._metrics["refresh_success"] += 1
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._metrics["refresh_failure"] += 1
+            logger.warning(
+                "Playback refresh failed for %s episode %s: %s",
+                stable_id,
+                episode,
+                type(error).__name__,
+            )
+            return []
+
+    def _start_quick_refresh(
+        self,
+        stable_id: str,
+        episode: int,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> asyncio.Task[list[dict]]:
+        key = (stable_id, episode)
+        current = self._quick_tasks.get(key)
+        if current is not None and not current.done():
+            return current
+        task = asyncio.create_task(
+            self._run_quick_refresh(
+                stable_id,
+                episode,
+                title=title,
+                original_title=original_title,
+                content_type=content_type,
+                year=year,
+            )
+        )
+        self._quick_tasks[key] = task
+
+        def remove(completed: asyncio.Task[list[dict]]) -> None:
+            if self._quick_tasks.get(key) is completed:
+                self._quick_tasks.pop(key, None)
+
+        task.add_done_callback(remove)
+        return task
+
+    async def _run_quick_refresh(
+        self,
+        stable_id: str,
+        episode: int,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> list[dict]:
+        result: list[dict] = []
+
+        async def load() -> list[dict]:
+            async with self._refresh_semaphore:
+                async with self._session_factory() as session:
+                    return await self._refresh_quick(
+                        stable_id,
+                        episode,
+                        session,
+                        title=title,
+                        original_title=original_title,
+                        content_type=content_type,
+                        year=year,
+                    )
+
+        try:
+            result = await asyncio.wait_for(
+                load(),
+                timeout=PLAYBACK_QUICK_TIMEOUT_SECONDS,
+            )
+            if result:
+                self._metrics["quick_success"] += 1
+        except asyncio.TimeoutError:
+            result = []
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.debug(
+                "Quick playback lookup failed for %s episode %s: %s",
+                stable_id,
+                episode,
+                type(error).__name__,
+            )
         finally:
-            if not lock.locked():
-                self._locks.pop(key, None)
+            if not self._closing:
+                self._start_full_refresh(
+                    stable_id,
+                    episode,
+                    title=title,
+                    original_title=original_title,
+                    content_type=content_type,
+                    year=year,
+                )
+        return result
 
     async def _cached_lines(
         self,
@@ -88,9 +329,21 @@ class PlaybackService:
         episode: int,
         *,
         force: bool,
+        allow_stale: bool = False,
     ) -> list[dict] | None:
         if force:
             return None
+        state, items = await self._cache_lookup(session, stable_id, episode)
+        if state == "fresh" or (allow_stale and state == "stale"):
+            return items
+        return None
+
+    async def _cache_lookup(
+        self,
+        session: AsyncSession,
+        stable_id: str,
+        episode: int,
+    ) -> tuple[str, list[dict]]:
         row = await session.scalar(
             select(PlaybackCache).where(
                 PlaybackCache.subject_id == stable_id,
@@ -98,7 +351,7 @@ class PlaybackService:
             )
         )
         if row is None:
-            return None
+            return "miss", []
         if row.line_count <= 0:
             ttl = PLAYBACK_NEGATIVE_CACHE_MINUTES * 60
         elif row.line_count < PLAYBACK_STABLE_LINE_COUNT:
@@ -106,14 +359,12 @@ class PlaybackService:
             ttl = PLAYBACK_PARTIAL_CACHE_MINUTES * 60
         else:
             ttl = PLAYBACK_CACHE_HOURS * 3600
-        if time.time() - row.verified_at >= ttl:
-            return None
         try:
             items = json.loads(row.lines_json)
         except (json.JSONDecodeError, TypeError):
-            return None
+            return "miss", []
         if not isinstance(items, list):
-            return None
+            return "miss", []
         now = time.time()
         fresh_items: list[dict] = []
         for item in items:
@@ -125,8 +376,26 @@ class PlaybackService:
                 expires_at = 0
             if expires_at <= 0 or expires_at > now + 15:
                 fresh_items.append(item)
-        return [
-            {**item, "cached": True}
+        if row.line_count > 0 and not self._has_usable_cached_route(fresh_items):
+            return "miss", []
+        age = max(0.0, now - row.verified_at)
+        if age < ttl:
+            state = "fresh"
+        elif (
+            row.line_count > 0
+            and age < PLAYBACK_STALE_HOURS * 3600
+            and self._has_usable_cached_route(fresh_items)
+        ):
+            state = "stale"
+        else:
+            return "miss", []
+        return state, [
+            {
+                **item,
+                "cached": True,
+                "stale": state == "stale",
+                "cache_state": state,
+            }
             for item in self._complete_site_inventory(fresh_items)
         ]
 
@@ -141,26 +410,14 @@ class PlaybackService:
         content_type: str,
         year: int,
     ) -> list[dict]:
-        metadata = await catalog_service.get_subject(stable_id, session)
-        if metadata:
-            title = str(metadata.get("title") or title).strip()
-            original_title = str(
-                metadata.get("original_title") or original_title
-            ).strip()
-            content_type = str(metadata.get("media_type") or content_type).strip()
-            date = str(metadata.get("date") or "")
-            if not year and len(date) >= 4 and date[:4].isdigit():
-                year = int(date[:4])
-            aliases = [
-                title,
-                original_title,
-                *(metadata.get("aliases") or []),
-            ]
-        else:
-            aliases = [title, original_title]
-            identity = parse_stable_id(stable_id)
-            content_type = content_type or (identity[1] if identity else "")
-        aliases = [str(value).strip() for value in aliases if str(value).strip()]
+        title, content_type, year, aliases = await self._playback_context(
+            stable_id,
+            session,
+            title=title,
+            original_title=original_title,
+            content_type=content_type,
+            year=year,
+        )
         if not aliases:
             await self._store_cache(session, stable_id, episode, title, [])
             return []
@@ -194,7 +451,141 @@ class PlaybackService:
             health=health,
         )
         await self._store_cache(session, stable_id, episode, title, data)
-        return [{**item, "cached": False} for item in data]
+        return [
+            {
+                **item,
+                "cached": False,
+                "stale": False,
+                "cache_state": "cold",
+            }
+            for item in data
+        ]
+
+    async def _playback_context(
+        self,
+        stable_id: str,
+        session: AsyncSession,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> tuple[str, str, int, list[str]]:
+        metadata = await catalog_service.get_subject(stable_id, session)
+        if metadata:
+            title = str(metadata.get("title") or title).strip()
+            original_title = str(
+                metadata.get("original_title") or original_title
+            ).strip()
+            content_type = str(metadata.get("media_type") or content_type).strip()
+            date = str(metadata.get("date") or "")
+            if not year and len(date) >= 4 and date[:4].isdigit():
+                year = int(date[:4])
+            aliases = [
+                title,
+                original_title,
+                *(metadata.get("aliases") or []),
+            ]
+        else:
+            aliases = [title, original_title]
+            identity = parse_stable_id(stable_id)
+            content_type = content_type or (identity[1] if identity else "")
+        aliases = [str(value).strip() for value in aliases if str(value).strip()]
+        return title, content_type, year, aliases
+
+    async def _refresh_quick(
+        self,
+        stable_id: str,
+        episode: int,
+        session: AsyncSession,
+        *,
+        title: str,
+        original_title: str,
+        content_type: str,
+        year: int,
+    ) -> list[dict]:
+        title = title.strip()
+        original_title = original_title.strip()
+        aliases = [value for value in (title, original_title) if value]
+        if aliases:
+            identity = parse_stable_id(stable_id)
+            content_type = content_type or (identity[1] if identity else "")
+        else:
+            title, content_type, year, aliases = await self._playback_context(
+                stable_id,
+                session,
+                title=title,
+                original_title=original_title,
+                content_type=content_type,
+                year=year,
+            )
+        if not aliases:
+            return []
+
+        matches = await self._load_bindings(session, stable_id)
+        resolved: dict[str, AggregatedVideoLine] = {}
+        health: dict[str, str] = {}
+
+        async def resolve_until_usable(candidates: list[SourceMatch]) -> bool:
+            async for match, lines, status in (
+                aggregator.resolve_source_matches_progressively(
+                    candidates,
+                    episode=episode,
+                    # The quick cold path returns only syntactically public
+                    # candidates. The client performs manifest + first-media
+                    # validation before display while the full server refresh
+                    # verifies every source in the background.
+                    verify=False,
+                )
+            ):
+                health[match.source_name] = status
+                for line in lines:
+                    previous = resolved.get(line.url)
+                    if previous is None or (
+                        previous.verification_status != SERVER_VERIFIED
+                        and line.verification_status == SERVER_VERIFIED
+                    ):
+                        resolved[line.url] = line
+                # A server-verified line can open immediately. A public client
+                # candidate is also useful on the quick path because the app
+                # performs the same manifest + first-segment probe locally.
+                if status in {SERVER_VERIFIED, CLIENT_PROBE_REQUIRED}:
+                    return True
+            return False
+
+        found = bool(matches) and await resolve_until_usable(matches)
+        discovered: list[SourceMatch] = []
+        if not found:
+            async for match in aggregator.discover_source_matches_progressively(
+                aliases,
+                content_type=content_type,
+                year=year,
+                max_matches=len(aggregator.source_inventory) + 8,
+            ):
+                discovered.append(match)
+                if await resolve_until_usable([match]):
+                    found = True
+                    break
+        if discovered:
+            matches = self._merge_matches(matches, discovered)
+            await self._store_bindings(session, stable_id, matches)
+        if health:
+            await self._record_health(session, stable_id, health)
+        data = self._complete_site_inventory(
+            [self._line_dict(line) for line in resolved.values()],
+            matches=matches,
+            health=health,
+        )
+        await self._store_cache(session, stable_id, episode, title, data)
+        return self._select_quick_lines([
+            {
+                **item,
+                "cached": False,
+                "stale": False,
+                "cache_state": "cold",
+            }
+            for item in data
+        ])
 
     async def _load_bindings(
         self, session: AsyncSession, stable_id: str
@@ -452,10 +843,64 @@ class PlaybackService:
         parts = str(source or "").split(":", 2)
         return parts[1].strip() if len(parts) >= 2 else ""
 
+    @staticmethod
+    def _has_playable_line(items: list[dict]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and item.get("available") is True
+            and bool(str(item.get("url") or "").strip())
+            for item in items
+        )
+
+    @staticmethod
+    def _has_usable_cached_route(items: list[dict]) -> bool:
+        return any(
+            isinstance(item, dict)
+            and bool(str(item.get("url") or "").strip())
+            and (
+                item.get("available") is True
+                or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+            )
+            for item in items
+        )
+
+    @staticmethod
+    def _select_quick_lines(items: list[dict]) -> list[dict]:
+        candidates = [
+            (index, dict(item))
+            for index, item in enumerate(items)
+            if isinstance(item, dict)
+            and bool(str(item.get("url") or "").strip())
+            and (
+                item.get("available") is True
+                or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+            )
+        ]
+        candidates.sort(
+            key=lambda entry: (
+                0 if entry[1].get("available") is True else 1,
+                entry[0],
+            )
+        )
+        selected: list[dict] = []
+        hosts: set[str] = set()
+        for _, item in candidates:
+            try:
+                host = (urlparse(str(item.get("url") or "")).hostname or "").lower()
+            except ValueError:
+                continue
+            if not host or host in hosts:
+                continue
+            hosts.add(host)
+            selected.append({**item, "quick": True})
+            if len(selected) >= PLAYBACK_QUICK_LINE_COUNT:
+                break
+        return selected
+
     async def refresh_due(self, *, limit: int = 12) -> dict[str, int]:
         refreshed = 0
         playable = 0
-        async with async_session() as session:
+        async with self._session_factory() as session:
             rows = (
                 await session.scalars(
                     select(PlaybackCache)
@@ -464,7 +909,7 @@ class PlaybackService:
                 )
             ).all()
         for row in rows:
-            async with async_session() as session:
+            async with self._session_factory() as session:
                 result = await self.lines(
                     row.subject_id,
                     row.episode,
@@ -473,7 +918,7 @@ class PlaybackService:
                     force=True,
                 )
             refreshed += 1
-            if result:
+            if self._has_playable_line(result):
                 playable += 1
         return {"refreshed": refreshed, "playable": playable}
 

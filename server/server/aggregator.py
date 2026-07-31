@@ -14,6 +14,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+from collections.abc import AsyncIterator
 from typing import Optional
 from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin, urlparse
@@ -415,21 +416,103 @@ class ContentAggregator:
             reverse=True,
         )[:max_matches]
 
-    async def resolve_source_matches(
+    async def discover_source_matches_progressively(
+        self,
+        aliases: list[str],
+        *,
+        content_type: str = "",
+        year: int = 0,
+        max_matches: int = 12,
+    ) -> AsyncIterator[SourceMatch]:
+        """Yield the first useful source matches without waiting for every site."""
+        clean_aliases: list[str] = []
+        seen_aliases: set[str] = set()
+        for value in aliases:
+            value = (value or "").strip()
+            key = _normalized_match_title(value)
+            if value and key and key not in seen_aliases:
+                seen_aliases.add(key)
+                clean_aliases.append(value)
+        if not clean_aliases:
+            return
+
+        providers: list[tuple[str, BaseScraper, float]] = [
+            ("maccms", self._maccms, 8),
+            ("tvbox", self._tvbox, 2),
+            *(
+                (
+                    name,
+                    scraper,
+                    5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+                )
+                for name, scraper in self._crawler_scrapers.items()
+            ),
+        ]
+        tasks = [
+            asyncio.create_task(
+                asyncio.wait_for(
+                    self._discover_scraper_matches(
+                        name,
+                        scraper,
+                        clean_aliases[:1],
+                        content_type=content_type,
+                        year=year,
+                    ),
+                    timeout=timeout,
+                )
+            )
+            for name, scraper, timeout in providers
+        ]
+        yielded_sites: set[str] = set()
+        yielded_count = 0
+        try:
+            for completed in asyncio.as_completed(tasks):
+                try:
+                    group = await completed
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                for candidate in sorted(
+                    group,
+                    key=lambda item: item.score,
+                    reverse=True,
+                ):
+                    if candidate.source_name in yielded_sites:
+                        continue
+                    yielded_sites.add(candidate.source_name)
+                    yield candidate
+                    yielded_count += 1
+                    if yielded_count >= max_matches:
+                        return
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def resolve_source_matches_progressively(
         self,
         matches: list[SourceMatch],
         *,
         episode: int,
         verify: bool = True,
-    ) -> tuple[list[AggregatedVideoLine], dict[str, str]]:
-        """低并发解析多站线路，并区分服务器实播与客户端候选。"""
+    ) -> AsyncIterator[tuple[SourceMatch, list[AggregatedVideoLine], str]]:
+        """Yield each resolved site as soon as its media checks finish."""
         semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
 
         async def resolve_one(match: SourceMatch):
             async with semaphore:
                 raw_lines = await self.get_video_urls(match.source_id, episode)
                 if not verify:
-                    return match, raw_lines
+                    return match, [
+                        replace(
+                            line,
+                            verification_status=CLIENT_PROBE_REQUIRED,
+                        )
+                        for line in raw_lines
+                        if _is_client_probe_candidate_url(line.url)
+                    ]
                 lines: list[AggregatedVideoLine] = []
                 if raw_lines:
                     checks = await asyncio.gather(
@@ -446,36 +529,52 @@ class ContentAggregator:
                             status == CLIENT_PROBE_REQUIRED
                             and _is_client_probe_candidate_url(line.url)
                         ):
-                            # Some public CDNs reject datacenter IPs but work
-                            # from residential clients. Return the candidate
-                            # without claiming it playable; the client repeats
-                            # the full manifest + first-segment probe.
                             lines.append(replace(
                                 line,
                                 verification_status=CLIENT_PROBE_REQUIRED,
                             ))
                 return match, lines
 
-        groups = await asyncio.gather(
-            *(resolve_one(match) for match in matches),
-            return_exceptions=True,
-        )
-        health: dict[str, str] = {}
-        unique: dict[str, AggregatedVideoLine] = {}
-        for group in groups:
-            if isinstance(group, Exception):
-                continue
-            match, lines = group
-            statuses = {line.verification_status for line in lines}
-            health[match.source_name] = (
-                SERVER_VERIFIED
-                if SERVER_VERIFIED in statuses
-                else (
-                    CLIENT_PROBE_REQUIRED
+        tasks = [asyncio.create_task(resolve_one(match)) for match in matches]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                try:
+                    match, lines = await completed
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    continue
+                statuses = {line.verification_status for line in lines}
+                status = (
+                    SERVER_VERIFIED
+                    if SERVER_VERIFIED in statuses
+                    else CLIENT_PROBE_REQUIRED
                     if CLIENT_PROBE_REQUIRED in statuses
                     else UNAVAILABLE
                 )
-            )
+                yield match, lines, status
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def resolve_source_matches(
+        self,
+        matches: list[SourceMatch],
+        *,
+        episode: int,
+        verify: bool = True,
+    ) -> tuple[list[AggregatedVideoLine], dict[str, str]]:
+        """低并发解析多站线路，并区分服务器实播与客户端候选。"""
+        health: dict[str, str] = {}
+        unique: dict[str, AggregatedVideoLine] = {}
+        async for match, lines, status in self.resolve_source_matches_progressively(
+            matches,
+            episode=episode,
+            verify=verify,
+        ):
+            health[match.source_name] = status
             for line in lines:
                 previous = unique.get(line.url)
                 if previous is None or (

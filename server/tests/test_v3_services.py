@@ -1,6 +1,8 @@
+import asyncio
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import func, select
@@ -209,9 +211,10 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.service = PlaybackService()
+        self.service = PlaybackService(session_factory=self.sessions)
 
     async def asyncTearDown(self):
+        await self.service.aclose()
         await self.engine.dispose()
 
     async def test_stable_id_discovers_binds_and_caches_multiple_sites(self):
@@ -295,7 +298,10 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                         subject_id="bangumi:partial",
                         episode=1,
                         title="Partial",
-                        lines_json='[{"source":"maccms:iKun","available":true}]',
+                        lines_json=(
+                            '[{"url":"https://cdn.example/partial.m3u8",'
+                            '"source":"maccms:iKun","available":true}]'
+                        ),
                         line_count=1,
                         verified_at=now - 11 * 60,
                     ),
@@ -303,7 +309,10 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                         subject_id="bangumi:stable",
                         episode=1,
                         title="Stable",
-                        lines_json='[{"source":"maccms:iKun","available":true}]',
+                        lines_json=(
+                            '[{"url":"https://cdn.example/stable.m3u8",'
+                            '"source":"maccms:iKun","available":true}]'
+                        ),
                         line_count=4,
                         verified_at=now - 11 * 60,
                     ),
@@ -343,6 +352,32 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             "https://source.example/watch/1",
         )
 
+    def test_playable_statistics_ignore_placeholder_only_inventory(self):
+        placeholders = [
+            {
+                "source": "crawler:dm706",
+                "available": False,
+                "status": "not_found",
+                "message": "当前站点没有匹配到这部作品",
+            },
+            {
+                "source": "maccms:iKun",
+                "available": False,
+                "status": "unavailable",
+            },
+        ]
+        self.assertFalse(self.service._has_playable_line(placeholders))
+        self.assertFalse(
+            self.service._has_playable_line(
+                [{"available": True, "url": ""}],
+            )
+        )
+        self.assertTrue(
+            self.service._has_playable_line(
+                [{"available": True, "url": "https://cdn.example/video.m3u8"}],
+            )
+        )
+
     async def test_expired_signed_candidate_is_removed_from_cache(self):
         async with self.sessions() as session:
             session.add(
@@ -369,6 +404,178 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(items)
         self.assertFalse(any(item.get("url") for item in items))
+
+    async def test_stale_positive_cache_returns_before_single_flight_refresh(self):
+        now = time.time()
+        async with self.sessions() as session:
+            session.add(
+                PlaybackCache(
+                    subject_id="bangumi:991",
+                    episode=1,
+                    title="Stale",
+                    lines_json=(
+                        '[{"url":"https://cdn.example/stale.m3u8",'
+                        '"source":"maccms:iKun","available":true,'
+                        f'"status":"{SERVER_VERIFIED}","expires_at":0}}]'
+                    ),
+                    line_count=1,
+                    verified_at=now - 11 * 60,
+                )
+            )
+            await session.commit()
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        refresh_calls = 0
+
+        async def slow_refresh(*_args, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            started.set()
+            await release.wait()
+            return [{"url": "https://cdn.example/fresh.m3u8", "available": True}]
+
+        with patch.object(self.service, "_refresh", new=slow_refresh):
+            async with self.sessions() as session:
+                first = await self.service.lines("bangumi:991", 1, session)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            async with self.sessions() as session:
+                second = await self.service.lines("bangumi:991", 1, session)
+
+            self.assertTrue(first[0]["stale"])
+            self.assertTrue(second[0]["stale"])
+            self.assertEqual(refresh_calls, 1)
+            self.assertEqual(len(self.service._refresh_tasks), 1)
+            release.set()
+            await asyncio.gather(*self.service._refresh_tasks.values())
+
+        self.assertEqual(self.service.cache_metrics["stale_hit"], 2)
+        self.assertEqual(self.service.cache_metrics["refresh_success"], 1)
+
+    async def test_concurrent_cache_misses_share_one_server_refresh(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        refresh_calls = 0
+
+        async def slow_refresh(*_args, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            started.set()
+            await release.wait()
+            return [{"url": "https://cdn.example/ready.m3u8", "available": True}]
+
+        async def lookup():
+            async with self.sessions() as session:
+                return await self.service.lines("bangumi:992", 1, session)
+
+        with patch.object(self.service, "_refresh", new=slow_refresh):
+            first = asyncio.create_task(lookup())
+            second = asyncio.create_task(lookup())
+            await asyncio.wait_for(started.wait(), timeout=1)
+            release.set()
+            results = await asyncio.gather(first, second)
+
+        self.assertEqual(refresh_calls, 1)
+        self.assertEqual(results[0], results[1])
+
+    async def test_quick_cold_lookup_stops_after_first_verified_source(self):
+        match = SourceMatch(
+            source_id="maccms:iKun:1",
+            source_name="iKun",
+            title="测试动画",
+            content_type="anime",
+            year=2024,
+            score=100,
+        )
+        line = AggregatedVideoLine(
+            url="https://first-cdn.example/video.m3u8",
+            title="首条可播线路",
+            format="hls",
+            source="maccms:iKun",
+            verification_status=SERVER_VERIFIED,
+        )
+        yielded_matches = 0
+        resolve_verify_values = []
+
+        async def discover(*_args, **_kwargs):
+            nonlocal yielded_matches
+            yielded_matches += 1
+            yield match
+            raise AssertionError("quick lookup continued after a verified route")
+
+        async def resolve(matches, **_kwargs):
+            resolve_verify_values.append(_kwargs.get("verify"))
+            yield matches[0], [line], SERVER_VERIFIED
+
+        with (
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value={
+                    "title": "测试动画",
+                    "original_title": "Test Anime",
+                    "aliases": [],
+                    "media_type": "anime",
+                    "date": "2024-01-01",
+                }),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service._refresh_quick(
+                    "bangumi:quick",
+                    1,
+                    session,
+                    title="测试动画",
+                    original_title="",
+                    content_type="anime",
+                    year=2024,
+                )
+
+        self.assertEqual(yielded_matches, 1)
+        self.assertEqual(resolve_verify_values, [False])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["url"], line.url)
+        self.assertTrue(items[0]["quick"])
+
+    def test_quick_inventory_prefers_three_different_hosts(self):
+        items = [
+            {
+                "url": "https://a.example/one.m3u8",
+                "available": True,
+                "status": SERVER_VERIFIED,
+            },
+            {
+                "url": "https://a.example/two.m3u8",
+                "available": True,
+                "status": SERVER_VERIFIED,
+            },
+            {
+                "url": "https://b.example/video.m3u8",
+                "available": True,
+                "status": SERVER_VERIFIED,
+            },
+            {
+                "url": "https://c.example/video.m3u8",
+                "available": False,
+                "status": CLIENT_PROBE_REQUIRED,
+            },
+        ]
+
+        selected = self.service._select_quick_lines(items)
+
+        self.assertEqual(
+            [urlparse(item["url"]).hostname for item in selected],
+            ["a.example", "b.example", "c.example"],
+        )
 
 
 if __name__ == "__main__":
