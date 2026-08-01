@@ -25,6 +25,7 @@ import '../sources/external_source_adapters.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
 import '../sources/source_rule_bridge.dart';
+import '../settings/settings_controller.dart';
 import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
 import 'async_single_flight.dart';
@@ -502,6 +503,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
   AccountController? _accountController;
+  SettingsController? _settingsController;
   int _homeRefreshVersion = 0;
   int _sourceCatalogRefreshVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
@@ -520,6 +522,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   AccountController get _accounts {
     final controller = _accountController;
     if (controller == null) throw const AccountException('应用状态尚未准备好');
+    return controller;
+  }
+
+  SettingsController get _settingsDomain {
+    final controller = _settingsController;
+    if (controller == null) throw StateError('应用设置尚未准备好');
     return controller;
   }
 
@@ -561,39 +569,31 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final accountBootstrap = await _accounts.initialize();
     final activeAccount = accountBootstrap.activeAccount;
     final accountSession = accountBootstrap.session;
-    final settingsJson = _settings.get(_accountSettingsKey('playback'));
-    final settings = settingsJson is Map
-        ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
-        : const PlaybackSettings();
-    final profileJson = _settings.get(_accountSettingsKey('profile'));
-    final homeJson = _settings.get(_accountSettingsKey('homePreferences'));
-    final appearanceJson = _settings.get(_accountSettingsKey('appearance'));
-    final danmakuJson = _settings.get(_accountSettingsKey('danmaku'));
-    final miscJson = _settings.get(_accountSettingsKey('misc'));
-    final servicesJson = _settings.get(_accountSettingsKey('services'));
-    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
-    final services = _normalizeServices(
-      servicesJson is Map
-          ? ExternalServiceSettings.fromJson(
-              servicesJson.cast<String, dynamic>(),
-            )
-          : const ExternalServiceSettings(),
+    _settingsController = SettingsController(
+      storage: HiveSettingsStorage(_settings),
+      publishSnapshot: _publishSettingsSnapshot,
+      applyKeepScreenOn: (enabled) async {
+        await WakelockPlus.toggle(enable: enabled).onError((_, _) {});
+      },
+      onExternalServicesChanged: _handleExternalServicesChanged,
     );
+    final settingsSnapshot = _settingsDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
+    final profileJson = _settings.get(_accountSettingsKey('profile'));
+    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
+    final services = settingsSnapshot.services;
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
     final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
     final rulePlugins = _restoreRulePlugins(rulePluginsJson);
     const sourceCatalog = SourceCatalogState();
-    final misc = miscJson is Map
-        ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
-        : const MiscSettings();
-    unawaited(
-      WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {}),
-    );
+    unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
     final offlineTasks = await _readDownloadTasks();
     final initialState = AnimeState(
       homeFeed: feed,
-      settings: settings,
+      settings: settingsSnapshot.playback,
       favorites: _readEntries('favorites'),
       history: _readEntries('history'),
       following: _readEntries('following'),
@@ -602,16 +602,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       feedbacks: _readFeedbacks(),
       profile: AccountController.profileFromJson(profileJson, activeAccount),
       accountSession: accountSession,
-      homePreferences: homeJson is Map
-          ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
-          : const HomePreferences(),
-      appearance: appearanceJson is Map
-          ? AppearanceSettings.fromJson(appearanceJson.cast<String, dynamic>())
-          : const AppearanceSettings(),
-      danmaku: danmakuJson is Map
-          ? DanmakuSettings.fromJson(danmakuJson.cast<String, dynamic>())
-          : const DanmakuSettings(),
-      misc: misc,
+      homePreferences: settingsSnapshot.homePreferences,
+      appearance: settingsSnapshot.appearance,
+      danmaku: settingsSnapshot.danmaku,
+      misc: settingsSnapshot.misc,
       services: services,
       rulePlugins: rulePlugins,
       sourceCatalog: sourceCatalog,
@@ -1634,134 +1628,30 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<void> retryPendingAccountCleanup() => _accounts.retryPendingCleanup();
 
-  Future<void> updateSettings(PlaybackSettings settings) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current != null) {
-      state = AsyncData(current.copyWith(settings: settings));
-    }
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'playback'),
-      settings.toJson(),
-    );
-  }
+  Future<void> updateSettings(PlaybackSettings settings) =>
+      _settingsDomain.updatePlayback(settings);
 
   Future<void> updateProfile(UserProfileSettings profile) =>
       _accounts.updateProfile(profile);
 
-  Future<void> updateHomePreferences(HomePreferences preferences) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current != null) {
-      state = AsyncData(current.copyWith(homePreferences: preferences));
-    }
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'homePreferences'),
-      preferences.toJson(),
-    );
-  }
+  Future<void> updateHomePreferences(HomePreferences preferences) =>
+      _settingsDomain.updateHomePreferences(preferences);
 
-  Future<void> updateAppearance(AppearanceSettings settings) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current != null) {
-      state = AsyncData(current.copyWith(appearance: settings));
-    }
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'appearance'),
-      settings.toJson(),
-    );
-  }
+  Future<void> updateAppearance(AppearanceSettings settings) =>
+      _settingsDomain.updateAppearance(settings);
 
-  Future<void> updateDanmaku(DanmakuSettings settings) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current != null) state = AsyncData(current.copyWith(danmaku: settings));
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'danmaku'),
-      settings.toJson(),
-    );
-  }
+  Future<void> updateDanmaku(DanmakuSettings settings) =>
+      _settingsDomain.updateDanmaku(settings);
 
-  Future<void> updateMisc(MiscSettings settings) async {
-    final accountId = _activeAccount?.id;
-    final accountContextVersion = _accountContextVersion;
-    final current = state.value;
-    if (current != null) state = AsyncData(current.copyWith(misc: settings));
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'misc'),
-      settings.toJson(),
-    );
-    if (accountContextVersion == _accountContextVersion) {
-      await WakelockPlus.toggle(
-        enable: settings.keepScreenOn,
-      ).onError((_, _) {});
-    }
-  }
+  Future<void> updateMisc(MiscSettings settings) =>
+      _settingsDomain.updateMisc(settings);
 
-  Future<void> updateServices(ExternalServiceSettings settings) async {
-    final accountId = _activeAccount?.id;
-    final accountContextVersion = _accountContextVersion;
-    final normalized = _normalizeServices(settings);
-    final current = state.value;
-    final changed =
-        current != null &&
-        _servicesSignature(current.services) != _servicesSignature(normalized);
-    if (current != null) {
-      state = AsyncData(current.copyWith(services: normalized));
-    }
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'services'),
-      normalized.toJson(),
-    );
-    if (changed) {
-      _backendLineLookups.clear();
-      _backendPlaybackLineCache.clear();
-      await Future.wait([
-        _library.delete(_homeFeedCacheKey),
-        _library.delete(_animeMetadataCacheKey),
-        _library.delete(_seriesMetadataCacheKey),
-        _library.delete(_movieMetadataCacheKey),
-      ]);
-      if (accountContextVersion == _accountContextVersion) {
-        unawaited(_refreshHomeFeed(normalized).onError((_, _) {}));
-      }
-    }
-  }
-
-  ExternalServiceSettings _normalizeServices(ExternalServiceSettings settings) {
-    final backendConfigured =
-        ZelunaBackendPlaybackRepository.normalizeBaseUrl(
-          settings.playbackBackendEndpoint,
-          service: _playbackBackendService(settings),
-          allowInsecureSelfHosted: settings.allowInsecurePlaybackBackend,
-        ) !=
-        null;
-    return settings.copyWith(
-      watchHubEnabled: false,
-      mediaMetadataEnabled: true,
-      tmdbEnabled: false,
-      cinemetaEnabled: false,
-      peerTubeEnabled: false,
-      wikimediaCommonsEnabled: false,
-      anilistEnabled: false,
-      jikanEnabled: false,
-      kitsuEnabled: false,
-      bangumiEnabled: false,
-      publicCollectionSyncEnabled: false,
-      preferBangumiChinese: true,
-      playbackBackendEnabled: backendConfigured,
-      allowInsecurePlaybackBackend:
-          settings.playbackBackendSelfHosted &&
-          settings.allowInsecurePlaybackBackend,
-    );
-  }
+  Future<void> updateServices(ExternalServiceSettings settings) =>
+      _settingsDomain.updateServices(settings);
 
   NetworkServiceKind _playbackBackendService(
     ExternalServiceSettings settings,
-  ) => settings.playbackBackendSelfHosted
-      ? NetworkServiceKind.selfHostedPlaybackBackend
-      : NetworkServiceKind.officialPlaybackBackend;
+  ) => SettingsController.playbackBackendService(settings);
 
   http.Client _playbackBackendClient(ExternalServiceSettings settings) {
     if (!settings.playbackBackendSelfHosted) {
@@ -2912,37 +2802,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> _applyAccountScope(AccountScopeActivation activation) async {
     final account = activation.account;
     final accountId = account?.id;
-    final settingsJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'playback'),
+    final settingsSnapshot = _settingsDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
     );
     final profileJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'profile'),
     );
-    final homeJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'homePreferences'),
-    );
-    final appearanceJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'appearance'),
-    );
-    final danmakuJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'danmaku'),
-    );
-    final miscJson = _settings.get(_accountSettingsKeyFor(accountId, 'misc'));
-    final servicesJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'services'),
-    );
     final rulePluginsJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'rulePlugins'),
-    );
-    final misc = miscJson is Map
-        ? MiscSettings.fromJson(miscJson.cast<String, dynamic>())
-        : const MiscSettings();
-    final services = _normalizeServices(
-      servicesJson is Map
-          ? ExternalServiceSettings.fromJson(
-              servicesJson.cast<String, dynamic>(),
-            )
-          : const ExternalServiceSettings(),
     );
     final rulePlugins = _restoreRulePlugins(rulePluginsJson);
     const sourceCatalog = SourceCatalogState();
@@ -2964,9 +2832,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     state = AsyncData(
       current.copyWith(
         selectedSubjects: const {},
-        settings: settingsJson is Map
-            ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
-            : const PlaybackSettings(),
+        settings: settingsSnapshot.playback,
         favorites: _readEntriesFor(accountId, 'favorites'),
         history: _readEntriesFor(accountId, 'history'),
         following: _readEntriesFor(accountId, 'following'),
@@ -2975,25 +2841,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         feedbacks: _readFeedbacksFor(accountId),
         profile: AccountController.profileFromJson(profileJson, account),
         accountSession: activation.session,
-        homePreferences: homeJson is Map
-            ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
-            : const HomePreferences(),
-        appearance: appearanceJson is Map
-            ? AppearanceSettings.fromJson(
-                appearanceJson.cast<String, dynamic>(),
-              )
-            : const AppearanceSettings(),
-        danmaku: danmakuJson is Map
-            ? DanmakuSettings.fromJson(danmakuJson.cast<String, dynamic>())
-            : const DanmakuSettings(),
-        misc: misc,
-        services: services,
+        homePreferences: settingsSnapshot.homePreferences,
+        appearance: settingsSnapshot.appearance,
+        danmaku: settingsSnapshot.danmaku,
+        misc: settingsSnapshot.misc,
+        services: settingsSnapshot.services,
         rulePlugins: rulePlugins,
         sourceCatalog: sourceCatalog,
       ),
     );
-    await WakelockPlus.toggle(enable: misc.keepScreenOn).onError((_, _) {});
-    unawaited(_refreshHomeFeed(services).onError((_, _) {}));
+    await _settingsDomain.applyRuntimeEffects().onError((_, _) {});
+    unawaited(_refreshHomeFeed(settingsSnapshot.services).onError((_, _) {}));
   }
 
   void _selectCredentialAccountContext(
@@ -3031,7 +2889,42 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
+  void _publishSettingsSnapshot(SettingsSnapshot snapshot) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        settings: snapshot.playback,
+        homePreferences: snapshot.homePreferences,
+        appearance: snapshot.appearance,
+        danmaku: snapshot.danmaku,
+        misc: snapshot.misc,
+        services: snapshot.services,
+      ),
+    );
+  }
+
+  Future<void> _handleExternalServicesChanged(
+    ExternalServicesChange change,
+  ) async {
+    if (change.playbackBackendChanged) {
+      _backendLineLookups.clear();
+      _backendPlaybackLineCache.clear();
+    }
+    if (!change.metadataChanged) return;
+    await Future.wait([
+      _library.delete(_homeFeedCacheKey),
+      _library.delete(_animeMetadataCacheKey),
+      _library.delete(_seriesMetadataCacheKey),
+      _library.delete(_movieMetadataCacheKey),
+    ]);
+    if (_accounts.isContextCurrent(change.contextVersion)) {
+      unawaited(_refreshHomeFeed(change.current).onError((_, _) {}));
+    }
+  }
+
   Future<void> _quiesceDownloadsForAccountChange() async {
+    await _settingsController?.settleWrites();
     final activeIds = state.value?.offlineTasks
         .where((task) => task.isActive)
         .map((task) => task.id)
@@ -3408,21 +3301,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return '$kind:${_servicesSignature(services)}';
   }
 
-  String _servicesSignature(ExternalServiceSettings services) {
-    return [
-      services.mediaMetadataEnabled,
-      services.tmdbEnabled,
-      services.cinemetaEnabled,
-      services.anilistEnabled,
-      services.jikanEnabled,
-      services.kitsuEnabled,
-      services.bangumiEnabled,
-      services.publicCollectionSyncEnabled,
-      services.peerTubeEnabled,
-      services.wikimediaCommonsEnabled,
-      services.preferBangumiChinese,
-    ].join(':');
-  }
+  String _servicesSignature(ExternalServiceSettings services) =>
+      SettingsController.servicesSignature(services);
 
   List<AnimeSubject> _uniqueSubjects(
     Iterable<AnimeSubject> subjects, {
