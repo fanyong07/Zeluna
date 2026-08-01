@@ -27,6 +27,7 @@ import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
 import 'video/native_video_controller.dart';
+import 'video/web_video_controller.dart';
 import 'web_stream_player.dart';
 
 const _nativeResumeSeekMaxAttempts = 15;
@@ -44,7 +45,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     with WidgetsBindingObserver {
   late AnimeEpisode _episode;
   late final NativeVideoController _nativeVideo;
-  late final WebStreamPlayerController _webPlayerController;
+  late final WebVideoController _webVideo;
   late final FocusNode _shortcutFocusNode;
   late final PlaybackSessionController _sessionController;
   late PlaybackPerformanceTrace _playbackTrace;
@@ -112,7 +113,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
-  Timer? _webLoadTimer;
   Timer? _stallWatchdogTimer;
   DateTime? _ignoreNativeErrorsUntil;
   Timer? _backupLookupDelayTimer;
@@ -147,6 +147,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Player get _player => _nativeVideo.player;
   VideoController get _controller => _nativeVideo.surfaceController;
+  WebStreamPlayerController get _webPlayerController =>
+      _webVideo.surfaceController;
+  Timer? get _webLoadTimer => _webVideo.startupTimer;
+  set _webLoadTimer(Timer? value) => _webVideo.replaceStartupTimer(value);
   Timer? get _nativeFirstFrameTimer => _nativeVideo.firstFrameTimer;
   set _nativeFirstFrameTimer(Timer? value) =>
       _nativeVideo.replaceFirstFrameTimer(value);
@@ -159,7 +163,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _nativeVideo = NativeVideoController();
-    _webPlayerController = WebStreamPlayerController();
+    _webVideo = WebVideoController();
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
@@ -324,7 +328,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       subscription.cancel();
     }
     _controlsHideTimer?.cancel();
-    _webLoadTimer?.cancel();
     _stallWatchdogTimer?.cancel();
     _backupLookupDelayTimer?.cancel();
     _backupLookupCancellationToken?.cancel();
@@ -339,6 +342,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
     _appFullscreen.dispose();
     unawaited(_nativeVideo.dispose());
+    _webVideo.dispose();
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     _sessionController.dispose();
