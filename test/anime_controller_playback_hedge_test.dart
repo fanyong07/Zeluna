@@ -134,6 +134,7 @@ void main() {
     'a client-verified prefetch is reused without probing the media twice',
     () async {
       const candidateUrl = 'https://cdn.example/candidate.m3u8';
+      final ruleResolutionGate = Completer<void>();
       final harness = await _PlaybackHarness.create(
         playbackResponse: (_) async => http.Response(
           jsonEncode([
@@ -152,13 +153,20 @@ void main() {
           headers: const {'content-type': 'application/json; charset=utf-8'},
         ),
         ruleId: 'test:slower-fallback',
+        ruleResolutionGate: ruleResolutionGate.future,
       );
-      addTearDown(harness.dispose);
+      addTearDown(() async {
+        if (!ruleResolutionGate.isCompleted) ruleResolutionGate.complete();
+        await harness.dispose();
+      });
 
-      final first = await harness.controller.linesForEpisodeMode(
+      final firstLookup = harness.controller.linesForEpisodeMode(
         _subject,
         _episode,
       );
+      await _waitUntil(() => harness.resolver.verifyCalls == 1);
+      final first = await firstLookup;
+      ruleResolutionGate.complete();
       final prefetched = harness.controller.prefetchedLineForEpisode(
         _subject,
         _episode,
@@ -406,6 +414,7 @@ class _PlaybackHarness {
     Map<String, ({Duration latency, String startupProfile})> probeResults =
         const {},
     Future<void>? verificationGate,
+    Future<void>? ruleResolutionGate,
   }) async {
     final root = await Directory.systemTemp.createTemp(
       'anime-controller-playback-hedge-',
@@ -439,6 +448,7 @@ class _PlaybackHarness {
       ruleId,
       probeResults: probeResults,
       verificationGate: verificationGate,
+      ruleResolutionGate: ruleResolutionGate,
     );
     final container = ProviderContainer(
       overrides: [
@@ -485,11 +495,13 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
     this.readyRuleId, {
     this.probeResults = const {},
     this.verificationGate,
+    this.ruleResolutionGate,
   });
 
   final String readyRuleId;
   final Map<String, ({Duration latency, String startupProfile})> probeResults;
   final Future<void>? verificationGate;
+  final Future<void>? ruleResolutionGate;
   int calls = 0;
   int readyCalls = 0;
   int verifyCalls = 0;
@@ -566,7 +578,12 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     calls++;
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final gate = ruleResolutionGate;
+    if (gate == null) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    } else {
+      await gate;
+    }
     if (rule.id != readyRuleId) return const [];
     readyCalls++;
     return [
