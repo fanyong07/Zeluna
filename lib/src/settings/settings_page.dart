@@ -1282,12 +1282,27 @@ class ServiceSettingsPage extends ConsumerWidget {
     BuildContext context,
   ) {
     final endpoint = settings.playbackBackendEndpoint.trim();
+    final selfHosted = settings.playbackBackendSelfHosted;
+    final endpointUri = Uri.tryParse(endpoint);
+    final cleartext = endpointUri?.scheme.toLowerCase() == 'http';
+    final backendAllowed =
+        endpointUri != null &&
+        endpointUri.hasAuthority &&
+        (endpointUri.scheme.toLowerCase() == 'https' ||
+            (selfHosted && cleartext && settings.allowInsecurePlaybackBackend));
+    final endpointLabel = endpoint.isEmpty
+        ? '未配置'
+        : selfHosted
+        ? cleartext
+              ? '自托管 HTTP（不安全） · $endpoint'
+              : '自托管 HTTPS · $endpoint'
+        : '官方 HTTPS · $endpoint';
     return [
       const _InfoCard(
         title: '在线内容服务',
         lines: [
           '番剧、电视剧和电影的资料与播放地址由在线服务提供；服务不可用时会明确提示。',
-          '地址只接受网页链接（http 或 https），不要填写账号、密码或带额外参数的链接。',
+          '官方服务只接受 HTTPS；自托管 HTTP 仅在高级模式主动授权后可用，且不会携带云账号凭据。',
         ],
       ),
       const SizedBox(height: 12),
@@ -1295,13 +1310,17 @@ class ServiceSettingsPage extends ConsumerWidget {
         children: [
           SettingsSwitchRow(
             title: '使用在线服务',
-            subtitle: endpoint.isEmpty ? '请先填写服务地址' : endpoint,
+            subtitle: endpoint.isEmpty ? '请先填写服务地址' : endpointLabel,
             value: settings.playbackBackendEnabled,
             onChanged: (value) {
-              if (value && endpoint.isEmpty) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('请先填写服务地址')));
+              if (value && !backendAllowed) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      endpoint.isEmpty ? '请先填写服务地址' : '当前服务地址未通过安全检查',
+                    ),
+                  ),
+                );
                 return;
               }
               controller.updateServices(
@@ -1309,15 +1328,81 @@ class ServiceSettingsPage extends ConsumerWidget {
               );
             },
           ),
+          SettingsSwitchRow(
+            title: '使用自托管服务（高级）',
+            subtitle: selfHosted
+                ? '地址由你维护；HTTPS 仍是推荐方式'
+                : '关闭时使用 Zeluna 官方 HTTPS 服务',
+            value: selfHosted,
+            onChanged: (value) {
+              controller.updateServices(
+                settings.copyWith(
+                  playbackBackendSelfHosted: value,
+                  playbackBackendEndpoint: value
+                      ? ''
+                      : defaultPlaybackBackendEndpoint,
+                  playbackBackendEnabled: value
+                      ? false
+                      : settings.playbackBackendEnabled,
+                  allowInsecurePlaybackBackend: false,
+                ),
+              );
+            },
+          ),
+          if (selfHosted)
+            SettingsSwitchRow(
+              title: '允许不安全 HTTP',
+              subtitle: settings.allowInsecurePlaybackBackend
+                  ? '已允许；流量可能被读取或篡改，且不会发送账号凭据'
+                  : '默认关闭，仅为无法配置 HTTPS 的自托管服务保留',
+              value: settings.allowInsecurePlaybackBackend,
+              onChanged: (value) async {
+                if (value && !await _confirmInsecurePlaybackBackend(context)) {
+                  return;
+                }
+                controller.updateServices(
+                  settings.copyWith(
+                    allowInsecurePlaybackBackend: value,
+                    playbackBackendEnabled: value || !cleartext
+                        ? settings.playbackBackendEnabled
+                        : false,
+                  ),
+                );
+              },
+            ),
           SettingsActionRow(
             title: '服务地址',
-            subtitle: endpoint.isEmpty ? '未配置' : endpoint,
+            subtitle: endpointLabel,
             onTap: () =>
                 _showPlaybackBackendEditor(context, settings, controller),
           ),
         ],
       ),
     ];
+  }
+
+  Future<bool> _confirmInsecurePlaybackBackend(BuildContext context) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('允许不安全 HTTP？'),
+            content: const Text(
+              'HTTP 流量可能被同一网络中的其他人读取或篡改。此模式只用于你主动配置的自托管服务，Zeluna 不会向它发送云账号 Token、Cookie 或 Authorization。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                key: const ValueKey('confirm_insecure_playback_backend'),
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: const Text('仍然允许'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   List<Widget> _subtitleSourceCards(
@@ -1567,6 +1652,7 @@ class ServiceSettingsPage extends ConsumerWidget {
                       '',
                     );
                     final uri = Uri.tryParse(value);
+                    final isCleartext = uri?.scheme.toLowerCase() == 'http';
                     final valid =
                         value.isEmpty ||
                         (uri != null &&
@@ -1574,16 +1660,28 @@ class ServiceSettingsPage extends ConsumerWidget {
                             (uri.scheme == 'http' || uri.scheme == 'https') &&
                             uri.userInfo.isEmpty &&
                             uri.query.isEmpty &&
-                            uri.fragment.isEmpty);
+                            uri.fragment.isEmpty &&
+                            (!isCleartext ||
+                                (settings.playbackBackendSelfHosted &&
+                                    settings.allowInsecurePlaybackBackend)));
                     if (!valid) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('请输入有效的 HTTP 或 HTTPS 地址')),
+                        SnackBar(
+                          content: Text(
+                            isCleartext
+                                ? '请先开启“自托管服务”和“允许不安全 HTTP”'
+                                : '请输入有效的 HTTPS 地址',
+                          ),
+                        ),
                       );
                       return;
                     }
                     controller.updateServices(
                       settings.copyWith(
                         playbackBackendEndpoint: value,
+                        playbackBackendSelfHosted:
+                            settings.playbackBackendSelfHosted ||
+                            value != defaultPlaybackBackendEndpoint,
                         playbackBackendEnabled: value.isEmpty
                             ? false
                             : settings.playbackBackendEnabled,

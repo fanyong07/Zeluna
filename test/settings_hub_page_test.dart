@@ -64,6 +64,55 @@ void main() {
     }
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('self-hosted HTTP requires a visible warning confirmation', (
+    tester,
+  ) async {
+    await _setViewport(tester);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(
+            _SelfHostedSettingsController.new,
+          ),
+        ],
+        child: MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: const ServiceSettingsPage(kind: 'playback'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('自托管 HTTP（不安全） · http://192.168.1.20'), findsNWidgets(2));
+    expect(find.text('允许不安全 HTTP'), findsOneWidget);
+    final toggle = find.byKey(const ValueKey('setting_switch_允许不安全 HTTP'));
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+
+    expect(find.text('允许不安全 HTTP？'), findsOneWidget);
+    expect(find.textContaining('不会向它发送云账号 Token'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ServiceSettingsPage)),
+    );
+    final controller =
+        container.read(animeControllerProvider.notifier)
+            as _SelfHostedSettingsController;
+    expect(controller.updated, isNull);
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('confirm_insecure_playback_backend')),
+    );
+    await tester.pumpAndSettle();
+    expect(controller.updated?.allowInsecurePlaybackBackend, isTrue);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 Future<void> _setViewport(WidgetTester tester) async {
@@ -75,6 +124,26 @@ Future<void> _setViewport(WidgetTester tester) async {
 class _FakeAnimeController extends AnimeController {
   @override
   Future<AnimeState> build() async => const AnimeState(homeFeed: _feed);
+}
+
+class _SelfHostedSettingsController extends AnimeController {
+  ExternalServiceSettings? updated;
+
+  @override
+  Future<AnimeState> build() async => const AnimeState(
+    homeFeed: _feed,
+    services: ExternalServiceSettings(
+      playbackBackendEnabled: false,
+      playbackBackendEndpoint: 'http://192.168.1.20',
+      playbackBackendSelfHosted: true,
+      allowInsecurePlaybackBackend: false,
+    ),
+  );
+
+  @override
+  Future<void> updateServices(ExternalServiceSettings settings) async {
+    updated = settings;
+  }
 }
 
 const _subject = AnimeSubject(
