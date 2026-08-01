@@ -30,6 +30,7 @@ import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
+import 'subtitles/subtitle_controller.dart';
 import 'video/native_video_controller.dart';
 import 'video/web_video_controller.dart';
 import 'web_stream_player.dart';
@@ -55,6 +56,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlaybackLineController _lineController;
   late final PlaybackRecoveryController _recoveryController;
   late final DanmakuController _danmakuController;
+  late final SubtitleController _subtitleController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
@@ -135,7 +137,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
   bool _theaterMode = false;
-  SubtitleCandidate? _selectedSubtitle;
 
   Player get _player => _nativeVideo.player;
   VideoController get _controller => _nativeVideo.surfaceController;
@@ -188,6 +189,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController = PlaybackRecoveryController();
     _danmakuController = DanmakuController()
       ..addListener(_handleDanmakuChanged);
+    _subtitleController = SubtitleController(
+      applyTrack: _player.setSubtitleTrack,
+    )..addListener(_handleSubtitleChanged);
     _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
@@ -228,6 +232,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _handleDanmakuChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _handleSubtitleChanged() {
     if (mounted) setState(() {});
   }
 
@@ -361,6 +369,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController.dispose();
     unawaited(_lineController.dispose());
     _danmakuController.dispose();
+    _subtitleController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
     super.dispose();
@@ -546,7 +555,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         child: _SubtitlePanel(
                           subject: widget.request.subject,
                           episode: _episode,
-                          selected: _selectedSubtitle,
+                          selected: _subtitleController.selected,
                           onSelected: _selectSubtitle,
                           onDisabled: _disableSubtitle,
                         ),
@@ -2428,6 +2437,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
     _danmakuController.changeEpisode();
+    _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
@@ -2825,38 +2835,34 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _selectSubtitle(SubtitleCandidate candidate) async {
-    final url = candidate.downloadUrl?.trim() ?? '';
-    if (!candidate.available || url.isEmpty) {
-      _showPlayerToast(candidate.message ?? '该字幕暂不可用');
-      return;
-    }
-    try {
-      await _player.setSubtitleTrack(
-        SubtitleTrack.uri(
-          url,
-          title: candidate.title,
-          language: candidate.language,
-        ),
-      );
-      if (!mounted) return;
-      setState(() {
-        _selectedSubtitle = candidate;
-        _subtitlePanel = false;
-      });
-      _showPlayerToast('已加载字幕：${candidate.title}');
-    } catch (error) {
-      _showPlayerToast('字幕加载失败：${_friendlyPlaybackError(error)}');
+    final result = await _subtitleController.select(candidate);
+    if (!mounted) return;
+    switch (result.status) {
+      case SubtitleActionStatus.applied:
+        setState(() => _subtitlePanel = false);
+        _showPlayerToast('已加载字幕：${candidate.title}');
+      case SubtitleActionStatus.unavailable:
+        _showPlayerToast(result.message ?? '该字幕暂不可用');
+      case SubtitleActionStatus.failed:
+        _showPlayerToast('字幕加载失败：${_friendlyPlaybackError(result.error!)}');
+      case SubtitleActionStatus.stale:
+        break;
     }
   }
 
   Future<void> _disableSubtitle() async {
-    await _player.setSubtitleTrack(SubtitleTrack.no());
+    final result = await _subtitleController.disable();
     if (!mounted) return;
-    setState(() {
-      _selectedSubtitle = null;
-      _subtitlePanel = false;
-    });
-    _showPlayerToast('字幕已关闭');
+    switch (result.status) {
+      case SubtitleActionStatus.applied:
+        setState(() => _subtitlePanel = false);
+        _showPlayerToast('字幕已关闭');
+      case SubtitleActionStatus.failed:
+        _showPlayerToast('字幕关闭失败：${_friendlyPlaybackError(result.error!)}');
+      case SubtitleActionStatus.unavailable:
+      case SubtitleActionStatus.stale:
+        break;
+    }
   }
 
   Future<void> _loadDanmakuForCurrentEpisode() async {
