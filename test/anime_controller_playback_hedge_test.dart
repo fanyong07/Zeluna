@@ -128,6 +128,54 @@ void main() {
       expect(harness.resolver.calls, 0);
     },
   );
+
+  test(
+    'a client-verified prefetch is reused without probing the media twice',
+    () async {
+      final harness = await _PlaybackHarness.create(
+        playbackResponse: (_) async => http.Response(
+          jsonEncode([
+            {
+              'url': 'https://cdn.example/candidate.m3u8',
+              'source': 'maccms:test',
+              'title': 'Episode 1',
+              'format': 'hls',
+              'status': 'client_probe_required',
+              'available': false,
+              'cached': false,
+              'cache_state': 'cold',
+            },
+          ]),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        ),
+        ruleId: 'test:slower-fallback',
+      );
+      addTearDown(harness.dispose);
+
+      final first = await harness.controller.linesForEpisodeMode(
+        _subject,
+        _episode,
+      );
+      final prefetched = harness.controller.prefetchedLineForEpisode(
+        _subject,
+        _episode,
+      );
+      final second = await harness.controller.linesForEpisodeMode(
+        _subject,
+        _episode,
+      );
+
+      expect(first.single.clientVerified, isTrue);
+      expect(first.single.available, isTrue);
+      expect(prefetched?.id, first.single.id);
+      expect(prefetched?.clientVerified, isTrue);
+      expect(second.single.id, first.single.id);
+      expect(harness.quickPlaybackRequests, 1);
+      expect(harness.resolver.verifyCalls, 1);
+      expect(harness.resolver.forceRefreshValues, [isFalse]);
+    },
+  );
 }
 
 class _PlaybackHarness {
@@ -223,6 +271,50 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
   final String readyRuleId;
   int calls = 0;
   int readyCalls = 0;
+  int verifyCalls = 0;
+  final List<bool> forceRefreshValues = <bool>[];
+
+  @override
+  Future<PlaybackLine> verifyPlaybackLine({
+    required PlaybackLine line,
+    bool enrichMetadata = true,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    verifyCalls++;
+    forceRefreshValues.add(forceRefresh);
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    return PlaybackLine(
+      id: line.id,
+      episodeId: line.episodeId,
+      providerId: line.providerId,
+      providerName: line.providerName,
+      title: line.title,
+      quality: line.quality,
+      format: line.format,
+      url: line.url,
+      headers: line.headers,
+      latency: const Duration(milliseconds: 5),
+      sizeLabel: line.sizeLabel,
+      sizeBytes: line.sizeBytes,
+      sizeEstimated: line.sizeEstimated,
+      videoWidth: line.videoWidth,
+      videoHeight: line.videoHeight,
+      bitrate: line.bitrate,
+      codecs: line.codecs,
+      isLive: line.isLive,
+      adaptive: line.adaptive,
+      publicHttpOnly: line.publicHttpOnly,
+      serverVerified: line.serverVerified,
+      requiresClientProbe: false,
+      clientVerified: true,
+      cacheState: line.cacheState,
+      sourceErrorCategory: line.sourceErrorCategory,
+      expiresAt: line.expiresAt,
+      available: true,
+      message: line.message,
+    );
+  }
 
   @override
   Future<List<PlaybackLine>> resolveRule({

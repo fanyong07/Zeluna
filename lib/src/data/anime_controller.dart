@@ -967,6 +967,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           startBackendCandidateProbe();
         case 'probe':
           probedBackendLines = event.lines;
+          if (hasPlayableLine(probedBackendLines)) {
+            _cacheBackendPlaybackLines(
+              subject,
+              episode,
+              _mergePlaybackLines(<PlaybackLine>[
+                ...backendLines,
+                ...probedBackendLines,
+              ]),
+              expandAll: expandAll,
+            );
+          }
         case 'rules':
           ruleLines = event.lines;
       }
@@ -987,6 +998,48 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         : const <PlaybackLine>[];
   }
 
+  String? _backendPlaybackLookupKey(
+    ExternalServiceSettings services,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+  }) {
+    final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+      services.playbackBackendEndpoint,
+    );
+    if (!services.playbackBackendEnabled ||
+        !_usesBackendPlayback(subject) ||
+        endpoint == null) {
+      return null;
+    }
+    return <Object>[
+      _accountContextVersion,
+      endpoint,
+      subject.source,
+      subject.id,
+      episode.id,
+      episode.number,
+      expandAll,
+    ].join('|');
+  }
+
+  void _cacheBackendPlaybackLines(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Iterable<PlaybackLine> lines, {
+    bool expandAll = false,
+  }) {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    final lookupKey = _backendPlaybackLookupKey(
+      services,
+      subject,
+      episode,
+      expandAll: expandAll,
+    );
+    if (lookupKey == null) return;
+    _backendPlaybackLineCache.write(lookupKey, lines);
+  }
+
   Future<List<PlaybackLine>> _backendLinesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
@@ -997,24 +1050,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       return Future.value(const <PlaybackLine>[]);
     }
     final services = state.value?.services ?? const ExternalServiceSettings();
-    final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
-      services.playbackBackendEndpoint,
+    final lookupKey = _backendPlaybackLookupKey(
+      services,
+      subject,
+      episode,
+      expandAll: expandAll,
     );
-    if (!services.playbackBackendEnabled ||
-        !_usesBackendPlayback(subject) ||
-        endpoint == null) {
+    if (lookupKey == null) {
       return Future.value(const <PlaybackLine>[]);
     }
     final accountContextVersion = _accountContextVersion;
-    final lookupKey = <Object>[
-      accountContextVersion,
-      endpoint,
-      subject.source,
-      subject.id,
-      episode.id,
-      episode.number,
-      expandAll,
-    ].join('|');
     final cached = _backendPlaybackLineCache.read(lookupKey);
     if (cached != null) return Future.value(cached);
     final pending = _backendLineLookups.run(lookupKey, () {
@@ -1048,23 +1093,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode,
   ) {
     final services = state.value?.services ?? const ExternalServiceSettings();
-    final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
-      services.playbackBackendEndpoint,
-    );
-    if (!services.playbackBackendEnabled ||
-        !_usesBackendPlayback(subject) ||
-        endpoint == null) {
-      return null;
-    }
-    final lookupKey = <Object>[
-      _accountContextVersion,
-      endpoint,
-      subject.source,
-      subject.id,
-      episode.id,
-      episode.number,
-      false,
-    ].join('|');
+    final lookupKey = _backendPlaybackLookupKey(services, subject, episode);
+    if (lookupKey == null) return null;
     final lines = _backendPlaybackLineCache.read(lookupKey);
     if (lines == null) return null;
     for (final line in lines) {
@@ -1154,7 +1184,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       verify: (line) => verifyPlaybackLine(
         line,
         enrichMetadata: false,
-        forceRefresh: true,
         cancellationToken: cancellationToken,
       ),
     )) {
