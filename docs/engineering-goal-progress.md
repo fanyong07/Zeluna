@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
+- Current HEAD: latest completed implementation stage `ce3d7ba` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -66,7 +66,7 @@ Tests:
 
 Builds: deferred to the cross-platform release gates in G13/G14; G0 changes no build or signing configuration.
 
-Commit: `test: freeze fast-start playback behavior` (this stage commit)
+Commit: `3a1c5ec test: freeze fast-start playback behavior`
 
 Remaining risks:
 
@@ -75,7 +75,47 @@ Remaining risks:
 
 ## G1 Stable identity and migration
 
-Status: not_started
+Status: completed
+
+Audit:
+
+- Audited Dart/Python hash APIs, time/random IDs, short hashes, and array-index-derived identities across client and server sources.
+- Persisted or API-visible subject, episode, playback-line, download-task, rule, repository, direct-media, and fallback display identities now use deterministic inputs. Python's process-randomized `hash()` and the known Dart `hashCode`, 32-bit FNV, timestamp, and array-index identity paths were removed.
+- Remaining `hashCode`/`identityHashCode`/short-hash uses are limited to in-process maps, cancellation namespaces, visual danmaku lanes, display aliases, or deterministic daily sorting; player-created local/network lines and local danmaku IDs are session-only and are not persisted.
+- Hive inventory contains four dynamic JSON boxes and no registered binary adapters: `anime.settings.v2`, `anime.library.v2`, `anime.accounts.v1`, and `anime.search.v1`. The identity migration schema is version 1 and operates only on identity-bearing rule/settings and library records. Account records already use persisted account/cloud IDs, while search history contains account-scoped strings and requires no media-identity rewrite.
+
+Changes:
+
+- Added matching Dart and Python `v1` identity primitives using UTF-8, SHA-256, framed components, and positive 63-bit integer derivation.
+- Canonical URL identity lowercases scheme/host, removes only default ports and fragments, and preserves signed query order. Access-affecting headers enter a fingerprint; Cookie, Authorization, token, secret, and key values never enter an ID in plaintext.
+- Added stable/legacy compatibility fields to subjects, episodes, downloads, rules, and rule repositories. Imported Animeko rule IDs no longer depend on array position and retain their old IDs as aliases.
+- Replaced unstable identities in backend catalog/playback results, server fallback display IDs, rule playback lines, direct media, external subjects, downloads, manual rules, clipboard repositories, and danmaku cache keys.
+- Added startup migration for global, guest, and account-scoped favorites, following, history/progress, image favorites, downloads, feedback subjects, metadata caches, and rule state. Each key uses one atomic Hive write followed by a resumable checkpoint marker.
+- Duplicate records merge deterministically; the newest playback progress wins, completed/local download data wins, all old IDs and download paths are retained, and short-lived remote URLs/headers are removed so downloads resolve fresh playback credentials.
+- Unconvertible records or malformed rule state remain byte-for-byte unchanged and are recorded in the migration marker. No box is cleared and no downloaded file is deleted.
+
+Tests:
+
+- Shared Dart/Python vectors cover digest bytes, canonical subjects/episodes, signed query order, sensitive header fingerprints, playback lines, downloads, rules, and 63-bit integers.
+- Migration regressions cover deterministic duplicate merge, legacy alias/path preservation, account isolation, interruption after data write, idempotent resume, malformed whole-key retention, and position-dependent Animeko rule migration.
+- Account migration tests verify the new stable download ID and preservation of the old `guest-download` alias.
+- `flutter test --reporter compact`: 468 passed, 26 intentionally skipped.
+- `python -m unittest discover -s tests -q`: 80 passed.
+- `flutter analyze --suppress-analytics`: no issues.
+- Dart format check, Python compile check, `git diff --check`, staged secret scan, and real-URL scan passed.
+
+Builds: deferred to G13/G14; G1 changes no signing or packaging configuration.
+
+Commits:
+
+- `3250701 refactor: introduce stable identity primitives`
+- `ce3d7ba migration: migrate persisted media identities`
+
+Remaining risks:
+
+- Migration behavior is verified against deterministic Hive fixtures and restart simulation; no private user Hive database was read or copied for this stage.
+- Retained malformed legacy keys are reported in the marker but do not yet have a user-facing repair screen; privacy-safe reporting belongs to G12.
+- Cross-platform signed release builds and rollback packaging remain G13/G14 gates.
 
 ## G2 Rule security
 
