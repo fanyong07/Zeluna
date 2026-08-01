@@ -2113,6 +2113,10 @@ class _DetailPageState extends ConsumerState<DetailPage> {
               subject: bundle.subject,
               episodes: bundle.episodes,
               episode: episode,
+              initialLine: controller.prefetchedLineForEpisode(
+                bundle.subject,
+                episode,
+              ),
             ),
           );
         }

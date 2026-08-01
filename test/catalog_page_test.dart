@@ -474,6 +474,51 @@ void main() {
     expect(find.byType(DetailPage), findsOneWidget);
   });
 
+  testWidgets('detail hands a prefetched verified line directly to player', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    PlaySessionRequest? capturedRequest;
+    final router = GoRouter(
+      routes: [
+        GoRoute(
+          path: '/',
+          builder: (context, state) => const DetailPage(subject: _subject),
+        ),
+        GoRoute(
+          path: '/player',
+          builder: (context, state) {
+            capturedRequest = state.extra as PlaySessionRequest;
+            return const Scaffold(body: Center(child: Text('测试播放页')));
+          },
+        ),
+      ],
+    );
+    addTearDown(router.dispose);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(
+            _PrefetchedLineAnimeController.new,
+          ),
+        ],
+        child: MaterialApp.router(routerConfig: router),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('立即播放'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('测试播放页'), findsOneWidget);
+    expect(capturedRequest?.initialLine?.id, _prefetchedLine.id);
+  });
+
   testWidgets('profile history preview expands in place', (tester) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
@@ -1242,6 +1287,16 @@ class _FakeAnimeController extends AnimeController {
   }
 }
 
+class _PrefetchedLineAnimeController extends _FakeAnimeController {
+  @override
+  PlaybackLine? prefetchedLineForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) {
+    return _prefetchedLine;
+  }
+}
+
 class _DelayedMetadataController extends AnimeController {
   static late Completer<AnimeState> _buildCompleter;
   static bool _ready = false;
@@ -1303,6 +1358,19 @@ class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
 }
 
 final _testRuleDate = DateTime(2026, 5, 5);
+
+const _prefetchedLine = PlaybackLine(
+  id: 'prefetched-line',
+  episodeId: 1001,
+  providerId: 'zeluna:site:test',
+  providerName: '在线服务 · test',
+  title: '预取线路',
+  quality: '1080P',
+  format: 'hls',
+  url: 'https://cdn.example/video.m3u8',
+  serverVerified: true,
+  available: true,
+);
 
 const _futureAnimeSubject = AnimeSubject(
   id: 2026,

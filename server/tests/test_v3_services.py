@@ -16,7 +16,14 @@ from server.aggregator import (
     aggregator,
 )
 from server.catalog import CatalogService
-from server.database import Base, CatalogSubject, PlaybackCache, SourceBinding
+from server.config import SOURCE_CIRCUIT_FAILURE_THRESHOLD
+from server.database import (
+    Base,
+    CatalogSubject,
+    PlaybackCache,
+    SourceBinding,
+    SourceHealth,
+)
 from server.playback import PlaybackService
 from server.scrapers.maccms_sites import MACCMS_SITES
 
@@ -563,6 +570,177 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(item["quick"] for item in items))
         self.assertTrue(slow_cancelled.is_set())
+
+    async def test_quick_existing_bindings_collect_immediate_backup_hosts(self):
+        matches = [
+            SourceMatch(
+                source_id=f"maccms:site-{index}:1",
+                source_name=f"site-{index}",
+                title="Bound Anime",
+                content_type="anime",
+                year=2024,
+                score=100 - index,
+            )
+            for index in range(3)
+        ]
+        generator_closed = asyncio.Event()
+
+        def result(index: int):
+            line = AggregatedVideoLine(
+                url=f"https://cdn-{index}.example/video.m3u8",
+                title=f"Route {index}",
+                format="hls",
+                source=f"maccms:site-{index}",
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+            return matches[index], [line], CLIENT_PROBE_REQUIRED
+
+        async def resolve(*_args, **_kwargs):
+            try:
+                yield result(0)
+                await asyncio.sleep(0.03)
+                yield result(1)
+                await asyncio.Event().wait()
+            finally:
+                generator_closed.set()
+
+        with (
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=matches),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+            ) as discover,
+        ):
+            started = time.monotonic()
+            async with self.sessions() as session:
+                items = await self.service._refresh_quick(
+                    "bangumi:bound",
+                    1,
+                    session,
+                    title="Bound Anime",
+                    original_title="",
+                    content_type="anime",
+                    year=2024,
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(
+            [urlparse(item["url"]).hostname for item in items],
+            ["cdn-0.example", "cdn-1.example"],
+        )
+        self.assertLess(elapsed, 1.0)
+        self.assertTrue(generator_closed.is_set())
+        discover.assert_not_called()
+
+    async def test_recent_source_failures_open_then_half_open_and_recover(self):
+        now = 1_800_000_000.0
+        binding = SourceBinding(
+            stable_id="bangumi:circuit",
+            source_id="maccms:circuit:1",
+            source_name="circuit",
+            matched_title="Circuit Anime",
+            media_type="anime",
+            year=2024,
+            score=100,
+            enabled=True,
+            updated_at=now,
+        )
+        async with self.sessions() as session:
+            session.add(binding)
+            await session.commit()
+
+        with patch("server.playback.time.time", return_value=now):
+            for _ in range(SOURCE_CIRCUIT_FAILURE_THRESHOLD):
+                async with self.sessions() as session:
+                    await self.service._record_health(
+                        session,
+                        "bangumi:circuit",
+                        {"circuit": "unavailable"},
+                    )
+            async with self.sessions() as session:
+                self.assertEqual(
+                    await self.service._load_bindings(
+                        session,
+                        "bangumi:circuit",
+                    ),
+                    [],
+                )
+                stored_binding = await session.scalar(select(SourceBinding))
+                stored_health = await session.scalar(select(SourceHealth))
+                self.assertTrue(stored_binding.enabled)
+                self.assertEqual(
+                    stored_health.consecutive_failures,
+                    SOURCE_CIRCUIT_FAILURE_THRESHOLD,
+                )
+
+        cooldown = self.service._source_circuit_cooldown_seconds(
+            SOURCE_CIRCUIT_FAILURE_THRESHOLD
+        )
+        recovered_at = now + cooldown + 1
+        with patch("server.playback.time.time", return_value=recovered_at):
+            async with self.sessions() as session:
+                half_open = await self.service._load_bindings(
+                    session,
+                    "bangumi:circuit",
+                )
+                self.assertEqual([item.source_name for item in half_open], ["circuit"])
+                await self.service._record_health(
+                    session,
+                    "bangumi:circuit",
+                    {"circuit": SERVER_VERIFIED},
+                )
+            async with self.sessions() as session:
+                healthy = await self.service._load_bindings(
+                    session,
+                    "bangumi:circuit",
+                )
+                stored_health = await session.scalar(select(SourceHealth))
+                self.assertEqual([item.source_name for item in healthy], ["circuit"])
+                self.assertEqual(stored_health.consecutive_failures, 0)
+                self.assertEqual(stored_health.last_status, "healthy")
+
+    async def test_client_probe_candidate_never_opens_source_circuit(self):
+        now = 1_800_000_000.0
+        async with self.sessions() as session:
+            session.add(SourceBinding(
+                stable_id="bangumi:client-candidate",
+                source_id="maccms:client-candidate:1",
+                source_name="client-candidate",
+                matched_title="Client Candidate",
+                media_type="anime",
+                year=2024,
+                score=100,
+                enabled=True,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        with patch("server.playback.time.time", return_value=now):
+            async with self.sessions() as session:
+                await self.service._record_health(
+                    session,
+                    "bangumi:client-candidate",
+                    {"client-candidate": CLIENT_PROBE_REQUIRED},
+                )
+            async with self.sessions() as session:
+                matches = await self.service._load_bindings(
+                    session,
+                    "bangumi:client-candidate",
+                )
+                health = await session.scalar(select(SourceHealth))
+
+        self.assertEqual([item.source_name for item in matches], ["client-candidate"])
+        self.assertEqual(health.consecutive_failures, 0)
+        self.assertEqual(health.last_status, CLIENT_PROBE_REQUIRED)
 
     async def test_quick_refresh_is_not_blocked_by_full_refresh_capacity(self):
         expected = [{"url": "https://cdn.example/quick.m3u8"}]

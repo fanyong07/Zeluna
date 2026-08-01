@@ -29,6 +29,9 @@ from .config import (
     PLAYBACK_STALE_HOURS,
     PLAYBACK_STABLE_LINE_COUNT,
     SOURCE_BINDING_HOURS,
+    SOURCE_CIRCUIT_BASE_COOLDOWN_SECONDS,
+    SOURCE_CIRCUIT_FAILURE_THRESHOLD,
+    SOURCE_CIRCUIT_MAX_COOLDOWN_SECONDS,
     SOURCE_MAX_CONCURRENCY,
 )
 from .database import (
@@ -427,7 +430,12 @@ class PlaybackService:
             await self._store_cache(session, stable_id, episode, title, [])
             return []
 
-        matches = await self._load_bindings(session, stable_id)
+        source_health = await self._load_source_health(session)
+        matches = await self._load_bindings(
+            session,
+            stable_id,
+            source_health=source_health,
+        )
         configured_sites = aggregator.configured_source_names
         matched_sites = {
             match.source_name
@@ -441,6 +449,15 @@ class PlaybackService:
                 year=year,
                 max_matches=len(aggregator.source_inventory) + 8,
             )
+            now = time.time()
+            discovered = [
+                match
+                for match in discovered
+                if not self._source_circuit_is_open(
+                    source_health.get(match.source_name),
+                    now,
+                )
+            ]
             matches = self._merge_matches(matches, discovered)
             await self._store_bindings(session, stable_id, matches)
 
@@ -527,7 +544,12 @@ class PlaybackService:
         if not aliases:
             return []
 
-        matches = await self._load_bindings(session, stable_id)
+        source_health = await self._load_source_health(session)
+        matches = await self._load_bindings(
+            session,
+            stable_id,
+            source_health=source_health,
+        )
         resolved: dict[str, AggregatedVideoLine] = {}
         health: dict[str, str] = {}
         quick_candidate_limit = min(
@@ -554,20 +576,50 @@ class PlaybackService:
             return status in {SERVER_VERIFIED, CLIENT_PROBE_REQUIRED}
 
         async def resolve_until_usable(candidates: list[SourceMatch]) -> bool:
-            async for match, lines, status in (
-                aggregator.resolve_source_matches_progressively(
-                    candidates,
-                    episode=episode,
-                    # The quick cold path returns only syntactically public
-                    # candidates. The client performs manifest + first-media
-                    # validation before display while the full server refresh
-                    # verifies every source in the background.
-                    verify=False,
-                )
-            ):
-                if remember_result(match, lines, status):
-                    return True
-            return False
+            # Existing bindings are usually the fastest cold path. Keep a tiny
+            # grace window after the first usable result so the response can
+            # include immediate backup hosts without waiting for every source.
+            iterator = aggregator.resolve_source_matches_progressively(
+                candidates,
+                episode=episode,
+                # The quick cold path returns only syntactically public
+                # candidates. The client performs manifest + first-media
+                # validation before display while the full server refresh
+                # verifies every source in the background.
+                verify=False,
+            ).__aiter__()
+            found = False
+            first_usable_at: float | None = None
+            try:
+                while True:
+                    try:
+                        if first_usable_at is None:
+                            match, lines, status = await anext(iterator)
+                        else:
+                            remaining = (
+                                _QUICK_CANDIDATE_GRACE_SECONDS
+                                - (time.monotonic() - first_usable_at)
+                            )
+                            if remaining <= 0:
+                                break
+                            match, lines, status = await asyncio.wait_for(
+                                anext(iterator),
+                                timeout=remaining,
+                            )
+                    except (StopAsyncIteration, asyncio.TimeoutError):
+                        break
+                    if remember_result(match, lines, status):
+                        found = True
+                        first_usable_at = first_usable_at or time.monotonic()
+                        quick_count = len(self._select_quick_lines([
+                            self._line_dict(line)
+                            for line in resolved.values()
+                        ]))
+                        if quick_count >= PLAYBACK_QUICK_LINE_COUNT:
+                            break
+            finally:
+                await iterator.aclose()
+            return found
 
         async def resolve_one(
             match: SourceMatch,
@@ -603,6 +655,11 @@ class PlaybackService:
                             max_matches=len(aggregator.source_inventory) + 8,
                         )
                     ):
+                        if self._source_circuit_is_open(
+                            source_health.get(match.source_name),
+                            time.time(),
+                        ):
+                            continue
                         discovered.append(match)
                         task = asyncio.create_task(resolve_one(match))
                         tasks.add(task)
@@ -695,25 +752,42 @@ class PlaybackService:
         ])
 
     async def _load_bindings(
-        self, session: AsyncSession, stable_id: str
+        self,
+        session: AsyncSession,
+        stable_id: str,
+        *,
+        source_health: dict[str, SourceHealth] | None = None,
     ) -> list[SourceMatch]:
-        cutoff = time.time() - SOURCE_BINDING_HOURS * 3600
+        now = time.time()
+        cutoff = now - SOURCE_BINDING_HOURS * 3600
         rows = (
             await session.scalars(
                 select(SourceBinding)
                 .where(
                     SourceBinding.stable_id == stable_id,
-                    SourceBinding.enabled.is_(True),
                     SourceBinding.updated_at >= cutoff,
                 )
-                .order_by(
-                    SourceBinding.success_count.desc(),
-                    SourceBinding.score.desc(),
-                    SourceBinding.failure_count.asc(),
-                )
-                .limit(len(aggregator.source_inventory) + 8)
             )
         ).all()
+        health = source_health
+        if health is None:
+            health = await self._load_source_health(session)
+        rows = [
+            row
+            for row in rows
+            if not self._source_circuit_is_open(
+                health.get(row.source_name),
+                now,
+            )
+        ]
+        rows.sort(
+            key=lambda row: self._source_binding_rank(
+                row,
+                health.get(row.source_name),
+            ),
+            reverse=True,
+        )
+        rows = rows[:len(aggregator.source_inventory) + 8]
         return [
             SourceMatch(
                 source_id=row.source_id,
@@ -726,6 +800,72 @@ class PlaybackService:
             )
             for row in rows
         ]
+
+    async def _load_source_health(
+        self,
+        session: AsyncSession,
+    ) -> dict[str, SourceHealth]:
+        rows = (await session.scalars(select(SourceHealth))).all()
+        return {row.source_name: row for row in rows}
+
+    @staticmethod
+    def _source_circuit_cooldown_seconds(consecutive_failures: int) -> int:
+        if consecutive_failures < SOURCE_CIRCUIT_FAILURE_THRESHOLD:
+            return 0
+        exponent = min(
+            6,
+            consecutive_failures - SOURCE_CIRCUIT_FAILURE_THRESHOLD,
+        )
+        return min(
+            SOURCE_CIRCUIT_MAX_COOLDOWN_SECONDS,
+            SOURCE_CIRCUIT_BASE_COOLDOWN_SECONDS * (2 ** exponent),
+        )
+
+    @classmethod
+    def _source_circuit_is_open(
+        cls,
+        health: SourceHealth | None,
+        now: float,
+    ) -> bool:
+        if health is None:
+            return False
+        cooldown = cls._source_circuit_cooldown_seconds(
+            health.consecutive_failures
+        )
+        return cooldown > 0 and now < health.last_checked_at + cooldown
+
+    @staticmethod
+    def _source_binding_rank(
+        binding: SourceBinding,
+        health: SourceHealth | None,
+    ) -> tuple[int, int, int, int, int]:
+        if health is None:
+            health_tier = 2
+            consecutive_failures = 0
+        elif health.consecutive_failures >= SOURCE_CIRCUIT_FAILURE_THRESHOLD:
+            # The cooldown has elapsed, so this is a half-open recovery probe.
+            health_tier = 0
+            consecutive_failures = health.consecutive_failures
+        elif health.last_status in {"healthy", CLIENT_PROBE_REQUIRED}:
+            health_tier = 3
+            consecutive_failures = health.consecutive_failures
+        elif health.last_status == "unknown":
+            health_tier = 2
+            consecutive_failures = health.consecutive_failures
+        else:
+            health_tier = 1
+            consecutive_failures = health.consecutive_failures
+        recent_binding_success = int(
+            binding.last_success_at >= binding.last_failure_at
+            and binding.last_success_at > 0
+        )
+        return (
+            health_tier,
+            recent_binding_success,
+            binding.score,
+            binding.success_count - binding.failure_count,
+            -consecutive_failures,
+        )
 
     async def _store_bindings(
         self,
@@ -785,11 +925,10 @@ class PlaybackService:
                 elif status == UNAVAILABLE:
                     row.failure_count += 1
                     row.last_failure_at = now
-                # 连续多次失败后暂停到下次重新发现，避免每次拖慢首播。
-                row.enabled = (
-                    status == CLIENT_PROBE_REQUIRED
-                    or row.failure_count - row.success_count < 5
-                )
+                # Keep the binding recoverable. Recent source health applies a
+                # temporary circuit instead of permanently disabling it from
+                # lifetime counters.
+                row.enabled = True
             source = await session.scalar(
                 select(SourceHealth).where(SourceHealth.source_name == source_name)
             )
@@ -810,6 +949,7 @@ class PlaybackService:
                 source.consecutive_failures = 0
                 source.last_status = "healthy"
             elif status == CLIENT_PROBE_REQUIRED:
+                source.consecutive_failures = 0
                 source.last_status = CLIENT_PROBE_REQUIRED
             else:
                 source.failure_count += 1

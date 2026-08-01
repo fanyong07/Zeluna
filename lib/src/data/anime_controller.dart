@@ -30,6 +30,7 @@ import 'media_download_line_selector.dart';
 import 'media_download_result.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
+import 'playback_prefetch_cache.dart';
 import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
@@ -455,6 +456,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   final _playbackPrefetchCancellationTokens =
       <String, RulePlaybackCancellationToken>{};
   final _backendLineLookups = AsyncSingleFlight<String, List<PlaybackLine>>();
+  final _backendPlaybackLineCache = PlaybackPrefetchCache();
   final _downloadRuns = <String, Future<void>>{};
   final _downloadPersistedAt = <String, DateTime>{};
   Future<void> _metadataWriteQueue = Future<void>.value();
@@ -834,6 +836,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     _playbackPrefetchCancellationTokens.clear();
     _playbackPrefetches.clear();
+    _backendPlaybackLineCache.clear();
   }
 
   Future<List<PlaybackLine>> linesForEpisode(
@@ -872,48 +875,115 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) async {
     if (cancellationToken?.isCancelled ?? false) return const [];
     final accountContextVersion = _accountContextVersion;
-    final backendFuture = _backendLinesForEpisode(
-      subject,
-      episode,
-      cancellationToken: cancellationToken,
-    );
-    final ruleFuture = _ruleLinesForEpisode(
-      subject,
-      episode,
-      expandAll: expandAll,
-      cancellationToken: cancellationToken,
-    );
-    // A warm Zeluna cache normally responds in well under a second. A cold
-    // quick lookup has a short server budget to find one usable candidate;
-    // the progressive stream keeps expanding the list afterwards.
-    final backendLines = await backendFuture.timeout(
-      const Duration(seconds: 6),
-      onTimeout: () => const <PlaybackLine>[],
-    );
-    if (accountContextVersion != _accountContextVersion ||
-        (cancellationToken?.isCancelled ?? false)) {
-      return const <PlaybackLine>[];
-    }
-    if (backendLines.any(
+    var backendLines = const <PlaybackLine>[];
+    var probedBackendLines = const <PlaybackLine>[];
+    var ruleLines = const <PlaybackLine>[];
+
+    bool isCurrentRequest() =>
+        accountContextVersion == _accountContextVersion &&
+        !(cancellationToken?.isCancelled ?? false);
+
+    bool hasPlayableLine(Iterable<PlaybackLine> lines) => lines.any(
       (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
-    )) {
-      return _mergePlaybackLines(backendLines);
-    }
-    final results = await Future.wait(<Future<List<PlaybackLine>>>[
-      _probeBackendClientCandidates(
-        backendLines,
+    );
+
+    Future<({String kind, List<PlaybackLine> lines})> tagged(
+      String kind,
+      Future<List<PlaybackLine>> future,
+    ) async => (kind: kind, lines: await future);
+
+    // A warm Zeluna cache normally responds in well under a second. Give it a
+    // short uncontested head start, then race it against custom rules. This is
+    // a real hedge: a fast empty backend result starts fallback immediately,
+    // while a slow backend can no longer hold a ready rule line for six seconds.
+    final backendEvent = tagged(
+      'backend',
+      _backendLinesForEpisode(
+        subject,
+        episode,
         cancellationToken: cancellationToken,
+      ).timeout(
+        const Duration(seconds: 6),
+        onTimeout: () => const <PlaybackLine>[],
       ),
-      ruleFuture,
+    );
+    final firstEvent = await Future.any([
+      backendEvent,
+      Future<({String kind, List<PlaybackLine> lines})>.delayed(
+        const Duration(milliseconds: 900),
+        () => (kind: 'hedge', lines: const <PlaybackLine>[]),
+      ),
     ]);
-    final merged = _mergePlaybackLines(<PlaybackLine>[
-      ...backendLines,
-      ...results[0],
-      ...results[1],
-    ]);
-    return accountContextVersion == _accountContextVersion &&
-            !(cancellationToken?.isCancelled ?? false)
-        ? merged
+    if (!isCurrentRequest()) return const <PlaybackLine>[];
+
+    final pending =
+        <String, Future<({String kind, List<PlaybackLine> lines})>>{};
+
+    void startRules() {
+      pending.putIfAbsent(
+        'rules',
+        () => tagged(
+          'rules',
+          _ruleLinesForEpisode(
+            subject,
+            episode,
+            expandAll: expandAll,
+            cancellationToken: cancellationToken,
+          ),
+        ),
+      );
+    }
+
+    void startBackendCandidateProbe() {
+      if (backendLines.isEmpty || pending.containsKey('probe')) return;
+      pending['probe'] = tagged(
+        'probe',
+        _probeBackendClientCandidates(
+          backendLines,
+          cancellationToken: cancellationToken,
+        ).onError((_, _) => const <PlaybackLine>[]),
+      );
+    }
+
+    if (firstEvent.kind == 'backend') {
+      backendLines = firstEvent.lines;
+      if (hasPlayableLine(backendLines)) {
+        return _mergePlaybackLines(backendLines);
+      }
+      startBackendCandidateProbe();
+      startRules();
+    } else {
+      pending['backend'] = backendEvent;
+      startRules();
+    }
+
+    while (pending.isNotEmpty) {
+      final event = await Future.any(pending.values);
+      pending.remove(event.kind);
+      if (!isCurrentRequest()) return const <PlaybackLine>[];
+      switch (event.kind) {
+        case 'backend':
+          backendLines = event.lines;
+          startBackendCandidateProbe();
+        case 'probe':
+          probedBackendLines = event.lines;
+        case 'rules':
+          ruleLines = event.lines;
+      }
+      final merged = _mergePlaybackLines(<PlaybackLine>[
+        ...backendLines,
+        ...probedBackendLines,
+        ...ruleLines,
+      ]);
+      if (hasPlayableLine(merged)) return merged;
+    }
+
+    return isCurrentRequest()
+        ? _mergePlaybackLines(<PlaybackLine>[
+            ...backendLines,
+            ...probedBackendLines,
+            ...ruleLines,
+          ])
         : const <PlaybackLine>[];
   }
 
@@ -945,6 +1015,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       episode.number,
       expandAll,
     ].join('|');
+    final cached = _backendPlaybackLineCache.read(lookupKey);
+    if (cached != null) return Future.value(cached);
     final pending = _backendLineLookups.run(lookupKey, () {
       final repository = ZelunaBackendPlaybackRepository(
         baseUrl: services.playbackBackendEndpoint,
@@ -966,8 +1038,43 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           cancellationToken?.isCancelled == true) {
         return const <PlaybackLine>[];
       }
+      _backendPlaybackLineCache.write(lookupKey, lines);
       return lines;
     });
+  }
+
+  PlaybackLine? prefetchedLineForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) {
+    final services = state.value?.services ?? const ExternalServiceSettings();
+    final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+      services.playbackBackendEndpoint,
+    );
+    if (!services.playbackBackendEnabled ||
+        !_usesBackendPlayback(subject) ||
+        endpoint == null) {
+      return null;
+    }
+    final lookupKey = <Object>[
+      _accountContextVersion,
+      endpoint,
+      subject.source,
+      subject.id,
+      episode.id,
+      episode.number,
+      false,
+    ].join('|');
+    final lines = _backendPlaybackLineCache.read(lookupKey);
+    if (lines == null) return null;
+    for (final line in lines) {
+      if (line.available &&
+          (line.serverVerified || line.clientVerified) &&
+          (line.url?.trim().isNotEmpty ?? false)) {
+        return line;
+      }
+    }
+    return null;
   }
 
   // 客户端 web-selector 规则线路：独立于后端路径，不受 _usesBackendPlayback
@@ -986,6 +1093,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final repository = RulePlaybackSourceRepository(
       repository: _ruleRepositoryFor(ruleState),
       ruleState: ruleState,
+      resolver: ref.read(rulePlaybackResolverProvider),
     );
     return repository
         .linesForEpisodeMode(
@@ -1281,6 +1389,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final repository = RulePlaybackSourceRepository(
       repository: _ruleRepositoryFor(ruleState),
       ruleState: ruleState,
+      resolver: ref.read(rulePlaybackResolverProvider),
     );
     await for (final update in repository.lineUpdatesForEpisode(
       subject,
@@ -1602,6 +1711,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     if (changed) {
       _backendLineLookups.clear();
+      _backendPlaybackLineCache.clear();
       await Future.wait([
         _library.delete(_homeFeedCacheKey),
         _library.delete(_animeMetadataCacheKey),
