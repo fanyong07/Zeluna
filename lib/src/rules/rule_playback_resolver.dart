@@ -9,6 +9,8 @@ import 'package:xml/xml.dart';
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import 'android_csp_bridge.dart';
 import 'animeko_webview_sniffer.dart';
@@ -90,12 +92,14 @@ bool get _requiresDrpyPublicMediaProbe =>
 class RulePlaybackResolver {
   RulePlaybackResolver({
     http.Client? client,
+    http.Client? rulePublicClient,
     http.Client? drpyPublicClient,
     AndroidCspBridge? cspBridge,
     DrpyRuntime? drpyRuntime,
     AnimekoWebViewSniffer? animekoWebViewSniffer,
     this.timeout = const Duration(seconds: 10),
   }) : _client = client,
+       _rulePublicClient = rulePublicClient,
        _drpyPublicClient = drpyPublicClient,
        _cspBridge = cspBridge ?? AndroidCspBridge(),
        _drpyRuntime = drpyRuntime ?? DrpyRuntime(),
@@ -107,6 +111,7 @@ class RulePlaybackResolver {
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
   final http.Client? _client;
+  final http.Client? _rulePublicClient;
   final http.Client? _drpyPublicClient;
   final AndroidCspBridge _cspBridge;
   final DrpyRuntime _drpyRuntime;
@@ -227,11 +232,24 @@ class RulePlaybackResolver {
       }
 
       final isDrpy = rule.engine.toLowerCase() == 'drpy-js';
-      final injectedClient = isDrpy ? _drpyPublicClient ?? _client : _client;
+      final injectedClient = isDrpy
+          ? _drpyPublicClient ?? _rulePublicClient ?? _client
+          : _rulePublicClient ?? _client;
       final ownedClient = injectedClient == null;
       final client =
           injectedClient ??
-          (isDrpy ? _drpyRuntime.createPublicHttpClient() : http.Client());
+          (isDrpy
+              ? _drpyRuntime.createPublicHttpClient()
+              : createNetworkHttpClient(
+                  const NetworkRequestPolicy(
+                    service: NetworkServiceKind.rulePage,
+                    httpsOnly: false,
+                    allowPrivateNetwork: false,
+                    maxResponseBytes: 4 * 1024 * 1024,
+                    requestTimeout: Duration(seconds: 12),
+                    rejectRedirects: false,
+                  ),
+                ));
       final started = Stopwatch()..start();
       try {
         return switch (rule.engine.toLowerCase()) {
@@ -2769,12 +2787,12 @@ class RulePlaybackResolver {
                 currentUri,
                 abortTrigger: abortTrigger.future,
               )
-              ..followRedirects = !drpyPublicOnly && !sandboxedRule
+              ..followRedirects = false
+              ..maxRedirects = 0
               ..headers.addAll(currentHeaders);
         response = await client.send(request);
         final location = response.headers['location'];
-        if ((!drpyPublicOnly && !sandboxedRule) ||
-            !_isHttpRedirect(response.statusCode) ||
+        if (!_isHttpRedirect(response.statusCode) ||
             location == null ||
             location.trim().isEmpty) {
           break;
@@ -2785,15 +2803,17 @@ class RulePlaybackResolver {
         if (redirect >= redirectLimit) {
           final subscription = response.stream.listen(null);
           await subscription.cancel();
-          throw const HttpException('drpy media redirect limit reached.');
+          throw const HttpException('media redirect limit reached.');
         }
         final nextUri = currentUri.resolve(location.trim());
         if (sandboxedRule) {
           _ensureSandboxedRuleUri(nextUri, RuleUrlPurpose.media);
         }
-        await _drpyRuntime.ensurePublicUri(
-          _proxyUpstreamUri(nextUri) ?? nextUri,
-        );
+        if (drpyPublicOnly) {
+          await _drpyRuntime.ensurePublicUri(
+            _proxyUpstreamUri(nextUri) ?? nextUri,
+          );
+        }
         currentHeaders = _mediaChildHeaders(
           currentUri,
           nextUri,

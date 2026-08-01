@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import 'zeluna_backend_playback_repository.dart';
@@ -12,8 +13,14 @@ class ZelunaBackendCatalogRepository {
   ZelunaBackendCatalogRepository({
     required String baseUrl,
     required http.Client client,
+    NetworkServiceKind service = NetworkServiceKind.officialPlaybackBackend,
+    bool allowInsecureSelfHosted = false,
     this.requestTimeout = const Duration(seconds: 8),
-  }) : _baseUri = ZelunaBackendPlaybackRepository.normalizeBaseUrl(baseUrl),
+  }) : _baseUri = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+         baseUrl,
+         service: service,
+         allowInsecureSelfHosted: allowInsecureSelfHosted,
+       ),
        _client = client;
 
   final Uri? _baseUri;

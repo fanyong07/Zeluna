@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -13,19 +15,49 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
   ZelunaBackendPlaybackRepository({
     required String baseUrl,
     http.Client? client,
+    this.service = NetworkServiceKind.officialPlaybackBackend,
+    this.allowInsecureSelfHosted = false,
     this.requestTimeout = const Duration(seconds: 18),
-  }) : _baseUri = normalizeBaseUrl(baseUrl),
-       _client = client ?? http.Client(),
-       _ownsClient = client == null;
+  }) : assert(
+         service == NetworkServiceKind.officialPlaybackBackend ||
+             service == NetworkServiceKind.selfHostedPlaybackBackend,
+       ),
+       _baseUri = normalizeBaseUrl(
+         baseUrl,
+         service: service,
+         allowInsecureSelfHosted: allowInsecureSelfHosted,
+       ),
+       _client = client == null
+           ? createNetworkHttpClient(
+               NetworkRequestPolicy.forService(
+                 service,
+                 allowInsecureSelfHosted: allowInsecureSelfHosted,
+               ),
+             )
+           : PolicyHttpClient(
+               inner: client,
+               ownsInner: false,
+               policy: NetworkRequestPolicy.forService(
+                 service,
+                 allowInsecureSelfHosted: allowInsecureSelfHosted,
+               ),
+             ),
+       _ownsClient = true;
 
   final Uri? _baseUri;
   final http.Client _client;
   final bool _ownsClient;
+  final NetworkServiceKind service;
+  final bool allowInsecureSelfHosted;
   final Duration requestTimeout;
 
   bool get isConfigured => _baseUri != null;
 
-  static Uri? normalizeBaseUrl(String value) {
+  static Uri? normalizeBaseUrl(
+    String value, {
+    NetworkServiceKind service = NetworkServiceKind.officialPlaybackBackend,
+    bool allowInsecureSelfHosted = false,
+  }) {
     final uri = Uri.tryParse(value.trim());
     if (uri == null ||
         !uri.hasAuthority ||
@@ -33,6 +65,18 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         uri.userInfo.isNotEmpty ||
         uri.query.isNotEmpty ||
         uri.fragment.isNotEmpty) {
+      return null;
+    }
+    if (service != NetworkServiceKind.officialPlaybackBackend &&
+        service != NetworkServiceKind.selfHostedPlaybackBackend) {
+      return null;
+    }
+    try {
+      NetworkRequestPolicy.forService(
+        service,
+        allowInsecureSelfHosted: allowInsecureSelfHosted,
+      ).ensureUriAllowed(uri);
+    } on NetworkSecurityException {
       return null;
     }
     return uri.replace(path: uri.path.replaceFirst(RegExp(r'/+$'), ''));
@@ -76,6 +120,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
     } on TimeoutException {
       return const [];
     } on http.ClientException {
+      return const [];
+    } on NetworkSecurityException {
       return const [];
     } on FormatException {
       return const [];
@@ -264,6 +310,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
     } on TimeoutException {
       return const [];
     } on http.ClientException {
+      return const [];
+    } on NetworkSecurityException {
       return const [];
     } on FormatException {
       return const [];

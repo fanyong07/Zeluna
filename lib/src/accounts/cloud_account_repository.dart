@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import 'local_account_repository.dart';
 
 const _defaultZelunaBackendUrl = String.fromEnvironment(
@@ -81,8 +83,20 @@ class CloudAccountRepository implements CloudAccountService {
     CloudAccountTokenStore? tokenStore,
     this.requestTimeout = const Duration(seconds: 12),
   }) : _baseUri = _normalizeBaseUrl(baseUrl),
-       _client = client ?? http.Client(),
-       _ownsClient = client == null,
+       _client = client == null
+           ? createNetworkHttpClient(
+               NetworkRequestPolicy.forService(
+                 NetworkServiceKind.accountBackend,
+               ),
+             )
+           : PolicyHttpClient(
+               inner: client,
+               ownsInner: false,
+               policy: NetworkRequestPolicy.forService(
+                 NetworkServiceKind.accountBackend,
+               ),
+             ),
+       _ownsClient = true,
        _tokenStore = tokenStore ?? SecureCloudAccountTokenStore();
 
   final Uri _baseUri;
@@ -108,6 +122,8 @@ class CloudAccountRepository implements CloudAccountService {
     } on TimeoutException {
       return cachedAccount;
     } on http.ClientException {
+      return cachedAccount;
+    } on NetworkSecurityException {
       return cachedAccount;
     } on FormatException {
       return cachedAccount;
@@ -282,6 +298,8 @@ class CloudAccountRepository implements CloudAccountService {
       throw const AccountException('连接账号服务器超时，请检查网络后重试');
     } on http.ClientException {
       throw const AccountException('无法连接账号服务器，请检查网络后重试');
+    } on NetworkSecurityException {
+      throw const AccountException('账号服务器未通过安全连接检查');
     }
   }
 
@@ -394,6 +412,9 @@ Uri _normalizeBaseUrl(String value) {
       uri.fragment.isNotEmpty) {
     throw ArgumentError.value(value, 'baseUrl', '必须是完整的 HTTPS 地址');
   }
+  NetworkRequestPolicy.forService(
+    NetworkServiceKind.accountBackend,
+  ).ensureUriAllowed(uri);
   return uri.replace(path: uri.path.replaceFirst(RegExp(r'/+$'), ''));
 }
 

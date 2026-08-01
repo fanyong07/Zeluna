@@ -9,6 +9,8 @@ import '../accounts/local_account_repository.dart';
 import '../accounts/cloud_account_repository.dart';
 import '../core/identity/local_identity_migration.dart';
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
@@ -193,9 +195,13 @@ final bangumiBuiltInAccessTokenProvider = Provider<String?>((ref) {
   );
 });
 
-final bangumiMetadataHttpClientProvider = Provider<http.Client>(
-  (ref) => http.Client(),
-);
+final bangumiMetadataHttpClientProvider = Provider<http.Client>((ref) {
+  final client = createNetworkHttpClient(
+    NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+  );
+  ref.onDispose(client.close);
+  return client;
+});
 
 final tmdbCredentialStoreProvider = Provider<TmdbCredentialStore>(
   (ref) => TmdbCredentialStore(),
@@ -271,18 +277,57 @@ final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
 );
 
 final rulePlaybackResolverProvider = Provider<RulePlaybackResolver>((ref) {
-  final client = http.Client();
+  final client = createNetworkHttpClient(
+    const NetworkRequestPolicy(
+      service: NetworkServiceKind.mediaResource,
+      httpsOnly: false,
+      allowPrivateNetwork: false,
+      maxResponseBytes: 512 * 1024,
+      requestTimeout: Duration(seconds: 12),
+      allowSyntheticDns: true,
+      allowLiteralBenchmarkAddress: true,
+      rejectRedirects: false,
+    ),
+  );
+  final rulePublicClient = createNetworkHttpClient(
+    const NetworkRequestPolicy(
+      service: NetworkServiceKind.rulePage,
+      httpsOnly: false,
+      allowPrivateNetwork: false,
+      maxResponseBytes: 4 * 1024 * 1024,
+      requestTimeout: Duration(seconds: 12),
+      rejectRedirects: false,
+    ),
+  );
   final drpyPublicClient = createDrpyPublicHttpClient();
   ref.onDispose(client.close);
+  ref.onDispose(rulePublicClient.close);
   ref.onDispose(drpyPublicClient.close);
   return RulePlaybackResolver(
     client: client,
+    rulePublicClient: rulePublicClient,
     drpyPublicClient: drpyPublicClient,
   );
 });
 
 final zelunaBackendHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = createNetworkHttpClient(
+    NetworkRequestPolicy.forService(NetworkServiceKind.officialPlaybackBackend),
+  );
+  ref.onDispose(client.close);
+  return client;
+});
+
+final selfHostedBackendHttpClientProvider = Provider.family<http.Client, bool>((
+  ref,
+  allowInsecure,
+) {
+  final client = createNetworkHttpClient(
+    NetworkRequestPolicy.forService(
+      NetworkServiceKind.selfHostedPlaybackBackend,
+      allowInsecureSelfHosted: allowInsecure,
+    ),
+  );
   ref.onDispose(client.close);
   return client;
 });
@@ -294,7 +339,9 @@ final cloudAccountServiceProvider = Provider<CloudAccountService>((ref) {
 });
 
 final externalServiceHttpClientProvider = Provider<http.Client>((ref) {
-  final client = http.Client();
+  final client = createNetworkHttpClient(
+    NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+  );
   ref.onDispose(client.close);
   return client;
 });
@@ -1111,8 +1158,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode, {
     bool expandAll = false,
   }) {
+    final service = _playbackBackendService(services);
     final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
       services.playbackBackendEndpoint,
+      service: service,
+      allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
     );
     if (!services.playbackBackendEnabled ||
         !_usesBackendPlayback(subject) ||
@@ -1122,6 +1172,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return <Object>[
       _accountContextVersion,
       endpoint,
+      service.name,
+      services.allowInsecurePlaybackBackend,
       subject.source,
       subject.id,
       episode.id,
@@ -1172,7 +1224,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final pending = _backendLineLookups.run(lookupKey, () {
       final repository = ZelunaBackendPlaybackRepository(
         baseUrl: services.playbackBackendEndpoint,
-        client: ref.read(zelunaBackendHttpClientProvider),
+        client: _playbackBackendClient(services),
+        service: _playbackBackendService(services),
+        allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
         requestTimeout: const Duration(seconds: 18),
       );
       // Caller cancellation must not cancel the shared request for another
@@ -1392,13 +1446,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (!services.playbackBackendEnabled ||
         ZelunaBackendPlaybackRepository.normalizeBaseUrl(
               services.playbackBackendEndpoint,
+              service: _playbackBackendService(services),
+              allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
             ) ==
             null) {
       return null;
     }
     return ZelunaBackendCatalogRepository(
       baseUrl: services.playbackBackendEndpoint,
-      client: ref.read(zelunaBackendHttpClientProvider),
+      client: _playbackBackendClient(services),
+      service: _playbackBackendService(services),
+      allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
     );
   }
 
@@ -1864,6 +1922,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final backendConfigured =
         ZelunaBackendPlaybackRepository.normalizeBaseUrl(
           settings.playbackBackendEndpoint,
+          service: _playbackBackendService(settings),
+          allowInsecureSelfHosted: settings.allowInsecurePlaybackBackend,
         ) !=
         null;
     return settings.copyWith(
@@ -1880,6 +1940,26 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       publicCollectionSyncEnabled: false,
       preferBangumiChinese: true,
       playbackBackendEnabled: backendConfigured,
+      allowInsecurePlaybackBackend:
+          settings.playbackBackendSelfHosted &&
+          settings.allowInsecurePlaybackBackend,
+    );
+  }
+
+  NetworkServiceKind _playbackBackendService(
+    ExternalServiceSettings settings,
+  ) => settings.playbackBackendSelfHosted
+      ? NetworkServiceKind.selfHostedPlaybackBackend
+      : NetworkServiceKind.officialPlaybackBackend;
+
+  http.Client _playbackBackendClient(ExternalServiceSettings settings) {
+    if (!settings.playbackBackendSelfHosted) {
+      return ref.read(zelunaBackendHttpClientProvider);
+    }
+    return ref.read(
+      selfHostedBackendHttpClientProvider(
+        settings.allowInsecurePlaybackBackend,
+      ),
     );
   }
 

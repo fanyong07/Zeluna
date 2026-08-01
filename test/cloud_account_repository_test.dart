@@ -172,6 +172,28 @@ void main() {
     expect(tokens.value, 'session-token');
   });
 
+  test('account requests never follow redirects with credentials', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final client = MockClient((request) async {
+      expect(request.followRedirects, isFalse);
+      expect(request.headers['Authorization'], 'Bearer session-token');
+      return http.Response(
+        '',
+        302,
+        headers: {'location': 'http://attacker.example/collect'},
+      );
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+
+    expect(await repository.restoreSession(null), isNull);
+    expect(tokens.value, 'session-token');
+  });
+
   test('cloud account cache never stores password material', () async {
     final root = await Directory.systemTemp.createTemp('cloud-account-cache-');
     Hive.init(root.path);

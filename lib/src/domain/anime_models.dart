@@ -947,7 +947,7 @@ const _defaultPlaybackBackendEnabled = bool.fromEnvironment(
   'ZELUNA_BACKEND_ENABLED',
   defaultValue: true,
 );
-const _defaultPlaybackBackendEndpoint = String.fromEnvironment(
+const defaultPlaybackBackendEndpoint = String.fromEnvironment(
   'ZELUNA_BACKEND_URL',
   defaultValue: 'https://api.zeluna.top',
 );
@@ -978,7 +978,9 @@ class ExternalServiceSettings {
     this.customDanmakuEndpoint = '',
     this.danmakuTimelineSync = true,
     this.playbackBackendEnabled = _defaultPlaybackBackendEnabled,
-    this.playbackBackendEndpoint = _defaultPlaybackBackendEndpoint,
+    this.playbackBackendEndpoint = defaultPlaybackBackendEndpoint,
+    this.playbackBackendSelfHosted = false,
+    this.allowInsecurePlaybackBackend = false,
   });
 
   final bool mediaMetadataEnabled;
@@ -1006,6 +1008,8 @@ class ExternalServiceSettings {
   final bool danmakuTimelineSync;
   final bool playbackBackendEnabled;
   final String playbackBackendEndpoint;
+  final bool playbackBackendSelfHosted;
+  final bool allowInsecurePlaybackBackend;
 
   ExternalServiceSettings copyWith({
     bool? mediaMetadataEnabled,
@@ -1033,6 +1037,8 @@ class ExternalServiceSettings {
     bool? danmakuTimelineSync,
     bool? playbackBackendEnabled,
     String? playbackBackendEndpoint,
+    bool? playbackBackendSelfHosted,
+    bool? allowInsecurePlaybackBackend,
   }) {
     return ExternalServiceSettings(
       mediaMetadataEnabled: mediaMetadataEnabled ?? this.mediaMetadataEnabled,
@@ -1069,6 +1075,10 @@ class ExternalServiceSettings {
           playbackBackendEnabled ?? this.playbackBackendEnabled,
       playbackBackendEndpoint:
           playbackBackendEndpoint ?? this.playbackBackendEndpoint,
+      playbackBackendSelfHosted:
+          playbackBackendSelfHosted ?? this.playbackBackendSelfHosted,
+      allowInsecurePlaybackBackend:
+          allowInsecurePlaybackBackend ?? this.allowInsecurePlaybackBackend,
     );
   }
 
@@ -1098,9 +1108,18 @@ class ExternalServiceSettings {
     'danmakuTimelineSync': danmakuTimelineSync,
     'playbackBackendEnabled': playbackBackendEnabled,
     'playbackBackendEndpoint': playbackBackendEndpoint,
+    'playbackBackendSelfHosted': playbackBackendSelfHosted,
+    'allowInsecurePlaybackBackend': allowInsecurePlaybackBackend,
   };
 
   factory ExternalServiceSettings.fromJson(Map<String, dynamic> json) {
+    final playbackEndpoint =
+        (json['playbackBackendEndpoint']?.toString().trim().isNotEmpty ?? false)
+        ? json['playbackBackendEndpoint'].toString().trim()
+        : defaultPlaybackBackendEndpoint;
+    final selfHosted =
+        json['playbackBackendSelfHosted'] as bool? ??
+        playbackEndpoint != defaultPlaybackBackendEndpoint;
     return ExternalServiceSettings(
       mediaMetadataEnabled: json['mediaMetadataEnabled'] as bool? ?? true,
       mediaMetadataProvider:
@@ -1134,11 +1153,11 @@ class ExternalServiceSettings {
       playbackBackendEnabled:
           json['playbackBackendEnabled'] as bool? ??
           _defaultPlaybackBackendEnabled,
-      playbackBackendEndpoint:
-          (json['playbackBackendEndpoint']?.toString().trim().isNotEmpty ??
-              false)
-          ? json['playbackBackendEndpoint'].toString().trim()
-          : _defaultPlaybackBackendEndpoint,
+      playbackBackendEndpoint: playbackEndpoint,
+      playbackBackendSelfHosted: selfHosted,
+      allowInsecurePlaybackBackend:
+          selfHosted &&
+          (json['allowInsecurePlaybackBackend'] as bool? ?? false),
     );
   }
 }

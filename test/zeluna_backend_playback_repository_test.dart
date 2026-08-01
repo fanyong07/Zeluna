@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:anime/src/data/zeluna_backend_playback_repository.dart';
+import 'package:anime/src/core/network/network_security.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -317,11 +318,20 @@ void main() {
     const settings = ExternalServiceSettings(
       playbackBackendEnabled: true,
       playbackBackendEndpoint: 'https://anime.example.com',
+      playbackBackendSelfHosted: true,
     );
     final restored = ExternalServiceSettings.fromJson(settings.toJson());
 
     expect(restored.playbackBackendEnabled, isTrue);
     expect(restored.playbackBackendEndpoint, 'https://anime.example.com');
+    expect(restored.playbackBackendSelfHosted, isTrue);
+    expect(restored.allowInsecurePlaybackBackend, isFalse);
+    final migratedLegacy = ExternalServiceSettings.fromJson({
+      'playbackBackendEnabled': true,
+      'playbackBackendEndpoint': 'https://legacy-self-hosted.example',
+    });
+    expect(migratedLegacy.playbackBackendSelfHosted, isTrue);
+    expect(migratedLegacy.allowInsecurePlaybackBackend, isFalse);
     expect(
       ZelunaBackendPlaybackRepository.normalizeBaseUrl(
         'https://user:pass@example.com',
@@ -334,6 +344,38 @@ void main() {
       ),
       isNull,
     );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://backend.example.com',
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://192.168.1.20:8080',
+        service: NetworkServiceKind.selfHostedPlaybackBackend,
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://192.168.1.20:8080',
+        service: NetworkServiceKind.selfHostedPlaybackBackend,
+        allowInsecureSelfHosted: true,
+      ),
+      Uri.parse('http://192.168.1.20:8080'),
+    );
+    const insecureSettings = ExternalServiceSettings(
+      playbackBackendEnabled: true,
+      playbackBackendEndpoint: 'http://192.168.1.20:8080',
+      playbackBackendSelfHosted: true,
+      allowInsecurePlaybackBackend: true,
+    );
+    final restoredInsecure = ExternalServiceSettings.fromJson(
+      insecureSettings.toJson(),
+    );
+    expect(restoredInsecure.playbackBackendSelfHosted, isTrue);
+    expect(restoredInsecure.allowInsecurePlaybackBackend, isTrue);
   });
 }
 
