@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `2a2e873` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `9d068ac` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -369,6 +369,42 @@ Remaining risks:
 
 - External-service cache invalidation still crosses compatibility ports into the future Catalog and PlaybackDiscovery controllers; no playback ranking or concurrency parameter changed.
 - Sensitive third-party credentials remain in their existing dedicated stores or existing legacy model fields. G8/G10 must enforce final token lifecycle and sync exclusions without logging or migrating real secrets.
+
+### SourceController
+
+Audit:
+
+- Rule installation, permission approval, repository refresh/import, source toggles, persistence, and XBPQ hydration were owned directly by `AnimeController`. Rule writes had no explicit serialized owner, while repository import and hydration used separate account checks and a global refresh counter.
+- A repository refresh could retain URLs from an old account and, after an account switch, begin a later URL import in the new account. A scope transition could also overlap an old page mutation while the new source catalog was still loading.
+- The bundled v3 `sources_catalog.json` is intentionally empty under the unified-backend product flow. This slice must preserve that boundary rather than silently restoring legacy third-party source inventory or startup hydration.
+
+Changes:
+
+- Added an independent `SourceController` owning rule inventory, repositories, trust and permission decisions, catalog enabled state, repository imports, hydration generations, account/context scope, and ordered persistence.
+- Account-scope loading and rule/source mutations now share one serial queue. Loading marks the domain unavailable until the complete rules-plus-catalog snapshot is ready; queued old-scope actions fail instead of reading an old snapshot and writing it under a new account key.
+- Slow URL imports capture their initiating scope outside the mutation queue and revalidate it before applying. Repository refresh never continues against the newly selected account, and completed old hydration results are discarded after a scope or source-generation change.
+- Imported rules are always rewritten as `untrusted`, remain disabled, and cannot be enabled by individual or bulk switches until the current permission digest is explicitly approved. Content/permission changes still invalidate prior approvals through repository normalization.
+- The local bundled catalog is loaded with account-scoped enabled overrides and synchronously bridged for inventory metrics, but no network hydration runs at startup. Production behavior remains an empty v3 source catalog unless a future audited catalog is deliberately shipped.
+- `AnimeController` retains its public rule/source API as compatibility delegates, waits for source writes during account changes, and publishes source snapshots through a typed port. It fell from 3,959 to 3,566 lines.
+
+Tests:
+
+- Added six direct controller regressions for account-scoped restore, trust downgrade and bulk-enable blocking, stale slow-import rejection, stale hydration rejection, captured-scope write settlement, and mutation rejection during scope loading.
+- Sources, rule security/import, account switching, permission UI, catalog/navigation, and source bridge focused regressions: 81 passed, 25 intentionally skipped, 0 failed.
+- Full `flutter test --reporter compact`: 553 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, repository security gate, and staged strong-secret scan passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `9d068ac refactor: split source controller`
+
+Remaining domains, in required order: Downloads, Library, Catalog, PlaybackDiscovery, Sync.
+
+Remaining risks:
+
+- Source hydration requests are not forcibly cancelled at the transport layer when an account changes; generation and scope checks prevent their results from publishing or persisting. Transport cancellation remains a possible future optimization, not a correctness dependency.
+- The intentionally empty bundled catalog means legacy catalog sources are not restored by this architecture refactor. User-imported rules remain available through the audited permission path, while live third-party source acceptance still requires deterministic fixtures or separately authorized real-network validation.
+- No production environment, real user database, signing material, private credential, Cookie, or signed media URL was accessed.
 
 ## G7 Server architecture
 
