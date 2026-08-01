@@ -50,7 +50,7 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
       )) {
         return null;
       }
-      await _clearWebViewTaskStorage(controller);
+      await clearAnimekoWebViewTaskStorage(controller);
       await session.seedCookies();
       session.startTimeout();
       await controller.loadUrl(
@@ -212,7 +212,7 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
   }
 
   Future<void> _resetToBlank(InAppWebViewController controller) async {
-    await _clearWebViewTaskStorage(controller);
+    await clearAnimekoWebViewTaskStorage(controller);
     final loaded = Completer<void>();
     _blankPageLoaded = loaded;
     var blankLoaded = false;
@@ -508,7 +508,7 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
           isInspectable: kDebugMode,
         ),
         onWebViewCreated: (controller) async {
-          await _clearWebViewTaskStorage(controller);
+          await clearAnimekoWebViewTaskStorage(controller);
           await seedCookies();
           if (result.isCompleted) return;
           await controller.loadUrl(
@@ -600,7 +600,9 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
       nestedSettleTimer?.cancel();
       try {
         final controller = webView?.webViewController;
-        if (controller != null) await _clearWebViewTaskStorage(controller);
+        if (controller != null) {
+          await clearAnimekoWebViewTaskStorage(controller);
+        }
         await webView?.dispose();
       } catch (_) {}
     }
@@ -668,10 +670,13 @@ WebResourceResponse _blockedWebResourceResponse() => WebResourceResponse(
   reasonPhrase: 'Forbidden',
 );
 
-Future<void> _clearWebViewTaskStorage(InAppWebViewController controller) async {
+@visibleForTesting
+Future<void> clearAnimekoWebViewTaskStorage(
+  InAppWebViewController controller,
+) async {
   try {
-    await controller.evaluateJavascript(
-      source: '''(async () => {
+    await controller.callAsyncJavaScript(
+      functionBody: '''
         try { localStorage.clear(); } catch (_) {}
         try { sessionStorage.clear(); } catch (_) {}
         try {
@@ -691,7 +696,8 @@ Future<void> _clearWebViewTaskStorage(InAppWebViewController controller) async {
             await Promise.all(registrations.map((registration) => registration.unregister()));
           }
         } catch (_) {}
-      })();''',
+        return true;
+      ''',
     );
   } catch (_) {}
   try {
