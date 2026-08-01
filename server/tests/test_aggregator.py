@@ -123,6 +123,26 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             {"maccms:iKun:1", "maccms:魔都:2"},
         )
 
+    async def test_fallback_display_id_is_sha256_stable(self):
+        self.aggregator = ContentAggregator(crawler_scrapers={})
+        self.aggregator._maccms.search = AsyncMock(return_value=[
+            SubjectResult(
+                source_id="legacy:42",
+                title="Fallback Title",
+                type="anime",
+            )
+        ])
+        self.aggregator._tvbox.search = AsyncMock(return_value=[])
+
+        results = await self.aggregator.search(
+            "Fallback Title", ["anime"], max_results=10
+        )
+
+        self.assertEqual(
+            [item.id for item in results],
+            ["maccms:display:v1:2dea17a54f90c71c4cde8471"],
+        )
+
     async def test_stable_playback_discovers_and_resolves_custom_crawler(self):
         crawler = AsyncMock()
         crawler.content_types = ["anime"]

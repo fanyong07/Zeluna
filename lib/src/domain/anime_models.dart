@@ -1,3 +1,5 @@
+import '../core/identity/stable_identity.dart';
+
 enum AnimeHomeTab {
   recent('最近更新'),
   recommended('推荐'),
@@ -29,6 +31,9 @@ class AnimeSubject {
     this.ratingRank,
     this.ratingTotal,
     this.source = 'bangumi',
+    this.stableKey,
+    this.legacyId,
+    this.legacyIds = const [],
   });
 
   final int id;
@@ -49,6 +54,15 @@ class AnimeSubject {
   final int? ratingRank;
   final int? ratingTotal;
   final String source;
+  final String? stableKey;
+  final int? legacyId;
+  final List<int> legacyIds;
+
+  String get identityKey {
+    final explicit = stableKey?.trim() ?? '';
+    if (explicit.isNotEmpty) return explicit;
+    return stableSubjectKey(source: source, identifier: id);
+  }
 
   String get year {
     final value = date;
@@ -76,6 +90,9 @@ class AnimeSubject {
     List<AnimeTag>? tags,
     int? totalEpisodes,
     String? source,
+    String? stableKey,
+    int? legacyId,
+    List<int>? legacyIds,
   }) {
     return AnimeSubject(
       id: id,
@@ -96,6 +113,9 @@ class AnimeSubject {
       ratingRank: ratingRank,
       ratingTotal: ratingTotal,
       source: source ?? this.source,
+      stableKey: stableKey ?? this.stableKey,
+      legacyId: legacyId ?? this.legacyId,
+      legacyIds: legacyIds ?? this.legacyIds,
     );
   }
 
@@ -118,6 +138,9 @@ class AnimeSubject {
     'ratingRank': ratingRank,
     'ratingTotal': ratingTotal,
     'source': source,
+    'stableKey': identityKey,
+    if (legacyId != null) 'legacyId': legacyId,
+    if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
   };
 
   factory AnimeSubject.fromJson(Map<String, dynamic> json) {
@@ -140,13 +163,29 @@ class AnimeSubject {
       ratingRank: _nullableIntFromJson(json['ratingRank']),
       ratingTotal: _nullableIntFromJson(json['ratingTotal']),
       source: json['source']?.toString() ?? 'bangumi',
+      stableKey: _blankToNull(json['stableKey']?.toString()),
+      legacyId: _nullableIntFromJson(json['legacyId']),
+      legacyIds: _intListFromJson(json['legacyIds']),
     );
   }
 }
 
 bool sameSubjectIdentity(AnimeSubject first, AnimeSubject second) {
-  return first.id == second.id &&
-      first.source.trim().toLowerCase() == second.source.trim().toLowerCase();
+  if (first.identityKey == second.identityKey) return true;
+  if (first.source.trim().toLowerCase() != second.source.trim().toLowerCase()) {
+    return false;
+  }
+  final firstIds = <int>{
+    first.id,
+    if (first.legacyId != null) first.legacyId!,
+    ...first.legacyIds,
+  };
+  final secondIds = <int>{
+    second.id,
+    if (second.legacyId != null) second.legacyId!,
+    ...second.legacyIds,
+  };
+  return firstIds.any(secondIds.contains);
 }
 
 class AnimeEpisode {
@@ -159,6 +198,8 @@ class AnimeEpisode {
     required this.duration,
     required this.description,
     this.thumbnailUrl,
+    this.stableKey,
+    this.legacyId,
   });
 
   final int id;
@@ -169,11 +210,24 @@ class AnimeEpisode {
   final String duration;
   final String description;
   final String? thumbnailUrl;
+  final String? stableKey;
+  final int? legacyId;
+
+  String identityKey({String? subjectKey}) {
+    final explicit = stableKey?.trim() ?? '';
+    if (explicit.isNotEmpty) return explicit;
+    return stableEpisodeKey(
+      subjectKey: subjectKey?.trim().isNotEmpty == true
+          ? subjectKey!.trim()
+          : 'legacy-subject:$subjectId',
+      normalizedNumber: number,
+    );
+  }
 
   String get displayTitle =>
       title.trim().isEmpty ? '第$number集' : '第$number集 $title';
 
-  Map<String, dynamic> toJson() => {
+  Map<String, dynamic> toJson({String? subjectKey}) => {
     'id': id,
     'subjectId': subjectId,
     'number': number,
@@ -182,6 +236,8 @@ class AnimeEpisode {
     'duration': duration,
     'description': description,
     'thumbnailUrl': thumbnailUrl,
+    'stableKey': identityKey(subjectKey: subjectKey),
+    if (legacyId != null) 'legacyId': legacyId,
   };
 
   factory AnimeEpisode.fromJson(Map<String, dynamic> json) {
@@ -194,6 +250,8 @@ class AnimeEpisode {
       duration: json['duration']?.toString() ?? '',
       description: json['description']?.toString() ?? '',
       thumbnailUrl: _blankToNull(json['thumbnailUrl']?.toString()),
+      stableKey: _blankToNull(json['stableKey']?.toString()),
+      legacyId: _nullableIntFromJson(json['legacyId']),
     );
   }
 }
@@ -642,7 +700,7 @@ class LibraryEntry {
 
   Map<String, dynamic> toJson() => {
     'subject': subject.toJson(),
-    'episode': episode?.toJson(),
+    'episode': episode?.toJson(subjectKey: subject.identityKey),
     'updatedAt': updatedAt.toIso8601String(),
     'note': note,
     if (positionSeconds > 0) 'positionSeconds': positionSeconds,
@@ -1346,4 +1404,13 @@ List<String> _stringListFromJson(Object? value) {
         .toList();
   }
   return const [];
+}
+
+List<int> _intListFromJson(Object? value) {
+  if (value is! List) return const [];
+  return value
+      .map(_nullableIntFromJson)
+      .whereType<int>()
+      .toSet()
+      .toList(growable: false);
 }

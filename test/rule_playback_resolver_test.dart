@@ -1711,7 +1711,7 @@ segment-1.ts
   test(
     'Animeko importer marks rss as unsupported and web selector playable',
     () {
-      final bundle = const RuleImporter().importFromText('''
+      const animekoExport = '''
       {
         "exportedMediaSourceDataList": {
           "mediaSources": [
@@ -1757,7 +1757,9 @@ segment-1.ts
           ]
         }
       }
-    ''');
+    ''';
+      const importer = RuleImporter();
+      final bundle = importer.importFromText(animekoExport);
 
       expect(bundle.rules, hasLength(2));
       final rss = bundle.rules.firstWhere(
@@ -1775,6 +1777,19 @@ segment-1.ts
       expect(web.animeko?.cookies, 'quality=1080');
       expect(web.priority, 2);
       expect(web.groupId, isNotEmpty);
+      expect(rss.id, startsWith('rule:v1:'));
+      expect(web.id, startsWith('rule:v1:'));
+
+      final reversedExport = jsonDecode(animekoExport) as Map<String, dynamic>;
+      final exported =
+          reversedExport['exportedMediaSourceDataList'] as Map<String, dynamic>;
+      final sources = exported['mediaSources'] as List<dynamic>;
+      exported['mediaSources'] = sources.reversed.toList(growable: false);
+      final reversed = importer.importFromText(jsonEncode(reversedExport));
+      expect(
+        {for (final rule in reversed.rules) rule.name: rule.id},
+        {for (final rule in bundle.rules) rule.name: rule.id},
+      );
     },
   );
 

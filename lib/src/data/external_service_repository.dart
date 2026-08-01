@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 
 class TmdbTokenValidation {
@@ -1455,7 +1456,9 @@ class ExternalServiceRepository {
             '作品原名：$title。',
           ].join();
     return AnimeSubject(
-      id: identifier.hashCode.abs(),
+      id: stableInt63(
+        stableSubjectKey(source: 'archive', identifier: identifier),
+      ),
       title: title,
       originalTitle: title,
       summary: summary,
@@ -1567,7 +1570,9 @@ LIMIT $limit
       if (genre.isNotEmpty) AnimeTag(name: genre),
     ];
     return AnimeSubject(
-      id: _intValue(idText) ?? title.hashCode.abs(),
+      id:
+          _intValue(idText) ??
+          stableInt63(stableSubjectKey(source: 'wikidata', identifier: title)),
       title: title,
       originalTitle: title,
       summary: description.isEmpty ? '暂无简介。' : description,

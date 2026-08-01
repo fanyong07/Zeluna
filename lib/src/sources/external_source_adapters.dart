@@ -7,6 +7,7 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import 'source_catalog_models.dart';
 import 'source_proxy_uri.dart';
@@ -104,9 +105,14 @@ class M3uChannel {
 
   bool get requiresExternalClient => false;
 
-  int get subjectId => _stablePositiveInt('$sourceId|$id');
+  String get subjectKey =>
+      stableSubjectKey(source: 'm3u-channel:$sourceId', identifier: id);
 
-  int get episodeId => _stablePositiveInt('$sourceId|$id|live');
+  int get subjectId => stableInt63(subjectKey);
+
+  int get episodeId => stableInt63(
+    stableEpisodeKey(subjectKey: subjectKey, normalizedNumber: 1),
+  );
 
   PlaybackLine toPlaybackLine({int? episodeId}) {
     return PlaybackLine(
@@ -1507,15 +1513,8 @@ String? _blankToNull(String value) {
   return text.isEmpty ? null : text;
 }
 
-int _stablePositiveInt(String value) {
-  var hash = 0x811c9dc5;
-  for (final byte in utf8.encode(value)) {
-    hash ^= byte;
-    hash = (hash * 0x01000193) & 0x7fffffff;
-  }
-  return hash == 0 ? 1 : hash;
-}
-
 String _stableToken(String value) {
-  return _stablePositiveInt(value).toRadixString(16).padLeft(8, '0');
+  return stableDigest(
+    'source-item|$stableIdentityVersion|$value',
+  ).substring(0, 32);
 }

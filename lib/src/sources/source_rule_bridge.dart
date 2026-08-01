@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:collection';
 
+import '../core/identity/stable_identity.dart';
 import '../rules/csp_rule_support.dart';
 import '../rules/rule_importer.dart';
 import '../rules/rule_models.dart';
@@ -239,7 +240,13 @@ String _drpyScriptIdentity(RulePlugin rule) {
   final extUrl = rule.rawConfig['extUrl']?.toString().trim() ?? '';
   if (extUrl.isNotEmpty) return _canonicalEndpoint(extUrl);
   final inline = rule.rawConfig['inlineSource']?.toString().trim() ?? '';
-  if (inline.isNotEmpty) return 'inline:${rule.id}:${inline.hashCode}';
+  if (inline.isNotEmpty) {
+    return stableRuleKey(
+      ruleId: rule.id,
+      engine: rule.engine,
+      contentHash: stableDigest(inline),
+    );
+  }
   final site = rule.rawConfig['site'];
   return 'site:${jsonEncode(site ?? const <String, dynamic>{})}';
 }

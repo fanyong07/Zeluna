@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../app/anime_app.dart';
+import '../core/identity/stable_identity.dart';
 import '../data/anime_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
@@ -1962,7 +1963,12 @@ void _showManualRuleDialog(BuildContext context, WidgetRef ref) {
                     _showSnack(context, '请填写名称、主页和搜索地址');
                     return;
                   }
-                  final id = 'manual:${DateTime.now().microsecondsSinceEpoch}';
+                  final id = stableRuleKey(
+                    ruleId: 'manual:${name.trim().toLowerCase()}',
+                    engine: 'native',
+                    sourceRepository: baseUrl,
+                    contentHash: stableDigest('${type.name}|$searchUrl'),
+                  );
                   final json =
                       '''
 {

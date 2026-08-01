@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import 'zeluna_backend_playback_repository.dart';
@@ -184,13 +185,19 @@ class ZelunaBackendCatalogRepository {
 
 String? stableSubjectId(AnimeSubject subject) {
   final source = subject.source.trim().toLowerCase();
-  if (source == 'bangumi') return 'bangumi:${subject.id}';
+  if (source == 'bangumi') {
+    return stableSubjectKey(source: source, identifier: subject.id);
+  }
   final parts = source.split(':');
   if (parts.length == 3 && parts.first == 'tmdb') {
     final mediaType = parts[1] == 'series' ? 'tv' : parts[1];
     if ((mediaType == 'tv' || mediaType == 'movie') &&
         int.tryParse(parts[2]) != null) {
-      return 'tmdb:$mediaType:${parts[2]}';
+      return stableSubjectKey(
+        source: source,
+        identifier: subject.id,
+        mediaType: mediaType,
+      );
     }
   }
   return null;
@@ -211,8 +218,12 @@ String? stableSubjectId(AnimeSubject subject) {
 }
 
 int _stableEpisodeId(AnimeSubject subject, int number) {
-  final prefix = subject.source.hashCode & 0x3FFFFFFF;
-  return (prefix * 1000 + subject.id * 100 + number) & 0x7FFFFFFF;
+  final subjectKey =
+      stableSubjectId(subject) ??
+      stableSubjectKey(source: subject.source, identifier: subject.id);
+  return stableInt63(
+    stableEpisodeKey(subjectKey: subjectKey, normalizedNumber: number),
+  );
 }
 
 int _int(Object? value, {int fallback = 0}) =>

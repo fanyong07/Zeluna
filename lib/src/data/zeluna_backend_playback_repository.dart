@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -203,11 +204,24 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           json['startup_latency_ms']?.toString() ?? '',
         );
         final startupProfile = _startupProfileFromJson(json['startup_profile']);
+        final providerId = _providerKey(source, stableId);
+        final episodeKey = stableEpisodeKey(
+          subjectKey: stableId,
+          normalizedNumber: episode.number,
+        );
+        final lineId = hasPlayableUrl
+            ? stablePlaybackLineKey(
+                providerId: providerId,
+                episodeKey: episodeKey,
+                uri: url,
+                headers: headers,
+              )
+            : 'line:$stableIdentityVersion:${stableDigest('placeholder|$providerId|$episodeKey|$source|${json['title'] ?? ''}|$status')}';
         lines.add(
           PlaybackLine(
-            id: 'zeluna:${_stableHash('$stableId|${episode.number}|$source|$url|$index')}',
+            id: lineId,
             episodeId: episode.id,
-            providerId: _providerKey(source, stableId),
+            providerId: providerId,
             providerName: _providerName(source),
             title: json['title']?.toString().trim().isNotEmpty == true
                 ? json['title'].toString().trim()
@@ -288,13 +302,19 @@ DateTime? _epochDateTime(Object? value) {
 
 String? _stableSubjectId(AnimeSubject subject) {
   final source = subject.source.trim().toLowerCase();
-  if (source == 'bangumi') return 'bangumi:${subject.id}';
+  if (source == 'bangumi') {
+    return stableSubjectKey(source: source, identifier: subject.id);
+  }
   final parts = source.split(':');
   if (parts.length == 3 && parts.first == 'tmdb') {
     final mediaType = parts[1] == 'series' ? 'tv' : parts[1];
     if ((mediaType == 'tv' || mediaType == 'movie') &&
         int.tryParse(parts[2]) != null) {
-      return 'tmdb:$mediaType:${parts[2]}';
+      return stableSubjectKey(
+        source: source,
+        identifier: subject.id,
+        mediaType: mediaType,
+      );
     }
   }
   return null;
@@ -311,13 +331,4 @@ String _providerKey(String source, String stableId) {
   final parts = source.split(':');
   final site = parts.length >= 2 ? parts[1].trim() : '';
   return site.isEmpty ? 'zeluna:$stableId' : 'zeluna:site:$site';
-}
-
-String _stableHash(String value) {
-  var hash = 0x811C9DC5;
-  for (final unit in value.codeUnits) {
-    hash ^= unit;
-    hash = (hash * 0x01000193) & 0xFFFFFFFF;
-  }
-  return hash.toRadixString(16).padLeft(8, '0');
 }

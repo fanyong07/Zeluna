@@ -34,6 +34,7 @@ from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.base import BaseScraper, SubjectResult
 from .config import SOURCE_MAX_CONCURRENCY
+from .stable_identity import stable_digest
 
 logger = logging.getLogger(__name__)
 
@@ -961,7 +962,10 @@ class ContentAggregator:
                 elif orig_id and orig_id.split(":", 1)[0] in ("maccms", "tvbox", "intl"):
                     display_id = orig_id
                 else:
-                    display_id = f"{source_label}:{abs(hash(title_lower)) % 10**10}"
+                    title_fingerprint = stable_digest(
+                        f"display|v1|{source_label}|{title_lower}"
+                    )
+                    display_id = f"{source_label}:display:v1:{title_fingerprint[:24]}"
 
                 all_results.append(AggregatedSubject(
                     id=display_id,

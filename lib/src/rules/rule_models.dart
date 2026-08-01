@@ -88,6 +88,7 @@ class RulePlugin {
     this.priority = 100,
     this.unsupportedReason,
     this.note = '',
+    this.legacyIds = const [],
   });
 
   final String id;
@@ -117,6 +118,7 @@ class RulePlugin {
   final int priority;
   final String? unsupportedReason;
   final String note;
+  final List<String> legacyIds;
 
   String get sourceLabel => source.label;
 
@@ -219,6 +221,7 @@ class RulePlugin {
     int? priority,
     String? unsupportedReason,
     String? note,
+    List<String>? legacyIds,
   }) {
     return RulePlugin(
       id: id ?? this.id,
@@ -248,6 +251,7 @@ class RulePlugin {
       priority: priority ?? this.priority,
       unsupportedReason: unsupportedReason ?? this.unsupportedReason,
       note: note ?? this.note,
+      legacyIds: legacyIds ?? this.legacyIds,
     );
   }
 
@@ -279,6 +283,7 @@ class RulePlugin {
     'priority': priority,
     'unsupportedReason': unsupportedReason,
     'note': note,
+    if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
   };
 
   factory RulePlugin.fromJson(Map<String, dynamic> json) {
@@ -342,6 +347,7 @@ class RulePlugin {
       priority: _intFromJson(json['priority'], fallback: 100),
       unsupportedReason: _blankToNull(json['unsupportedReason']?.toString()),
       note: json['note']?.toString() ?? json['description']?.toString() ?? '',
+      legacyIds: _stringList(json['legacyIds']),
     );
   }
 }
@@ -864,6 +870,7 @@ class RuleRepositoryRecord {
     required this.url,
     required this.importedAt,
     required this.ruleCount,
+    this.legacyIds = const [],
   });
 
   final String id;
@@ -871,6 +878,7 @@ class RuleRepositoryRecord {
   final String url;
   final DateTime importedAt;
   final int ruleCount;
+  final List<String> legacyIds;
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -878,6 +886,7 @@ class RuleRepositoryRecord {
     'url': url,
     'importedAt': importedAt.toIso8601String(),
     'ruleCount': ruleCount,
+    if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
   };
 
   factory RuleRepositoryRecord.fromJson(Map<String, dynamic> json) {
@@ -887,6 +896,7 @@ class RuleRepositoryRecord {
       url: json['url']?.toString() ?? '',
       importedAt: _dateTimeFromJson(json['importedAt']),
       ruleCount: _intFromJson(json['ruleCount']),
+      legacyIds: _stringList(json['legacyIds']),
     );
   }
 }

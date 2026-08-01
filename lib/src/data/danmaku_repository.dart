@@ -6,6 +6,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import 'danmaku_response_decoder.dart';
 
@@ -737,7 +738,7 @@ class DanmakuRepository {
     return '${subject.source}|${subject.id}|${subject.title}|${episode.number}|'
         '${settings.bilibiliDanmakuEnabled}|'
         '${settings.dandanplayDanmakuEnabled}|${settings.dandanplayAppId}|'
-        '${settings.dandanplayAppSecret.hashCode}|'
+        '${stableDigest(settings.dandanplayAppSecret)}|'
         '${settings.customDanmakuEnabled}|${settings.customDanmakuEndpoint}';
   }
 }

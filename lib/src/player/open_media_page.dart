@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
@@ -156,9 +157,20 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
 
   Future<void> _open(String value, {required String provider}) async {
     final title = _title.text.trim().isEmpty ? '自定义媒体' : _title.text.trim();
-    final id = DateTime.now().microsecondsSinceEpoch.remainder(0x3fffffff);
+    final normalizedValue = value.trim();
+    final subjectKey = stableSubjectKey(
+      source: 'direct',
+      identifier: normalizedValue,
+    );
+    final subjectId = stableInt63(subjectKey);
+    final episodeKey = stableEpisodeKey(
+      subjectKey: subjectKey,
+      normalizedNumber: 1,
+    );
+    final episodeId = stableInt63(episodeKey);
+    final headers = _parseHeaders(_headers.text);
     final subject = AnimeSubject(
-      id: -id,
+      id: subjectId,
       title: title,
       originalTitle: title,
       summary: '由用户直接打开的本地文件或网络媒体。',
@@ -173,26 +185,28 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
       tags: const [],
       totalEpisodes: 1,
       source: 'direct',
+      stableKey: subjectKey,
     );
     final episode = AnimeEpisode(
-      id: -id,
-      subjectId: -id,
+      id: episodeId,
+      subjectId: subjectId,
       number: 1,
       title: title,
       airdate: null,
       duration: '',
       description: '',
+      stableKey: episodeKey,
     );
     final line = PlaybackLine(
-      id: 'direct:$id',
+      id: 'line:$stableIdentityVersion:${stableDigest('direct|$episodeKey|$normalizedValue|${stableHeaderFingerprint(headers)}')}',
       episodeId: episode.id,
       providerId: 'direct',
       providerName: provider,
       title: title,
       quality: '原始',
       format: _formatOf(value),
-      url: value,
-      headers: _parseHeaders(_headers.text),
+      url: normalizedValue,
+      headers: headers,
       available: true,
     );
     if (!mounted) return;

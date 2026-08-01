@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/identity/stable_identity.dart';
 import 'csp_rule_support.dart';
 import 'rule_models.dart';
 
@@ -163,20 +164,31 @@ class RuleImporter {
       searchUrl,
       searchConfig['rawBaseUrl']?.toString() ?? '',
     );
-    final idSeed = '$sourceUrl:$factoryId:$name:$searchUrl:$index';
     final version = source['version']?.toString() ?? '1.0';
     final description = args['description']?.toString() ?? '';
     final tier = _intFromAny(args['tier'], fallback: index);
     final groupId = _importGroupId(sourceUrl, factoryId);
+    final engine = switch (factoryId) {
+      'web-selector' => 'animeko-web-selector',
+      'rss' => 'animeko-rss',
+      _ => 'animeko-$factoryId',
+    };
+    final id = stableRuleKey(
+      ruleId: 'animeko:$factoryId:${name.toLowerCase()}',
+      engine: engine,
+      sourceRepository: baseUrl,
+      contentHash: stableDigest('$version|$searchUrl'),
+    );
+    final legacySeed = '$sourceUrl:$factoryId:$name:$searchUrl:$index';
 
     if (factoryId == 'web-selector') {
       return RulePlugin(
-        id: 'custom:animeko:${_hash(idSeed)}',
+        id: id,
         name: name,
         version: version,
         source: RuleSourceKind.custom,
         contentType: RuleContentType.anime,
-        engine: 'animeko-web-selector',
+        engine: engine,
         updatedAt: DateTime.now(),
         qualityScore: 76,
         tags: const ['Animeko', 'CSS', '在线播放'],
@@ -189,6 +201,7 @@ class RuleImporter {
         animeko: _animekoConfigFromSearchConfig(searchConfig),
         groupId: groupId,
         priority: tier,
+        legacyIds: ['custom:animeko:${_hash(legacySeed)}'],
         note: description.trim().isEmpty
             ? '从 Animeko web-selector 源导入，可直接尝试解析在线播放地址。'
             : description,
@@ -197,12 +210,12 @@ class RuleImporter {
 
     if (factoryId == 'rss') {
       return RulePlugin(
-        id: 'custom:animeko-rss:${_hash(idSeed)}',
+        id: id,
         name: name,
         version: version,
         source: RuleSourceKind.custom,
         contentType: RuleContentType.anime,
-        engine: 'animeko-rss',
+        engine: engine,
         updatedAt: DateTime.now(),
         qualityScore: 50,
         tags: const ['Animeko', 'RSS', 'BT'],
@@ -214,6 +227,7 @@ class RuleImporter {
         installedByDefault: false,
         groupId: groupId,
         priority: tier,
+        legacyIds: ['custom:animeko-rss:${_hash(legacySeed)}'],
         unsupportedReason:
             '这是 BT/RSS 资源订阅，不是 mp4/m3u8 在线播放源；当前播放器没有下载或 BT 边下边播能力，所以不能直接启用播放。',
         note: description.trim().isEmpty
@@ -223,12 +237,12 @@ class RuleImporter {
     }
 
     return RulePlugin(
-      id: 'custom:animeko-unsupported:${_hash(idSeed)}',
+      id: id,
       name: name,
       version: version,
       source: RuleSourceKind.custom,
       contentType: RuleContentType.anime,
-      engine: 'animeko-$factoryId',
+      engine: engine,
       updatedAt: DateTime.now(),
       qualityScore: 40,
       tags: const ['Animeko', '暂不支持'],
@@ -240,6 +254,7 @@ class RuleImporter {
       installedByDefault: false,
       groupId: groupId,
       priority: tier,
+      legacyIds: ['custom:animeko-unsupported:${_hash(legacySeed)}'],
       unsupportedReason: '当前还没有接入 Animeko 的 $factoryId 源执行器。',
       note: description.trim().isEmpty ? '从 Animeko 源导入。' : description,
     );

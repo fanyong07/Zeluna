@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import 'android_csp_bridge.dart';
 import 'animeko_webview_sniffer.dart';
@@ -440,7 +441,7 @@ class RulePlaybackResolver {
       final rawSiteKey = androidCspSiteKey(raw, rule.id);
       final siteKey = rawSiteKey.length <= 150
           ? rawSiteKey
-          : '${rawSiteKey.substring(0, 120)}:${rule.id.hashCode}';
+          : '${rawSiteKey.substring(0, 120)}:${stableDigest(rule.id).substring(0, 24)}';
       final site = AndroidCspSite(
         spiderMd5: spiderMd5,
         siteKey: siteKey,
@@ -1906,12 +1907,19 @@ class RulePlaybackResolver {
     bool publicHttpOnly = false,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, referer);
+    final lineHeaders = headers ?? _headers(rule: rule, referer: referer);
+    final episodeKey = episode.identityKey();
     final detectedQuality = _probeResolutionLabel(
       probe.videoWidth,
       probe.videoHeight,
     );
     return PlaybackLine(
-      id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
+      id: stablePlaybackLineKey(
+        providerId: rule.id,
+        episodeKey: episodeKey,
+        uri: normalizedUrl,
+        headers: lineHeaders,
+      ),
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
@@ -1923,7 +1931,7 @@ class RulePlaybackResolver {
           (rule.tags.contains('4K') ? '4K/HD' : '分辨率未知'),
       format: probe.format ?? _formatForUrl(normalizedUrl, rule.engine),
       url: normalizedUrl,
-      headers: headers ?? _headers(rule: rule, referer: referer),
+      headers: lineHeaders,
       latency: probe.latency,
       sizeLabel: _probeSizeLabel(probe),
       sizeBytes: probe.sizeBytes,
@@ -1951,10 +1959,16 @@ class RulePlaybackResolver {
     required Map<String, String> headers,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, headers['Referer'] ?? '');
+    final episodeKey = episode.identityKey();
     return PlaybackLine(
       // Keep the same logical id as the optimistic quick result so a failed
       // verified probe replaces it instead of leaving a stale playable row.
-      id: 'rule:${rule.id}:${episode.id}:${normalizedUrl.hashCode}',
+      id: stablePlaybackLineKey(
+        providerId: rule.id,
+        episodeKey: episodeKey,
+        uri: normalizedUrl,
+        headers: headers,
+      ),
       episodeId: episode.id,
       providerId: rule.id,
       providerName: rule.name,
