@@ -14,16 +14,15 @@ import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
-import '../rules/rule_importer.dart';
 import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
-import '../rules/rule_security.dart';
 import '../rules/tvbox_xbpq_hydrator.dart';
 import '../sources/external_source_adapters.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
+import '../sources/source_controller.dart';
 import '../sources/source_rule_bridge.dart';
 import '../settings/settings_controller.dart';
 import 'bangumi_credential_store.dart';
@@ -43,21 +42,7 @@ import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
 import 'zeluna_backend_playback_repository.dart';
 
-class RuleRepositoryRefreshResult {
-  const RuleRepositoryRefreshResult({
-    required this.repositoryCount,
-    required this.refreshedCount,
-    required this.failedCount,
-    required this.ruleCount,
-  });
-
-  final int repositoryCount;
-  final int refreshedCount;
-  final int failedCount;
-  final int ruleCount;
-
-  bool get hasRemoteRepositories => repositoryCount > 0;
-}
+export '../sources/source_controller.dart' show RuleRepositoryRefreshResult;
 
 /// Runs every supplied playback probe with a small concurrency window and
 /// emits each result as soon as it finishes. This keeps a large route
@@ -504,8 +489,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   late Box<dynamic> _library;
   AccountController? _accountController;
   SettingsController? _settingsController;
+  SourceController? _sourceController;
   int _homeRefreshVersion = 0;
-  int _sourceCatalogRefreshVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _playbackPrefetches = <String, Future<void>>{};
@@ -528,6 +513,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   SettingsController get _settingsDomain {
     final controller = _settingsController;
     if (controller == null) throw StateError('应用设置尚未准备好');
+    return controller;
+  }
+
+  SourceController get _sourceDomain {
+    final controller = _sourceController;
+    if (controller == null) throw StateError('线路与规则尚未准备好');
     return controller;
   }
 
@@ -582,13 +573,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       contextVersion: _accounts.contextVersion,
     );
     final profileJson = _settings.get(_accountSettingsKey('profile'));
-    final rulePluginsJson = _settings.get(_accountSettingsKey('rulePlugins'));
+    _sourceController = SourceController(
+      storage: HiveSourceStorage(_settings),
+      catalogRepository: ref.read(sourceCatalogRepositoryProvider),
+      sourceRuleBridge: ref.read(sourceRuleBridgeProvider),
+      publishSnapshot: _publishSourceSnapshot,
+    );
+    final sourceSnapshot = await _sourceDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
     final services = settingsSnapshot.services;
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
     final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
-    final rulePlugins = _restoreRulePlugins(rulePluginsJson);
-    const sourceCatalog = SourceCatalogState();
     unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
     final offlineTasks = await _readDownloadTasks();
     final initialState = AnimeState(
@@ -607,8 +605,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       danmaku: settingsSnapshot.danmaku,
       misc: settingsSnapshot.misc,
       services: services,
-      rulePlugins: rulePlugins,
-      sourceCatalog: sourceCatalog,
+      rulePlugins: sourceSnapshot.rulePlugins,
+      sourceCatalog: sourceSnapshot.sourceCatalog,
     );
     if (!cachedHomeFeed.fresh) {
       unawaited(
@@ -1703,424 +1701,56 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return _library.delete(key);
   }
 
-  Future<void> installRulePlugin(String id) async {
-    final current = state.value;
-    if (current == null) return;
-    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
-    final installed = {...current.rulePlugins.installedIds, id};
-    final enabled = {...current.rulePlugins.enabledIds};
-    if (rule != null &&
-        rule.canResolveNatively &&
-        _ruleRepositoryFor(
-          current.rulePlugins,
-        ).canEnableRule(rule, current.rulePlugins)) {
-      enabled.add(id);
-    }
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(
-        installedIds: installed,
-        enabledIds: enabled,
-      ),
-    );
-  }
+  Future<void> installRulePlugin(String id) =>
+      _sourceDomain.installRulePlugin(id);
 
-  Future<void> uninstallRulePlugin(String id) async {
-    final current = state.value;
-    if (current == null) return;
-    final installed = {...current.rulePlugins.installedIds}..remove(id);
-    final enabled = {...current.rulePlugins.enabledIds}..remove(id);
-    final approvals = {...current.rulePlugins.approvedPermissionDigests}
-      ..remove(id);
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(
-        installedIds: installed,
-        enabledIds: enabled,
-        approvedPermissionDigests: approvals,
-      ),
-    );
-  }
+  Future<void> uninstallRulePlugin(String id) =>
+      _sourceDomain.uninstallRulePlugin(id);
 
-  Future<void> toggleRulePlugin(String id, bool enabled) async {
-    final current = state.value;
-    if (current == null || !current.rulePlugins.installedIds.contains(id)) {
-      return;
-    }
-    final enabledIds = {...current.rulePlugins.enabledIds};
-    if (enabled) {
-      final repository = _ruleRepositoryFor(current.rulePlugins);
-      final rule = repository.byId(id);
-      if (rule == null ||
-          !repository.canEnableRule(rule, current.rulePlugins)) {
-        return;
-      }
-      enabledIds.add(id);
-    } else {
-      enabledIds.remove(id);
-    }
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(enabledIds: enabledIds),
-    );
-  }
+  Future<void> toggleRulePlugin(String id, bool enabled) =>
+      _sourceDomain.toggleRulePlugin(id, enabled);
 
-  Future<void> approveRulePluginPermissionsAndEnable(String id) async {
-    final current = state.value;
-    if (current == null || !current.rulePlugins.installedIds.contains(id)) {
-      return;
-    }
-    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
-    if (rule == null || !rule.canResolveNatively) return;
-    final approvals = {...current.rulePlugins.approvedPermissionDigests};
-    if (rule.effectiveManifest.requiresApproval) {
-      approvals[id] = rule.effectiveManifest.permissionDigest;
-    }
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(
-        enabledIds: {...current.rulePlugins.enabledIds, id},
-        approvedPermissionDigests: approvals,
-      ),
-    );
-  }
+  Future<void> approveRulePluginPermissionsAndEnable(String id) =>
+      _sourceDomain.approveRulePluginPermissionsAndEnable(id);
 
   Future<void> setInstalledRulePluginsEnabled(
     Iterable<String> ids,
     bool enabled,
-  ) async {
-    final current = state.value;
-    if (current == null) return;
-    final targets = ids.toSet().intersection(current.rulePlugins.installedIds);
-    if (targets.isEmpty) return;
-    final enabledIds = {...current.rulePlugins.enabledIds};
-    if (enabled) {
-      enabledIds.addAll(targets);
-    } else {
-      enabledIds.removeAll(targets);
-    }
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(enabledIds: enabledIds),
-    );
-  }
+  ) => _sourceDomain.setInstalledRulePluginsEnabled(ids, enabled);
 
-  Future<RuleRepositoryRefreshResult> refreshRuleRepositories() async {
-    final current = state.value;
-    if (current == null) {
-      return const RuleRepositoryRefreshResult(
-        repositoryCount: 0,
-        refreshedCount: 0,
-        failedCount: 0,
-        ruleCount: 0,
-      );
-    }
+  Future<RuleRepositoryRefreshResult> refreshRuleRepositories() =>
+      _sourceDomain.refreshRuleRepositories();
 
-    // Built-in verified rules ship with the app. Refreshing still installs any
-    // newly added recommendations without changing the user's existing
-    // enable/disable choices.
-    await _updateRulePlugins(_installNewRecommendedRules(current.rulePlugins));
+  Future<void> setAllInstalledRulePluginsEnabled(bool enabled) =>
+      _sourceDomain.setAllInstalledRulePluginsEnabled(enabled);
 
-    final urls = current.rulePlugins.repositories
-        .map((record) => record.url.trim())
-        .where((url) => url.isNotEmpty)
-        .toSet()
-        .toList(growable: false);
-    var refreshedCount = 0;
-    var failedCount = 0;
-    var ruleCount = 0;
-    for (final url in urls) {
-      try {
-        final result = await importRuleRepositoryUrl(url);
-        refreshedCount++;
-        ruleCount += result.installedCount;
-      } catch (_) {
-        failedCount++;
-      }
-    }
-    return RuleRepositoryRefreshResult(
-      repositoryCount: urls.length,
-      refreshedCount: refreshedCount,
-      failedCount: failedCount,
-      ruleCount: ruleCount,
-    );
-  }
+  Future<void> resetRulePlugins() => _sourceDomain.resetRulePlugins();
 
-  Future<void> setAllInstalledRulePluginsEnabled(bool enabled) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current == null) return;
-    final bridge = ref.read(sourceRuleBridgeProvider);
-    final rulePlugins = _normalizeRulePlugins(
-      current.rulePlugins.copyWith(
-        enabledIds: enabled
-            ? {...current.rulePlugins.installedIds}
-            : <String>{},
-      ),
-    );
-    final toggledCatalog = current.sourceCatalog.copyWith(
-      sources: [
-        for (final source in current.sourceCatalog.sources)
-          current.sourceCatalog.playbackRuleCountFor(source.id) > 0 ||
-                  bridge.mayContributePlaybackRules(source)
-              ? source.copyWith(enabled: enabled)
-              : source,
-      ],
-      loadError: current.sourceCatalog.loadError,
-    );
-    final refreshVersion = ++_sourceCatalogRefreshVersion;
-    final sourceBridge = bridge.build(toggledCatalog);
-    final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
-    state = AsyncData(
-      current.copyWith(rulePlugins: rulePlugins, sourceCatalog: sourceCatalog),
-    );
-    await Future.wait([
-      _settings.put(
-        _accountSettingsKeyFor(accountId, 'rulePlugins'),
-        rulePlugins.toJson(),
-      ),
-      _settings.put(
-        _accountSettingsKeyFor(accountId, 'sourceEnabled'),
-        sourceCatalog.enabledById,
-      ),
-    ]);
-    await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
-  }
+  Future<RuleImportResult> importRuleRepositoryUrl(String url) =>
+      _sourceDomain.importRuleRepositoryUrl(url);
 
-  Future<void> resetRulePlugins() async {
-    final current = state.value;
-    final customRules =
-        current?.rulePlugins.customRules ?? const <RulePlugin>[];
-    final repositories =
-        current?.rulePlugins.repositories ?? const <RuleRepositoryRecord>[];
-    final defaults = RulePluginRepository(
-      extraRules: customRules,
-    ).defaultState();
-    await _updateRulePlugins(
-      defaults.copyWith(customRules: customRules, repositories: repositories),
-    );
-  }
-
-  Future<RuleImportResult> importRuleRepositoryUrl(String url) async {
-    final ownerAccountId = _activeAccount?.id;
-    final bundle = await const RuleImporter().importFromUrl(url);
-    if (_activeAccount?.id != ownerAccountId) {
-      throw const AccountException('账号已切换，请在当前账号下重新导入');
-    }
-    return _importRuleBundle(bundle, ownerAccountId: ownerAccountId);
-  }
-
-  Future<RuleImportResult> importRuleRepositoryText(String text) async {
-    final ownerAccountId = _activeAccount?.id;
-    final bundle = const RuleImporter().importFromText(text);
-    return _importRuleBundle(bundle, ownerAccountId: ownerAccountId);
-  }
+  Future<RuleImportResult> importRuleRepositoryText(String text) =>
+      _sourceDomain.importRuleRepositoryText(text);
 
   Future<RuleImportResult> importSelectedRulePlugins({
     required String repositoryName,
     required List<RulePlugin> rules,
     String sourceUrl = '',
-  }) {
-    final ownerAccountId = _activeAccount?.id;
-    return _importRuleBundle(
-      RuleImportBundle(
-        name: repositoryName,
-        rules: List<RulePlugin>.unmodifiable(rules),
-        sourceUrl: sourceUrl,
-      ),
-      ownerAccountId: ownerAccountId,
-    );
-  }
+  }) => _sourceDomain.importSelectedRulePlugins(
+    repositoryName: repositoryName,
+    rules: rules,
+    sourceUrl: sourceUrl,
+  );
 
-  Future<void> toggleVideoSource(String id, bool enabled) async {
-    await setVideoSourcesEnabled({id}, enabled);
-  }
+  Future<void> toggleVideoSource(String id, bool enabled) =>
+      _sourceDomain.toggleVideoSource(id, enabled);
 
-  Future<void> setVideoSourcesEnabled(
-    Iterable<String> ids,
-    bool enabled,
-  ) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current == null) return;
-    final sourceIds = ids.toSet();
-    if (sourceIds.isEmpty ||
-        !current.sourceCatalog.sources.any(
-          (source) => sourceIds.contains(source.id),
-        )) {
-      return;
-    }
-    final toggledCatalog = current.sourceCatalog.copyWith(
-      sources: [
-        for (final source in current.sourceCatalog.sources)
-          sourceIds.contains(source.id)
-              ? source.copyWith(enabled: enabled)
-              : source,
-      ],
-      loadError: current.sourceCatalog.loadError,
-    );
-    final refreshVersion = ++_sourceCatalogRefreshVersion;
-    final sourceBridge = ref
-        .read(sourceRuleBridgeProvider)
-        .build(toggledCatalog);
-    final sourceCatalog = sourceBridge.attachTo(toggledCatalog);
-    state = AsyncData(current.copyWith(sourceCatalog: sourceCatalog));
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'sourceEnabled'),
-      sourceCatalog.enabledById,
-    );
-    await _hydrateAndApplySourceCatalog(toggledCatalog, refreshVersion);
-  }
+  Future<void> setVideoSourcesEnabled(Iterable<String> ids, bool enabled) =>
+      _sourceDomain.setVideoSourcesEnabled(ids, enabled);
 
-  Future<void> _hydrateAndApplySourceCatalog(
-    SourceCatalogState catalog,
-    int refreshVersion,
-  ) async {
-    if (refreshVersion != _sourceCatalogRefreshVersion) return;
-    final hydrated = await ref
-        .read(sourceRuleBridgeProvider)
-        .buildHydrated(catalog);
-    if (refreshVersion != _sourceCatalogRefreshVersion) return;
-    final current = state.value;
-    if (current == null) return;
-    state = AsyncData(
-      current.copyWith(sourceCatalog: hydrated.attachTo(current.sourceCatalog)),
-    );
-  }
-
-  Future<void> _updateRulePlugins(RulePluginState rulePlugins) async {
-    final accountId = _activeAccount?.id;
-    final normalized = _normalizeRulePlugins(rulePlugins);
-    final current = state.value;
-    if (current != null) {
-      state = AsyncData(current.copyWith(rulePlugins: normalized));
-    }
-    await _settings.put(
-      _accountSettingsKeyFor(accountId, 'rulePlugins'),
-      normalized.toJson(),
-    );
-  }
-
-  RulePluginState _normalizeRulePlugins(RulePluginState rulePlugins) {
-    final repository = _ruleRepositoryFor(rulePlugins);
-    return repository.normalizeState(rulePlugins);
-  }
-
-  RulePluginState _restoreRulePlugins(Object? value) {
-    if (value is! Map) return const RulePluginRepository().defaultState();
-    try {
-      return _installNewRecommendedRules(
-        _normalizeRulePlugins(
-          RulePluginState.fromJson(value.cast<String, dynamic>()),
-        ),
-      );
-    } catch (_) {
-      return const RulePluginRepository().defaultState();
-    }
-  }
-
-  RulePluginState _installNewRecommendedRules(RulePluginState state) {
-    final repository = _ruleRepositoryFor(state);
-    final defaults = repository.defaultState();
-    final missing = defaults.installedIds.difference(state.installedIds);
-    if (missing.isEmpty) return state;
-    return repository.normalizeState(
-      state.copyWith(
-        installedIds: {...state.installedIds, ...missing},
-        enabledIds: {
-          ...state.enabledIds,
-          ...defaults.enabledIds.intersection(missing),
-        },
-      ),
-    );
-  }
-
-  Future<RuleImportResult> _importRuleBundle(
-    RuleImportBundle bundle, {
-    required String? ownerAccountId,
-  }) async {
-    if (_activeAccount?.id != ownerAccountId) {
-      throw const AccountException('账号已切换，请在当前账号下重新导入');
-    }
-    if (bundle.rules.isEmpty) {
-      return RuleImportResult(
-        repositoryName: bundle.name,
-        ruleCount: 0,
-        installedCount: 0,
-      );
-    }
-    final current = state.value;
-    if (current == null) {
-      return RuleImportResult(
-        repositoryName: bundle.name,
-        ruleCount: bundle.rules.length,
-        installedCount: 0,
-      );
-    }
-    final importedRules = [
-      for (final rule in bundle.rules)
-        rule.copyWith(
-          permissionManifest: rule.effectiveManifest.copyWith(
-            sourceRepository: bundle.sourceUrl.trim(),
-            contentHash: '',
-            trustLevel: RuleTrustLevel.untrusted,
-          ),
-        ),
-    ];
-    final existing = {
-      for (final rule in current.rulePlugins.customRules) rule.id: rule,
-    };
-    for (final rule in importedRules) {
-      existing[rule.id] = rule;
-    }
-    final mergedCustomRules = existing.values.toList(growable: false);
-    final mergedRepository = RulePluginRepository(
-      extraRules: mergedCustomRules,
-    );
-    final effectiveRuleIds = <String>{};
-    for (final rule in importedRules) {
-      final effectiveRule = mergedRepository.byId(rule.id);
-      if (effectiveRule != null) effectiveRuleIds.add(effectiveRule.id);
-    }
-    final installed = {
-      ...current.rulePlugins.installedIds,
-      ...effectiveRuleIds,
-    };
-    final enabled = {...current.rulePlugins.enabledIds};
-    final repositoryRecord = RuleRepositoryRecord(
-      id: bundle.sourceUrl.trim().isEmpty
-          ? 'clipboard:${_stableRuleBundleId(bundle)}'
-          : 'url:${_stableRuleRepositoryId(bundle.sourceUrl)}',
-      name: bundle.name,
-      url: bundle.sourceUrl,
-      importedAt: DateTime.now(),
-      ruleCount: effectiveRuleIds.length,
-    );
-    final repositories = [
-      repositoryRecord,
-      ...current.rulePlugins.repositories.where(
-        (record) =>
-            record.id != repositoryRecord.id &&
-            (bundle.sourceUrl.trim().isEmpty ||
-                record.url.trim() != bundle.sourceUrl.trim()),
-      ),
-    ];
-    if (_activeAccount?.id != ownerAccountId) {
-      throw const AccountException('账号已切换，请在当前账号下重新导入');
-    }
-    await _updateRulePlugins(
-      current.rulePlugins.copyWith(
-        installedIds: installed,
-        enabledIds: enabled,
-        customRules: mergedCustomRules,
-        repositories: repositories,
-      ),
-    );
-    return RuleImportResult(
-      repositoryName: bundle.name,
-      ruleCount: bundle.rules.length,
-      installedCount: effectiveRuleIds.length,
-    );
-  }
-
-  RulePluginRepository _ruleRepositoryFor(RulePluginState state) {
-    return RulePluginRepository(extraRules: state.customRules);
-  }
+  RulePluginRepository _ruleRepositoryFor(RulePluginState value) =>
+      _sourceController?.repositoryFor(value) ??
+      RulePluginRepository(extraRules: value.customRules);
 
   Future<bool> toggleFavorite(AnimeSubject subject) async {
     final current = state.value;
@@ -2809,11 +2439,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final profileJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'profile'),
     );
-    final rulePluginsJson = _settings.get(
-      _accountSettingsKeyFor(accountId, 'rulePlugins'),
+    final sourceSnapshot = await _sourceDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
     );
-    final rulePlugins = _restoreRulePlugins(rulePluginsJson);
-    const sourceCatalog = SourceCatalogState();
     final offlineTasks = await _readDownloadTasksFor(accountId);
     final current = state.value;
     if (current == null ||
@@ -2827,7 +2456,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
     _backendLineLookups.clear();
     _homeRefreshVersion++;
-    _sourceCatalogRefreshVersion++;
     _cancelPlaybackPrefetches();
     state = AsyncData(
       current.copyWith(
@@ -2846,8 +2474,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         danmaku: settingsSnapshot.danmaku,
         misc: settingsSnapshot.misc,
         services: settingsSnapshot.services,
-        rulePlugins: rulePlugins,
-        sourceCatalog: sourceCatalog,
+        rulePlugins: sourceSnapshot.rulePlugins,
+        sourceCatalog: sourceSnapshot.sourceCatalog,
       ),
     );
     await _settingsDomain.applyRuntimeEffects().onError((_, _) {});
@@ -2904,6 +2532,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
+  void _publishSourceSnapshot(SourceSnapshot snapshot) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        rulePlugins: snapshot.rulePlugins,
+        sourceCatalog: snapshot.sourceCatalog,
+      ),
+    );
+  }
+
   Future<void> _handleExternalServicesChanged(
     ExternalServicesChange change,
   ) async {
@@ -2925,6 +2564,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<void> _quiesceDownloadsForAccountChange() async {
     await _settingsController?.settleWrites();
+    await _sourceController?.settleWrites();
     final activeIds = state.value?.offlineTasks
         .where((task) => task.isActive)
         .map((task) => task.id)
@@ -3544,39 +3184,6 @@ bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
     if (right[entry.key] != entry.value) return false;
   }
   return true;
-}
-
-String _stableRuleRepositoryId(String value) {
-  final normalized = value.trim();
-  String canonical;
-  try {
-    canonical = canonicalIdentityUri(normalized);
-  } on FormatException {
-    canonical = normalized;
-  }
-  return stableDigest(
-    'rule-repository|$stableIdentityVersion|$canonical',
-  ).substring(0, 32);
-}
-
-String _stableRuleBundleId(RuleImportBundle bundle) {
-  final identities =
-      bundle.rules
-          .map(
-            (rule) => stableRuleKey(
-              ruleId: rule.id,
-              engine: rule.engine,
-              sourceRepository: rule.baseUrl,
-              contentHash: stableDigest(
-                '${rule.searchUrl}|${rule.contentType.name}|${rule.version}',
-              ),
-            ),
-          )
-          .toList(growable: false)
-        ..sort();
-  return stableDigest(
-    'rule-bundle|$stableIdentityVersion|${bundle.name.trim()}|${identities.join('|')}',
-  ).substring(0, 32);
 }
 
 class _HomeFeedCacheSnapshot {
