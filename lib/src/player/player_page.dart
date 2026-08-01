@@ -19,7 +19,7 @@ import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
-import 'anime4k_shader_manager.dart';
+import 'anime4k/anime4k_controller.dart';
 import 'app_fullscreen.dart';
 import 'danmaku/danmaku_controller.dart';
 import 'danmaku_overlay.dart';
@@ -57,8 +57,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlaybackRecoveryController _recoveryController;
   late final DanmakuController _danmakuController;
   late final SubtitleController _subtitleController;
+  late final Anime4KController _anime4kController;
   late PlaybackPerformanceTrace _playbackTrace;
-  final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   int? _handledFailureOpenSerial;
@@ -74,23 +74,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
   double? _appliedVolume;
-  String? _appliedSuperResolutionKey;
-  Anime4KMpvRuntime? _anime4kRuntime;
-  Anime4KProfile? _activeSuperResolutionProfile;
-  Anime4KTier? _activeSuperResolutionTier;
-  Anime4KSelection? _activeSuperResolutionSelection;
-  VideoParams? _videoParams;
-  double? _videoFramesPerSecond;
-  bool _videoFrameRateIsMeasured = false;
-  var _videoFrameRateQuerySerial = 0;
-  Size _videoViewportPhysicalSize = Size.zero;
-  String? _superResolutionStatusMessage;
-  Future<void> _superResolutionQueue = Future<void>.value();
-  bool _handlingSuperResolutionFailure = false;
-  bool _previewingOriginal = false;
-  Timer? _superResolutionPerformanceTimer;
-  final _superResolutionCounters = <String, int>{};
-  var _superResolutionOverloadSamples = 0;
   bool _controlsVisible = true;
   double? _temporaryPlaybackRate;
   bool _pointerInChromeHotZone = false;
@@ -115,7 +98,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   String? _pendingRecoveryStrategy;
   String? _pendingRecoveryFromProvider;
   var _finalFailureTraceRecorded = false;
-  var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   DateTime? _ignoreNativeErrorsUntil;
   var _backupLookupInProgress = false;
@@ -192,6 +174,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _subtitleController = SubtitleController(
       applyTrack: _player.setSubtitleTrack,
     )..addListener(_handleSubtitleChanged);
+    _anime4kController = Anime4KController(
+      platform: defaultTargetPlatform,
+      getProperty: _readMpvProperty,
+      setProperty: _writeMpvProperty,
+    )..addListener(_handleAnime4KChanged);
     _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
@@ -237,6 +224,29 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _handleSubtitleChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _handleAnime4KChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _readMpvProperty(String property) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      throw UnsupportedError('The current player is not backed by libmpv.');
+    }
+    final nativePlayer = platform as dynamic;
+    final value = await nativePlayer.getProperty(property);
+    return value?.toString() ?? '';
+  }
+
+  Future<void> _writeMpvProperty(String property, String value) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      throw UnsupportedError('The current player is not backed by libmpv.');
+    }
+    final nativePlayer = platform as dynamic;
+    await nativePlayer.setProperty(property, value);
   }
 
   void _startPlaybackTrace() {
@@ -360,7 +370,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
-    _superResolutionPerformanceTimer?.cancel();
+    _anime4kController.dispose();
     unawaited(_restoreSystemUi());
     if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
     _appFullscreen.dispose();
@@ -404,7 +414,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             ? state.settings
             : state.settings.copyWith(speed: _temporaryPlaybackRate);
         _applyPlaybackSettings(effectiveSettings);
-        final superResolutionStatus = _superResolutionDisplayStatus;
+        final superResolutionStatus = _anime4kController.displayStatus;
         final superResolutionPanelStatus = _buildSuperResolutionPanelStatus(
           superResolutionStatus,
         );
@@ -452,9 +462,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         episode: _episode,
                         line: _line,
                         settings: effectiveSettings,
-                        superResolutionActive:
-                            superResolutionStatus != null &&
-                            !superResolutionStatus.previewingOriginal,
+                        superResolutionActive: _anime4kController.isActive,
                         services: state.services,
                         danmaku: state.danmaku,
                         remoteDanmaku: _danmakuController.remoteComments,
@@ -610,18 +618,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     return _playerMessage;
   }
 
-  Widget? _buildSuperResolutionPanelStatus(
-    _SuperResolutionDisplayStatus? status,
-  ) {
-    final notice = _superResolutionStatusMessage?.trim();
+  Widget? _buildSuperResolutionPanelStatus(Anime4KDisplayStatus? status) {
+    final notice = _anime4kController.statusMessage?.trim();
     if (status == null && (notice == null || notice.isEmpty)) return null;
 
     final children = <Widget>[
       if (status != null)
         _SuperResolutionPanelStatus(
           status: status,
-          onCompareStart: () => _setSuperResolutionOriginalPreview(true),
-          onCompareEnd: () => _setSuperResolutionOriginalPreview(false),
+          onCompareStart: () => _anime4kController.setOriginalPreview(true),
+          onCompareEnd: () => _anime4kController.setOriginalPreview(false),
         ),
       if (status != null && notice != null && notice.isNotEmpty)
         const SizedBox(height: 8),
@@ -769,12 +775,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                 : PlaybackSessionEvent.playbackPaused(),
           );
           setState(() => _playing = value);
+          _anime4kController.updatePlaybackState(
+            playing: value,
+            buffering: _buffering,
+          );
           _resetPlaybackStallWatchdog(
             grace: value ? const Duration(seconds: 2) : Duration.zero,
           );
           if (value) {
             _scheduleControlsHide();
-            unawaited(_refreshSuperResolutionFrameRate());
+            unawaited(
+              _anime4kController.refreshFrameRate(
+                usesWebPlayer: _usesWebPlayer,
+              ),
+            );
             _scheduleSingleBackupLookup();
           } else {
             _backupLookupDelayTimer?.cancel();
@@ -838,9 +852,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       ..track(
         _player.stream.videoParams.listen((value) {
           if (mounted && !_usesWebPlayer) {
-            setState(() => _videoParams = value);
-            _refreshSuperResolutionShader();
-            unawaited(_refreshSuperResolutionFrameRate());
+            _anime4kController.updateVideoDimensions(
+              width: value.w ?? 0,
+              height: value.h ?? 0,
+            );
+            unawaited(
+              _anime4kController.refreshFrameRate(
+                usesWebPlayer: _usesWebPlayer,
+              ),
+            );
           }
         }),
       )
@@ -868,6 +888,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             );
           }
           setState(() => _buffering = value);
+          _anime4kController.updatePlaybackState(
+            playing: _playing,
+            buffering: value,
+          );
           if (value) {
             _backupLookupDelayTimer?.cancel();
             _backupLookupDelayTimer = null;
@@ -904,7 +928,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _handlePlayerError(error);
         }),
       )
-      ..track(_player.stream.log.listen(_handleSuperResolutionLog));
+      ..track(
+        _player.stream.log.listen(
+          (log) => _anime4kController.handlePlayerLog(
+            prefix: log.prefix,
+            text: log.text,
+          ),
+        ),
+      );
   }
 
   void _applyPlaybackSettings(PlaybackSettings settings) {
@@ -931,379 +962,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     PlaybackSettings settings, {
     bool force = false,
   }) {
-    final selection = _superResolutionSelectionFor(settings);
-    final customShaders = settings.superResolutionCustomShaders;
-    final key =
-        '${settings.superResolution}:${selection.requestedProfile.settingValue}:'
-        '${selection.resolvedProfile.settingValue}:${selection.tier.settingValue}:'
-        '${selection.pipelineProfile.settingValue}:'
-        '${customShaders.join('|')}';
-    if (!force && _appliedSuperResolutionKey == key) {
-      final activeTier = _activeSuperResolutionTier;
-      if (activeTier != null &&
-          _activeSuperResolutionProfile == selection.resolvedProfile) {
-        _activeSuperResolutionSelection = selection.withTier(activeTier);
-      }
-      return;
-    }
-    _appliedSuperResolutionKey = key;
-    final serial = ++_superResolutionApplySerial;
-    _superResolutionQueue = _superResolutionQueue
-        .then(
-          (_) => _setSuperResolutionShader(
-            enabled: settings.superResolution,
-            selection: selection,
-            customShaderNames: customShaders,
-            serial: serial,
-          ),
-        )
-        .catchError((Object _) {});
-  }
-
-  Future<void> _setSuperResolutionShader({
-    required bool enabled,
-    required Anime4KSelection selection,
-    required List<String> customShaderNames,
-    required int serial,
-    Anime4KTier? skipTier,
-  }) async {
-    if (serial != _superResolutionApplySerial) return;
-    try {
-      if (!enabled) {
-        await _anime4kRuntime?.disable();
-        if (!mounted || serial != _superResolutionApplySerial) return;
-        _stopSuperResolutionPerformanceMonitor();
-        setState(() {
-          _activeSuperResolutionProfile = null;
-          _activeSuperResolutionTier = null;
-          _activeSuperResolutionSelection = null;
-          _previewingOriginal = false;
-          _superResolutionStatusMessage = null;
-        });
-        return;
-      }
-
-      final support = Anime4KShaderManager.currentPlatformSupport;
-      if (!support.supported) {
-        if (!mounted || serial != _superResolutionApplySerial) return;
-        _showSuperResolutionUnavailable(
-          support.reason ?? '当前平台不支持实时超分，已使用普通画质。',
-        );
-        return;
-      }
-      if (selection.resolvedProfile == Anime4KProfile.advanced &&
-          customShaderNames.isEmpty) {
-        await _anime4kRuntime?.disable();
-        if (!mounted || serial != _superResolutionApplySerial) return;
-        _showSuperResolutionUnavailable('高级超分至少需要选择一个着色器。');
-        return;
-      }
-
-      final runtime = _anime4kRuntime ??= _createAnime4KRuntime();
-      final result = await runtime.enable(
-        selection.pipelineProfile,
-        requestedTier: selection.tier,
-        skipTier: skipTier,
-        customShaderNames: customShaderNames,
-      );
-      if (!mounted || serial != _superResolutionApplySerial) return;
-      if (!result.enabled) {
-        _showSuperResolutionUnavailable('当前设备无法运行 Anime4K 超分，已自动恢复普通画质。');
-        return;
-      }
-
-      final fallbackMessage = result.usedFallback
-          ? '${selection.resolvedProfile.label}已从${result.requestedTier.label}'
-                '降为${result.activeTier!.label}，保证播放流畅。'
-          : null;
-      setState(() {
-        _activeSuperResolutionProfile = selection.resolvedProfile;
-        _activeSuperResolutionTier = result.activeTier;
-        _activeSuperResolutionSelection = selection.withTier(
-          result.activeTier!,
-        );
-        _previewingOriginal = false;
-        _superResolutionStatusMessage = fallbackMessage;
-      });
-      _startSuperResolutionPerformanceMonitor();
-    } catch (error) {
-      if (!mounted || !enabled || serial != _superResolutionApplySerial) {
-        return;
-      }
-      _showSuperResolutionUnavailable('当前播放器无法启用实时超分，已自动恢复普通画质。');
-    }
-  }
-
-  Anime4KMpvRuntime _createAnime4KRuntime() {
-    final platform = _player.platform;
-    if (platform is! NativePlayer) {
-      throw UnsupportedError('The current player is not backed by libmpv.');
-    }
-    final nativePlayer = platform as dynamic;
-    return Anime4KMpvRuntime(
-      platform: defaultTargetPlatform,
-      installPipeline: (profile, tier, customShaderNames) =>
-          _anime4kShaders.ensureInstalled(
-            profile,
-            tier: tier,
-            customShaderNames: customShaderNames,
-          ),
-      getProperty: (property) async {
-        final value = await nativePlayer.getProperty(property);
-        return value?.toString() ?? '';
-      },
-      setProperty: (property, value) async {
-        await nativePlayer.setProperty(property, value);
-      },
-    );
-  }
-
-  void _handleSuperResolutionLog(PlayerLog log) {
-    final activeProfile = _activeSuperResolutionProfile;
-    final activeTier = _activeSuperResolutionTier;
-    if (activeProfile == null ||
-        activeTier == null ||
-        _handlingSuperResolutionFailure ||
-        !_currentSettings.superResolution) {
-      return;
-    }
-    final message = '${log.prefix} ${log.text}'.toLowerCase();
-    final isShaderFailure =
-        message.contains('shader') &&
-        (message.contains('error') ||
-            message.contains('failed') ||
-            message.contains('compile') ||
-            message.contains('could not'));
-    if (!isShaderFailure) return;
-
-    _handlingSuperResolutionFailure = true;
-    final selection = _superResolutionSelectionFor(_currentSettings);
-    final serial = ++_superResolutionApplySerial;
-    _superResolutionQueue = _superResolutionQueue
-        .then(
-          (_) => _setSuperResolutionShader(
-            enabled: true,
-            selection: selection,
-            customShaderNames: _currentSettings.superResolutionCustomShaders,
-            serial: serial,
-            skipTier: activeTier,
-          ),
-        )
-        .catchError((Object _) {})
-        .whenComplete(() => _handlingSuperResolutionFailure = false);
-  }
-
-  void _showSuperResolutionUnavailable(String message) {
-    _stopSuperResolutionPerformanceMonitor();
-    setState(() {
-      _activeSuperResolutionProfile = null;
-      _activeSuperResolutionTier = null;
-      _activeSuperResolutionSelection = null;
-      _previewingOriginal = false;
-      _superResolutionStatusMessage = message;
-    });
+    _anime4kController.applySettings(settings, force: force);
   }
 
   void _refreshSuperResolutionShader() {
-    _applyVideoRenderSettings(
-      _currentSettings,
-      force:
-          _currentSettings.superResolution &&
-          _activeSuperResolutionSelection == null,
-    );
-  }
-
-  Anime4KSelection _superResolutionSelectionFor(PlaybackSettings settings) {
-    final sourceWidth = _videoParams?.w ?? 0;
-    final sourceHeight = _videoParams?.h ?? 0;
-    var outputSize = _videoViewportPhysicalSize;
-    if (sourceWidth > 0 &&
-        sourceHeight > 0 &&
-        outputSize.width > 0 &&
-        outputSize.height > 0) {
-      outputSize = applyBoxFit(
-        _fitForVideoScale(settings.videoScale),
-        Size(sourceWidth.toDouble(), sourceHeight.toDouble()),
-        outputSize,
-      ).destination;
-    }
-    if (outputSize == Size.zero && sourceWidth > 0 && sourceHeight > 0) {
-      outputSize = Size(sourceWidth.toDouble(), sourceHeight.toDouble());
-    }
-    return Anime4KShaderManager.select(
-      requestedProfile: Anime4KProfile.fromSetting(
-        settings.superResolutionProfile,
-      ),
-      platform: defaultTargetPlatform,
-      sourceWidth: sourceWidth,
-      sourceHeight: sourceHeight,
-      displayWidth: outputSize.width.round(),
-      displayHeight: outputSize.height.round(),
-      sourceFramesPerSecond: _videoFramesPerSecond ?? 0,
-    );
-  }
-
-  Future<void> _refreshSuperResolutionFrameRate() async {
-    if (!mounted || _usesWebPlayer || (_videoParams?.w ?? 0) <= 0) return;
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return;
-    final serial = ++_videoFrameRateQuerySerial;
-    final nativePlayer = platform as dynamic;
-
-    Future<double?> readFrameRate(String property) async {
-      try {
-        return Anime4KShaderManager.parseFrameRate(
-          await nativePlayer.getProperty(property),
-        );
-      } catch (_) {
-        return null;
-      }
-    }
-
-    final measured = await readFrameRate('estimated-vf-fps');
-    final container = measured == null
-        ? await readFrameRate('container-fps')
-        : null;
-    final value = measured ?? container;
-    if (!mounted || serial != _videoFrameRateQuerySerial || value == null) {
-      return;
-    }
-
-    final isMeasured = measured != null;
-    final current = _videoFramesPerSecond;
-    if (_videoFrameRateIsMeasured && !isMeasured) return;
-    if (_videoFrameRateIsMeasured == isMeasured &&
-        current != null &&
-        value <= current + 0.5) {
-      return;
-    }
-    setState(() {
-      _videoFramesPerSecond = value;
-      _videoFrameRateIsMeasured = isMeasured;
-    });
-    _refreshSuperResolutionShader();
+    _anime4kController.refresh();
   }
 
   void _handleVideoViewportSize(Size physicalSize) {
-    if ((_videoViewportPhysicalSize.width - physicalSize.width).abs() < 1 &&
-        (_videoViewportPhysicalSize.height - physicalSize.height).abs() < 1) {
-      return;
-    }
-    if (!mounted) return;
-    setState(() => _videoViewportPhysicalSize = physicalSize);
-    _refreshSuperResolutionShader();
-  }
-
-  void _setSuperResolutionOriginalPreview(bool enabled) {
-    if (_activeSuperResolutionSelection == null ||
-        _previewingOriginal == enabled) {
-      return;
-    }
-    setState(() => _previewingOriginal = enabled);
-    _superResolutionQueue = _superResolutionQueue
-        .then((_) => _anime4kRuntime?.setPreviewOriginal(enabled))
-        .catchError((Object _) {
-          if (mounted) setState(() => _previewingOriginal = false);
-        });
-  }
-
-  void _startSuperResolutionPerformanceMonitor() {
-    _superResolutionPerformanceTimer?.cancel();
-    _superResolutionCounters.clear();
-    _superResolutionOverloadSamples = 0;
-    _superResolutionPerformanceTimer = Timer.periodic(
-      const Duration(seconds: 4),
-      (_) => unawaited(_sampleSuperResolutionPerformance()),
-    );
-  }
-
-  void _stopSuperResolutionPerformanceMonitor() {
-    _superResolutionPerformanceTimer?.cancel();
-    _superResolutionPerformanceTimer = null;
-    _superResolutionCounters.clear();
-    _superResolutionOverloadSamples = 0;
-  }
-
-  Future<void> _sampleSuperResolutionPerformance() async {
-    final runtime = _anime4kRuntime;
-    final activeTier = _activeSuperResolutionTier;
-    if (runtime == null ||
-        activeTier == null ||
-        activeTier == Anime4KTier.performance ||
-        !_playing ||
-        _buffering ||
-        _previewingOriginal ||
-        _handlingSuperResolutionFailure) {
-      return;
-    }
-    var largestDelta = 0;
-    var foundCounter = false;
-    for (final property in const [
-      'vo-drop-frame-count',
-      'mistimed-frame-count',
-      'delayed-frame-count',
-    ]) {
-      try {
-        final value = await runtime.readCounter(property);
-        if (value == null) continue;
-        foundCounter = true;
-        final previous = _superResolutionCounters[property];
-        _superResolutionCounters[property] = value;
-        if (previous != null && value >= previous) {
-          final delta = value - previous;
-          if (delta > largestDelta) largestDelta = delta;
-        }
-      } catch (_) {
-        // Some libmpv builds do not expose every rendering counter.
-      }
-    }
-    if (!foundCounter) return;
-    if (largestDelta >= 4) {
-      _superResolutionOverloadSamples += 1;
-    } else {
-      _superResolutionOverloadSamples = 0;
-    }
-    if (_superResolutionOverloadSamples < 2 || !mounted) return;
-
-    _superResolutionOverloadSamples = 0;
-    _handlingSuperResolutionFailure = true;
-    final selection = _superResolutionSelectionFor(_currentSettings);
-    final serial = ++_superResolutionApplySerial;
-    _superResolutionQueue = _superResolutionQueue
-        .then(
-          (_) => _setSuperResolutionShader(
-            enabled: true,
-            selection: selection,
-            customShaderNames: _currentSettings.superResolutionCustomShaders,
-            serial: serial,
-            skipTier: activeTier,
-          ),
-        )
-        .catchError((Object _) {})
-        .whenComplete(() => _handlingSuperResolutionFailure = false);
-  }
-
-  _SuperResolutionDisplayStatus? get _superResolutionDisplayStatus {
-    final selection = _activeSuperResolutionSelection;
-    if (selection == null) return null;
-    final mode = _previewingOriginal
-        ? '原画预览'
-        : selection.expectsUpscale
-        ? '超分运行中'
-        : selection.resolvedProfile.restoresWithoutScaling
-        ? '画质修复中'
-        : '当前尺寸无需放大';
-    final dimensions = selection.resolutionDescription(
-      previewingOriginal: _previewingOriginal,
-    );
-    final frameRate = selection.frameRateLabel;
-    return _SuperResolutionDisplayStatus(
-      title: mode,
-      detail:
-          '$dimensions${frameRate == null ? '' : ' · $frameRate'} · '
-          '${selection.activeModeLabel} · ${selection.tier.label}',
-      previewingOriginal: _previewingOriginal,
-    );
+    _anime4kController.updateViewport(physicalSize);
   }
 
   double _volumeFromSettings(PlaybackSettings settings) {
@@ -1814,6 +1481,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeFirstFrameTimer?.cancel();
     _ignoreNativeErrorsUntil = null;
     _revealPlayerControls();
+    _anime4kController.resetVideo();
     setState(() {
       _line = line;
       _loadingLine = true;
@@ -1822,10 +1490,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _position = Duration.zero;
       _duration = Duration.zero;
       _buffer = Duration.zero;
-      _videoParams = null;
-      _videoFramesPerSecond = null;
-      _videoFrameRateIsMeasured = false;
-      _videoFrameRateQuerySerial += 1;
     });
     if (!playbackLineCanStartImmediately(line)) {
       line = await ref
@@ -3080,18 +2744,6 @@ class MissingPlayerPage extends StatelessWidget {
   }
 }
 
-class _SuperResolutionDisplayStatus {
-  const _SuperResolutionDisplayStatus({
-    required this.title,
-    required this.detail,
-    required this.previewingOriginal,
-  });
-
-  final String title;
-  final String detail;
-  final bool previewingOriginal;
-}
-
 class _SuperResolutionPanelStatus extends StatelessWidget {
   const _SuperResolutionPanelStatus({
     required this.status,
@@ -3099,7 +2751,7 @@ class _SuperResolutionPanelStatus extends StatelessWidget {
     required this.onCompareEnd,
   });
 
-  final _SuperResolutionDisplayStatus status;
+  final Anime4KDisplayStatus status;
   final VoidCallback onCompareStart;
   final VoidCallback onCompareEnd;
 
