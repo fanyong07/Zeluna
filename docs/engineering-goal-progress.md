@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation stage `5ec8ec1` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation stage `c590fb2` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -163,7 +163,53 @@ Remaining risks:
 
 ## G3 Network security
 
-Status: not_started
+Status: completed
+
+Audit:
+
+- Classified every external request as `accountBackend`, `officialPlaybackBackend`, `selfHostedPlaybackBackend`, `rulePage`, `mediaResource`, or `metadataApi`; production call sites no longer obtain an untyped default client.
+- Audited redirects, DNS results, literal addresses, TLS, credentials, cancellation, timeouts, decompressed response limits, HLS children, offline downloads, Android manifests, and self-hosted HTTP configuration.
+- The final raw download client was replaced after the initial G3 audit. Single-file, playlist, variant, audio, map, and segment requests now share the same public-only transport boundary.
+
+Changes:
+
+- Added typed request policies with HTTPS requirements, public-address checks before connection, TLS verification, direct connections, timeouts, decompressed-body limits, API redirect rejection, and sensitive-header rejection on cleartext HTTP.
+- Public media requests use explicit redirect handling. Every hop is revalidated and cross-origin Authorization, Cookie, token, API-key, secret, signature, and credential headers are removed before the next request.
+- HLS manifests and every child resource repeat the public-network check. Offline downloads retain cancellation, Range/If-Range, resume validation, and streaming I/O while using a separate bounded 64 GiB response ceiling instead of the 512 KiB playback-probe limit.
+- Clash-style synthetic DNS compatibility is restricted to trusted HTTPS hostname resolution and backend-confirmed media; arbitrary private, metadata, special-purpose, and literal benchmark addresses remain blocked outside that narrow media case.
+- Account, official playback, self-hosted playback, rule import/runtime, metadata, danmaku, Kazumi, TVBox/XBPQ, M3U, external-source, and offline-download transports now use an explicit policy or dedicated public-only implementation.
+- Self-hosted HTTP is disabled by default, requires advanced mode plus a second risk confirmation, is visibly marked insecure, can be disabled again, and never carries cloud-account credentials.
+- Android main/release manifests deny cleartext globally. Debug permits cleartext only for `localhost` and `10.0.2.2`; release uses system trust anchors and does not trust user certificates.
+
+Tests:
+
+- Network regressions cover service classification, HTTPS/credential rules, private and special addresses, DNS-rebinding connection checks, redirects, decompressed limits, header stripping, Fake-IP compatibility, HLS private children, and full-download streams larger than the playback-probe limit.
+- Account, catalog/playback, rule import/runtime, metadata, danmaku, Kazumi, TVBox/XBPQ, external-source, self-hosted warning, and download pause/resume/cancel tests cover the migrated call sites.
+- `flutter test --reporter expanded`: 502 passed, 26 intentionally skipped, 0 failed.
+- `python -m unittest discover -s tests -q` (from `server`): 80 passed.
+- `flutter analyze --suppress-analytics`: no issues.
+- Dart format and `git diff --check` passed. The sensitive-filename scan found only the tracked `server/.env.example` template; the strong-secret marker scan found no files.
+
+Builds:
+
+- `flutter build apk --debug --suppress-analytics` passed. Artifact: `build/app/outputs/flutter-apk/app-debug.apk`, 235,860,214 bytes, SHA-256 `6857D641CCDAD1AAD8A551C7531F5FD98C679DDC6218F2135CF14EE528EC15CA`.
+- Release manifest processing reached the packaged-manifest output. Main, merged, and packaged release manifests all contain `usesCleartextTraffic="false"` and `networkSecurityConfig="@xml/network_security_config"`.
+- No signed release package was created and no signing material was read; signed cross-platform release gates remain G13/G14 work.
+
+Commits:
+
+- `f8c42ad security: enforce typed network policies`
+- `1c02a08 security: gate self-hosted HTTP access`
+- `78b1152 security: deny Android release cleartext`
+- `e159987 security: harden untrusted network transports`
+- `a8f6583 security: secure default media clients`
+- `c590fb2 security: harden media download transport`
+
+Remaining risks:
+
+- Native Android/Windows clients validate the actual DNS-selected connection address. A browser controls Web DNS and sockets, so Web can enforce URI, scheme, literal-host, redirect, header, timeout, and response limits but cannot independently re-check the browser's resolved socket address.
+- Synthetic-DNS media compatibility intentionally permits the benchmark range only after a trusted media path identifies it; this exception remains covered by negative private-network regressions and must not be generalized.
+- Android real-device cleartext and DNS-rebinding acceptance remains a G13/G14 release gate; G3 validated policy code, manifests, packaged manifest output, tests, and the Debug APK.
 
 ## G4 CI and repository gates
 
