@@ -22,6 +22,7 @@ import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'app_fullscreen.dart';
 import 'danmaku_overlay.dart';
+import 'lines/playback_line_controller.dart';
 import 'lines/playback_recovery_controller.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
@@ -49,15 +50,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final WebVideoController _webVideo;
   late final FocusNode _shortcutFocusNode;
   late final PlaybackSessionController _sessionController;
+  late final PlaybackLineController _lineController;
   late final PlaybackRecoveryController _recoveryController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
-  StreamSubscription<PlaybackLineLookupUpdate>? _lineLookupSubscription;
-  RulePlaybackCancellationToken? _lineLookupCancellationToken;
-  final _failedLineIds = <String>{};
-  final _lineFailureCounts = <String, int>{};
   int? _handledFailureOpenSerial;
   PlaybackLine? _line;
   List<PlaybackLine> _lines = const [];
@@ -116,7 +114,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
   DateTime? _ignoreNativeErrorsUntil;
-  RulePlaybackCancellationToken? _backupLookupCancellationToken;
   var _backupLookupInProgress = false;
   var _backupLookupSerial = 0;
   var _appInForeground = true;
@@ -130,7 +127,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   int? _pendingNativeResumeOpenSerial;
   var _nativeResumeSeekAttempts = 0;
   var _nativeResumeSeekInProgress = false;
-  String? _preferredProviderId;
   final _localDanmakuTimers = <Timer>[];
   bool _episodePanel = false;
   bool _linePanel = false;
@@ -160,6 +156,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Timer? get _nativeResumeSeekTimer => _nativeVideo.resumeSeekTimer;
   set _nativeResumeSeekTimer(Timer? value) =>
       _nativeVideo.replaceResumeSeekTimer(value);
+  StreamSubscription<PlaybackLineLookupUpdate>? get _lineLookupSubscription =>
+      _lineController.lookupSubscription;
+  set _lineLookupSubscription(
+    StreamSubscription<PlaybackLineLookupUpdate>? value,
+  ) => _lineController.lookupSubscription = value;
+  RulePlaybackCancellationToken? get _lineLookupCancellationToken =>
+      _lineController.lookupCancellationToken;
+  set _lineLookupCancellationToken(RulePlaybackCancellationToken? value) =>
+      _lineController.lookupCancellationToken = value;
+  RulePlaybackCancellationToken? get _backupLookupCancellationToken =>
+      _lineController.backupLookupCancellationToken;
+  set _backupLookupCancellationToken(RulePlaybackCancellationToken? value) =>
+      _lineController.backupLookupCancellationToken = value;
+  Set<String> get _failedLineIds => _lineController.failedLineIds;
+  Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
+  String? get _preferredProviderId => _lineController.preferredProviderId;
+  set _preferredProviderId(String? value) =>
+      _lineController.preferredProviderId = value;
 
   @override
   void initState() {
@@ -170,6 +184,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
+    _lineController = PlaybackLineController();
     _recoveryController = PlaybackRecoveryController();
     _startPlaybackTrace();
     _line = widget.request.initialLine;
@@ -332,10 +347,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       subscription.cancel();
     }
     _controlsHideTimer?.cancel();
-    _backupLookupCancellationToken?.cancel();
     _superResolutionPerformanceTimer?.cancel();
-    _lineLookupCancellationToken?.cancel();
-    unawaited(_lineLookupSubscription?.cancel());
     for (final timer in _localDanmakuTimers) {
       timer.cancel();
     }
@@ -346,6 +358,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_nativeVideo.dispose());
     _webVideo.dispose();
     _recoveryController.dispose();
+    unawaited(_lineController.dispose());
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     _sessionController.dispose();
