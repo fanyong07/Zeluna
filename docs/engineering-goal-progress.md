@@ -251,7 +251,53 @@ Remaining risks:
 
 ## G5 Player architecture
 
-Status: not_started
+Status: completed
+
+Changes:
+
+- Reduced `PlayerPage` from the G0 baseline of 7,130 lines to 2,310 lines. The page now composes player services, renders state, wires player/page lifecycle events, and dispatches user input instead of owning every playback subsystem.
+- Added an explicit playback-session state machine for idle, discovery, opening, buffering, playback, pause, recovery, failure, completion, and disposal, with ordered events for lookup, verification, first frame, timeouts, failures, line/episode changes, seeking, lifecycle changes, and playback completion.
+- Moved line inventory, quick lookup, progressive lookup, single-backup preparation, request serials, cancellation tokens, stream subscription, and scan progress into `PlaybackLineRepository`. Selection preference, failure quarantine, loaded-media preservation, and next-line choice are owned by `PlaybackLineController`; concurrent recovery, same-line retry, backup scheduling, and stall state are owned by `PlaybackRecoveryController`.
+- Moved media-kit objects, native subscriptions, delayed resume seeking, and first-frame soft/hard timeout polling into the native video controller. Web player commands and soft/hard startup watchdogs are owned by the Web video controller. Stale opens, replacement watchdogs, first-frame progress, and disposal all invalidate delayed callbacks.
+- Moved gesture focus/chrome timers, Anime4K shader queue/degradation/performance sampling, danmaku requests/local timers, subtitle player callbacks, and their disposal boundaries into dedicated controllers.
+- Split the player canvas, chrome, panels, mobile layout, and desktop layout into focused `part` files while preserving the existing page API and visual behavior.
+
+Tests:
+
+- Regression coverage includes first frame, native resume seeking, automatic line switching, one same-line retry, soft and hard timeout, stall watchdog, manual alternative selection, episode changes, Web autoplay rejection, Anime4K degradation, parallel danmaku, subtitles, disposal without late callbacks, account-context changes, application foreground/background, and performance-event ordering.
+- `flutter test --reporter json`: 544 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart formatting and `git diff --check` passed.
+- Replaced the playback-hedge test's wall-clock race with an explicit rule-resolution gate; the test now deterministically exercises the intended client-probe-first branch under parallel load.
+
+Builds:
+
+- `flutter build apk --debug --suppress-analytics` passed. Artifact: `build/app/outputs/flutter-apk/app-debug.apk`, 268,863,539 bytes, SHA-256 `7F81607E2AAD9A22ABD608525D9966FD9E73CA548549F2ACBF831A115E8DE8AC`.
+- `flutter build web --release --suppress-analytics` passed. `build/web/main.dart.js` is 4,780,243 bytes, SHA-256 `BF72ACA0541DDCF9B510DC3B5CFF4BE54B9853C406F17E53365CC9511E5FEB99`.
+- `flutter build windows --release --suppress-analytics` passed. Artifact: `build/windows/x64/runner/Release/Zeluna.exe`; compiled Dart payload `data/app.so` is 13,370,288 bytes.
+
+Commits:
+
+- `a276742 refactor: add playback session state machine`
+- `78c2fe0 refactor: own native player resources`
+- `ad98d52 refactor: own web player startup lifecycle`
+- `454b723 refactor: own playback recovery timers`
+- `24524e7 refactor: own playback line lookup resources`
+- `b3d1034 refactor: own player gesture resources`
+- `0142a0e refactor: own danmaku resources`
+- `178215f refactor: own subtitle player callbacks`
+- `8b1739d refactor: own anime4k runtime lifecycle`
+- `59c997c refactor: split player ui modules`
+- `23c38fb refactor: own native resume seeking`
+- `3d1b5ef refactor: own playback recovery state`
+- `9915af3 refactor: own playback line selection`
+- `656bf7b test: remove playback hedge timing race`
+- `8b885a2 refactor: own playback line discovery`
+- `357a427 refactor: own playback startup watchdogs`
+
+Remaining risks:
+
+- Windows still reports the upstream WebView CMake `CMP0175` developer warning recorded in G4; it does not fail the Release build.
+- G5 validates deterministic controller behavior and development/release compilation. Real-device playback, signed release artifacts, installer/package production, and production deployment remain G13/G14 gates; no signing material was read and no production environment was changed.
 
 ## G6 Client domain architecture
 
