@@ -81,6 +81,9 @@ android/build/
 # Local server runtime data
 server/**/__pycache__/
 server/**/*.pyc
+server/.venv/
+server/.pytest_cache/
+server/.ruff_cache/
 server/**/*.db
 server/.env
 server/.env.*

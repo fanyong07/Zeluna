@@ -142,7 +142,7 @@ powershell -ExecutionPolicy Bypass -File tool/check_release.ps1
 ```powershell
 flutter analyze
 flutter test
-cd server && pip install -r requirements-dev.txt && python -m pytest -q
+cd server && uv sync --frozen --all-groups && uv run pytest -q
 ```
 
 ---
@@ -153,8 +153,8 @@ cd server && pip install -r requirements-dev.txt && python -m pytest -q
 
 ```powershell
 cd server
-pip install -r requirements-dev.txt
-python run.py
+uv sync --frozen --all-groups
+uv run python run.py
 # http://127.0.0.1:8000
 ```
 

@@ -3,8 +3,8 @@
 
 用法:
   cd server
-  pip install -r requirements.txt
-  python run.py
+  uv sync --frozen
+  uv run python run.py
 """
 
 import uvicorn
