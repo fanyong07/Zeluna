@@ -154,7 +154,9 @@ void main() {
       expect(state.accountSession.current?.email, 'first@example.com');
       expect(state.profile.nickname, '第一位用户');
       expect(state.favorites.single.subject.title, _subject.title);
-      expect(state.offlineTasks.single.id, 'guest-download');
+      expect(state.offlineTasks.single.id, startsWith('download:v1:'));
+      expect(state.offlineTasks.single.legacyId, 'guest-download');
+      expect(state.offlineTasks.single.legacyIds, contains('guest-download'));
       expect(state.settings.speed, 1.5);
       expect(state.history.single.episode?.id, _episode.id);
       expect(state.following.single.subject.id, _subject.id);
@@ -244,7 +246,9 @@ void main() {
       state = container.read(animeControllerProvider).requireValue;
       expect(state.profile.nickname, '第一位用户');
       expect(state.favorites.single.subject.title, _subject.title);
-      expect(state.offlineTasks.single.id, 'guest-download');
+      expect(state.offlineTasks.single.id, startsWith('download:v1:'));
+      expect(state.offlineTasks.single.legacyId, 'guest-download');
+      expect(state.offlineTasks.single.legacyIds, contains('guest-download'));
       expect(state.settings.speed, 1.5);
       expect(state.history.single.episode?.id, _episode.id);
       expect(state.following.single.subject.id, _subject.id);

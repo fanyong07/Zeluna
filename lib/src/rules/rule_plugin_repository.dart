@@ -184,11 +184,16 @@ _RuleCollection _collectRules(
     byCanonicalId[merged.id] = merged;
     aliasesByCanonicalId[merged.id] = {
       for (final candidate in candidates) candidate.id,
+      for (final candidate in candidates)
+        for (final legacyId in candidate.legacyIds) legacyId,
       merged.id,
     };
     rulesByCanonicalId[merged.id] = List.unmodifiable(candidates);
     for (final candidate in candidates) {
       canonicalIdByAlias[candidate.id] = merged.id;
+      for (final legacyId in candidate.legacyIds) {
+        canonicalIdByAlias[legacyId] = merged.id;
+      }
     }
   }
   return _RuleCollection(
@@ -303,11 +308,13 @@ RulePlugin _mergeRuleMetadata(
 ) {
   final tags = <String>{...preferred.tags};
   final headers = <String, String>{};
+  final legacyIds = <String>{...preferred.legacyIds};
   var installedByDefault = preferred.installedByDefault;
   var priority = preferred.priority;
   for (final candidate in candidates) {
     tags.addAll(candidate.tags);
     headers.addAll(candidate.requestHeaders);
+    legacyIds.addAll(candidate.legacyIds);
     installedByDefault = installedByDefault || candidate.installedByDefault;
     if (candidate.priority < priority) priority = candidate.priority;
   }
@@ -316,6 +323,7 @@ RulePlugin _mergeRuleMetadata(
     requestHeaders: {...headers, ...preferred.requestHeaders},
     installedByDefault: installedByDefault,
     priority: priority,
+    legacyIds: legacyIds.toList(growable: false)..sort(),
   );
 }
 

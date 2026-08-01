@@ -7,6 +7,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../accounts/local_account_repository.dart';
 import '../accounts/cloud_account_repository.dart';
+import '../core/identity/local_identity_migration.dart';
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_importer.dart';
@@ -527,6 +529,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _settings = boxes[0];
     _library = boxes[1];
     _accountRepository = LocalAccountRepository(boxes[2]);
+    await LocalIdentityMigration(settings: _settings, library: _library).run();
     final pendingDeletion = _accountRepository.pendingDeletion();
     if (pendingDeletion != null) {
       await _resumePendingDeletion(pendingDeletion).onError((_, _) {});
@@ -2255,7 +2258,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final enabled = {...current.rulePlugins.enabledIds};
     final repositoryRecord = RuleRepositoryRecord(
       id: bundle.sourceUrl.trim().isEmpty
-          ? 'clipboard:${DateTime.now().microsecondsSinceEpoch}'
+          ? 'clipboard:${_stableRuleBundleId(bundle)}'
           : 'url:${_stableRuleRepositoryId(bundle.sourceUrl)}',
       name: bundle.name,
       url: bundle.sourceUrl,
@@ -2412,8 +2415,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       return '已重新开始下载';
     }
     final now = DateTime.now();
+    final subjectKey = subject.identityKey;
+    final episodeKey = episode.identityKey(subjectKey: subjectKey);
     final task = MediaDownloadTask(
-      id: now.microsecondsSinceEpoch.toString(),
+      id: stableDownloadTaskKey(subjectKey: subjectKey, episodeKey: episodeKey),
       subject: subject,
       episode: episode,
       createdAt: now,
@@ -2881,10 +2886,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final current = state.value;
     if (current == null) return;
     final now = DateTime.now();
+    final normalizedTitle = title.trim().isEmpty ? '未命名反馈' : title.trim();
+    final normalizedContent = content.trim();
     final feedback = LocalFeedback(
-      id: now.microsecondsSinceEpoch.toString(),
-      title: title.trim().isEmpty ? '未命名反馈' : title.trim(),
-      content: content.trim(),
+      id: 'feedback:$stableIdentityVersion:${stableDigest('${_activeAccount?.id ?? 'guest'}|${now.toUtc().toIso8601String()}|$normalizedTitle|$normalizedContent')}',
+      title: normalizedTitle,
+      content: normalizedContent,
       createdAt: now,
       subject: subject,
     );
@@ -3333,7 +3340,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             : const <String, String>{};
         final storedUrl = json['url']?.toString().trim() ?? '';
         final storedMessage = json['message']?.toString() ?? '';
-        if (json['version'] != 2 ||
+        if (json['version'] != 3 ||
             !_sameStringMap(storedHeaders, task.headers) ||
             storedUrl != (task.url ?? '') ||
             storedMessage != task.message) {
@@ -3780,6 +3787,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ratingRank: primary.ratingRank ?? secondary.ratingRank,
       ratingTotal: primary.ratingTotal ?? secondary.ratingTotal,
       source: primary.source,
+      stableKey: primary.identityKey,
+      legacyId: primary.legacyId,
+      legacyIds: primary.legacyIds,
     );
   }
 
@@ -3873,12 +3883,36 @@ bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
 }
 
 String _stableRuleRepositoryId(String value) {
-  var hash = 0x811c9dc5;
-  for (final codeUnit in value.trim().codeUnits) {
-    hash ^= codeUnit;
-    hash = (hash * 0x01000193) & 0xffffffff;
+  final normalized = value.trim();
+  String canonical;
+  try {
+    canonical = canonicalIdentityUri(normalized);
+  } on FormatException {
+    canonical = normalized;
   }
-  return hash.toRadixString(16).padLeft(8, '0');
+  return stableDigest(
+    'rule-repository|$stableIdentityVersion|$canonical',
+  ).substring(0, 32);
+}
+
+String _stableRuleBundleId(RuleImportBundle bundle) {
+  final identities =
+      bundle.rules
+          .map(
+            (rule) => stableRuleKey(
+              ruleId: rule.id,
+              engine: rule.engine,
+              sourceRepository: rule.baseUrl,
+              contentHash: stableDigest(
+                '${rule.searchUrl}|${rule.contentType.name}|${rule.version}',
+              ),
+            ),
+          )
+          .toList(growable: false)
+        ..sort();
+  return stableDigest(
+    'rule-bundle|$stableIdentityVersion|${bundle.name.trim()}|${identities.join('|')}',
+  ).substring(0, 32);
 }
 
 class _HomeFeedCacheSnapshot {

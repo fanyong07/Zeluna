@@ -1,3 +1,4 @@
+import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 
 enum MediaDownloadTaskStatus {
@@ -32,6 +33,9 @@ class MediaDownloadTask {
     this.completedUnits = 0,
     this.totalUnits = 0,
     this.message = '',
+    this.legacyId,
+    this.legacyIds = const [],
+    this.legacyLocalPaths = const [],
   });
 
   final String id;
@@ -54,6 +58,9 @@ class MediaDownloadTask {
   final int completedUnits;
   final int totalUnits;
   final String message;
+  final String? legacyId;
+  final List<String> legacyIds;
+  final List<String> legacyLocalPaths;
 
   String get title => '${subject.title} · ${episode.displayTitle}';
 
@@ -106,6 +113,7 @@ class MediaDownloadTask {
   }
 
   MediaDownloadTask copyWith({
+    String? id,
     AnimeSubject? subject,
     AnimeEpisode? episode,
     DateTime? createdAt,
@@ -125,9 +133,12 @@ class MediaDownloadTask {
     int? completedUnits,
     int? totalUnits,
     String? message,
+    Object? legacyId = _unset,
+    List<String>? legacyIds,
+    List<String>? legacyLocalPaths,
   }) {
     return MediaDownloadTask(
-      id: id,
+      id: id ?? this.id,
       subject: subject ?? this.subject,
       episode: episode ?? this.episode,
       createdAt: createdAt ?? this.createdAt,
@@ -155,14 +166,19 @@ class MediaDownloadTask {
       completedUnits: completedUnits ?? this.completedUnits,
       totalUnits: totalUnits ?? this.totalUnits,
       message: message ?? this.message,
+      legacyId: identical(legacyId, _unset)
+          ? this.legacyId
+          : legacyId as String?,
+      legacyIds: legacyIds ?? this.legacyIds,
+      legacyLocalPaths: legacyLocalPaths ?? this.legacyLocalPaths,
     );
   }
 
   Map<String, dynamic> toJson() => {
-    'version': 2,
+    'version': 3,
     'id': id,
     'subject': subject.toJson(),
-    'episode': episode.toJson(),
+    'episode': episode.toJson(subjectKey: subject.identityKey),
     'createdAt': createdAt.toIso8601String(),
     'updatedAt': updatedAt.toIso8601String(),
     'status': status.name,
@@ -182,6 +198,9 @@ class MediaDownloadTask {
     'completedUnits': completedUnits,
     'totalUnits': totalUnits,
     'message': _persistableMessage(message, status),
+    if (legacyId != null) 'legacyId': legacyId,
+    if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
+    if (legacyLocalPaths.isNotEmpty) 'legacyLocalPaths': legacyLocalPaths,
   };
 
   factory MediaDownloadTask.fromJson(Map<String, dynamic> json) {
@@ -225,6 +244,9 @@ class MediaDownloadTask {
           orElse: () => MediaDownloadTaskStatus.failed,
         ),
       ),
+      legacyId: _blankToNull(json['legacyId']),
+      legacyIds: _stringList(json['legacyIds']),
+      legacyLocalPaths: _stringList(json['legacyLocalPaths']),
     );
   }
 
@@ -232,20 +254,29 @@ class MediaDownloadTask {
     final lines = entry.note.split('\n');
     final path = lines.length > 1 ? _blankToNull(lines.last) : null;
     final completed = entry.note.startsWith('已下载') && path != null;
+    final subjectKey = entry.subject.identityKey;
+    final episodeKey = stableEpisodeKey(
+      subjectKey: subjectKey,
+      normalizedNumber: entry.episode?.number ?? 1,
+    );
+    final episode =
+        entry.episode ??
+        AnimeEpisode(
+          id: stableInt63(episodeKey),
+          subjectId: entry.subject.id,
+          number: 1,
+          title: '',
+          airdate: null,
+          duration: '',
+          description: '',
+          stableKey: episodeKey,
+        );
+    final legacyId =
+        'legacy-${entry.subject.source}-${entry.subject.id}-${entry.episode?.id ?? 0}';
     return MediaDownloadTask(
-      id: 'legacy-${entry.subject.source}-${entry.subject.id}-${entry.episode?.id ?? 0}',
+      id: stableDownloadTaskKey(subjectKey: subjectKey, episodeKey: episodeKey),
       subject: entry.subject,
-      episode:
-          entry.episode ??
-          AnimeEpisode(
-            id: 0,
-            subjectId: entry.subject.id,
-            number: 1,
-            title: '',
-            airdate: null,
-            duration: '',
-            description: '',
-          ),
+      episode: episode,
       createdAt: entry.updatedAt,
       updatedAt: entry.updatedAt,
       status: completed
@@ -253,6 +284,8 @@ class MediaDownloadTask {
           : MediaDownloadTaskStatus.failed,
       localPath: path,
       message: completed ? '从旧版下载记录迁移' : '旧下载记录无法继续，请重新下载',
+      legacyId: legacyId,
+      legacyIds: [legacyId],
     );
   }
 }
@@ -302,6 +335,15 @@ int _intValue(Object? value) => switch (value) {
   final num number => number.toInt(),
   _ => int.tryParse(value?.toString() ?? '') ?? 0,
 };
+
+List<String> _stringList(Object? value) {
+  if (value is! List) return const [];
+  return value
+      .map((item) => item.toString().trim())
+      .where((item) => item.isNotEmpty)
+      .toSet()
+      .toList(growable: false);
+}
 
 String _formatFromPath(String path) {
   final lower = path.toLowerCase();
