@@ -16,6 +16,7 @@ import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
+import '../rules/rule_security.dart';
 import '../rules/tvbox_xbpq_hydrator.dart';
 import '../sources/external_source_adapters.dart';
 import '../sources/source_catalog_models.dart';
@@ -1927,7 +1928,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
     final installed = {...current.rulePlugins.installedIds, id};
     final enabled = {...current.rulePlugins.enabledIds};
-    if (rule?.canResolveNatively ?? false) enabled.add(id);
+    if (rule != null &&
+        rule.canResolveNatively &&
+        _ruleRepositoryFor(
+          current.rulePlugins,
+        ).canEnableRule(rule, current.rulePlugins)) {
+      enabled.add(id);
+    }
     await _updateRulePlugins(
       current.rulePlugins.copyWith(
         installedIds: installed,
@@ -1941,10 +1948,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (current == null) return;
     final installed = {...current.rulePlugins.installedIds}..remove(id);
     final enabled = {...current.rulePlugins.enabledIds}..remove(id);
+    final approvals = {...current.rulePlugins.approvedPermissionDigests}
+      ..remove(id);
     await _updateRulePlugins(
       current.rulePlugins.copyWith(
         installedIds: installed,
         enabledIds: enabled,
+        approvedPermissionDigests: approvals,
       ),
     );
   }
@@ -1956,12 +1966,37 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     final enabledIds = {...current.rulePlugins.enabledIds};
     if (enabled) {
+      final repository = _ruleRepositoryFor(current.rulePlugins);
+      final rule = repository.byId(id);
+      if (rule == null ||
+          !repository.canEnableRule(rule, current.rulePlugins)) {
+        return;
+      }
       enabledIds.add(id);
     } else {
       enabledIds.remove(id);
     }
     await _updateRulePlugins(
       current.rulePlugins.copyWith(enabledIds: enabledIds),
+    );
+  }
+
+  Future<void> approveRulePluginPermissionsAndEnable(String id) async {
+    final current = state.value;
+    if (current == null || !current.rulePlugins.installedIds.contains(id)) {
+      return;
+    }
+    final rule = _ruleRepositoryFor(current.rulePlugins).byId(id);
+    if (rule == null || !rule.canResolveNatively) return;
+    final approvals = {...current.rulePlugins.approvedPermissionDigests};
+    if (rule.effectiveManifest.requiresApproval) {
+      approvals[id] = rule.effectiveManifest.permissionDigest;
+    }
+    await _updateRulePlugins(
+      current.rulePlugins.copyWith(
+        enabledIds: {...current.rulePlugins.enabledIds, id},
+        approvedPermissionDigests: approvals,
+      ),
     );
   }
 
@@ -2236,10 +2271,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         installedCount: 0,
       );
     }
+    final importedRules = [
+      for (final rule in bundle.rules)
+        rule.copyWith(
+          permissionManifest: rule.effectiveManifest.copyWith(
+            sourceRepository: bundle.sourceUrl.trim(),
+            contentHash: '',
+            trustLevel: RuleTrustLevel.untrusted,
+          ),
+        ),
+    ];
     final existing = {
       for (final rule in current.rulePlugins.customRules) rule.id: rule,
     };
-    for (final rule in bundle.rules) {
+    for (final rule in importedRules) {
       existing[rule.id] = rule;
     }
     final mergedCustomRules = existing.values.toList(growable: false);
@@ -2247,7 +2292,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       extraRules: mergedCustomRules,
     );
     final effectiveRuleIds = <String>{};
-    for (final rule in bundle.rules) {
+    for (final rule in importedRules) {
       final effectiveRule = mergedRepository.byId(rule.id);
       if (effectiveRule != null) effectiveRuleIds.add(effectiveRule.id);
     }

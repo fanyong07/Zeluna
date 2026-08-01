@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import 'csp_rule_support.dart';
 import 'rule_models.dart';
+import 'rule_security.dart';
 
 class RulePluginRepository {
   const RulePluginRepository({this.extraRules = const []});
@@ -39,7 +40,8 @@ class RulePluginRepository {
           (rule) =>
               rule.contentType == type &&
               collection.anyAliasIn(rule.id, state.installedIds) &&
-              collection.anyAliasIn(rule.id, state.enabledIds),
+              collection.anyAliasIn(rule.id, state.enabledIds) &&
+              canEnableRule(rule, state),
         )
         .toList(growable: false);
   }
@@ -70,6 +72,7 @@ class RulePluginRepository {
     final enabled = {
       for (final rule in allRules)
         if (installed.contains(rule.id) &&
+            rule.effectiveManifest.trustLevel == RuleTrustLevel.official &&
             rule.canResolveNatively &&
             _canExecuteOnCurrentPlatform(rule))
           rule.id,
@@ -89,15 +92,41 @@ class RulePluginRepository {
     return collection.byCanonicalId[canonicalId];
   }
 
+  bool canEnableRule(RulePlugin rule, RulePluginState state) {
+    final manifest = rule.effectiveManifest;
+    if (!isRuleCoreVersionCompatible(manifest.minimumCoreVersion)) {
+      return false;
+    }
+    return !manifest.requiresApproval ||
+        state.approvedPermissionDigests[rule.id] == manifest.permissionDigest;
+  }
+
   RulePluginState normalizeState(RulePluginState state) {
     final collection = _collection;
     final installed = collection.canonicalizeIds(state.installedIds);
+    final approvedPermissionDigests = <String, String>{};
+    for (final entry in state.approvedPermissionDigests.entries) {
+      final canonicalId = collection.canonicalIdByAlias[entry.key];
+      final rule = canonicalId == null
+          ? null
+          : collection.byCanonicalId[canonicalId];
+      if (rule != null &&
+          entry.value == rule.effectiveManifest.permissionDigest) {
+        approvedPermissionDigests[canonicalId!] = entry.value;
+      }
+    }
     final enabled = collection
         .canonicalizeIds(state.enabledIds)
         .where(
           (id) =>
               installed.contains(id) &&
               (collection.byCanonicalId[id]?.canResolveNatively ?? false) &&
+              canEnableRule(
+                collection.byCanonicalId[id]!,
+                state.copyWith(
+                  approvedPermissionDigests: approvedPermissionDigests,
+                ),
+              ) &&
               _canExecuteOnCurrentPlatform(collection.byCanonicalId[id]!),
         )
         .toSet();
@@ -108,6 +137,7 @@ class RulePluginRepository {
     return state.copyWith(
       installedIds: installed,
       enabledIds: enabled,
+      approvedPermissionDigests: approvedPermissionDigests,
       customRules: customRules,
       repositories: _deduplicateRepositories(state.repositories),
     );
@@ -407,6 +437,20 @@ final _verifiedBuiltInRules = <RulePlugin>[
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
           '(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
     ),
+    permissionManifest: const RulePermissionManifest.official(
+      id: 'zeluna:recommended:fantuan',
+      name: '饭团动漫(替换)',
+      version: '2026-07-28',
+      engine: 'animeko-web-selector',
+      contentTypes: ['anime'],
+      pageDomains: ['acgpost.com'],
+      mediaDomains: ['acgpost.com'],
+      javascript: true,
+      webViewSniffing: true,
+      cookiePolicy: RuleCookiePolicy.taskScoped,
+      customReferer: true,
+      customUserAgent: true,
+    ),
   ),
   RulePlugin(
     id: 'zeluna:recommended:aikanbot',
@@ -426,6 +470,16 @@ final _verifiedBuiltInRules = <RulePlugin>[
     installedByDefault: true,
     priority: 1,
     requestHeaders: const {'Referer': 'https://www1.aikanbot.com/'},
+    permissionManifest: const RulePermissionManifest.official(
+      id: 'zeluna:recommended:aikanbot',
+      name: '爱看机器人',
+      version: '2026-07-28',
+      engine: 'aikanbot-api',
+      contentTypes: ['anime'],
+      pageDomains: ['www1.aikanbot.com'],
+      mediaDomains: ['www1.aikanbot.com'],
+      customReferer: true,
+    ),
     note: '通过站点公开的页面播放清单接口获取 HLS，客户端不加载广告播放器。',
   ),
   RulePlugin(
@@ -446,6 +500,16 @@ final _verifiedBuiltInRules = <RulePlugin>[
     installedByDefault: true,
     priority: 2,
     rawConfig: const {'lineCode': 'anime_jp_m3u8'},
+    permissionManifest: const RulePermissionManifest.official(
+      id: 'zeluna:recommended:sorani',
+      name: '青空次元',
+      version: '2026-07-28',
+      engine: 'sorani-api',
+      contentTypes: ['anime'],
+      pageDomains: ['api.sorani.cc', 'www.sorani.net'],
+      mediaDomains: ['api.sorani.cc'],
+      customReferer: true,
+    ),
     note: '播放时从公开接口获取短时 HLS 清单，并在客户端验证媒体分片。',
   ),
   RulePlugin(
@@ -474,6 +538,16 @@ final _verifiedBuiltInRules = <RulePlugin>[
       playTitle: '">&&</a>',
       playLink: 'href="&&"',
     ),
+    permissionManifest: const RulePermissionManifest.official(
+      id: 'zeluna:recommended:dbku',
+      name: '独播库',
+      version: '2026-07-28',
+      engine: 'XBPQ',
+      contentTypes: ['movie'],
+      pageDomains: ['www.dbku.tv'],
+      mediaDomains: ['www.dbku.tv'],
+      customReferer: true,
+    ),
     note: '播放页提供经页面编码的 HLS 地址，客户端会先解码并验证清单与分片。',
   ),
   RulePlugin(
@@ -501,6 +575,16 @@ final _verifiedBuiltInRules = <RulePlugin>[
       playList: '<a&&</a>',
       playTitle: '><span>&&</span>',
       playLink: 'href="&&"',
+    ),
+    permissionManifest: const RulePermissionManifest.official(
+      id: 'zeluna:recommended:nivod',
+      name: '泥视频',
+      version: '2026-07-28',
+      engine: 'XBPQ',
+      contentTypes: ['movie'],
+      pageDomains: ['www.nivod.vip'],
+      mediaDomains: ['www.nivod.vip'],
+      customReferer: true,
     ),
     note: '播放页提供 HLS 清单地址，客户端会验证清单与首个媒体分片。',
   ),

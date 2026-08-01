@@ -16,6 +16,7 @@ import 'github_rule_repository_scanner.dart';
 import 'rule_importer.dart';
 import 'rule_models.dart';
 import 'rule_plugin_repository.dart';
+import 'rule_security.dart';
 
 Color _surfaceText(BuildContext context) =>
     Theme.of(context).colorScheme.onSurface;
@@ -116,7 +117,7 @@ class RuleManagementPage extends ConsumerWidget {
                             .read(animeControllerProvider.notifier)
                             .setAllInstalledRulePluginsEnabled(true);
                         if (context.mounted) {
-                          _showSnack(context, '已启用全部可用来源');
+                          _showSnack(context, '已启用官方及已授权来源');
                         }
                       },
                 onDisableAll: installedEnabledCount == 0 && noCatalogEnabled
@@ -169,9 +170,13 @@ class RuleManagementPage extends ConsumerWidget {
                         .where((rule) => rule.contentType == type)
                         .toList(growable: false),
                     state: state.rulePlugins,
-                    onToggle: (rule, enabled) => ref
-                        .read(animeControllerProvider.notifier)
-                        .toggleRulePlugin(rule.id, enabled),
+                    onToggle: (rule, enabled) => _toggleRulePluginWithApproval(
+                      context,
+                      ref,
+                      state.rulePlugins,
+                      rule,
+                      enabled,
+                    ),
                     onRemove: (rule) => ref
                         .read(animeControllerProvider.notifier)
                         .uninstallRulePlugin(rule.id),
@@ -1032,6 +1037,11 @@ class _RuleCardText extends StatelessWidget {
           children: [
             SmallBadge(label: rule.engine),
             SmallBadge(label: rule.sourceLabel),
+            SmallBadge(
+              label: rule.effectiveManifest.trustLevel.label,
+              active:
+                  rule.effectiveManifest.trustLevel == RuleTrustLevel.official,
+            ),
             if (rule.requiresCaptcha) const SmallBadge(label: 'captcha'),
             SmallBadge(
               label: _ruleStatusLabel(rule),
@@ -1060,6 +1070,165 @@ class _RuleCardText extends StatelessWidget {
       ],
     );
   }
+}
+
+Future<void> _toggleRulePluginWithApproval(
+  BuildContext context,
+  WidgetRef ref,
+  RulePluginState state,
+  RulePlugin rule,
+  bool enabled,
+) async {
+  final controller = ref.read(animeControllerProvider.notifier);
+  if (!enabled || state.hasApprovedPermissions(rule)) {
+    await controller.toggleRulePlugin(rule.id, enabled);
+    return;
+  }
+  final approved = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (dialogContext) => _RulePermissionDialog(rule: rule),
+  );
+  if (approved == true) {
+    await controller.approveRulePluginPermissionsAndEnable(rule.id);
+  }
+}
+
+class _RulePermissionDialog extends StatelessWidget {
+  const _RulePermissionDialog({required this.rule});
+
+  final RulePlugin rule;
+
+  @override
+  Widget build(BuildContext context) {
+    final manifest = rule.effectiveManifest;
+    final customHeaders = <String>[
+      if (manifest.customReferer) 'Referer',
+      if (manifest.customOrigin) 'Origin',
+      if (manifest.customUserAgent) 'User-Agent',
+    ];
+    return AlertDialog(
+      title: const Text('确认规则权限'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${manifest.name} · ${manifest.version}',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 12),
+              _PermissionLine(label: '来源', value: manifest.sourceRepository),
+              _PermissionLine(
+                label: '内容哈希',
+                value: manifest.contentHash,
+                monospace: true,
+              ),
+              _PermissionLine(label: '信任等级', value: manifest.trustLevel.label),
+              _PermissionLine(
+                label: '页面域名',
+                value: _permissionList(manifest.pageDomains),
+              ),
+              _PermissionLine(
+                label: '媒体域名',
+                value: _permissionList(manifest.mediaDomains),
+              ),
+              _PermissionLine(
+                label: 'JavaScript',
+                value: _permissionBool(manifest.javascript),
+              ),
+              _PermissionLine(
+                label: 'Cookie',
+                value: manifest.cookiePolicy.label,
+              ),
+              _PermissionLine(
+                label: 'WebView',
+                value: _permissionBool(manifest.webViewSniffing),
+              ),
+              _PermissionLine(
+                label: '明文 HTTP',
+                value: _permissionBool(manifest.cleartextHttp),
+              ),
+              _PermissionLine(
+                label: '自定义 Header',
+                value: _permissionList(customHeaders),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '仅批准当前内容和权限。规则更新后需要重新确认。',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: _surfaceMuted(context)),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('批准并启用'),
+        ),
+      ],
+    );
+  }
+}
+
+class _PermissionLine extends StatelessWidget {
+  const _PermissionLine({
+    required this.label,
+    required this.value,
+    this.monospace = false,
+  });
+
+  final String label;
+  final String value;
+  final bool monospace;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(
+              label,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: _surfaceMuted(context)),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value.trim().isEmpty ? '无' : value,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                fontFamily: monospace ? 'monospace' : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _permissionBool(bool enabled) => enabled ? '允许' : '不允许';
+
+String _permissionList(Iterable<String> values) {
+  final normalized = values.where((value) => value.trim().isNotEmpty).toList();
+  return normalized.isEmpty ? '无' : normalized.join('、');
 }
 
 String _ruleStatusLabel(RulePlugin rule) {

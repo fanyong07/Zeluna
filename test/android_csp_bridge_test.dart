@@ -6,6 +6,7 @@ import 'package:anime/src/rules/csp_rule_support.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_security.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -228,6 +229,16 @@ RulePlugin _cspRule() => RulePlugin(
     'spider': './jar/custom_spider.jar;md5;$qistCustomSpiderMd5',
     'site': {'key': 'star', 'api': 'csp_Star'},
   },
+  permissionManifest: const RulePermissionManifest.untrusted(
+    id: 'csp-star',
+    name: 'Star',
+    version: '1',
+    engine: 'android-csp',
+    contentTypes: ['series'],
+    pageDomains: ['raw.githubusercontent.com'],
+    mediaDomains: ['media.example'],
+    customReferer: true,
+  ),
 );
 
 const _subject = AnimeSubject(

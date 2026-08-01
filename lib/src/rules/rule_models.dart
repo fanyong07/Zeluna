@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'csp_rule_support.dart';
+import 'rule_security.dart';
 
 enum RuleContentType {
   anime('番剧'),
@@ -89,6 +90,7 @@ class RulePlugin {
     this.unsupportedReason,
     this.note = '',
     this.legacyIds = const [],
+    this.permissionManifest,
   });
 
   final String id;
@@ -119,10 +121,77 @@ class RulePlugin {
   final String? unsupportedReason;
   final String note;
   final List<String> legacyIds;
+  final RulePermissionManifest? permissionManifest;
 
   String get sourceLabel => source.label;
 
   String get contentLabel => contentType.label;
+
+  RulePermissionManifest get effectiveManifest {
+    final declared = permissionManifest;
+    final fallbackDomains = ruleDomainsFromUrls([baseUrl, searchUrl]);
+    bool hasHeader(String name) =>
+        requestHeaders.keys.any((key) => key.toLowerCase() == name);
+    final contentHash = ruleSecurityContentHash({
+      'id': id,
+      'version': version,
+      'engine': engine,
+      'baseUrl': baseUrl,
+      'searchUrl': searchUrl,
+      'kazumi': kazumi?.toJson(),
+      'xbpq': xbpq?.toJson(),
+      'animeko': animeko == null ? null : {...animeko!.toJson(), 'cookies': ''},
+      'requestHeaders': ruleHeadersForPersistence(requestHeaders),
+      'rawConfig': ruleConfigForPersistence(rawConfig),
+    });
+    return RulePermissionManifest(
+      id: id,
+      name: name,
+      version: version,
+      engine: engine,
+      contentTypes: [contentType.name],
+      sourceRepository:
+          declared?.sourceRepository ??
+          rawConfig['sourceRepository']?.toString().trim() ??
+          '',
+      contentHash: contentHash,
+      signature: declared?.signature ?? '',
+      trustLevel: declared?.trustLevel ?? RuleTrustLevel.untrusted,
+      pageDomains: declared == null
+          ? fallbackDomains
+          : normalizeRuleDomains(declared.pageDomains),
+      mediaDomains: declared == null
+          ? fallbackDomains
+          : normalizeRuleDomains(declared.mediaDomains),
+      javascript:
+          declared?.javascript ??
+          requiresWebView ||
+              requiresCaptcha ||
+              kazumi?.useWebView == true ||
+              engine.toLowerCase() == 'animeko-web-selector',
+      webViewSniffing:
+          declared?.webViewSniffing ??
+          requiresWebView || engine.toLowerCase() == 'animeko-web-selector',
+      cookiePolicy:
+          declared?.cookiePolicy ??
+          (hasHeader('cookie') || (animeko?.cookies.trim().isNotEmpty ?? false)
+              ? RuleCookiePolicy.taskScoped
+              : RuleCookiePolicy.none),
+      cleartextHttp:
+          declared?.cleartextHttp ??
+          [
+            baseUrl,
+            searchUrl,
+          ].any((value) => Uri.tryParse(value)?.scheme.toLowerCase() == 'http'),
+      customReferer: declared?.customReferer ?? true,
+      customOrigin: declared?.customOrigin ?? hasHeader('origin'),
+      customUserAgent:
+          declared?.customUserAgent ??
+          hasHeader('user-agent') ||
+              (animeko?.videoUserAgent.trim().isNotEmpty ?? false),
+      minimumCoreVersion: declared?.minimumCoreVersion ?? '1.0.0',
+    );
+  }
 
   RuleExecutionStatus get executionStatus {
     if (requiresPrivateAuth || _reasonNeedsPrivateAuth(unsupportedReason)) {
@@ -222,6 +291,7 @@ class RulePlugin {
     String? unsupportedReason,
     String? note,
     List<String>? legacyIds,
+    RulePermissionManifest? permissionManifest,
   }) {
     return RulePlugin(
       id: id ?? this.id,
@@ -252,6 +322,7 @@ class RulePlugin {
       unsupportedReason: unsupportedReason ?? this.unsupportedReason,
       note: note ?? this.note,
       legacyIds: legacyIds ?? this.legacyIds,
+      permissionManifest: permissionManifest ?? this.permissionManifest,
     );
   }
 
@@ -276,14 +347,15 @@ class RulePlugin {
     'installedByDefault': installedByDefault,
     'kazumi': kazumi?.toJson(),
     'xbpq': xbpq?.toJson(),
-    'animeko': animeko?.toJson(),
-    'requestHeaders': requestHeaders,
-    'rawConfig': rawConfig,
+    'animeko': animeko == null ? null : {...animeko!.toJson(), 'cookies': ''},
+    'requestHeaders': ruleHeadersForPersistence(requestHeaders),
+    'rawConfig': ruleConfigForPersistence(rawConfig),
     'groupId': groupId,
     'priority': priority,
     'unsupportedReason': unsupportedReason,
     'note': note,
     if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
+    'manifest': effectiveManifest.toJson(),
   };
 
   factory RulePlugin.fromJson(Map<String, dynamic> json) {
@@ -301,6 +373,7 @@ class RulePlugin {
     final kazumiJson = json['kazumi'];
     final xbpqJson = json['xbpq'];
     final animekoJson = json['animeko'];
+    final manifestJson = json['manifest'];
     return RulePlugin(
       id: json['id']?.toString() ?? '',
       name:
@@ -348,6 +421,11 @@ class RulePlugin {
       unsupportedReason: _blankToNull(json['unsupportedReason']?.toString()),
       note: json['note']?.toString() ?? json['description']?.toString() ?? '',
       legacyIds: _stringList(json['legacyIds']),
+      permissionManifest: manifestJson is Map
+          ? RulePermissionManifest.fromImportedJson(
+              manifestJson.cast<String, dynamic>(),
+            )
+          : null,
     );
   }
 }
@@ -929,12 +1007,14 @@ class RulePluginState {
   const RulePluginState({
     this.installedIds = const {},
     this.enabledIds = const {},
+    this.approvedPermissionDigests = const {},
     this.customRules = const [],
     this.repositories = const [],
   });
 
   final Set<String> installedIds;
   final Set<String> enabledIds;
+  final Map<String, String> approvedPermissionDigests;
   final List<RulePlugin> customRules;
   final List<RuleRepositoryRecord> repositories;
 
@@ -942,15 +1022,24 @@ class RulePluginState {
 
   bool isEnabled(String id) => enabledIds.contains(id);
 
+  bool hasApprovedPermissions(RulePlugin rule) {
+    if (!rule.effectiveManifest.requiresApproval) return true;
+    return approvedPermissionDigests[rule.id] ==
+        rule.effectiveManifest.permissionDigest;
+  }
+
   RulePluginState copyWith({
     Set<String>? installedIds,
     Set<String>? enabledIds,
+    Map<String, String>? approvedPermissionDigests,
     List<RulePlugin>? customRules,
     List<RuleRepositoryRecord>? repositories,
   }) {
     return RulePluginState(
       installedIds: installedIds ?? this.installedIds,
       enabledIds: enabledIds ?? this.enabledIds,
+      approvedPermissionDigests:
+          approvedPermissionDigests ?? this.approvedPermissionDigests,
       customRules: customRules ?? this.customRules,
       repositories: repositories ?? this.repositories,
     );
@@ -959,6 +1048,7 @@ class RulePluginState {
   Map<String, dynamic> toJson() => {
     'installedIds': installedIds.toList(),
     'enabledIds': enabledIds.toList(),
+    'approvedPermissionDigests': approvedPermissionDigests,
     'customRules': customRules.map((rule) => rule.toJson()).toList(),
     'repositories': repositories.map((record) => record.toJson()).toList(),
   };
@@ -967,6 +1057,9 @@ class RulePluginState {
     return RulePluginState(
       installedIds: _stringSet(json['installedIds']),
       enabledIds: _stringSet(json['enabledIds']),
+      approvedPermissionDigests: _stringMapFromJson(
+        json['approvedPermissionDigests'],
+      ),
       customRules: _ruleList(json['customRules']),
       repositories: _repositoryList(json['repositories']),
     );

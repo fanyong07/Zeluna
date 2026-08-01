@@ -1,3 +1,5 @@
+import 'rule_security.dart';
+
 typedef AnimekoSniffMatcher = String? Function(String value, String baseUrl);
 
 class AnimekoWebViewSniffRequest {
@@ -6,6 +8,7 @@ class AnimekoWebViewSniffRequest {
     required this.headers,
     required this.matchVideo,
     required this.matchNested,
+    required this.manifest,
     this.timeout = const Duration(seconds: 8),
   });
 
@@ -13,6 +16,7 @@ class AnimekoWebViewSniffRequest {
   final Map<String, String> headers;
   final AnimekoSniffMatcher matchVideo;
   final AnimekoSniffMatcher matchNested;
+  final RulePermissionManifest manifest;
   final Duration timeout;
 }
 

@@ -25,62 +25,61 @@ void main() {
     expect(repository.byId(older.id)?.id, newer.id);
   });
 
-  test('normalization migrates installed and enabled duplicate aliases', () {
-    final older = _rule(
-      id: 'user:old-state',
-      version: '1.0',
-      updatedAt: DateTime(2026, 1, 1),
-    );
-    final newer = _rule(
-      id: 'user:new-state',
-      version: '2.0',
-      updatedAt: DateTime(2026, 7, 1),
-    );
-    final repository = RulePluginRepository(extraRules: [older, newer]);
-    final legacyState = RulePluginState(
-      installedIds: {older.id},
-      enabledIds: {older.id},
-      customRules: [older, newer],
-    );
-    final normalized = repository.normalizeState(
-      RulePluginState(
+  test(
+    'normalization migrates aliases but requires updated permission approval',
+    () {
+      final older = _rule(
+        id: 'user:old-state',
+        version: '1.0',
+        updatedAt: DateTime(2026, 1, 1),
+      );
+      final newer = _rule(
+        id: 'user:new-state',
+        version: '2.0',
+        updatedAt: DateTime(2026, 7, 1),
+      );
+      final repository = RulePluginRepository(extraRules: [older, newer]);
+      final legacyState = RulePluginState(
         installedIds: {older.id},
         enabledIds: {older.id},
         customRules: [older, newer],
-        repositories: [
-          RuleRepositoryRecord(
-            id: 'old-record',
-            name: '重复仓库',
-            url: 'https://example.com/rules.json',
-            importedAt: DateTime(2026, 1, 1),
-            ruleCount: 1,
-          ),
-          RuleRepositoryRecord(
-            id: 'new-record',
-            name: '重复仓库',
-            url: 'https://example.com/rules.json/',
-            importedAt: DateTime(2026, 7, 1),
-            ruleCount: 2,
-          ),
-        ],
-      ),
-    );
+      );
+      final normalized = repository.normalizeState(
+        RulePluginState(
+          installedIds: {older.id},
+          enabledIds: {older.id},
+          customRules: [older, newer],
+          repositories: [
+            RuleRepositoryRecord(
+              id: 'old-record',
+              name: '重复仓库',
+              url: 'https://example.com/rules.json',
+              importedAt: DateTime(2026, 1, 1),
+              ruleCount: 1,
+            ),
+            RuleRepositoryRecord(
+              id: 'new-record',
+              name: '重复仓库',
+              url: 'https://example.com/rules.json/',
+              importedAt: DateTime(2026, 7, 1),
+              ruleCount: 2,
+            ),
+          ],
+        ),
+      );
 
-    expect(normalized.customRules, hasLength(1));
-    expect(normalized.customRules.single.id, newer.id);
-    expect(normalized.installedIds, {newer.id});
-    expect(normalized.enabledIds, {newer.id});
-    expect(normalized.repositories, hasLength(1));
-    expect(normalized.repositories.single.id, 'new-record');
-    expect(
-      repository.playbackRulesFor(legacyState, RuleContentType.anime),
-      hasLength(1),
-    );
-    expect(
-      repository.playbackRulesFor(legacyState, RuleContentType.anime).single.id,
-      newer.id,
-    );
-  });
+      expect(normalized.customRules, hasLength(1));
+      expect(normalized.customRules.single.id, newer.id);
+      expect(normalized.installedIds, {newer.id});
+      expect(normalized.enabledIds, isEmpty);
+      expect(normalized.repositories, hasLength(1));
+      expect(normalized.repositories.single.id, 'new-record');
+      expect(
+        repository.playbackRulesFor(legacyState, RuleContentType.anime),
+        isEmpty,
+      );
+    },
+  );
 
   test('same host with different content types remains separate', () {
     final anime = _rule(
@@ -355,6 +354,9 @@ void main() {
       RulePluginState(
         installedIds: allIds,
         enabledIds: allIds,
+        approvedPermissionDigests: {
+          executable.id: executable.effectiveManifest.permissionDigest,
+        },
         customRules: rules,
       ),
     );

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:anime/src/rules/animeko_webview_sniffer.dart';
+import 'package:anime/src/rules/rule_security.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -8,7 +9,7 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
-    'Windows headless WebView repeatedly sniffs playback without crashing',
+    'Windows headless WebView refuses loopback pages before navigation',
     (tester) async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
@@ -61,12 +62,31 @@ void main() {
               return match?.group(0);
             },
             matchNested: (_, _) => null,
+            manifest: const RulePermissionManifest(
+              id: 'integration:loopback',
+              name: 'Loopback security test',
+              version: '1.0',
+              engine: 'animeko-web-selector',
+              contentTypes: ['anime'],
+              sourceRepository: 'integration-test',
+              contentHash: 'test',
+              signature: '',
+              trustLevel: RuleTrustLevel.untrusted,
+              pageDomains: ['127.0.0.1'],
+              mediaDomains: ['media.example.test'],
+              javascript: true,
+              webViewSniffing: true,
+              cookiePolicy: RuleCookiePolicy.taskScoped,
+              cleartextHttp: true,
+              customReferer: false,
+              customOrigin: false,
+              customUserAgent: false,
+              minimumCoreVersion: '1.0.0',
+            ),
           ),
         );
 
-        expect(result?.videoUrl, 'https://media.example.test/episode.m3u8');
-        expect(result?.cookieHeader, contains('configured=yes'));
-        expect(result?.cookieHeader, contains('runtime=ready'));
+        expect(result, isNull);
         await tester.pump(const Duration(milliseconds: 100));
       }
     },

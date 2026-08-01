@@ -1482,6 +1482,9 @@ https://stream.example/live/cctv1.m3u8
       RulePluginState(
         installedIds: {rule.id},
         enabledIds: {rule.id},
+        approvedPermissionDigests: {
+          rule.id: rule.effectiveManifest.permissionDigest,
+        },
         customRules: [rule],
         repositories: [
           RuleRepositoryRecord(
@@ -1551,6 +1554,10 @@ https://stream.example/live/cctv1.m3u8
       RulePluginState(
         installedIds: {animeRule.id, movieRule.id},
         enabledIds: {animeRule.id, movieRule.id},
+        approvedPermissionDigests: {
+          animeRule.id: animeRule.effectiveManifest.permissionDigest,
+          movieRule.id: movieRule.effectiveManifest.permissionDigest,
+        },
         customRules: [animeRule, movieRule],
       ).toJson(),
     );

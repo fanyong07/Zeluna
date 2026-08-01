@@ -8,6 +8,7 @@ import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/animeko_webview_sniffer.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_security.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -55,28 +56,20 @@ void main() {
         client: sharedClient,
         timeout: const Duration(seconds: 5),
       );
-      final rule = _kazumiRule.copyWith(
-        id: 'kazumi:shared-client-cancel',
-        baseUrl: '$origin/',
-        searchUrl: '$origin/vod/search.html?wd=@keyword',
-        requestHeaders: const {},
-      );
       final cancellationToken = RulePlaybackCancellationToken();
-      final resolving = resolver.resolveRule(
-        rule: rule,
-        subject: _animeSubject,
-        episode: _episode,
-        verifyPlayable: false,
+      final resolving = resolver.verifyPlaybackLine(
+        line: _networkLine('$origin/vod/search.html'),
+        enrichMetadata: false,
         cancellationToken: cancellationToken,
       );
 
       await searchStarted.future.timeout(const Duration(seconds: 2));
       final stopwatch = Stopwatch()..start();
       cancellationToken.cancel();
-      final lines = await resolving.timeout(const Duration(seconds: 1));
+      final line = await resolving.timeout(const Duration(seconds: 1));
       stopwatch.stop();
 
-      expect(lines, isEmpty);
+      expect(line.url, '$origin/vod/search.html');
       expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 800)));
       final health = await sharedClient.get(Uri.parse('$origin/health'));
       expect(health.statusCode, 200);
@@ -90,7 +83,7 @@ void main() {
     var probeRequests = 0;
     final client = MockClient((request) async {
       expect(request.headers['Cookie'], 'session=user-value');
-      expect(request.headers['Authorization'], 'Bearer user-value');
+      expect(request.headers, isNot(contains('Authorization')));
       switch (request.url.path) {
         case '/test/01.m3u8':
           expect(request.headers['Range'], 'bytes=0-2048');
@@ -158,6 +151,50 @@ void main() {
     expect(cachedLines, hasLength(2));
     expect(playPageRequests, 1);
     expect(probeRequests, 1);
+  });
+
+  test('page redirect cannot escape approved rule domains', () async {
+    var attackerRequests = 0;
+    final client = MockClient((request) async {
+      if (request.url.host == 'attacker.test') attackerRequests++;
+      if (request.url.path == '/vod/search.html') {
+        return http.Response(
+          '',
+          302,
+          headers: {'location': 'https://attacker.test/search'},
+        );
+      }
+      return http.Response('not found', 404);
+    });
+
+    final lines = await RulePlaybackResolver(client: client).resolveRule(
+      rule: _kazumiRule,
+      subject: _animeSubject,
+      episode: _episode,
+      verifyPlayable: false,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.available, isFalse);
+    expect(attackerRequests, 0);
+  });
+
+  test('media redirect cannot escape approved rule domains', () async {
+    var attackerRequests = 0;
+    final line = await _resolveSinglePlayableLine(
+      'https://cdn.example.com/redirect.m3u8',
+      probe: (request) {
+        if (request.url.host == 'attacker.test') attackerRequests++;
+        return http.Response(
+          '',
+          302,
+          headers: {'location': 'https://attacker.test/video.m3u8'},
+        );
+      },
+    );
+
+    expect(line.available, isFalse);
+    expect(attackerRequests, 0);
   });
 
   test('quick lookup rejects a dead explicit media url', () async {
@@ -884,7 +921,7 @@ http://[
         switch (request.url.host) {
           case 'cdn.example.com':
             expect(request.headers['Cookie'], 'session=user-value');
-            expect(request.headers['Authorization'], 'Bearer user-value');
+            expect(request.headers, isNot(contains('Authorization')));
             expect(request.headers['Range'], 'bytes=0-2048');
             return http.Response(
               '''
@@ -1794,7 +1831,7 @@ segment-1.ts
   );
 
   test(
-    'rule importer preserves credentials, scripts and repository configs',
+    'rule importer keeps runtime credentials but scrubs persisted state',
     () {
       const importer = RuleImporter();
 
@@ -1820,11 +1857,12 @@ segment-1.ts
       );
       expect(credentialRule.rawConfig['token'], 'user-token');
       final restoredCredential = RulePlugin.fromJson(credentialRule.toJson());
-      expect(restoredCredential.rawConfig['token'], 'user-token');
+      expect(restoredCredential.rawConfig, isNot(contains('token')));
       expect(
-        restoredCredential.requestHeaders['Authorization'],
-        'Bearer user-value',
+        restoredCredential.requestHeaders,
+        isNot(contains('Authorization')),
       );
+      expect(restoredCredential.requestHeaders, isNot(contains('Cookie')));
 
       final tvBoxBundle = importer.importFromText('''
         {
@@ -2545,6 +2583,31 @@ final _kazumiRule = RulePlugin(
     'Cookie': 'session=user-value',
     'Authorization': 'Bearer user-value',
   },
+  permissionManifest: const RulePermissionManifest(
+    id: 'kazumi:test',
+    name: 'KazumiTest',
+    version: '1.0',
+    engine: 'native',
+    contentTypes: ['anime'],
+    sourceRepository: 'test-fixture',
+    contentHash: 'computed-at-runtime',
+    signature: '',
+    trustLevel: RuleTrustLevel.untrusted,
+    pageDomains: ['example.com'],
+    mediaDomains: [
+      'cdn.example.com',
+      'variants.example.net',
+      'segments.example.org',
+    ],
+    javascript: false,
+    webViewSniffing: false,
+    cookiePolicy: RuleCookiePolicy.taskScoped,
+    cleartextHttp: false,
+    customReferer: true,
+    customOrigin: false,
+    customUserAgent: false,
+    minimumCoreVersion: '1.0.0',
+  ),
   kazumi: KazumiParserConfig(
     searchList: "//div[@class='item']",
     searchName: '//strong',

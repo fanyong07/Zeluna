@@ -1,6 +1,7 @@
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_security.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -83,6 +84,16 @@ final _jsonApiRule = RulePlugin(
   searchable: true,
   quickSearch: true,
   filterable: false,
+  permissionManifest: const RulePermissionManifest.untrusted(
+    id: 'custom:tvbox:json',
+    name: '测试 JSON 源',
+    version: '1.0',
+    engine: 'tvbox-json-api',
+    contentTypes: ['anime'],
+    pageDomains: ['api.example.com'],
+    mediaDomains: ['cdn.example.com'],
+    customReferer: true,
+  ),
 );
 
 const _subject = AnimeSubject(

@@ -15,6 +15,7 @@ import 'animeko_webview_sniffer.dart';
 import 'csp_rule_support.dart';
 import 'drpy_runtime.dart';
 import 'rule_models.dart';
+import 'rule_security.dart';
 
 const _playableProbeTimeout = Duration(seconds: 6);
 const _playlistMetadataTimeout = Duration(seconds: 3);
@@ -25,6 +26,7 @@ const _maxBinaryProbeSampleBytes = 64 * 1024;
 const _maxManifestProbeSampleBytes = 512 * 1024;
 const _minimumBinaryProbeBytes = 4 * 1024;
 const _maxDrpyMediaRedirects = 3;
+const _maxRuleRedirects = 5;
 const _maxConcurrentPlayableProbes = 4;
 const _maxConcurrentMetadataProbes = 4;
 const _responseCacheTtl = Duration(minutes: 5);
@@ -72,9 +74,10 @@ final Object _rulePlaybackResolveContextKey = Object();
 final Object _drpyPublicMediaProbeKey = Object();
 
 class _RulePlaybackResolveContext {
-  const _RulePlaybackResolveContext(this.cancellationToken);
+  const _RulePlaybackResolveContext(this.cancellationToken, {this.rule});
 
   final RulePlaybackCancellationToken? cancellationToken;
+  final RulePlugin? rule;
 }
 
 _RulePlaybackResolveContext? get _activeRulePlaybackResolveContext =>
@@ -206,7 +209,10 @@ class RulePlaybackResolver {
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     if (cancellationToken?.isCancelled ?? false) return const [];
-    final resolveContext = _RulePlaybackResolveContext(cancellationToken);
+    final resolveContext = _RulePlaybackResolveContext(
+      cancellationToken,
+      rule: rule,
+    );
     return runZoned(() async {
       if (rule.requiresCaptcha || rule.unsupportedReason != null) {
         if (rule.engine.toLowerCase() == 'android-csp') return const [];
@@ -336,7 +342,10 @@ class RulePlaybackResolver {
         episodeTitle: episode.title,
         ruleSource: inlineSource,
         ruleUrl: extUrl,
-        requestHeaders: rule.requestHeaders,
+        requestHeaders: filterRuleRequestHeaders(
+          rule.requestHeaders,
+          rule.effectiveManifest,
+        ),
         credentialOrigin: rule.baseUrl,
       ),
       client: client,
@@ -1110,9 +1119,13 @@ class RulePlaybackResolver {
     final result = await _animekoWebViewSniffer.sniff(
       AnimekoWebViewSniffRequest(
         pageUrl: Uri.parse(playPageUrl),
-        headers: _animekoVideoHeaders(rule, config, detailUrl),
+        headers: filterRuleRequestHeaders(
+          _animekoVideoHeaders(rule, config, detailUrl),
+          rule.effectiveManifest,
+        ),
         matchVideo: matchVideo,
         matchNested: matchNested,
+        manifest: rule.effectiveManifest,
         timeout: const Duration(seconds: 8),
       ),
     );
@@ -1752,6 +1765,7 @@ class RulePlaybackResolver {
     Map<String, String> headers,
   ) async {
     _throwIfLookupCancelled(url);
+    _ensureSandboxedRuleUri(url, RuleUrlPurpose.page);
     final requestUri = _ruleRequestUri(url);
     final requestHeaders = _ruleRequestHeaders(url, headers);
     final key = _requestCacheKey('GET', requestUri, requestHeaders);
@@ -1790,6 +1804,16 @@ class RulePlaybackResolver {
     }
   }
 
+  void _ensureSandboxedRuleUri(Uri uri, RuleUrlPurpose purpose) {
+    final rule = _activeRulePlaybackResolveContext?.rule;
+    if (rule == null) return;
+    if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
+      throw StateError(
+        '规则请求超出已批准的${purpose == RuleUrlPurpose.page ? '页面' : '媒体'}域名范围。',
+      );
+    }
+  }
+
   Future<String> _post(
     http.Client client,
     Uri url,
@@ -1797,6 +1821,7 @@ class RulePlaybackResolver {
     Map<String, String> headers,
   ) async {
     _throwIfLookupCancelled(url);
+    _ensureSandboxedRuleUri(url, RuleUrlPurpose.page);
     final requestUri = _ruleRequestUri(url);
     final requestHeaders = _ruleRequestHeaders(url, headers);
     final key = _requestCacheKey(
@@ -1856,13 +1881,58 @@ class RulePlaybackResolver {
     final cancellationToken =
         _activeRulePlaybackResolveContext?.cancellationToken;
     final unregisterCancellation = cancellationToken?.register(abort);
-    final request = http.AbortableRequest(
-      method,
-      uri,
-      abortTrigger: abortTrigger.future,
-    )..headers.addAll(headers);
-    if (body != null) request.body = body;
-    final operation = client.send(request).then(http.Response.fromStream);
+    final sandboxed = _activeRulePlaybackResolveContext?.rule != null;
+    final operation = () async {
+      var currentMethod = method;
+      var currentUri = uri;
+      var currentHeaders = headers;
+      var currentBody = body;
+      for (var redirect = 0; ; redirect++) {
+        _ensureSandboxedRuleUri(currentUri, RuleUrlPurpose.page);
+        final request =
+            http.AbortableRequest(
+                currentMethod,
+                currentUri,
+                abortTrigger: abortTrigger.future,
+              )
+              ..followRedirects = !sandboxed
+              ..headers.addAll(currentHeaders);
+        if (currentBody != null) request.body = currentBody;
+        final response = await client.send(request);
+        final location = response.headers['location'];
+        if (!sandboxed ||
+            !_isHttpRedirect(response.statusCode) ||
+            location == null ||
+            location.trim().isEmpty) {
+          return http.Response.fromStream(response);
+        }
+        if (redirect >= _maxRuleRedirects) {
+          final subscription = response.stream.listen(null);
+          await subscription.cancel();
+          throw StateError('规则页面重定向次数过多。');
+        }
+        final nextUri = currentUri.resolve(location.trim());
+        _ensureSandboxedRuleUri(nextUri, RuleUrlPurpose.page);
+        currentHeaders = _mediaChildHeaders(
+          currentUri,
+          nextUri,
+          currentHeaders,
+        );
+        if (response.statusCode == 303 ||
+            ((response.statusCode == 301 || response.statusCode == 302) &&
+                currentMethod.toUpperCase() == 'POST')) {
+          currentMethod = 'GET';
+          currentBody = null;
+          currentHeaders = _withoutHeaderIgnoreCase(
+            currentHeaders,
+            'content-type',
+          );
+        }
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        currentUri = nextUri;
+      }
+    }();
     try {
       return await operation.timeout(
         timeout,
@@ -2015,16 +2085,25 @@ class RulePlaybackResolver {
           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     };
-    for (final entry in rule.requestHeaders.entries) {
+    final manifest = rule.effectiveManifest;
+    for (final entry in filterRuleRequestHeaders(
+      rule.requestHeaders,
+      manifest,
+    ).entries) {
       final name = entry.key.trim();
       final value = entry.value.trim();
       if (name.isNotEmpty && value.isNotEmpty) headers[name] = value;
     }
-    if (userAgent.trim().isNotEmpty) headers['User-Agent'] = userAgent.trim();
+    if (manifest.customUserAgent && userAgent.trim().isNotEmpty) {
+      headers['User-Agent'] = userAgent.trim();
+    }
     final refererValue = referer?.trim();
-    if (refererValue != null && refererValue.isNotEmpty) {
+    if (manifest.customReferer &&
+        refererValue != null &&
+        refererValue.isNotEmpty) {
       headers['Referer'] = refererValue;
-    } else if (!headers.containsKey('Referer') &&
+    } else if (manifest.customReferer &&
+        !headers.containsKey('Referer') &&
         rule.baseUrl.trim().isNotEmpty) {
       headers['Referer'] = rule.baseUrl;
     }
@@ -2042,7 +2121,10 @@ class RulePlaybackResolver {
       userAgent: config.videoUserAgent,
     );
     final cookie = config.cookies.trim();
-    if (cookie.isNotEmpty) headers['Cookie'] = cookie;
+    if (rule.effectiveManifest.cookiePolicy == RuleCookiePolicy.taskScoped &&
+        cookie.isNotEmpty) {
+      headers['Cookie'] = cookie;
+    }
     return headers;
   }
 
@@ -2058,6 +2140,7 @@ class RulePlaybackResolver {
       return const _PlayableProbeResult(false, '视频地址格式不正确。');
     }
     _throwIfLookupCancelled(target);
+    _ensureSandboxedRuleUri(target, RuleUrlPurpose.media);
     final requestUri = _ruleRequestUri(target);
     final sourceHeaders = _videoProbeHeaders(headers);
     final requestHeaders = _ruleRequestHeaders(target, sourceHeaders);
@@ -2657,6 +2740,7 @@ class RulePlaybackResolver {
     required Duration timeout,
   }) async {
     final drpyPublicOnly = _requiresDrpyPublicMediaProbe;
+    final sandboxedRule = _activeRulePlaybackResolveContext?.rule != null;
     final abortTrigger = Completer<void>();
     void abort() {
       if (!abortTrigger.isCompleted) abortTrigger.complete();
@@ -2671,6 +2755,9 @@ class RulePlaybackResolver {
       var currentHeaders = headers;
       late http.StreamedResponse response;
       for (var redirect = 0; ; redirect++) {
+        if (sandboxedRule) {
+          _ensureSandboxedRuleUri(currentUri, RuleUrlPurpose.media);
+        }
         if (drpyPublicOnly) {
           await _drpyRuntime.ensurePublicUri(
             _proxyUpstreamUri(currentUri) ?? currentUri,
@@ -2682,22 +2769,28 @@ class RulePlaybackResolver {
                 currentUri,
                 abortTrigger: abortTrigger.future,
               )
-              ..followRedirects = !drpyPublicOnly
+              ..followRedirects = !drpyPublicOnly && !sandboxedRule
               ..headers.addAll(currentHeaders);
         response = await client.send(request);
         final location = response.headers['location'];
-        if (!drpyPublicOnly ||
+        if ((!drpyPublicOnly && !sandboxedRule) ||
             !_isHttpRedirect(response.statusCode) ||
             location == null ||
             location.trim().isEmpty) {
           break;
         }
-        if (redirect >= _maxDrpyMediaRedirects) {
+        final redirectLimit = drpyPublicOnly
+            ? _maxDrpyMediaRedirects
+            : _maxRuleRedirects;
+        if (redirect >= redirectLimit) {
           final subscription = response.stream.listen(null);
           await subscription.cancel();
           throw const HttpException('drpy media redirect limit reached.');
         }
         final nextUri = currentUri.resolve(location.trim());
+        if (sandboxedRule) {
+          _ensureSandboxedRuleUri(nextUri, RuleUrlPurpose.media);
+        }
         await _drpyRuntime.ensurePublicUri(
           _proxyUpstreamUri(nextUri) ?? nextUri,
         );

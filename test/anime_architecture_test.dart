@@ -351,11 +351,7 @@ void main() {
     final repository = RulePluginRepository(extraRules: rules);
     final source = RulePlaybackSourceRepository(
       repository: repository,
-      ruleState: RulePluginState(
-        installedIds: rules.map((rule) => rule.id).toSet(),
-        enabledIds: rules.map((rule) => rule.id).toSet(),
-        customRules: rules,
-      ),
+      ruleState: _approvedRuleState(rules),
       resolver: RulePlaybackResolver(
         client: MockClient((request) async {
           requestedHosts.add(request.url.host);
@@ -412,11 +408,7 @@ void main() {
       final repository = RulePluginRepository(extraRules: [rule]);
       final source = RulePlaybackSourceRepository(
         repository: repository,
-        ruleState: RulePluginState(
-          installedIds: {rule.id},
-          enabledIds: {rule.id},
-          customRules: [rule],
-        ),
+        ruleState: _approvedRuleState([rule]),
         resolver: _PublicOnlyLineResolver(),
         cacheNamespace: 'test:public-only-copy',
       );
@@ -456,11 +448,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
       );
 
@@ -510,11 +498,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: [rule]),
-        ruleState: RulePluginState(
-          installedIds: {rule.id},
-          enabledIds: {rule.id},
-          customRules: [rule],
-        ),
+        ruleState: _approvedRuleState([rule]),
         resolver: resolver,
       );
 
@@ -551,11 +535,7 @@ void main() {
     ) {
       return RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: [rule]),
-        ruleState: RulePluginState(
-          installedIds: {rule.id},
-          enabledIds: {rule.id},
-          customRules: [rule],
-        ),
+        ruleState: _approvedRuleState([rule]),
         resolver: resolver,
         cacheNamespace: cacheNamespace,
       );
@@ -608,11 +588,7 @@ void main() {
     );
     final source = RulePlaybackSourceRepository(
       repository: RulePluginRepository(extraRules: [rule]),
-      ruleState: RulePluginState(
-        installedIds: {rule.id},
-        enabledIds: {rule.id},
-        customRules: [rule],
-      ),
+      ruleState: _approvedRuleState([rule]),
       resolver: resolver,
       cacheNamespace: 'title-enrichment-cache-test',
     );
@@ -649,11 +625,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
         quickLookupBudget: const Duration(milliseconds: 120),
       );
@@ -699,11 +671,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
       );
 
@@ -743,11 +711,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
         cacheNamespace: 'progressive-test',
       );
@@ -795,11 +759,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: [rule]),
-        ruleState: RulePluginState(
-          installedIds: {rule.id},
-          enabledIds: {rule.id},
-          customRules: [rule],
-        ),
+        ruleState: _approvedRuleState([rule]),
         resolver: resolver,
         cacheNamespace: 'progressive-removal-test',
       );
@@ -839,11 +799,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
         progressiveDiscoveryTimeSlice: const Duration(milliseconds: 3),
         progressiveVerificationTimeSlice: const Duration(milliseconds: 3),
@@ -908,11 +864,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: rules),
-        ruleState: RulePluginState(
-          installedIds: rules.map((rule) => rule.id).toSet(),
-          enabledIds: rules.map((rule) => rule.id).toSet(),
-          customRules: rules,
-        ),
+        ruleState: _approvedRuleState(rules),
         resolver: resolver,
         cacheNamespace: 'progressive-candidates-test',
       );
@@ -958,11 +910,7 @@ void main() {
       );
       final source = RulePlaybackSourceRepository(
         repository: RulePluginRepository(extraRules: [rule]),
-        ruleState: RulePluginState(
-          installedIds: {rule.id},
-          enabledIds: {rule.id},
-          customRules: [rule],
-        ),
+        ruleState: _approvedRuleState([rule]),
         resolver: resolver,
         progressiveDiscoveryTimeSlice: const Duration(milliseconds: 2),
         progressiveDiscoveryRuleTimeout: const Duration(milliseconds: 8),
@@ -1011,11 +959,7 @@ void main() {
     );
     final source = RulePlaybackSourceRepository(
       repository: RulePluginRepository(extraRules: rules),
-      ruleState: RulePluginState(
-        installedIds: rules.map((rule) => rule.id).toSet(),
-        enabledIds: rules.map((rule) => rule.id).toSet(),
-        customRules: rules,
-      ),
+      ruleState: _approvedRuleState(rules),
       resolver: resolver,
       cacheNamespace: 'progressive-cancel-test',
     );
@@ -1041,6 +985,18 @@ void main() {
     expect(resolver.calls, hasLength(callsAtCancellation));
     expect(resolver.verifyPlayableCalls, everyElement(isFalse));
   });
+}
+
+RulePluginState _approvedRuleState(List<RulePlugin> rules) {
+  return RulePluginState(
+    installedIds: rules.map((rule) => rule.id).toSet(),
+    enabledIds: rules.map((rule) => rule.id).toSet(),
+    approvedPermissionDigests: {
+      for (final rule in rules)
+        rule.id: rule.effectiveManifest.permissionDigest,
+    },
+    customRules: rules,
+  );
 }
 
 const _animeSubject = AnimeSubject(

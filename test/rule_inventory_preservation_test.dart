@@ -141,8 +141,19 @@ void main() {
       expect(restoredNini.rawConfig['spider'], rawConfig['spider']);
       expect((restoredNini.rawConfig['site'] as Map)['api'], 'csp_NiNi');
 
+      final approvedRestored = RulePluginState.fromJson(
+        restored
+            .copyWith(
+              approvedPermissionDigests: {
+                for (final rule in repository.allRules)
+                  rule.id: rule.effectiveManifest.permissionDigest,
+              },
+            )
+            .toJson(),
+      );
+
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-      normalized = repository.normalizeState(restored);
+      normalized = repository.normalizeState(approvedRestored);
       expect(normalized.installedIds, allIds);
       expect(normalized.customRules, hasLength(9));
       expect(normalized.enabledIds, hasLength(3));
@@ -154,7 +165,7 @@ void main() {
       );
 
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
-      normalized = repository.normalizeState(restored);
+      normalized = repository.normalizeState(approvedRestored);
       expect(normalized.installedIds, allIds);
       expect(normalized.customRules, hasLength(9));
       expect(normalized.enabledIds, hasLength(6));

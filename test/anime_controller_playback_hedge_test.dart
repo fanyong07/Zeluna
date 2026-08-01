@@ -412,6 +412,9 @@ class _PlaybackHarness {
       RulePluginState(
         installedIds: {rule.id},
         enabledIds: {rule.id},
+        approvedPermissionDigests: {
+          rule.id: rule.effectiveManifest.permissionDigest,
+        },
         customRules: [rule],
       ).toJson(),
     );

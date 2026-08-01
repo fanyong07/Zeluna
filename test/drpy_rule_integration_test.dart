@@ -9,6 +9,7 @@ import 'package:anime/src/rules/drpy_runtime.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_security.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:anime/src/sources/source_rule_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -159,23 +160,25 @@ void main() {
   test(
     'resolver emits only the drpy candidate that passes the real media probe',
     () async {
-      final rule = const RuleImporter()
-          .importFromText(
-            jsonEncode({
-              'sites': [
-                {
-                  'key': 'integration',
-                  'name': 'Integration drpy',
-                  'type': 3,
-                  'api': './lib/drpy2.min.js',
-                  'ext': './rules/integration.js',
-                },
-              ],
-            }),
-            sourceUrl: 'https://example.com/config/box.json',
-          )
-          .rules
-          .first;
+      final rule = _withTestPermissions(
+        const RuleImporter()
+            .importFromText(
+              jsonEncode({
+                'sites': [
+                  {
+                    'key': 'integration',
+                    'name': 'Integration drpy',
+                    'type': 3,
+                    'api': './lib/drpy2.min.js',
+                    'ext': './rules/integration.js',
+                  },
+                ],
+              }),
+              sourceUrl: 'https://example.com/config/box.json',
+            )
+            .rules
+            .first,
+      );
       var deadProbeCount = 0;
       var goodProbeCount = 0;
       final client = MockClient((request) async {
@@ -573,23 +576,49 @@ void main() {
 }
 
 RulePlugin _importDrpyRule(String extName) {
-  return const RuleImporter()
-      .importFromText(
-        jsonEncode({
-          'sites': [
-            {
-              'key': extName,
-              'name': extName,
-              'type': 3,
-              'api': './lib/drpy2.min.js',
-              'ext': './rules/$extName',
-            },
-          ],
-        }),
-        sourceUrl: 'https://example.com/config/box.json',
-      )
-      .rules
-      .first;
+  return _withTestPermissions(
+    const RuleImporter()
+        .importFromText(
+          jsonEncode({
+            'sites': [
+              {
+                'key': extName,
+                'name': extName,
+                'type': 3,
+                'api': './lib/drpy2.min.js',
+                'ext': './rules/$extName',
+              },
+            ],
+          }),
+          sourceUrl: 'https://example.com/config/box.json',
+        )
+        .rules
+        .first,
+  );
+}
+
+RulePlugin _withTestPermissions(RulePlugin rule) {
+  return rule.copyWith(
+    permissionManifest: RulePermissionManifest.untrusted(
+      id: rule.id,
+      name: rule.name,
+      version: rule.version,
+      engine: rule.engine,
+      contentTypes: [rule.contentType.name],
+      pageDomains: const [
+        'example.com',
+        'content.example.com',
+        'raw.githubusercontent.com',
+      ],
+      mediaDomains: const [
+        'example.com',
+        'content.example.com',
+        'media.example.com',
+      ],
+      cookiePolicy: RuleCookiePolicy.taskScoped,
+      customReferer: true,
+    ),
+  );
 }
 
 Future<void> _preloadJsfForWindowsTests() async {
