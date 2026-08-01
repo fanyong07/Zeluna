@@ -144,7 +144,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _lineController.backupLookupCancellationToken = value;
   Set<String> get _failedLineIds => _lineController.failedLineIds;
   Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
-  String? get _preferredProviderId => _lineController.preferredProviderId;
   set _preferredProviderId(String? value) =>
       _lineController.preferredProviderId = value;
 
@@ -1369,39 +1368,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   List<PlaybackLine> _preserveLoadedLineIfProbeDisagrees(
     List<PlaybackLine> lines,
   ) {
-    final current = _line;
-    if (current == null) return lines;
-    final replacement = _lineById(lines, current.id);
-    if (!shouldPreserveLoadedPlaybackLine(
-      currentLine: current,
-      replacementLine: replacement,
+    return _lineController.preserveLoadedLineIfProbeDisagrees(
+      lines: lines,
+      currentLine: _line,
       loadedUrl: _loadedUrl,
-      failedLineIds: _failedLineIds,
       playbackFailed: _playbackFailed,
-    )) {
-      return lines;
-    }
-    return <String, PlaybackLine>{
-      for (final line in lines) line.id: line,
-      current.id: current,
-    }.values.toList(growable: false);
+    );
   }
 
   PlaybackLine? _preferredPlayableLine(List<PlaybackLine> lines) {
-    if (lines.isEmpty) return null;
-    final preferredProviderId = _preferredProviderId;
-    if (preferredProviderId != null) {
-      for (final line in lines) {
-        if (line.providerId == preferredProviderId &&
-            !_failedLineIds.contains(line.id)) {
-          return line;
-        }
-      }
-    }
-    for (final line in lines) {
-      if (!_failedLineIds.contains(line.id)) return line;
-    }
-    return null;
+    return _lineController.preferredPlayableLine(lines);
   }
 
   Future<void> _openLine(
@@ -1652,20 +1628,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _clearLineFailure(String lineId) {
-    _failedLineIds.remove(lineId);
-    _lineFailureCounts.remove(lineId);
+    _lineController.clearFailure(lineId);
   }
 
   bool _markLineFailure(PlaybackLine line, {bool definitive = false}) {
-    final count = nextPlaybackLineFailureCount(
-      _lineFailureCounts[line.id] ?? 0,
-      definitive: definitive,
-    );
-    _lineFailureCounts[line.id] = count;
-    if (!shouldRetryPlaybackLineAfterFailure(count)) {
-      _failedLineIds.add(line.id);
-    }
-    return !shouldRetryPlaybackLineAfterFailure(count);
+    return _lineController.markFailure(line, definitive: definitive);
   }
 
   void _handleRuntimeLineFailure(PlaybackLine line, {required String message}) {
@@ -1820,12 +1787,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   PlaybackLine? _nextPlayableLine() {
-    final currentId = _line?.id;
-    for (final line in _availableLines(_lines)) {
-      if (line.id == currentId || _failedLineIds.contains(line.id)) continue;
-      return line;
-    }
-    return null;
+    return _lineController.nextPlayableLine(currentLine: _line, lines: _lines);
   }
 
   Future<void> _togglePlayPause() async {
