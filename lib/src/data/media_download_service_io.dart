@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../core/network/network_http_client.dart';
 import 'media_download_backend.dart';
 import 'media_download_hls_io.dart';
 import 'media_download_result.dart';
@@ -16,7 +17,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
   IoMediaDownloadBackend({
     http.Client Function()? clientFactory,
     Future<Directory> Function()? directoryProvider,
-  }) : _clientFactory = clientFactory ?? http.Client.new,
+  }) : _clientFactory = clientFactory ?? createMediaDownloadHttpClient,
        _directoryProvider = directoryProvider ?? _defaultDirectory;
 
   final http.Client Function() _clientFactory;

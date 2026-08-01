@@ -198,6 +198,86 @@ class PolicyHttpClient extends http.BaseClient {
   }
 }
 
+/// Follows a small, explicit redirect chain for streaming GET/HEAD requests.
+///
+/// The wrapped [PolicyHttpClient] still validates every network connection.
+/// This layer additionally validates each redirect target before the next
+/// request is created and removes credentials when the origin changes.
+class RedirectingNetworkHttpClient extends http.BaseClient {
+  RedirectingNetworkHttpClient({
+    required http.Client inner,
+    required this.policy,
+    this.maxRedirects = 5,
+    bool ownsInner = true,
+  }) : _inner = inner,
+       _ownsInner = ownsInner;
+
+  final http.Client _inner;
+  final bool _ownsInner;
+  final NetworkRequestPolicy policy;
+  final int maxRedirects;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    final method = request.method.toUpperCase();
+    if (method != 'GET' && method != 'HEAD') {
+      throw const NetworkSecurityException(
+        'Streaming redirect client only supports GET and HEAD requests.',
+      );
+    }
+    var currentUri = request.url;
+    var currentHeaders = Map<String, String>.from(request.headers);
+    for (var redirectCount = 0; ; redirectCount++) {
+      policy.ensureUriAllowed(currentUri);
+      policy.ensureHeadersAllowed(currentUri, currentHeaders);
+      final hopRequest = http.Request(method, currentUri)
+        ..headers.addAll(currentHeaders)
+        ..persistentConnection = request.persistentConnection;
+      final response = await _inner.send(hopRequest);
+      if (!_isRedirect(response.statusCode)) {
+        return http.StreamedResponse(
+          response.stream,
+          response.statusCode,
+          contentLength: response.contentLength,
+          request: response.request ?? hopRequest,
+          headers: response.headers,
+          isRedirect: response.isRedirect,
+          persistentConnection: response.persistentConnection,
+          reasonPhrase: response.reasonPhrase,
+        );
+      }
+
+      final location = response.headers['location']?.trim() ?? '';
+      if (location.isEmpty) {
+        await _cancelResponse(response);
+        throw const NetworkSecurityException(
+          'Media redirect response did not provide a target.',
+        );
+      }
+      if (redirectCount >= maxRedirects) {
+        await _cancelResponse(response);
+        throw const NetworkSecurityException('Media redirect limit reached.');
+      }
+      final nextUri = currentUri.resolve(location);
+      final nextHeaders = headersForNetworkRedirect(
+        currentUri,
+        nextUri,
+        currentHeaders,
+      );
+      policy.ensureUriAllowed(nextUri);
+      policy.ensureHeadersAllowed(nextUri, nextHeaders);
+      await _cancelResponse(response);
+      currentUri = nextUri;
+      currentHeaders = nextHeaders;
+    }
+  }
+
+  @override
+  void close() {
+    if (_ownsInner) _inner.close();
+  }
+}
+
 bool isSensitiveNetworkHeader(String name) {
   final normalized = name.trim().toLowerCase();
   return normalized == 'authorization' ||

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_security.dart';
 import 'media_download_backend.dart';
 import 'media_download_result.dart';
 
@@ -96,6 +97,7 @@ Future<MediaDownloadResult> downloadHlsMedia({
     throwIfStopped();
     final selection = await _resolveHlsSelection(
       sourceUri,
+      credentialOrigin: sourceUri,
       headers: request.headers,
       control: control,
       clientFactory: clientFactory,
@@ -126,6 +128,7 @@ Future<MediaDownloadResult> downloadHlsMedia({
     if (selection.audio != null) {
       final fetchedAudio = await _fetchPlaylist(
         selection.audio!.uri!,
+        credentialOrigin: sourceUri,
         headers: request.headers,
         control: control,
         clientFactory: clientFactory,
@@ -237,7 +240,11 @@ Future<MediaDownloadResult> downloadHlsMedia({
         item: item,
         finalFile: files.finalFile,
         partialFile: files.partialFile,
-        headers: request.headers,
+        headers: headersForNetworkRedirect(
+          sourceUri,
+          item.uri,
+          request.headers,
+        ),
         control: control,
         clientFactory: clientFactory,
         validator: validator,
@@ -363,12 +370,14 @@ Future<MediaDownloadResult> downloadHlsMedia({
 
 Future<_HlsSelection> _resolveHlsSelection(
   Uri source, {
+  required Uri credentialOrigin,
   required Map<String, String> headers,
   required MediaDownloadControl control,
   required http.Client Function() clientFactory,
 }) async {
   var fetched = await _fetchPlaylist(
     source,
+    credentialOrigin: credentialOrigin,
     headers: headers,
     control: control,
     clientFactory: clientFactory,
@@ -424,6 +433,7 @@ Future<_HlsSelection> _resolveHlsSelection(
     }
     fetched = await _fetchPlaylist(
       variant.uri,
+      credentialOrigin: credentialOrigin,
       headers: headers,
       control: control,
       clientFactory: clientFactory,
@@ -435,6 +445,7 @@ Future<_HlsSelection> _resolveHlsSelection(
 
 Future<_FetchedPlaylist> _fetchPlaylist(
   Uri uri, {
+  required Uri credentialOrigin,
   required Map<String, String> headers,
   required MediaDownloadControl control,
   required http.Client Function() clientFactory,
@@ -444,7 +455,11 @@ Future<_FetchedPlaylist> _fetchPlaylist(
   try {
     if (control.isStopped) throw _HlsStopped(control.reason!);
     final request = http.Request('GET', uri)
-      ..headers.addAll(_downloadHeaders(headers));
+      ..headers.addAll(
+        _downloadHeaders(
+          headersForNetworkRedirect(credentialOrigin, uri, headers),
+        ),
+      );
     final responseOrStop = await Future.any<Object>([
       client.send(request).timeout(const Duration(seconds: 30)),
       control.whenStopped,

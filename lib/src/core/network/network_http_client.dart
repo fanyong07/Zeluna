@@ -34,3 +34,26 @@ http.Client createTrustedMediaProbeHttpClient() => createNetworkHttpClient(
     rejectRedirects: false,
   ),
 );
+
+const mediaDownloadMaxResponseBytes = 64 * 1024 * 1024 * 1024;
+
+/// Creates a public-only streaming client for full media and HLS downloads.
+///
+/// Downloads must not inherit the 512 KB playback-probe limit, but remain
+/// bounded so a single response cannot grow without limit.
+http.Client createMediaDownloadHttpClient({http.Client? inner}) {
+  const policy = NetworkRequestPolicy(
+    service: NetworkServiceKind.mediaResource,
+    httpsOnly: false,
+    allowPrivateNetwork: false,
+    maxResponseBytes: mediaDownloadMaxResponseBytes,
+    requestTimeout: Duration(seconds: 30),
+    allowSyntheticDns: true,
+    allowLiteralBenchmarkAddress: true,
+    rejectRedirects: false,
+  );
+  final policyClient = inner == null
+      ? createNetworkHttpClient(policy)
+      : PolicyHttpClient(inner: inner, policy: policy);
+  return RedirectingNetworkHttpClient(inner: policyClient, policy: policy);
+}

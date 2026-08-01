@@ -4,6 +4,7 @@ import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_service_io.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   test(
@@ -32,7 +33,10 @@ void main() {
       });
 
       final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
+        backend: IoMediaDownloadBackend(
+          clientFactory: http.Client.new,
+          directoryProvider: () async => root,
+        ),
       );
       addTearDown(service.dispose);
       final publishedAt = <DateTime>[];

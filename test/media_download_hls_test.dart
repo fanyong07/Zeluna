@@ -1,9 +1,12 @@
 import 'dart:io';
 
+import 'package:anime/src/core/network/network_http_client.dart';
 import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_service_io.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
   test(
@@ -66,9 +69,7 @@ high/index.m3u8
         if (await root.exists()) await root.delete(recursive: true);
       });
 
-      final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-      );
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
       addTearDown(service.dispose);
       final result = await service.download(
         taskId: 'master',
@@ -146,9 +147,7 @@ high/index.m3u8
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'redirect-hls',
@@ -227,9 +226,7 @@ segment.ts
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final url = 'http://${server.address.host}:${server.port}/vod.m3u8';
     var pauseRequested = false;
@@ -339,9 +336,7 @@ segment.ts
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final url = 'http://${server.address.host}:${server.port}/vod.m3u8';
     var pauseRequested = false;
@@ -444,9 +439,7 @@ segment.ts
         if (await workspace.exists()) await workspace.delete(recursive: true);
       });
 
-      final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-      );
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
       addTearDown(service.dispose);
       final url = 'http://${server.address.host}:${server.port}/vod.m3u8';
 
@@ -519,9 +512,7 @@ segment.ts
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     var cancelRequested = false;
     final result = await service.download(
@@ -573,9 +564,7 @@ segment.ts
         if (await root.exists()) await root.delete(recursive: true);
       });
 
-      final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-      );
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
       addTearDown(service.dispose);
       var cancelled = false;
       final result = await service.download(
@@ -628,9 +617,7 @@ segment.ts
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'html-segment',
@@ -670,9 +657,7 @@ segment.ts
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     Future<MediaDownloadResult> download(String path, String id) =>
         service.download(
@@ -693,6 +678,100 @@ segment.ts
     expect(aes.message, contains('AES-128'));
     expect(sample.outcome, MediaDownloadOutcome.unsupported);
     expect(sample.message, contains('SAMPLE-AES'));
+  });
+
+  test('cross-origin HLS children do not inherit source credentials', () async {
+    final root = await Directory.systemTemp.createTemp('anime-hls-origin-');
+    final seenHeaders = <Uri, Map<String, String>>{};
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    http.Client clientFactory() => createMediaDownloadHttpClient(
+      inner: MockClient((request) async {
+        seenHeaders[request.url] = Map<String, String>.from(request.headers);
+        if (request.url.host == 'media.example.test') {
+          return http.Response(
+            '#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n'
+            'https://cdn.example.test/segment.ts\n#EXT-X-ENDLIST\n',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        return http.Response.bytes(
+          List<int>.generate(1024, (index) => index % 251),
+          200,
+          headers: {'content-type': 'video/mp2t'},
+        );
+      }),
+    );
+    final service = MediaDownloadService(
+      backend: IoMediaDownloadBackend(
+        clientFactory: clientFactory,
+        directoryProvider: () async => root,
+      ),
+    );
+    addTearDown(service.dispose);
+
+    final result = await service.download(
+      taskId: 'origin-headers',
+      url: 'https://media.example.test/master.m3u8',
+      title: 'Origin headers',
+      headers: const {
+        'Authorization': 'Bearer redacted',
+        'Cookie': 'session=redacted',
+        'X-Signature': 'redacted',
+        'Referer': 'https://media.example.test/watch',
+      },
+      format: 'HLS',
+    );
+
+    expect(result.outcome, MediaDownloadOutcome.completed);
+    final sourceHeaders =
+        seenHeaders[Uri.parse('https://media.example.test/master.m3u8')]!;
+    final childHeaders =
+        seenHeaders[Uri.parse('https://cdn.example.test/segment.ts')]!;
+    expect(sourceHeaders['Authorization'], 'Bearer redacted');
+    expect(childHeaders, isNot(contains('Authorization')));
+    expect(childHeaders, isNot(contains('Cookie')));
+    expect(childHeaders, isNot(contains('X-Signature')));
+    expect(childHeaders['Referer'], 'https://media.example.test/watch');
+  });
+
+  test('private HLS children are blocked before transport', () async {
+    final root = await Directory.systemTemp.createTemp('anime-hls-private-');
+    var requests = 0;
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    http.Client clientFactory() => createMediaDownloadHttpClient(
+      inner: MockClient((request) async {
+        requests++;
+        return http.Response(
+          '#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n'
+          'http://192.168.1.20/segment.ts\n#EXT-X-ENDLIST\n',
+          200,
+          headers: {'content-type': 'application/vnd.apple.mpegurl'},
+        );
+      }),
+    );
+    final service = MediaDownloadService(
+      backend: IoMediaDownloadBackend(
+        clientFactory: clientFactory,
+        directoryProvider: () async => root,
+      ),
+    );
+    addTearDown(service.dispose);
+
+    final result = await service.download(
+      taskId: 'private-child',
+      url: 'https://media.example.test/master.m3u8',
+      title: 'Private child',
+      headers: const {},
+      format: 'HLS',
+    );
+
+    expect(result.outcome, MediaDownloadOutcome.failed);
+    expect(requests, 1);
   });
 }
 
@@ -767,9 +846,7 @@ segment-1.ts
     if (await root.exists()) await root.delete(recursive: true);
   });
 
-  final service = MediaDownloadService(
-    backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-  );
+  final service = MediaDownloadService(backend: _loopbackBackend(root));
   addTearDown(service.dispose);
   final url = 'http://${server.address.host}:${server.port}/master.m3u8';
   var pauseRequested = false;
@@ -813,6 +890,12 @@ segment-1.ts
   );
   expect(await localFirstSegment.readAsBytes(), secondVersion);
 }
+
+IoMediaDownloadBackend _loopbackBackend(Directory root) =>
+    IoMediaDownloadBackend(
+      clientFactory: http.Client.new,
+      directoryProvider: () async => root,
+    );
 
 Future<void> _segment(
   HttpRequest request,

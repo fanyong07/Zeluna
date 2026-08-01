@@ -5,6 +5,7 @@ import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_service_io.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   test('single-file download pauses and resumes with HTTP Range', () async {
@@ -21,9 +22,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final url = 'http://${server.address.host}:${server.port}/video.mp4';
     var requestedPause = false;
@@ -80,9 +79,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'cancel',
@@ -120,9 +117,7 @@ void main() {
         if (await root.exists()) await root.delete(recursive: true);
       });
 
-      final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-      );
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
       addTearDown(service.dispose);
       var cancelled = false;
       final result = await service.download(
@@ -170,9 +165,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'validator',
@@ -212,9 +205,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'range-reset',
@@ -262,9 +253,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
     final result = await service.download(
       taskId: 'range-shrink',
@@ -302,9 +291,7 @@ void main() {
         if (await root.exists()) await root.delete(recursive: true);
         if (await outside.exists()) await outside.delete(recursive: true);
       });
-      final service = MediaDownloadService(
-        backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-      );
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
       addTearDown(service.dispose);
       final outsideName = outside.path.split(Platform.pathSeparator).last;
       final traversal =
@@ -326,9 +313,7 @@ void main() {
     addTearDown(() async {
       if (await root.exists()) await root.delete(recursive: true);
     });
-    final service = MediaDownloadService(
-      backend: IoMediaDownloadBackend(directoryProvider: () async => root),
-    );
+    final service = MediaDownloadService(backend: _loopbackBackend(root));
     addTearDown(service.dispose);
 
     final result = await service.download(
@@ -343,6 +328,12 @@ void main() {
     expect(await root.list().toList(), isEmpty);
   });
 }
+
+IoMediaDownloadBackend _loopbackBackend(Directory root) =>
+    IoMediaDownloadBackend(
+      clientFactory: http.Client.new,
+      directoryProvider: () async => root,
+    );
 
 Future<void> _serveVideo(
   HttpRequest request,

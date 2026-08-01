@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:anime/src/core/network/network_http_client.dart';
 import 'package:anime/src/core/network/network_security.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -167,5 +168,71 @@ void main() {
       );
       expect(headers, {'Accept': 'application/json'});
     });
+
+    test(
+      'download client follows public redirects and strips credentials',
+      () async {
+        final requests = <http.Request>[];
+        final body = List<int>.filled(768 * 1024, 7);
+        final inner = MockClient((request) async {
+          requests.add(request);
+          if (request.url.host == 'media.example.test') {
+            return http.Response(
+              '',
+              302,
+              headers: {'location': 'https://cdn.example.test/video.mp4'},
+            );
+          }
+          return http.Response.bytes(
+            body,
+            200,
+            headers: {'content-type': 'video/mp4'},
+          );
+        });
+        final client = createMediaDownloadHttpClient(inner: inner);
+        addTearDown(client.close);
+
+        final response = await client.get(
+          Uri.parse('https://media.example.test/start'),
+          headers: const {
+            'Authorization': 'Bearer redacted',
+            'Cookie': 'session=redacted',
+            'X-Signature': 'redacted',
+            'Range': 'bytes=0-',
+          },
+        );
+
+        expect(response.bodyBytes, hasLength(body.length));
+        expect(requests, hasLength(2));
+        expect(requests.first.followRedirects, isFalse);
+        expect(requests.last.headers, isNot(contains('Authorization')));
+        expect(requests.last.headers, isNot(contains('Cookie')));
+        expect(requests.last.headers, isNot(contains('X-Signature')));
+        expect(requests.last.headers['Range'], 'bytes=0-');
+      },
+    );
+
+    test(
+      'download client blocks a private redirect before transport',
+      () async {
+        var requests = 0;
+        final inner = MockClient((request) async {
+          requests++;
+          return http.Response(
+            '',
+            302,
+            headers: {'location': 'http://192.168.1.20/private.mp4'},
+          );
+        });
+        final client = createMediaDownloadHttpClient(inner: inner);
+        addTearDown(client.close);
+
+        await expectLater(
+          client.get(Uri.parse('https://media.example.test/start')),
+          throwsA(isA<NetworkSecurityException>()),
+        );
+        expect(requests, 1);
+      },
+    );
   });
 }
