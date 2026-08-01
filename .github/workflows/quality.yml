@@ -30,6 +30,13 @@ jobs:
           cache: true
       - name: Resolve locked Flutter dependencies
         run: flutter pub get --enforce-lockfile
+      - name: Build Linux JavaScript runtime for VM tests
+        run: |
+          jsf_root="$(python3 -c 'import json, pathlib, urllib.parse; data=json.load(open(".dart_tool/package_config.json", encoding="utf-8")); uri=next(item["rootUri"] for item in data["packages"] if item["name"] == "jsf"); print(pathlib.Path(urllib.parse.urlparse(uri).path))')"
+          cmake -S "$jsf_root/src" -B "$RUNNER_TEMP/jsf-linux" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/jsf-linux" --config Release --parallel 2
+          test -f "$RUNNER_TEMP/jsf-linux/libjsf.so"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/jsf-linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Verify Dart formatting
         # The vendored WebView fork stays byte-comparable to its upstream
         # archive and is validated separately by the Windows job.

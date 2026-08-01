@@ -133,11 +133,12 @@ void main() {
   test(
     'a client-verified prefetch is reused without probing the media twice',
     () async {
+      const candidateUrl = 'https://cdn.example/candidate.m3u8';
       final harness = await _PlaybackHarness.create(
         playbackResponse: (_) async => http.Response(
           jsonEncode([
             {
-              'url': 'https://cdn.example/candidate.m3u8',
+              'url': candidateUrl,
               'source': 'maccms:test',
               'title': 'Episode 1',
               'format': 'hls',
@@ -166,12 +167,18 @@ void main() {
         _subject,
         _episode,
       );
+      final firstCandidate = first.singleWhere(
+        (line) => line.url == candidateUrl,
+      );
+      final secondCandidate = second.singleWhere(
+        (line) => line.url == candidateUrl,
+      );
 
-      expect(first.single.clientVerified, isTrue);
-      expect(first.single.available, isTrue);
-      expect(prefetched?.id, first.single.id);
+      expect(firstCandidate.clientVerified, isTrue);
+      expect(firstCandidate.available, isTrue);
+      expect(prefetched?.id, firstCandidate.id);
       expect(prefetched?.clientVerified, isTrue);
-      expect(second.single.id, first.single.id);
+      expect(secondCandidate.id, firstCandidate.id);
       expect(harness.quickPlaybackRequests, 1);
       expect(harness.resolver.verifyCalls, 1);
       expect(harness.resolver.forceRefreshValues, [isFalse]);

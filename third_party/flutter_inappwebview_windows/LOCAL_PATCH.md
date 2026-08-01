@@ -34,6 +34,9 @@ Functional changes are limited to:
   scheduling the deferred erase.
 - `in_app_webview_manager.cpp`: retain the compositor reference needed during
   DLL shutdown.
+- `windows/CMakeLists.txt`: define the Microsoft STL compatibility macro for
+  the upstream WinRT experimental-coroutine dependency so the fork continues
+  to build with MSVC 14.51 and newer toolchains.
 
 The remaining differences from the pub.dev archive remove trailing whitespace
 only and do not change behavior.
