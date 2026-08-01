@@ -41,8 +41,6 @@ part 'ui/player_panels.dart';
 part 'ui/player_mobile_layout.dart';
 part 'ui/player_desktop_layout.dart';
 
-const _nativeResumeSeekMaxAttempts = 15;
-
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key, required this.request});
 
@@ -115,10 +113,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   DateTime? _stallWatchdogSuppressedUntil;
   Duration? _pendingInitialResumePosition;
   Duration? _pendingAutoSwitchResumePosition;
-  Duration? _pendingNativeResumePosition;
-  int? _pendingNativeResumeOpenSerial;
-  var _nativeResumeSeekAttempts = 0;
-  var _nativeResumeSeekInProgress = false;
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -138,9 +132,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Timer? get _nativeFirstFrameTimer => _nativeVideo.firstFrameTimer;
   set _nativeFirstFrameTimer(Timer? value) =>
       _nativeVideo.replaceFirstFrameTimer(value);
-  Timer? get _nativeResumeSeekTimer => _nativeVideo.resumeSeekTimer;
-  set _nativeResumeSeekTimer(Timer? value) =>
-      _nativeVideo.replaceResumeSeekTimer(value);
   FocusNode get _shortcutFocusNode => _gestureController.shortcutFocusNode;
   Timer? get _controlsHideTimer => _gestureController.controlsHideTimer;
   set _controlsHideTimer(Timer? value) =>
@@ -168,7 +159,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _nativeVideo = NativeVideoController();
+    _nativeVideo = NativeVideoController(readOpenSerial: () => _openLineSerial);
     _webVideo = WebVideoController();
     _gestureController = PlayerGestureController();
     _episode = widget.request.episode;
@@ -808,7 +799,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _player.stream.position.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           _notePlaybackProgress(value);
-          _handleNativeResumeProgress(value);
+          _nativeVideo.resumeSeek.handleProgress(value);
           final previousPosition = _position;
           final reachedFirstFrame =
               _nativeFirstFrameTimer != null &&
@@ -845,7 +836,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           if (mounted && !_usesWebPlayer) {
             setState(() => _duration = value);
             if (value > Duration.zero) {
-              _nudgePendingNativeResume(mediaReady: true);
+              _nativeVideo.resumeSeek.nudge(mediaReady: true);
             }
           }
         }),
@@ -1111,8 +1102,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _checkPlaybackStall() {
     if (!mounted ||
         _leaving ||
-        _pendingNativeResumePosition != null ||
-        _nativeResumeSeekInProgress) {
+        _nativeVideo.resumeSeek.isPending ||
+        _nativeVideo.resumeSeek.isSeeking) {
       return;
     }
     final now = DateTime.now();
@@ -1467,7 +1458,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         position: requestedResumePosition,
       ),
     );
-    _cancelPendingNativeResume();
+    _nativeVideo.resumeSeek.cancel();
     final serial = ++_openLineSerial;
     _handledFailureOpenSerial = null;
     _playbackTrace.recordBufferingChanged(
@@ -1656,7 +1647,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
       await _player.open(media, play: true);
       if (requestedResumePosition > Duration.zero) {
-        _armNativeResumeSeek(serial, requestedResumePosition);
+        _nativeVideo.resumeSeek.arm(
+          openSerial: serial,
+          position: requestedResumePosition,
+        );
       }
       _refreshSuperResolutionShader();
       if (!mounted || serial != _openLineSerial) return;
@@ -1798,92 +1792,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Duration get _currentRecoveryPosition {
-    final pending = _pendingNativeResumePosition;
-    final position = pending != null && pending > _position
-        ? pending
-        : _position;
-    return playbackRecoveryPosition(position);
-  }
-
-  void _cancelPendingNativeResume() {
-    _nativeResumeSeekTimer?.cancel();
-    _nativeResumeSeekTimer = null;
-    _pendingNativeResumePosition = null;
-    _pendingNativeResumeOpenSerial = null;
-    _nativeResumeSeekAttempts = 0;
-    _nativeResumeSeekInProgress = false;
-  }
-
-  void _armNativeResumeSeek(int serial, Duration position) {
-    _pendingNativeResumePosition = position;
-    _pendingNativeResumeOpenSerial = serial;
-    _nativeResumeSeekAttempts = 0;
-    _scheduleNativeResumeSeek(const Duration(milliseconds: 250));
-  }
-
-  void _scheduleNativeResumeSeek(Duration delay) {
-    if (_pendingNativeResumePosition == null ||
-        _nativeResumeSeekInProgress ||
-        _nativeResumeSeekAttempts >= _nativeResumeSeekMaxAttempts ||
-        _nativeResumeSeekTimer != null) {
-      return;
-    }
-    _nativeResumeSeekTimer = Timer(delay, () {
-      _nativeResumeSeekTimer = null;
-      unawaited(_applyPendingNativeResume());
-    });
-  }
-
-  Future<void> _applyPendingNativeResume() async {
-    final position = _pendingNativeResumePosition;
-    final serial = _pendingNativeResumeOpenSerial;
-    if (!mounted ||
-        position == null ||
-        serial == null ||
-        serial != _openLineSerial ||
-        _nativeResumeSeekInProgress ||
-        _nativeResumeSeekAttempts >= _nativeResumeSeekMaxAttempts) {
-      return;
-    }
-    _nativeResumeSeekInProgress = true;
-    _nativeResumeSeekAttempts++;
-    try {
-      await _player.seek(position);
-    } catch (_) {
-      // Some demuxers reject seeking until duration or the first frame exists.
-    } finally {
-      _nativeResumeSeekInProgress = false;
-    }
-    if (mounted &&
-        serial == _openLineSerial &&
-        _pendingNativeResumePosition != null) {
-      _scheduleNativeResumeSeek(const Duration(seconds: 2));
-    }
-  }
-
-  void _nudgePendingNativeResume({bool mediaReady = false}) {
-    if (_pendingNativeResumeOpenSerial == _openLineSerial) {
-      if (mediaReady) {
-        _nativeResumeSeekTimer?.cancel();
-        _nativeResumeSeekTimer = null;
-        if (_nativeResumeSeekAttempts >= _nativeResumeSeekMaxAttempts) {
-          _nativeResumeSeekAttempts = 0;
-        }
-      }
-      _scheduleNativeResumeSeek(Duration.zero);
-    }
-  }
-
-  void _handleNativeResumeProgress(Duration value) {
-    final target = _pendingNativeResumePosition;
-    if (target == null || _pendingNativeResumeOpenSerial != _openLineSerial) {
-      return;
-    }
-    if (value >= target - const Duration(seconds: 2)) {
-      _cancelPendingNativeResume();
-      return;
-    }
-    if (value > Duration.zero) _nudgePendingNativeResume();
+    return _nativeVideo.resumeSeek.recoveryPosition(_position);
   }
 
   Future<void> _tryAutoSwitchLine({Duration? resumePosition}) async {
@@ -2122,7 +2031,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _autoSwitchRetryPending = false;
     _pendingInitialResumePosition = null;
     _pendingAutoSwitchResumePosition = null;
-    _cancelPendingNativeResume();
+    _nativeVideo.resumeSeek.cancel();
     setState(() {
       _episode = episode;
       _line = null;
