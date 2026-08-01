@@ -213,7 +213,41 @@ Remaining risks:
 
 ## G4 CI and repository gates
 
-Status: not_started
+Status: completed
+
+Changes:
+
+- Added one pinned `Quality Gates` workflow for Flutter formatting, analysis and tests; Android Debug; Windows Release plus the real WebView lifecycle integration test; Web Release; Python/Alembic/Ruff/pip-audit; and repository supply-chain checks.
+- Added Dependabot for GitHub Actions, pub, and Python dependencies. Third-party Actions are pinned by commit and workflow permissions are read-only.
+- Replaced the parallel Python requirements files with a single committed `server/uv.lock`; CI installs with `uv sync --frozen --all-groups`.
+- Added repeatable Alembic migration coverage for empty, legacy, current, cached, incompatible, backed-up, pragma-preserving, and repeated-run database states.
+- Added repository artifact scanning that rejects real environment files, private keys, signing material, databases/backups, cookies, tokens, and strong secret markers without reading allowed local private files.
+- Added Dart and Python license allow-list checks, Python vulnerability auditing, dependency advisory checks, and deterministic Flutter/Python CycloneDX SBOM generation.
+- Recorded the vendored Windows WebView fork's package, upstream tag/commit, Apache-2.0 license, behavioral patch list, and update procedure.
+- Built the locked `jsf` Linux shared library before VM tests so Linux exercises Drpy instead of silently skipping its native runtime. Made the playback hedge regression tolerant of the intended concurrent fallback while still proving that the backend candidate is probed only once.
+- Added the Microsoft STL compatibility definition required by MSVC 14.51 to the local WebView fork and recorded it in the fork patch manifest.
+
+Validation:
+
+- Local `flutter test --reporter compact`: 502 passed, 26 intentionally skipped, 0 failed.
+- Local `flutter analyze --suppress-analytics`: no issues; tracked Dart formatting and `git diff --check` passed.
+- Local server suite: 93 tests plus 3 subtests passed; focused Alembic suite: 9 passed; Ruff, compileall, pip-audit, secret scan, Dart/Python license checks, and both SBOM generators passed.
+- Local Android Debug, Web Release, and Windows Release builds passed. Windows WebView integration: 2 passed.
+- `actionlint` 1.7.12 passed before the first remote run; the final workflow was then parsed and fully exercised by GitHub Actions.
+- GitHub Actions Run `30702578325` completed successfully on commit `473e6aa`: Flutter, Android, Windows/WebView, Web, Python/Alembic, and supply-chain jobs all passed. The Linux JavaScript runtime build and the Windows MSVC 14.51 build both passed in their target environments.
+
+Commits:
+
+- `c4d8a18 build: lock server dependencies with uv`
+- `f454c61 ci: add cross-platform quality gates`
+- `411dded docs: record Windows WebView fork provenance`
+- `cd966f5 style: enforce tracked Dart formatting`
+- `473e6aa ci: fix cross-platform quality gates`
+
+Remaining risks:
+
+- The Windows build still reports upstream CMake `CMP0175` and third-party compiler warnings. They do not fail the build or tests, but should be re-evaluated when the vendored WebView baseline is upgraded.
+- G4 validates unsigned/debug development artifacts and release compilation only. Signing identity, installer/package production, real-device acceptance, provenance publication, and production deployment remain G13/G14 work; no signing material was read or committed.
 
 ## G5 Player architecture
 
