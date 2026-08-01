@@ -25,6 +25,7 @@ import 'danmaku/danmaku_controller.dart';
 import 'danmaku_overlay.dart';
 import 'gestures/player_gesture_controller.dart';
 import 'lines/playback_line_controller.dart';
+import 'lines/playback_line_repository.dart';
 import 'lines/playback_recovery_controller.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
@@ -58,6 +59,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlayerGestureController _gestureController;
   late final PlaybackSessionController _sessionController;
   late final PlaybackLineController _lineController;
+  late final PlaybackLineRepository _lineRepository;
   late final PlaybackRecoveryController _recoveryController;
   late final DanmakuController _danmakuController;
   late final SubtitleController _subtitleController;
@@ -67,7 +69,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   final _subscriptions = <StreamSubscription<dynamic>>[];
   int? _handledFailureOpenSerial;
   PlaybackLine? _line;
-  List<PlaybackLine> _lines = const [];
   String? _loadedUrl;
   String? _playerMessage;
   String? _lineLookupMessage;
@@ -84,16 +85,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _playing = false;
   var _buffering = false;
   var _loadingLine = false;
-  var _lineLookupInProgress = false;
-  var _lineScanInProgress = false;
-  var _lineScanComplete = false;
-  var _lineScanCompletedRules = 0;
-  var _lineScanTotalRules = 0;
   var _playbackFailed = false;
   var _fullscreen = false;
   var _muted = false;
   var _leaving = false;
-  var _lineLookupSerial = 0;
   var _openLineSerial = 0;
   int? _firstFrameTraceOpenSerial;
   String? _pendingRecoveryLineId;
@@ -102,8 +97,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _finalFailureTraceRecorded = false;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   DateTime? _ignoreNativeErrorsUntil;
-  var _backupLookupInProgress = false;
-  var _backupLookupSerial = 0;
   var _appInForeground = true;
   Duration? _pendingInitialResumePosition;
   bool _episodePanel = false;
@@ -129,19 +122,17 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Timer? get _controlsHideTimer => _gestureController.controlsHideTimer;
   set _controlsHideTimer(Timer? value) =>
       _gestureController.replaceControlsHideTimer(value);
-  StreamSubscription<PlaybackLineLookupUpdate>? get _lineLookupSubscription =>
-      _lineController.lookupSubscription;
-  set _lineLookupSubscription(
-    StreamSubscription<PlaybackLineLookupUpdate>? value,
-  ) => _lineController.lookupSubscription = value;
+  List<PlaybackLine> get _lines => _lineRepository.lines;
+  set _lines(List<PlaybackLine> value) => _lineRepository.replaceLines(value);
+  bool get _lineLookupInProgress => _lineRepository.lookupInProgress;
+  bool get _lineScanInProgress => _lineRepository.scanInProgress;
+  bool get _lineScanComplete => _lineRepository.scanComplete;
+  int get _lineScanCompletedRules => _lineRepository.scanCompletedRules;
+  int get _lineScanTotalRules => _lineRepository.scanTotalRules;
+  bool get _backupLookupInProgress => _lineRepository.backupInProgress;
+  bool get _hasExpandedLineLookup => _lineRepository.hasExpandedLookup;
   RulePlaybackCancellationToken? get _lineLookupCancellationToken =>
-      _lineController.lookupCancellationToken;
-  set _lineLookupCancellationToken(RulePlaybackCancellationToken? value) =>
-      _lineController.lookupCancellationToken = value;
-  RulePlaybackCancellationToken? get _backupLookupCancellationToken =>
-      _lineController.backupLookupCancellationToken;
-  set _backupLookupCancellationToken(RulePlaybackCancellationToken? value) =>
-      _lineController.backupLookupCancellationToken = value;
+      _lineRepository.activeCancellationToken;
   Set<String> get _failedLineIds => _lineController.failedLineIds;
   Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
   set _preferredProviderId(String? value) =>
@@ -157,6 +148,43 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _episode = widget.request.episode;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _lineController = PlaybackLineController();
+    _line = widget.request.initialLine;
+    _loadingLine = _isPlayableLine(_line);
+    _lineRepository = PlaybackLineRepository(
+      loadQuickLines: (subject, episode, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .linesForEpisode(
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          ),
+      verifyLine: (line, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .verifyPlaybackLine(
+            line,
+            enrichMetadata: false,
+            cancellationToken: cancellationToken,
+          ),
+      loadExpandedLines: (subject, episode, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .lineUpdatesForEpisode(
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          ),
+      loadSingleBackup: (subject, episode, currentLine, cancellationToken) =>
+          ref
+              .read(animeControllerProvider.notifier)
+              .prepareSingleBackupForEpisode(
+                subject,
+                episode,
+                currentLine: currentLine,
+                cancellationToken: cancellationToken,
+              ),
+      initialLines: initialPlaybackLinesForDisplay(widget.request.initialLine),
+      initialEpisodeId: _episode.id,
+      lookupInProgress: !_loadingLine && !widget.request.offlineOnly,
+    );
     _recoveryController = PlaybackRecoveryController();
     _danmakuController = DanmakuController()
       ..addListener(_handleDanmakuChanged);
@@ -169,11 +197,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       setProperty: _writeMpvProperty,
     )..addListener(_handleAnime4KChanged);
     _startPlaybackTrace();
-    _line = widget.request.initialLine;
-    _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
     _pendingInitialResumePosition = widget.request.resumePosition;
-    _loadingLine = _isPlayableLine(_line);
-    _lineLookupInProgress = !_loadingLine && !widget.request.offlineOnly;
     _resetPlaybackStallWatchdog(
       position: widget.request.resumePosition,
       grace: const Duration(seconds: 5),
@@ -366,7 +390,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_nativeVideo.dispose());
     _webVideo.dispose();
     _recoveryController.dispose();
-    unawaited(_lineController.dispose());
+    unawaited(_lineRepository.dispose());
+    _lineController.dispose();
     _danmakuController.dispose();
     _subtitleController.dispose();
     _gestureController.dispose();
@@ -967,58 +992,27 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
-    final serial = ++_lineLookupSerial;
     _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
     _cancelSingleBackupLookup();
-    _lineLookupCancellationToken?.cancel();
-    final previousSubscription = _lineLookupSubscription;
-    _lineLookupSubscription = null;
-    if (previousSubscription != null) await previousSubscription.cancel();
-    if (!mounted || serial != _lineLookupSerial) return;
-    final cancellationToken = RulePlaybackCancellationToken();
-    _lineLookupCancellationToken = cancellationToken;
     final usesProgressiveLookup = _usesProgressiveRuleLookup(
       widget.request.subject,
     );
+    final lookup = _lineRepository.lookupQuick(
+      subject: widget.request.subject,
+      episode: _episode,
+      progressive: usesProgressiveLookup,
+    );
     setState(() {
-      _lineLookupInProgress = true;
-      _lineScanInProgress = false;
-      _lineScanComplete = !usesProgressiveLookup;
-      _lineScanCompletedRules = 0;
-      _lineScanTotalRules = 0;
       _lineLookupMessage = null;
       _playerMessage = null;
       _playbackFailed = false;
     });
     _playbackTrace.record('line_lookup_started');
     try {
-      final discoveredLines = await ref
-          .read(animeControllerProvider.notifier)
-          .linesForEpisode(
-            widget.request.subject,
-            _episode,
-            cancellationToken: cancellationToken,
-          );
-      if (!mounted ||
-          serial != _lineLookupSerial ||
-          cancellationToken.isCancelled) {
-        return;
-      }
-      final controller = ref.read(animeControllerProvider.notifier);
-      final lines = await verifyPlaybackLinesBeforeDisplay(
-        discoveredLines,
-        verify: (line) => controller.verifyPlaybackLine(
-          line,
-          enrichMetadata: false,
-          cancellationToken: cancellationToken,
-        ),
-      );
-      if (!mounted ||
-          serial != _lineLookupSerial ||
-          cancellationToken.isCancelled) {
-        return;
-      }
-      final available = _availableLines(lines);
+      final inventory = await lookup;
+      if (!mounted || inventory == null) return;
+      final lines = inventory.lines;
+      final available = inventory.playableLines;
       for (final discovered in available) {
         _sessionController.dispatch(
           PlaybackSessionEvent.lineDiscovered(discovered.id),
@@ -1034,9 +1028,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         nextLine = _preferredPlayableLine(available);
       }
       setState(() {
-        _lines = lines;
         _line = nextLine;
-        _lineLookupInProgress = available.isEmpty && usesProgressiveLookup;
         _lineLookupMessage = available.isEmpty ? '暂时还没找到可用线路，仍在继续查找…' : null;
       });
       _playbackTrace.record(
@@ -1055,14 +1047,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _recordFinalPlaybackFailure(reason: 'no_playable_line');
       }
     } catch (error) {
-      if (!mounted || serial != _lineLookupSerial) return;
+      if (!mounted) return;
       _playbackTrace.record(
         'line_lookup_failed',
         fields: <String, Object?>{'error_type': error.runtimeType.toString()},
       );
       setState(() {
-        _lines = const [];
-        _lineLookupInProgress = false;
         _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
         _playbackFailed = true;
       });
@@ -1130,7 +1120,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _backupLookupDelayTimer != null ||
         _backupLookupInProgress ||
         _lineScanInProgress ||
-        _lineLookupSubscription != null) {
+        _hasExpandedLineLookup) {
       return;
     }
     _backupLookupDelayTimer = Timer(delay, () {
@@ -1164,57 +1154,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _nextPlayableLine() != null) {
       return;
     }
-    final serial = ++_backupLookupSerial;
-    final episodeId = _episode.id;
-    final token = RulePlaybackCancellationToken();
-    _backupLookupCancellationToken?.cancel();
-    _backupLookupCancellationToken = token;
-    _backupLookupInProgress = true;
-    try {
-      final snapshot = await ref
-          .read(animeControllerProvider.notifier)
-          .prepareSingleBackupForEpisode(
-            widget.request.subject,
-            _episode,
-            currentLine: current,
-            cancellationToken: token,
-          );
-      if (!mounted ||
-          serial != _backupLookupSerial ||
-          episodeId != _episode.id ||
-          token.isCancelled ||
-          snapshot.isEmpty) {
-        return;
-      }
-      var merged = mergePlaybackLineSnapshot(
-        currentLines: _lines,
-        snapshotLines: snapshot,
-      );
-      merged = _preserveLoadedLineIfProbeDisagrees(merged);
-      setState(() => _lines = merged);
-      final backup = _nextPlayableLine();
-      if (backup != null) {
-        _playbackTrace.record('backup_ready', fields: _lineTraceFields(backup));
-      }
-    } catch (_) {
-      // Backup preparation is best-effort and must never disturb playback.
-    } finally {
-      if (serial == _backupLookupSerial) {
-        _backupLookupInProgress = false;
-        if (identical(_backupLookupCancellationToken, token)) {
-          _backupLookupCancellationToken = null;
-        }
-      }
+    final inventory = await _lineRepository.prepareSingleBackup(
+      subject: widget.request.subject,
+      episode: _episode,
+      currentLine: current,
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
+    );
+    if (!mounted || inventory == null) return;
+    setState(() {});
+    final backup = _nextPlayableLine();
+    if (backup != null) {
+      _playbackTrace.record('backup_ready', fields: _lineTraceFields(backup));
     }
   }
 
   void _cancelSingleBackupLookup() {
-    _backupLookupSerial++;
     _backupLookupDelayTimer?.cancel();
     _backupLookupDelayTimer = null;
-    _backupLookupCancellationToken?.cancel();
-    _backupLookupCancellationToken = null;
-    _backupLookupInProgress = false;
+    _lineRepository.cancelSingleBackupLookup();
   }
 
   void _startExpandedLineLookup({bool autoplay = false}) {
@@ -1223,146 +1180,85 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         !_usesProgressiveRuleLookup(widget.request.subject) ||
         _lineScanComplete ||
         _lineScanInProgress ||
-        _lineLookupSubscription != null) {
+        _hasExpandedLineLookup) {
       return;
     }
     _cancelSingleBackupLookup();
-    final serial = _lineLookupSerial;
-    final episodeId = _episode.id;
-    final cancellationToken = _lineLookupCancellationToken ??=
-        RulePlaybackCancellationToken();
-    if (cancellationToken.isCancelled) return;
-    setState(() {
-      _lineScanInProgress = true;
-      _lineScanCompletedRules = 0;
-      _lineScanTotalRules = 0;
-      if (!_isPlayableLine(_line)) _lineLookupInProgress = true;
-    });
-
-    late final StreamSubscription<PlaybackLineLookupUpdate> subscription;
-    subscription = ref
-        .read(animeControllerProvider.notifier)
-        .lineUpdatesForEpisode(
-          widget.request.subject,
-          _episode,
-          cancellationToken: cancellationToken,
-        )
-        .listen(
-          (update) {
-            if (!mounted ||
-                serial != _lineLookupSerial ||
-                episodeId != _episode.id ||
-                cancellationToken.isCancelled) {
-              return;
-            }
-            var merged = mergePlaybackLineSnapshot(
-              currentLines: _lines,
-              snapshotLines: update.lines,
-              replacedProviderId:
-                  update.phase == PlaybackLineLookupPhase.verification
-                  ? update.resolvedProviderId
-                  : null,
-              authoritative: update.isComplete,
+    final started = _lineRepository.startExpandedLookup(
+      subject: widget.request.subject,
+      episode: _episode,
+      hasActivePlayableLine: _isPlayableLine(_line),
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
+      onUpdate: (repositoryUpdate) {
+        if (!mounted) return;
+        final update = repositoryUpdate.source;
+        final merged = repositoryUpdate.inventory.lines;
+        final available = repositoryUpdate.inventory.playableLines;
+        final previous = _line;
+        final recoveryPosition = _currentRecoveryPosition;
+        PlaybackLine? selected = _line;
+        if (selected != null) {
+          final refreshed = _lineById(merged, selected.id);
+          if (refreshed != null && (refreshed.available || _playbackFailed)) {
+            selected = refreshed;
+          }
+        }
+        final currentFailed =
+            _playbackFailed ||
+            (selected != null && _failedLineIds.contains(selected.id));
+        final target = currentFailed || !_isPlayableLine(selected)
+            ? _preferredPlayableLine(available)
+            : selected;
+        final shouldOpen =
+            target != null &&
+            !_failedLineIds.contains(target.id) &&
+            ((autoplay && (!_isPlayableLine(_line) || _loadedUrl == null)) ||
+                (currentFailed && _currentSettings.autoSwitchLine));
+        setState(() {
+          _line = shouldOpen ? target : selected;
+          _lineLookupMessage = available.isEmpty
+              ? update.isComplete
+                    ? _emptyLineMessage(merged, subject: widget.request.subject)
+                    : _progressiveLookupMessage(update)
+              : null;
+        });
+        if (shouldOpen) {
+          if (currentFailed) {
+            _beginPlaybackRecovery(
+              target,
+              strategy: 'auto_switch',
+              previous: previous,
+              position: recoveryPosition,
             );
-            merged = _preserveLoadedLineIfProbeDisagrees(merged);
-            final available = _availableLines(merged);
-            final previous = _line;
-            final recoveryPosition = _currentRecoveryPosition;
-            PlaybackLine? selected = _line;
-            if (selected != null) {
-              final refreshed = _lineById(merged, selected.id);
-              if (refreshed != null &&
-                  (refreshed.available || _playbackFailed)) {
-                selected = refreshed;
-              }
-            }
-            final currentFailed =
-                _playbackFailed ||
-                (selected != null && _failedLineIds.contains(selected.id));
-            final target = currentFailed || !_isPlayableLine(selected)
-                ? _preferredPlayableLine(available)
-                : selected;
-            final shouldOpen =
-                target != null &&
-                !_failedLineIds.contains(target.id) &&
-                ((autoplay &&
-                        (!_isPlayableLine(_line) || _loadedUrl == null)) ||
-                    (currentFailed && _currentSettings.autoSwitchLine));
-            setState(() {
-              _lines = merged;
-              _line = shouldOpen ? target : selected;
-              _lineScanInProgress = !update.isComplete;
-              _lineScanComplete = update.isComplete;
-              _lineScanCompletedRules = update.completedRules;
-              _lineScanTotalRules = update.totalRules;
-              _lineLookupInProgress = available.isEmpty && !update.isComplete;
-              _lineLookupMessage = available.isEmpty
-                  ? update.isComplete
-                        ? _emptyLineMessage(
-                            merged,
-                            subject: widget.request.subject,
-                          )
-                        : _progressiveLookupMessage(update)
-                  : null;
-            });
-            if (shouldOpen) {
-              if (currentFailed) {
-                _beginPlaybackRecovery(
-                  target,
-                  strategy: 'auto_switch',
-                  previous: previous,
-                  position: recoveryPosition,
-                );
-              }
-              unawaited(
-                _openLine(
-                  target,
-                  force: true,
-                  resumePosition: recoveryPosition,
-                ),
-              );
-            } else if (update.isComplete &&
-                available.isEmpty &&
-                (_playbackFailed || !_isPlayableLine(_line))) {
-              _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
-            }
-          },
-          onError: (Object error, StackTrace stackTrace) {
-            if (!mounted ||
-                serial != _lineLookupSerial ||
-                episodeId != _episode.id) {
-              return;
-            }
-            setState(() {
-              _lineScanInProgress = false;
-              _lineLookupInProgress = false;
-              _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
-            });
-            if (_playbackFailed || !_isPlayableLine(_line)) {
-              _recordFinalPlaybackFailure(reason: 'source_scan_failed');
-            }
-          },
-          onDone: () {
-            if (identical(_lineLookupSubscription, subscription)) {
-              _lineLookupSubscription = null;
-            }
-            if (!mounted ||
-                serial != _lineLookupSerial ||
-                episodeId != _episode.id) {
-              return;
-            }
-            setState(() {
-              _lineScanInProgress = false;
-              _lineScanComplete = true;
-              _lineLookupInProgress = false;
-            });
-            if (_availableLines(_lines).isEmpty &&
-                (_playbackFailed || !_isPlayableLine(_line))) {
-              _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
-            }
-          },
-        );
-    _lineLookupSubscription = subscription;
+          }
+          unawaited(
+            _openLine(target, force: true, resumePosition: recoveryPosition),
+          );
+        } else if (update.isComplete &&
+            available.isEmpty &&
+            (_playbackFailed || !_isPlayableLine(_line))) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
+        }
+      },
+      onError: (error, stackTrace) {
+        if (!mounted) return;
+        setState(() {
+          _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
+        });
+        if (_playbackFailed || !_isPlayableLine(_line)) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_failed');
+        }
+      },
+      onDone: () {
+        if (!mounted) return;
+        setState(() {});
+        if (_availableLines(_lines).isEmpty &&
+            (_playbackFailed || !_isPlayableLine(_line))) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
+        }
+      },
+    );
+    if (started) setState(() {});
   }
 
   List<PlaybackLine> _preserveLoadedLineIfProbeDisagrees(
@@ -1939,6 +1835,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
     _cancelSingleBackupLookup();
+    unawaited(_lineRepository.cancelLookup());
+    _lineRepository.resetForEpisode(
+      episodeId: episode.id,
+      lookupInProgress: true,
+    );
     _resetPlaybackStallWatchdog(
       position: Duration.zero,
       grace: const Duration(seconds: 5),
@@ -1952,15 +1853,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     setState(() {
       _episode = episode;
       _line = null;
-      _lines = const [];
       _loadedUrl = null;
       _playerMessage = null;
       _lineLookupMessage = null;
-      _lineScanInProgress = false;
-      _lineScanComplete = false;
-      _lineScanCompletedRules = 0;
-      _lineScanTotalRules = 0;
-      _lineLookupInProgress = true;
       _playbackFailed = false;
       _position = Duration.zero;
       _duration = Duration.zero;
@@ -2187,9 +2082,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     if (_leaving) return;
     _leaving = true;
-    _lineLookupCancellationToken?.cancel();
     _cancelSingleBackupLookup();
-    await _lineLookupSubscription?.cancel();
+    await _lineRepository.cancelLookup();
     await _restoreSystemUi();
     await _player.stop();
     if (mounted) safeNavigateBack(context);
