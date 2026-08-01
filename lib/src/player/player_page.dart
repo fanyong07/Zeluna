@@ -26,6 +26,7 @@ import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
+import 'video/native_video_controller.dart';
 import 'web_stream_player.dart';
 
 const _nativeResumeSeekMaxAttempts = 15;
@@ -42,8 +43,7 @@ class PlayerPage extends ConsumerStatefulWidget {
 class _PlayerPageState extends ConsumerState<PlayerPage>
     with WidgetsBindingObserver {
   late AnimeEpisode _episode;
-  late final Player _player;
-  late final VideoController _controller;
+  late final NativeVideoController _nativeVideo;
   late final WebStreamPlayerController _webPlayerController;
   late final FocusNode _shortcutFocusNode;
   late final PlaybackSessionController _sessionController;
@@ -113,8 +113,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
   Timer? _webLoadTimer;
-  Timer? _nativeFirstFrameTimer;
-  Timer? _nativeResumeSeekTimer;
   Timer? _stallWatchdogTimer;
   DateTime? _ignoreNativeErrorsUntil;
   Timer? _backupLookupDelayTimer;
@@ -147,12 +145,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _danmakuLoadSerial = 0;
   int? _danmakuRequestedEpisodeId;
 
+  Player get _player => _nativeVideo.player;
+  VideoController get _controller => _nativeVideo.surfaceController;
+  Timer? get _nativeFirstFrameTimer => _nativeVideo.firstFrameTimer;
+  set _nativeFirstFrameTimer(Timer? value) =>
+      _nativeVideo.replaceFirstFrameTimer(value);
+  Timer? get _nativeResumeSeekTimer => _nativeVideo.resumeSeekTimer;
+  set _nativeResumeSeekTimer(Timer? value) =>
+      _nativeVideo.replaceResumeSeekTimer(value);
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _player = Player();
-    _controller = VideoController(_player);
+    _nativeVideo = NativeVideoController();
     _webPlayerController = WebStreamPlayerController();
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
@@ -319,8 +325,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     _controlsHideTimer?.cancel();
     _webLoadTimer?.cancel();
-    _nativeFirstFrameTimer?.cancel();
-    _nativeResumeSeekTimer?.cancel();
     _stallWatchdogTimer?.cancel();
     _backupLookupDelayTimer?.cancel();
     _backupLookupCancellationToken?.cancel();
@@ -334,7 +338,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_restoreSystemUi());
     if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
     _appFullscreen.dispose();
-    unawaited(_player.dispose());
+    unawaited(_nativeVideo.dispose());
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     _sessionController.dispose();
@@ -725,8 +729,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _bindPlayer() {
-    _subscriptions
-      ..add(
+    _nativeVideo
+      ..track(
         _player.stream.playing.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           _sessionController.dispatch(
@@ -750,7 +754,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.position.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           _notePlaybackProgress(value);
@@ -786,7 +790,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.duration.listen((value) {
           if (mounted && !_usesWebPlayer) {
             setState(() => _duration = value);
@@ -796,12 +800,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.buffer.listen((value) {
           if (mounted && !_usesWebPlayer) setState(() => _buffer = value);
         }),
       )
-      ..add(
+      ..track(
         _player.stream.videoParams.listen((value) {
           if (mounted && !_usesWebPlayer) {
             setState(() => _videoParams = value);
@@ -810,7 +814,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.buffering.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           _sessionController.dispatch(
@@ -842,7 +846,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.volume.listen((value) {
           if (mounted) {
             setState(() {
@@ -852,7 +856,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.completed.listen((completed) {
           if (_usesWebPlayer) return;
           if (completed) {
@@ -864,13 +868,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           }
         }),
       )
-      ..add(
+      ..track(
         _player.stream.error.listen((error) {
           if (_usesWebPlayer) return;
           _handlePlayerError(error);
         }),
       )
-      ..add(_player.stream.log.listen(_handleSuperResolutionLog));
+      ..track(_player.stream.log.listen(_handleSuperResolutionLog));
   }
 
   void _applyPlaybackSettings(PlaybackSettings settings) {
