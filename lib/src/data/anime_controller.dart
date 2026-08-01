@@ -5,6 +5,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../accounts/account_controller.dart';
 import '../accounts/local_account_repository.dart';
 import '../accounts/cloud_account_repository.dart';
 import '../core/identity/local_identity_migration.dart';
@@ -488,29 +489,6 @@ class AnimeState {
 class AnimeController extends AsyncNotifier<AnimeState> {
   static const _settingsBox = 'anime.settings.v2';
   static const _libraryBox = 'anime.library.v2';
-  static const _pendingBangumiCredentialMigrationKey =
-      'credentials.pending.bangumi.v1';
-  static const _pendingTmdbCredentialMigrationKey =
-      'credentials.pending.tmdb.v1';
-  static const _accountSettingKeys = [
-    'playback',
-    'profile',
-    'homePreferences',
-    'appearance',
-    'danmaku',
-    'misc',
-    'services',
-    'rulePlugins',
-    'sourceEnabled',
-  ];
-  static const _accountLibraryKeys = [
-    'favorites',
-    'history',
-    'following',
-    'offlineTasks',
-    'imageFavorites',
-    'feedbacks',
-  ];
   static const _animeMetadataCacheKey = 'metadata.cache.anime';
   static const _seriesMetadataCacheKey = 'metadata.cache.series';
   static const _movieMetadataCacheKey = 'metadata.cache.movie';
@@ -523,11 +501,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
-  late LocalAccountRepository _accountRepository;
-  LocalAccount? _activeAccount;
+  AccountController? _accountController;
   int _homeRefreshVersion = 0;
   int _sourceCatalogRefreshVersion = 0;
-  int _accountContextVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _playbackPrefetches = <String, Future<void>>{};
@@ -539,13 +515,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   final _downloadPersistedAt = <String, DateTime>{};
   Future<void> _metadataWriteQueue = Future<void>.value();
   Future<void> _downloadWriteQueue = Future<void>.value();
-  Future<void> _accountOperationQueue = Future<void>.value();
   Timer? _downloadPersistTimer;
 
-  int get accountContextVersion => _accountContextVersion;
+  AccountController get _accounts {
+    final controller = _accountController;
+    if (controller == null) throw const AccountException('应用状态尚未准备好');
+    return controller;
+  }
+
+  LocalAccount? get _activeAccount => _accountController?.activeAccount;
+  int get _accountContextVersion => _accountController?.contextVersion ?? 0;
+  int get accountContextVersion => _accountController?.contextVersion ?? 0;
 
   bool isAccountContextCurrent(int version) =>
-      version == _accountContextVersion;
+      _accountController?.isContextCurrent(version) ?? version == 0;
 
   @override
   Future<AnimeState> build() async {
@@ -556,45 +539,28 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ]);
     _settings = boxes[0];
     _library = boxes[1];
-    _accountRepository = LocalAccountRepository(boxes[2]);
     await LocalIdentityMigration(settings: _settings, library: _library).run();
-    final pendingDeletion = _accountRepository.pendingDeletion();
-    if (pendingDeletion != null) {
-      await _resumePendingDeletion(pendingDeletion).onError((_, _) {});
-    }
-    await _resumePendingBangumiCredentialMigration().onError((_, _) {});
-    await _resumePendingTmdbCredentialMigration().onError((_, _) {});
-    final pendingRegistration = _accountRepository.pendingRegistration();
-    LocalAccount? recoveredRegistration;
-    if (pendingRegistration != null) {
-      await _resumePendingRegistration(pendingRegistration);
-      recoveredRegistration = pendingRegistration.account;
-    }
-    final cachedAccount =
-        recoveredRegistration ?? _accountRepository.currentCloudAccount();
-    final restoredAccount = await ref
-        .read(cloudAccountServiceProvider)
-        .restoreSession(cachedAccount);
-    if (restoredAccount != null) {
-      await _accountRepository.rememberCloudAccount(restoredAccount);
-      if (recoveredRegistration != null) {
-        await _accountRepository.finalizeRegistration(restoredAccount.id);
-      }
-    } else {
-      await _accountRepository.signOut();
-    }
-    _activeAccount = restoredAccount;
-    ref
-        .read(_bangumiCredentialAccountContextProvider)
-        .selectAccount(_activeAccount?.id);
-    ref
-        .read(_tmdbCredentialAccountContextProvider)
-        .selectAccount(_activeAccount?.id);
-    final accountSession = LocalAccountSession(
-      current: _activeAccount,
-      available: _accountRepository.listCloudAccounts(),
-      hasPendingCleanup: _accountRepository.pendingDeletion() != null,
+    _accountController = AccountController(
+      cloudService: ref.read(cloudAccountServiceProvider),
+      localRepository: LocalAccountRepository(boxes[2]),
+      settings: _settings,
+      library: _library,
+      bangumiCredentialStore: ref.read(bangumiCredentialStoreProvider),
+      tmdbCredentialStore: ref.read(tmdbCredentialStoreProvider),
+      activateScope: _applyAccountScope,
+      quiesceDownloads: _quiesceDownloadsForAccountChange,
+      readOwnedDownloads: _readAccountOwnedDownloads,
+      cancelDownload: (taskId) =>
+          ref.read(mediaDownloadServiceProvider).cancel(taskId),
+      deleteDownloadFile: (path) =>
+          ref.read(mediaDownloadServiceProvider).deleteFiles([path]),
+      selectCredentialContext: _selectCredentialAccountContext,
+      publishSession: _publishAccountSession,
+      publishProfile: _publishAccountProfile,
     );
+    final accountBootstrap = await _accounts.initialize();
+    final activeAccount = accountBootstrap.activeAccount;
+    final accountSession = accountBootstrap.session;
     final settingsJson = _settings.get(_accountSettingsKey('playback'));
     final settings = settingsJson is Map
         ? PlaybackSettings.fromJson(settingsJson.cast<String, dynamic>())
@@ -634,7 +600,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       offlineTasks: offlineTasks,
       imageFavorites: _readEntries('imageFavorites'),
       feedbacks: _readFeedbacks(),
-      profile: _profileFromJson(profileJson, _activeAccount),
+      profile: AccountController.profileFromJson(profileJson, activeAccount),
       accountSession: accountSession,
       homePreferences: homeJson is Map
           ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
@@ -650,10 +616,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       rulePlugins: rulePlugins,
       sourceCatalog: sourceCatalog,
     );
-    if (recoveredRegistration != null) {
-      await _accountRepository.setActiveAccount(recoveredRegistration.id);
-      await _accountRepository.finalizeRegistration(recoveredRegistration.id);
-    }
     if (!cachedHomeFeed.fresh) {
       unawaited(
         Future<void>.delayed(
@@ -1629,145 +1591,48 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required String nickname,
     required String password,
     String verificationCode = '000000',
-  }) => _runAccountOperation(() async {
-    final current = state.value;
-    if (current == null) throw const AccountException('应用状态尚未准备好');
-    final account = await ref
-        .read(cloudAccountServiceProvider)
-        .register(
-          email: email,
-          nickname: nickname,
-          password: password,
-          verificationCode: verificationCode,
-        );
-    await _quiesceDownloadsForAccountChange();
-    await _settings.flush();
-    await _library.flush();
-    final shouldImportGuestData =
-        _activeAccount == null && current.accountSession.available.isEmpty;
-    await _accountRepository.beginCloudRegistration(
-      account: account,
-      importGuestData: shouldImportGuestData,
-    );
-    final pending = _accountRepository.pendingRegistration();
-    if (pending == null) throw const AccountException('账号初始化失败，请重试');
-    await _resumePendingRegistration(pending);
-    await _activateAccount(pending.account);
-    await _accountRepository.finalizeRegistration(pending.account.id);
-  });
+  }) => _accounts.register(
+    email: email,
+    nickname: nickname,
+    password: password,
+    verificationCode: verificationCode,
+  );
 
   Future<void> requestRegistrationCode(String email) =>
-      ref.read(cloudAccountServiceProvider).requestRegistrationCode(email);
+      _accounts.requestRegistrationCode(email);
 
   Future<void> requestPasswordResetCode(String email) =>
-      ref.read(cloudAccountServiceProvider).requestPasswordResetCode(email);
+      _accounts.requestPasswordResetCode(email);
 
   Future<void> resetAccountPassword({
     required String email,
     required String verificationCode,
     required String newPassword,
-  }) => _runAccountOperation(() async {
-    final normalizedEmail = email.trim().toLowerCase();
-    await ref
-        .read(cloudAccountServiceProvider)
-        .resetPassword(
-          email: normalizedEmail,
-          verificationCode: verificationCode,
-          newPassword: newPassword,
-        );
-    if (_activeAccount?.email != normalizedEmail) return;
-    await ref.read(cloudAccountServiceProvider).logout();
-    await _quiesceDownloadsForAccountChange();
-    await _activateAccount(null);
-  });
+  }) => _accounts.resetPassword(
+    email: email,
+    verificationCode: verificationCode,
+    newPassword: newPassword,
+  );
 
   Future<void> loginAccount({
     required String email,
     required String password,
-  }) => _runAccountOperation(() async {
-    final account = await ref
-        .read(cloudAccountServiceProvider)
-        .login(email: email, password: password);
-    await _accountRepository.rememberCloudAccount(account);
-    await _quiesceDownloadsForAccountChange();
-    await _activateAccount(account);
-  });
+  }) => _accounts.login(email: email, password: password);
 
-  Future<void> signOutAccount() => _runAccountOperation(() async {
-    await ref.read(cloudAccountServiceProvider).logout();
-    await _quiesceDownloadsForAccountChange();
-    await _activateAccount(null);
-  });
+  Future<void> signOutAccount() => _accounts.signOut();
 
   Future<void> changeAccountPassword({
     required String currentPassword,
     required String newPassword,
-  }) => _runAccountOperation(() async {
-    final account = _activeAccount;
-    if (account == null) throw const AccountException('请先登录账号');
-    await ref
-        .read(cloudAccountServiceProvider)
-        .changePassword(
-          currentPassword: currentPassword,
-          newPassword: newPassword,
-        );
-  });
+  }) => _accounts.changePassword(
+    currentPassword: currentPassword,
+    newPassword: newPassword,
+  );
 
   Future<void> deleteCurrentAccount({required String password}) =>
-      _runAccountOperation(() async {
-        final account = _activeAccount;
-        final current = state.value;
-        if (account == null || current == null) {
-          throw const AccountException('请先登录账号');
-        }
-        await ref.read(cloudAccountServiceProvider).verifyPassword(password);
-        await ref.read(cloudAccountServiceProvider).logout();
-        await _quiesceDownloadsForAccountChange();
-        final latest = state.value;
-        final ownedDownloads = List<MediaDownloadTask>.from(
-          latest?.offlineTasks ?? const [],
-        );
-        final pendingDeletion = await _accountRepository.beginDeletion(
-          accountId: account.id,
-          taskIds: ownedDownloads.map((task) => task.id),
-          paths: ownedDownloads.expand(
-            (task) => <String?>[task.temporaryPath, task.localPath],
-          ),
-        );
-        await _activateAccount(null);
-        try {
-          await _resumePendingDeletion(pendingDeletion);
-        } finally {
-          final guest = state.value;
-          if (guest != null && _activeAccount == null) {
-            state = AsyncData(
-              guest.copyWith(
-                accountSession: LocalAccountSession(
-                  available: _accountRepository.listCloudAccounts(),
-                  hasPendingCleanup:
-                      _accountRepository.pendingDeletion() != null,
-                ),
-              ),
-            );
-          }
-        }
-      });
+      _accounts.deleteCurrent(password: password);
 
-  Future<void> retryPendingAccountCleanup() => _runAccountOperation(() async {
-    final pending = _accountRepository.pendingDeletion();
-    if (pending != null) await _resumePendingDeletion(pending);
-    final current = state.value;
-    if (current == null) return;
-    state = AsyncData(
-      current.copyWith(
-        accountSession: LocalAccountSession(
-          current: _activeAccount,
-          available: _accountRepository.listCloudAccounts(),
-          hasPendingCleanup: _accountRepository.pendingDeletion() != null,
-        ),
-      ),
-    );
-  });
+  Future<void> retryPendingAccountCleanup() => _accounts.retryPendingCleanup();
 
   Future<void> updateSettings(PlaybackSettings settings) async {
     final accountId = _activeAccount?.id;
@@ -1782,41 +1647,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   Future<void> updateProfile(UserProfileSettings profile) =>
-      _runAccountOperation(() async {
-        final current = state.value;
-        if (current == null) return;
-        var normalized = profile;
-        var session = current.accountSession;
-        final account = _activeAccount;
-        if (account != null) {
-          final cloudUpdated = await ref
-              .read(cloudAccountServiceProvider)
-              .updateNickname(profile.nickname);
-          final updated = await _accountRepository.rememberCloudAccount(
-            cloudUpdated,
-          );
-          if (_activeAccount?.id != account.id) return;
-          _activeAccount = updated;
-          normalized = profile.copyWith(
-            nickname: updated.nickname,
-            uid: updated.shortId,
-          );
-          session = LocalAccountSession(
-            current: updated,
-            available: _accountRepository.listCloudAccounts(),
-            hasPendingCleanup: _accountRepository.pendingDeletion() != null,
-          );
-        }
-        final latest = state.value;
-        if (latest == null) return;
-        state = AsyncData(
-          latest.copyWith(profile: normalized, accountSession: session),
-        );
-        await _settings.put(
-          _accountSettingsKeyFor(account?.id, 'profile'),
-          normalized.toJson(),
-        );
-      });
+      _accounts.updateProfile(profile);
 
   Future<void> updateHomePreferences(HomePreferences preferences) async {
     final accountId = _activeAccount?.id;
@@ -3078,7 +2909,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
   }
 
-  Future<void> _activateAccount(LocalAccount? account) async {
+  Future<void> _applyAccountScope(AccountScopeActivation activation) async {
+    final account = activation.account;
     final accountId = account?.id;
     final settingsJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'playback'),
@@ -3116,14 +2948,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     const sourceCatalog = SourceCatalogState();
     final offlineTasks = await _readDownloadTasksFor(accountId);
     final current = state.value;
-    if (current == null) return;
-    await _accountRepository.setActiveAccount(accountId);
-    _activeAccount = account;
-    ref.read(_bangumiCredentialAccountContextProvider).selectAccount(accountId);
-    ref.read(_tmdbCredentialAccountContextProvider).selectAccount(accountId);
-    ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
-    ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
-    _accountContextVersion++;
+    if (current == null ||
+        !_accounts.isContextCurrent(activation.contextVersion)) {
+      return;
+    }
     RulePlaybackSourceRepository.clearRuntimeCaches();
     ref.read(rulePlaybackResolverProvider).clearCaches();
     ref.read(m3uSourceAdapterProvider).clearCache();
@@ -3133,11 +2961,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _homeRefreshVersion++;
     _sourceCatalogRefreshVersion++;
     _cancelPlaybackPrefetches();
-    final session = LocalAccountSession(
-      current: account,
-      available: _accountRepository.listCloudAccounts(),
-      hasPendingCleanup: _accountRepository.pendingDeletion() != null,
-    );
     state = AsyncData(
       current.copyWith(
         selectedSubjects: const {},
@@ -3150,8 +2973,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         offlineTasks: offlineTasks,
         imageFavorites: _readEntriesFor(accountId, 'imageFavorites'),
         feedbacks: _readFeedbacksFor(accountId),
-        profile: _profileFromJson(profileJson, account),
-        accountSession: session,
+        profile: AccountController.profileFromJson(profileJson, account),
+        accountSession: activation.session,
         homePreferences: homeJson is Map
             ? HomePreferences.fromJson(homeJson.cast<String, dynamic>())
             : const HomePreferences(),
@@ -3173,160 +2996,39 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     unawaited(_refreshHomeFeed(services).onError((_, _) {}));
   }
 
-  Future<void> _resumePendingRegistration(
-    PendingLocalAccountRegistration pending,
-  ) async {
-    final accountId = pending.account.id;
-    if (pending.importGuestData) {
-      await _settings.put(_pendingBangumiCredentialMigrationKey, accountId);
-      try {
-        await ref
-            .read(bangumiCredentialStoreProvider)
-            .migrateGuestToAccount(accountId);
-        await _settings.delete(_pendingBangumiCredentialMigrationKey);
-      } catch (_) {
-        // Registration remains usable. A non-secret pending marker retries
-        // the secure-store migration on the next startup.
-      }
-      await _settings.put(_pendingTmdbCredentialMigrationKey, accountId);
-      try {
-        await ref
-            .read(tmdbCredentialStoreProvider)
-            .migrateGuestToAccount(accountId);
-        await _settings.delete(_pendingTmdbCredentialMigrationKey);
-      } catch (_) {
-        // Keep registration usable and retry the non-secret marker later.
-      }
-      for (final key in _accountSettingKeys) {
-        if (key == 'profile') continue;
-        final value = _settings.get(key);
-        final target = _accountSettingsKeyFor(accountId, key);
-        if (value != null && !_settings.containsKey(target)) {
-          await _settings.put(target, value);
-        }
-      }
-      for (final key in _accountLibraryKeys) {
-        final value = _library.get(key);
-        final target = _accountLibraryKeyFor(accountId, key);
-        if (value != null && !_library.containsKey(target)) {
-          await _library.put(target, value);
-        }
-      }
-      for (final key in _accountSettingKeys) {
-        await _settings.delete(key);
-      }
-      for (final key in _accountLibraryKeys) {
-        await _library.delete(key);
-      }
-    }
-    await _accountRepository.completeRegistration(accountId);
+  void _selectCredentialAccountContext(
+    String? accountId, {
+    required bool resetCredentialState,
+  }) {
+    ref.read(_bangumiCredentialAccountContextProvider).selectAccount(accountId);
+    ref.read(_tmdbCredentialAccountContextProvider).selectAccount(accountId);
+    if (!resetCredentialState) return;
+    ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
+    ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
   }
 
-  Future<void> _resumePendingBangumiCredentialMigration() async {
-    final accountId = _settings
-        .get(_pendingBangumiCredentialMigrationKey)
-        ?.toString()
-        .trim();
-    if (accountId == null || accountId.isEmpty) return;
-    if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
-    final pendingRegistration = _accountRepository.pendingRegistration();
-    final accountExists = _accountRepository.listCloudAccounts().any(
-      (account) => account.id == accountId,
-    );
-    if (!accountExists && pendingRegistration?.account.id != accountId) {
-      await _settings.delete(_pendingBangumiCredentialMigrationKey);
-      return;
-    }
-    await ref
-        .read(bangumiCredentialStoreProvider)
-        .migrateGuestToAccount(accountId);
-    await _settings.delete(_pendingBangumiCredentialMigrationKey);
+  List<AccountOwnedDownload> _readAccountOwnedDownloads() => List.unmodifiable(
+    (state.value?.offlineTasks ?? const <MediaDownloadTask>[]).map(
+      (task) => AccountOwnedDownload(
+        id: task.id,
+        temporaryPath: task.temporaryPath,
+        localPath: task.localPath,
+      ),
+    ),
+  );
+
+  void _publishAccountSession(LocalAccountSession session) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(accountSession: session));
   }
 
-  Future<void> _resumePendingTmdbCredentialMigration() async {
-    final accountId = _settings
-        .get(_pendingTmdbCredentialMigrationKey)
-        ?.toString()
-        .trim();
-    if (accountId == null || accountId.isEmpty) return;
-    if (_accountRepository.pendingDeletion()?.accountId == accountId) return;
-    final pendingRegistration = _accountRepository.pendingRegistration();
-    final accountExists = _accountRepository.listCloudAccounts().any(
-      (account) => account.id == accountId,
+  void _publishAccountProfile(AccountProfileUpdate update) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(profile: update.profile, accountSession: update.session),
     );
-    if (!accountExists && pendingRegistration?.account.id != accountId) {
-      await _settings.delete(_pendingTmdbCredentialMigrationKey);
-      return;
-    }
-    await ref
-        .read(tmdbCredentialStoreProvider)
-        .migrateGuestToAccount(accountId);
-    await _settings.delete(_pendingTmdbCredentialMigrationKey);
-  }
-
-  Future<void> _resumePendingDeletion(
-    PendingLocalAccountDeletion pending,
-  ) async {
-    Object? firstError;
-
-    Future<void> attempt(Future<void> Function() action) async {
-      try {
-        await action();
-      } catch (error) {
-        firstError ??= error;
-      }
-    }
-
-    final downloadService = ref.read(mediaDownloadServiceProvider);
-    for (final taskId in pending.taskIds) {
-      downloadService.cancel(taskId);
-    }
-    await attempt(
-      () => _accountRepository.deleteAccountRecord(pending.accountId),
-    );
-    for (final path in pending.paths) {
-      await attempt(() => downloadService.deleteFiles([path]));
-    }
-    for (final key in _accountSettingKeys) {
-      await attempt(
-        () => _settings.delete(_accountSettingsKeyFor(pending.accountId, key)),
-      );
-    }
-    for (final key in _accountLibraryKeys) {
-      await attempt(
-        () => _library.delete(_accountLibraryKeyFor(pending.accountId, key)),
-      );
-    }
-    await attempt(
-      () => ref
-          .read(bangumiCredentialStoreProvider)
-          .clearAccount(pending.accountId),
-    );
-    await attempt(
-      () =>
-          ref.read(tmdbCredentialStoreProvider).clearAccount(pending.accountId),
-    );
-    if (_settings.get(_pendingBangumiCredentialMigrationKey)?.toString() ==
-        pending.accountId) {
-      await attempt(
-        () => _settings.delete(_pendingBangumiCredentialMigrationKey),
-      );
-    }
-    if (_settings.get(_pendingTmdbCredentialMigrationKey)?.toString() ==
-        pending.accountId) {
-      await attempt(() => _settings.delete(_pendingTmdbCredentialMigrationKey));
-    }
-    if (firstError == null) {
-      await _accountRepository.completeDeletion(pending.accountId);
-      return;
-    }
-    throw const AccountException('账号已退出，但部分本机文件仍在清理；下次启动会自动继续');
-  }
-
-  Future<T> _runAccountOperation<T>(Future<T> Function() action) {
-    final operation = _accountOperationQueue.then((_) => action());
-    _accountOperationQueue = operation.then<void>((_) {}, onError: (_, _) {});
-    return operation;
   }
 
   Future<void> _quiesceDownloadsForAccountChange() async {
@@ -3348,31 +3050,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
   }
 
-  UserProfileSettings _profileFromJson(Object? value, LocalAccount? account) {
-    var profile = value is Map
-        ? UserProfileSettings.fromJson(value.cast<String, dynamic>())
-        : const UserProfileSettings();
-    if (account != null) {
-      return profile.copyWith(
-        nickname: account.nickname,
-        uid: account.shortId,
-        density: profile.density < 0 ? 0 : profile.density,
-        coins: profile.coins < 0 ? 0 : profile.coins,
-      );
-    }
-    final isLegacyPlaceholder =
-        profile.nickname.trim().toLowerCase() == 'fanyong' &&
-        profile.uid == '31979';
-    if (isLegacyPlaceholder || profile.nickname.trim().isEmpty) {
-      profile = const UserProfileSettings();
-    }
-    return profile;
-  }
-
   void _ensureAccountContext(int expectedVersion) {
-    if (expectedVersion != _accountContextVersion) {
-      throw const AccountException('账号已切换，请重新打开当前内容');
-    }
+    _accounts.ensureContext(expectedVersion);
   }
 
   String _accountSettingsKey(String key) =>
@@ -3382,10 +3061,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _accountLibraryKeyFor(_activeAccount?.id, key);
 
   static String _accountSettingsKeyFor(String? accountId, String key) =>
-      accountId == null ? key : 'account.$accountId.$key';
+      AccountController.settingsKeyFor(accountId, key);
 
   static String _accountLibraryKeyFor(String? accountId, String key) =>
-      accountId == null ? key : 'account.$accountId.$key';
+      AccountController.libraryKeyFor(accountId, key);
 
   List<LibraryEntry> _toggleSubject(
     List<LibraryEntry> entries,
