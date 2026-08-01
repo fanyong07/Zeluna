@@ -5,6 +5,8 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_models.dart';
@@ -77,7 +79,11 @@ abstract class PlaybackSourceRepository {
 
 class InternetArchivePlaybackSourceRepository {
   InternetArchivePlaybackSourceRepository({http.Client? client})
-    : _client = client ?? http.Client();
+    : _client =
+          client ??
+          createNetworkHttpClient(
+            NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+          );
 
   final http.Client _client;
 

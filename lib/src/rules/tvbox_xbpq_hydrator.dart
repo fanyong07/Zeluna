@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
 import '../sources/source_catalog_models.dart';
 import 'rule_importer.dart';
 import 'rule_models.dart';
@@ -63,7 +64,12 @@ class TvBoxXbpqHydrator {
     DateTime Function()? clock,
   }) : assert(maxFileBytes > 0),
        assert(maxSites >= 0),
-       _client = client ?? http.Client(),
+       _client =
+           client ??
+           createUntrustedSourceHttpClient(
+             maxResponseBytes: maxFileBytes,
+             timeout: timeout,
+           ),
        _ownsClient = client == null,
        _importer = importer,
        _clock = clock ?? DateTime.now;

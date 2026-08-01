@@ -4,6 +4,8 @@ import 'dart:math';
 
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import 'chinese_text.dart';
 
@@ -86,7 +88,11 @@ class BangumiMetadataRepository {
     Future<void> Function(BangumiAccessCredential credential)?
     onAccessTokenRejected,
     DateTime Function()? clock,
-  }) : _client = client ?? http.Client(),
+  }) : _client =
+           client ??
+           createNetworkHttpClient(
+             NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+           ),
        _accessCredentialProvider = accessCredentialProvider,
        _onAccessTokenRejected = onAccessTokenRejected,
        _clock = clock ?? DateTime.now;

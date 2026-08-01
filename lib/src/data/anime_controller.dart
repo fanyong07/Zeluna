@@ -277,28 +277,8 @@ final playbackSourceRepositoryProvider = Provider<PlaybackSourceRepository>(
 );
 
 final rulePlaybackResolverProvider = Provider<RulePlaybackResolver>((ref) {
-  final client = createNetworkHttpClient(
-    const NetworkRequestPolicy(
-      service: NetworkServiceKind.mediaResource,
-      httpsOnly: false,
-      allowPrivateNetwork: false,
-      maxResponseBytes: 512 * 1024,
-      requestTimeout: Duration(seconds: 12),
-      allowSyntheticDns: true,
-      allowLiteralBenchmarkAddress: true,
-      rejectRedirects: false,
-    ),
-  );
-  final rulePublicClient = createNetworkHttpClient(
-    const NetworkRequestPolicy(
-      service: NetworkServiceKind.rulePage,
-      httpsOnly: false,
-      allowPrivateNetwork: false,
-      maxResponseBytes: 4 * 1024 * 1024,
-      requestTimeout: Duration(seconds: 12),
-      rejectRedirects: false,
-    ),
-  );
+  final client = createTrustedMediaProbeHttpClient();
+  final rulePublicClient = createUntrustedSourceHttpClient();
   final drpyPublicClient = createDrpyPublicHttpClient();
   ref.onDispose(client.close);
   ref.onDispose(rulePublicClient.close);

@@ -7,12 +7,15 @@ import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
 import '../domain/anime_models.dart';
 import 'danmaku_response_decoder.dart';
 
 class DanmakuRepository {
   DanmakuRepository({http.Client? client})
-    : _client = client ?? http.Client(),
+    : _client =
+          client ??
+          createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
       _ownsClient = client == null;
 
   static const _requestTimeout = Duration(seconds: 8);

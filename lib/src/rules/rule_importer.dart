@@ -5,6 +5,8 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import 'csp_rule_support.dart';
 import 'rule_models.dart';
 
@@ -40,12 +42,29 @@ class RuleImporter {
         'GitHub 仓库首页或代码页面不是规则文件。请使用 raw JSON 地址，或下载 JSON 后从本地/剪贴板导入。',
       );
     }
+    final policy = NetworkRequestPolicy(
+      service: NetworkServiceKind.rulePage,
+      httpsOnly: false,
+      allowPrivateNetwork: false,
+      maxResponseBytes: maxFileBytes,
+      requestTimeout: timeout,
+    );
+    policy.ensureUriAllowed(uri);
     final ownedClient = _client == null;
-    final client = _client ?? http.Client();
+    final client = _client ?? createNetworkHttpClient(policy);
     try {
       final request = http.Request('GET', uri)
         ..headers['Accept'] = 'application/json, text/plain;q=0.9';
       final response = await client.send(request).timeout(timeout);
+      if (response.statusCode >= 300 && response.statusCode < 400) {
+        final location = response.headers['location']?.trim() ?? '';
+        if (location.isNotEmpty) {
+          policy.ensureUriAllowed(uri.resolve(location));
+        }
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        throw const FormatException('规则导入地址发生重定向，已停止访问。');
+      }
       if (response.statusCode < 200 || response.statusCode >= 400) {
         throw FormatException('仓库请求失败：HTTP ${response.statusCode}');
       }
@@ -63,6 +82,8 @@ class RuleImporter {
         maxFileBytes,
       ).timeout(timeout);
       return importFromText(text, sourceUrl: uri.toString());
+    } on NetworkSecurityException catch (error) {
+      throw FormatException(error.message);
     } finally {
       if (ownedClient) client.close();
     }

@@ -10,7 +10,6 @@ import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
-import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import 'android_csp_bridge.dart';
 import 'animeko_webview_sniffer.dart';
@@ -240,16 +239,7 @@ class RulePlaybackResolver {
           injectedClient ??
           (isDrpy
               ? _drpyRuntime.createPublicHttpClient()
-              : createNetworkHttpClient(
-                  const NetworkRequestPolicy(
-                    service: NetworkServiceKind.rulePage,
-                    httpsOnly: false,
-                    allowPrivateNetwork: false,
-                    maxResponseBytes: 4 * 1024 * 1024,
-                    requestTimeout: Duration(seconds: 12),
-                    rejectRedirects: false,
-                  ),
-                ));
+              : createUntrustedSourceHttpClient());
       final started = Stopwatch()..start();
       try {
         return switch (rule.engine.toLowerCase()) {

@@ -5,6 +5,8 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 
 class TmdbTokenValidation {
@@ -25,7 +27,11 @@ class ExternalServiceRepository {
     http.Client? client,
     Future<String?> Function()? tmdbAccessTokenProvider,
     Future<void> Function(String rejectedToken)? onTmdbAccessTokenRejected,
-  }) : _client = client ?? http.Client(),
+  }) : _client =
+           client ??
+           createNetworkHttpClient(
+             NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+           ),
        _tmdbAccessTokenProvider = tmdbAccessTokenProvider,
        _onTmdbAccessTokenRejected = onTmdbAccessTokenRejected;
 

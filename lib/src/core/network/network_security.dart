@@ -207,7 +207,9 @@ bool isSensitiveNetworkHeader(String name) {
       normalized.contains('token') ||
       normalized.contains('api-key') ||
       normalized.contains('apikey') ||
-      normalized.contains('secret');
+      normalized.contains('secret') ||
+      normalized.contains('signature') ||
+      normalized.contains('credential');
 }
 
 Map<String, String> headersForNetworkRedirect(

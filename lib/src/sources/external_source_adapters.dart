@@ -8,6 +8,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/network_http_client.dart';
 import '../domain/anime_models.dart';
 import 'source_catalog_models.dart';
 import 'source_proxy_uri.dart';
@@ -355,7 +356,12 @@ class M3uSourceAdapter implements SourceSearchAdapter<M3uChannel> {
     this.uriPolicy = const SourceUriPolicy(),
     M3uPlaylistParser? parser,
     SourceAdapterClock? clock,
-  }) : _client = client ?? http.Client(),
+  }) : _client =
+           client ??
+           createUntrustedSourceHttpClient(
+             maxResponseBytes: maxPlaylistBytes,
+             timeout: timeout,
+           ),
        _ownsClient = client == null,
        _parser = parser ?? M3uPlaylistParser(uriPolicy: uriPolicy),
        _cache = _TtlCache(clock: clock ?? DateTime.now, maxEntries: 48),
@@ -608,7 +614,12 @@ class DmhySourceAdapter implements SourceSearchAdapter<TorrentResource> {
     this.uriPolicy = const SourceUriPolicy(),
     DmhySearchParser? parser,
     SourceAdapterClock? clock,
-  }) : _client = client ?? http.Client(),
+  }) : _client =
+           client ??
+           createUntrustedSourceHttpClient(
+             maxResponseBytes: maxResponseBytes,
+             timeout: timeout,
+           ),
        _ownsClient = client == null,
        _parser = parser ?? DmhySearchParser(uriPolicy: uriPolicy),
        _cache = _TtlCache(clock: clock ?? DateTime.now, maxEntries: 64),

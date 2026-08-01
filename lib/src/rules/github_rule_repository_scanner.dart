@@ -2,6 +2,9 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
+
 class GitHubRuleRepositoryScanner {
   const GitHubRuleRepositoryScanner({
     http.Client? client,
@@ -27,7 +30,11 @@ class GitHubRuleRepositoryScanner {
     }
 
     final ownedClient = _client == null;
-    final client = _client ?? http.Client();
+    final client =
+        _client ??
+        createNetworkHttpClient(
+          NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+        );
     final headers = const {'Accept': 'application/vnd.github+json'};
     try {
       final metadataUri = Uri.https(

@@ -57,6 +57,32 @@ void main() {
     expect(bundle.rules.single.name, '安全测试源');
   });
 
+  test('rule import redirects cannot escape to a private address', () async {
+    var requests = 0;
+    final client = MockClient((request) async {
+      requests++;
+      return http.Response(
+        '',
+        302,
+        headers: {'location': 'http://169.254.169.254/latest/meta-data'},
+      );
+    });
+    final importer = RuleImporter(client: client);
+    addTearDown(client.close);
+
+    await expectLater(
+      importer.importFromUrl('https://rules.example/start.json'),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('Private or special-purpose'),
+        ),
+      ),
+    );
+    expect(requests, 1);
+  });
+
   test(
     'declared content length is rejected before reading response body',
     () async {

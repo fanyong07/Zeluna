@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import 'rule_importer.dart';
 import 'rule_models.dart';
 
@@ -131,7 +133,11 @@ class KazumiRuleRepository {
 
   Future<KazumiRuleCatalog> refreshCatalog() async {
     final ownedClient = _client == null;
-    final client = _client ?? http.Client();
+    final client =
+        _client ??
+        createNetworkHttpClient(
+          NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+        );
     try {
       final body = await _getTextWithFallback(
         client,
@@ -178,7 +184,11 @@ class KazumiRuleRepository {
     }
 
     final ownedClient = _client == null;
-    final client = _client ?? http.Client();
+    final client =
+        _client ??
+        createNetworkHttpClient(
+          NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+        );
     try {
       final rules = <RulePlugin>[];
       final failedNames = <String>[];

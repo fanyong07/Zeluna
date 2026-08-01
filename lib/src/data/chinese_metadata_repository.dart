@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import 'bangumi_metadata_repository.dart';
 import 'chinese_text.dart';
@@ -29,7 +31,11 @@ class ChineseMetadataRepository {
     Duration cacheTtl = const Duration(days: 7),
     Duration missCacheTtl = const Duration(hours: 6),
     DateTime Function()? now,
-  }) : _client = client ?? http.Client(),
+  }) : _client =
+           client ??
+           createNetworkHttpClient(
+             NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+           ),
        _bangumiRepository = bangumiRepository ?? BangumiMetadataRepository(),
        _cacheTtl = cacheTtl,
        _missCacheTtl = missCacheTtl,
