@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `6f0f9ba` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `2a2e873` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -331,12 +331,44 @@ Builds: not run for this behavior-preserving domain slice. Android, Windows, and
 
 Commit: `6f0f9ba refactor: split account controller`
 
-Remaining domains, in required order: Settings, Sources, Downloads, Library, Catalog, PlaybackDiscovery, Sync.
+Remaining domains, in required order: Sources, Downloads, Library, Catalog, PlaybackDiscovery, Sync.
 
 Remaining risks:
 
 - Account scope activation still calls compatibility adapters inside `AnimeController`; those adapters will shrink as Settings, Sources, Downloads, Library, Catalog, and PlaybackDiscovery acquire their own owners.
 - Real signed-device and production account acceptance remains G13/G14 work. No signing material, production secret, real user database, or production environment was accessed.
+
+### SettingsController
+
+Audit:
+
+- Playback, home, appearance, danmaku, miscellaneous, external-service, network, advanced-mode, and security-related settings were parsed, published, persisted, and given runtime side effects directly inside `AnimeController`.
+- Concurrent settings writes had no explicit owner or ordering guarantee. Account changes flushed Hive but could not await a newly scheduled settings write before migrating or loading a different account scope.
+- The previous external-service change signature omitted playback-backend endpoint and trust-mode fields, so changing the backend could leave prefetched lines from the old endpoint in memory.
+
+Changes:
+
+- Added an independent `SettingsController` with a typed `SettingsSnapshot`, account/context scope, defensive JSON restore, centralized service normalization, ordered persistence queue, and explicit ports for state publication, screen-wake behavior, and cache invalidation.
+- Account activation now loads all six settings groups through the settings owner. Account changes await the settings write queue before migrating or swapping scope, while late writes continue targeting only the account captured when the user made the change.
+- Miscellaneous and external-service side effects carry mutation and account-context guards, so an old account cannot toggle wake lock or invalidate a new account after a delayed write.
+- Playback-backend endpoint, self-hosted mode, and insecure-HTTP confirmation now form a dedicated change signature. Backend changes clear only playback discovery caches; metadata cache refresh remains separately classified.
+- `AnimeController` retains the public settings methods as compatibility delegates and fell from 4,074 to 3,959 lines.
+
+Tests:
+
+- Added direct regressions for account-scoped restore/persistence, deterministic normalization, insecure self-hosted confirmation, stale cross-account side-effect suppression, backend-change classification, and ordered writes.
+- Settings, account switching, catalog/navigation, metadata credentials, playback backend, application rebuild, and chrome-layout focused regressions: 59 passed, 2 intentionally skipped, 0 failed.
+- Full `flutter test --reporter json`: 547 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `2a2e873 refactor: split settings controller`
+
+Remaining risks:
+
+- External-service cache invalidation still crosses compatibility ports into the future Catalog and PlaybackDiscovery controllers; no playback ranking or concurrency parameter changed.
+- Sensitive third-party credentials remain in their existing dedicated stores or existing legacy model fields. G8/G10 must enforce final token lifecycle and sync exclusions without logging or migrating real secrets.
 
 ## G7 Server architecture
 
