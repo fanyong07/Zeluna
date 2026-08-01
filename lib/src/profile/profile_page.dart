@@ -78,7 +78,9 @@ class _ProfileBanner extends StatelessWidget {
                 title: state.profile.nickname,
               ),
               const DecoratedBox(
-                decoration: BoxDecoration(gradient: AppOverlays.heroLeadingSoft),
+                decoration: BoxDecoration(
+                  gradient: AppOverlays.heroLeadingSoft,
+                ),
               ),
               Padding(
                 padding: EdgeInsets.all(compact ? 16 : 24),

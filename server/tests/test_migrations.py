@@ -71,6 +71,46 @@ def test_empty_database_upgrades_to_head_and_rolls_back(tmp_path):
         engine.dispose()
 
 
+def test_upgrade_head_is_idempotent_and_preserves_rows(tmp_path):
+    database_path = tmp_path / "repeated.db"
+    config = _config(database_path)
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users (
+                email, name, password_hash, role, sex, avatar, exp, coin,
+                color, address, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "repeat@example.com",
+                "repeat-user",
+                "hash",
+                "user",
+                "",
+                "",
+                0,
+                0,
+                "#000000",
+                "",
+                1,
+                1,
+            ),
+        )
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+    with sqlite3.connect(database_path) as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM users WHERE email = ?",
+            ("repeat@example.com",),
+        ).fetchone()[0]
+    assert count == 1
+    assert _revision(database_path) == migration_head_revision()
+
+
 def test_existing_schema_deduplicates_cache_and_preserves_data(tmp_path):
     database_path = tmp_path / "existing.db"
     url = f"sqlite:///{database_path.as_posix()}"

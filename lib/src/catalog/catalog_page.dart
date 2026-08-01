@@ -3068,7 +3068,9 @@ class _TileCloud<T> extends StatelessWidget {
                 children: [
                   PosterArt(coverUrl: imageOf(item), title: labelOf(item)),
                   DecoratedBox(
-                    decoration: BoxDecoration(color: AppOverlays.labelPlate(0.65)),
+                    decoration: BoxDecoration(
+                      color: AppOverlays.labelPlate(0.65),
+                    ),
                   ),
                   Align(
                     alignment: Alignment.bottomLeft,
@@ -3581,9 +3583,7 @@ class _DetailHero extends StatelessWidget {
       children: [
         if (backendManaged || subjectPlaybackLabel(subject).isNotEmpty)
           SmallBadge(
-            label: backendManaged
-                ? '在线可播'
-                : subjectPlaybackLabel(subject),
+            label: backendManaged ? '在线可播' : subjectPlaybackLabel(subject),
             active: backendManaged || directlyPlayable,
           ),
         SmallBadge(
@@ -3688,10 +3688,11 @@ class _DetailHero extends StatelessWidget {
         final compact = constraints.maxWidth < 720;
         final textScale = MediaQuery.textScalerOf(context).scale(1);
         // Without a real summary the banner can sit tighter on phones.
-        final compactHeight = (hasSummary
-                ? 360 + math.max(0, textScale - 1) * 72
-                : 300 + math.max(0, textScale - 1) * 56)
-            .toDouble();
+        final compactHeight =
+            (hasSummary
+                    ? 360 + math.max(0, textScale - 1) * 72
+                    : 300 + math.max(0, textScale - 1) * 56)
+                .toDouble();
         return SizedBox(
           height: compact ? compactHeight : 292,
           child: AppPanel(
@@ -3837,8 +3838,10 @@ class _DetailRightRail extends StatelessWidget {
         const SizedBox(height: 14),
         Builder(
           builder: (context) {
-            final railSummary =
-                _publicSubjectMetadata(context, bundle.subject).summary.trim();
+            final railSummary = _publicSubjectMetadata(
+              context,
+              bundle.subject,
+            ).summary.trim();
             final hasRailSummary =
                 railSummary.isNotEmpty && !railSummary.startsWith('暂无');
             if (!hasRailSummary) return const SizedBox.shrink();
@@ -3909,34 +3912,19 @@ class _DetailTabs extends StatelessWidget {
       overlayColor: WidgetStatePropertyAll(
         scheme.primary.withValues(alpha: 0.08),
       ),
-      labelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
-        fontWeight: FontWeight.w800,
-      ),
-      unselectedLabelStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
-        fontWeight: FontWeight.w600,
-      ),
+      labelStyle: Theme.of(
+        context,
+      ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
+      unselectedLabelStyle: Theme.of(
+        context,
+      ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600),
       labelPadding: EdgeInsets.symmetric(horizontal: compact ? 14 : 18),
       tabs: [
-        Tab(
-          height: compact ? 44 : 52,
-          text: '简介',
-        ),
-        Tab(
-          height: compact ? 44 : 52,
-          text: '选集',
-        ),
-        Tab(
-          height: compact ? 44 : 52,
-          text: '角色',
-        ),
-        Tab(
-          height: compact ? 44 : 52,
-          text: '职员',
-        ),
-        Tab(
-          height: compact ? 44 : 52,
-          text: '推荐',
-        ),
+        Tab(height: compact ? 44 : 52, text: '简介'),
+        Tab(height: compact ? 44 : 52, text: '选集'),
+        Tab(height: compact ? 44 : 52, text: '角色'),
+        Tab(height: compact ? 44 : 52, text: '职员'),
+        Tab(height: compact ? 44 : 52, text: '推荐'),
       ],
     );
   }
@@ -4036,9 +4024,7 @@ class _DetailInfo extends StatelessWidget {
             children: [
               for (final tag in subject.tags.take(32))
                 _Chip(
-                  label: tag.count > 0
-                      ? '${tag.name}  ${tag.count}'
-                      : tag.name,
+                  label: tag.count > 0 ? '${tag.name}  ${tag.count}' : tag.name,
                 ),
             ],
           ),
@@ -4083,8 +4069,9 @@ class _EpisodeGrid extends StatelessWidget {
                 color: index == 0
                     ? scheme.primaryContainer
                     : scheme.surfaceContainer,
-                borderColor:
-                    index == 0 ? scheme.primary : scheme.outlineVariant,
+                borderColor: index == 0
+                    ? scheme.primary
+                    : scheme.outlineVariant,
                 child: Row(
                   children: [
                     Text(

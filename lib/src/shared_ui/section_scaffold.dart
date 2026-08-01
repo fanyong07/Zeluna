@@ -289,8 +289,9 @@ class AppStateView extends StatelessWidget {
           }
         : _toneColor(context, tone);
     final titleColor = onTheater ? AppColors.theaterInk : scheme.onSurface;
-    final bodyColor =
-        onTheater ? AppColors.theaterMuted : scheme.onSurfaceVariant;
+    final bodyColor = onTheater
+        ? AppColors.theaterMuted
+        : scheme.onSurfaceVariant;
     final content = ConstrainedBox(
       constraints: BoxConstraints(maxWidth: compact ? 360 : 440),
       child: Column(

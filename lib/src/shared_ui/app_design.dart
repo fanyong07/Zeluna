@@ -92,11 +92,7 @@ class AppOverlays {
   static const posterBottom = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [
-      Color(0x001B1A18),
-      Color(0x661B1A18),
-      Color(0xE61B1A18),
-    ],
+    colors: [Color(0x001B1A18), Color(0x661B1A18), Color(0xE61B1A18)],
     stops: [0.35, 0.72, 1],
   );
 

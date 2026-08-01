@@ -1,0 +1,143 @@
+name: Quality Gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.41.3
+  UV_VERSION: 0.11.32
+
+jobs:
+  flutter:
+    name: Flutter analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Resolve locked Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Verify Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib test integration_test
+      - name: Analyze Flutter sources
+        run: flutter analyze --suppress-analytics
+      - name: Run Flutter tests
+        run: flutter test --reporter compact
+
+  android:
+    name: Android debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build apk --debug --suppress-analytics
+
+  windows:
+    name: Windows build and WebView fork
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build windows --suppress-analytics
+      - name: Exercise local WebView fork lifecycle
+        timeout-minutes: 15
+        run: flutter test integration_test/animeko_webview_sniffer_integration_test.dart -d windows --reporter compact
+
+  web:
+    name: Web build and conditional stubs
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build web --release --suppress-analytics
+
+  python:
+    name: Python, Alembic, lint, and audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+      - run: uv sync --frozen --all-groups
+      - name: Compile Python sources
+        run: uv run python -m compileall -q server tests tools
+      - name: Run server and Alembic migration tests
+        run: uv run pytest -q
+      - name: Run Ruff correctness checks
+        run: uv run ruff check .
+      - name: Audit Python vulnerabilities
+        run: uv run pip-audit --strict
+
+  supply-chain:
+    name: Secrets, licenses, advisories, and SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+      - run: flutter pub get --enforce-lockfile
+      - run: uv sync --project server --frozen --all-groups
+      - name: Verify repository artifact policy
+        run: uv run --project server python tool/ci/repository_gate.py --root .
+      - name: Generate Python CycloneDX SBOM
+        run: uv export --project server --frozen --no-dev --preview-features sbom-export --quiet --format cyclonedx1.5 --output-file build/sbom/python.cdx.json
+      - name: Verify advisories and licenses; generate Flutter SBOM
+        run: uv run --project server python tool/ci/dependency_gate.py --root .
+      - name: Upload supply-chain reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: supply-chain-reports
+          path: |
+            build/reports/*.json
+            build/sbom/*.json
+          if-no-files-found: warn
+          retention-days: 14
