@@ -92,8 +92,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _playbackFailed = false;
   var _fullscreen = false;
   var _muted = false;
-  var _autoSwitching = false;
-  var _autoSwitchRetryPending = false;
   var _leaving = false;
   var _lineLookupSerial = 0;
   var _openLineSerial = 0;
@@ -107,12 +105,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _backupLookupInProgress = false;
   var _backupLookupSerial = 0;
   var _appInForeground = true;
-  Duration _lastPlaybackProgressPosition = Duration.zero;
-  DateTime _lastPlaybackProgressAt = DateTime.now();
-  DateTime? _lastStallRecoveryAt;
-  DateTime? _stallWatchdogSuppressedUntil;
   Duration? _pendingInitialResumePosition;
-  Duration? _pendingAutoSwitchResumePosition;
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -1082,38 +1075,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     Duration? position,
     Duration grace = Duration.zero,
   }) {
-    final now = DateTime.now();
-    _lastPlaybackProgressPosition = position ?? _position;
-    _lastPlaybackProgressAt = now;
-    _stallWatchdogSuppressedUntil = grace > Duration.zero
-        ? now.add(grace)
-        : null;
+    _recoveryController.resetStallWatchdog(
+      position: position ?? _position,
+      grace: grace,
+    );
   }
 
   void _notePlaybackProgress(Duration value) {
-    final movedForward = value > _lastPlaybackProgressPosition;
-    final jumpedBackward =
-        _lastPlaybackProgressPosition - value > const Duration(seconds: 1);
-    if (!movedForward && !jumpedBackward) return;
-    _lastPlaybackProgressPosition = value;
-    _lastPlaybackProgressAt = DateTime.now();
+    _recoveryController.notePlaybackProgress(value);
   }
 
   void _checkPlaybackStall() {
-    if (!mounted ||
-        _leaving ||
-        _nativeVideo.resumeSeek.isPending ||
-        _nativeVideo.resumeSeek.isSeeking) {
-      return;
-    }
-    final now = DateTime.now();
-    final suppressedUntil = _stallWatchdogSuppressedUntil;
-    if (suppressedUntil != null && now.isBefore(suppressedUntil)) return;
-    final lastRecovery = _lastStallRecoveryAt;
-    final sinceLastRecovery = lastRecovery == null
-        ? const Duration(days: 365)
-        : now.difference(lastRecovery);
-    if (!playbackShouldRecoverFromStall(
+    if (!_recoveryController.shouldRecoverFromStall(
+      recoveryBlocked:
+          !mounted ||
+          _leaving ||
+          !_isPlayableLine(_line) ||
+          _nativeVideo.resumeSeek.isPending ||
+          _nativeVideo.resumeSeek.isSeeking,
       appInForeground: _appInForeground,
       playing: _playing,
       buffering: _buffering,
@@ -1122,14 +1101,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       position: _position,
       duration: _duration,
       buffer: _buffer,
-      stalledFor: now.difference(_lastPlaybackProgressAt),
-      sinceLastRecovery: sinceLastRecovery,
     )) {
       return;
     }
     final current = _line;
     if (!_isPlayableLine(current)) return;
-    _lastStallRecoveryAt = now;
     _playbackTrace.record(
       'stall_detected',
       fields: <String, Object?>{
@@ -1141,7 +1117,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         ).inMilliseconds,
       },
     );
-    _resetPlaybackStallWatchdog(grace: playbackStallRecoveryCooldown);
     _handleRuntimeLineFailure(current, message: '播放连续缓冲，正在尝试恢复当前线路。');
   }
 
@@ -1797,70 +1772,51 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _tryAutoSwitchLine({Duration? resumePosition}) async {
     if (!_currentSettings.autoSwitchLine) return;
-    if (_autoSwitching) {
-      _autoSwitchRetryPending = true;
-      final pending = playbackRecoveryPosition(resumePosition ?? Duration.zero);
-      if (pending > (_pendingAutoSwitchResumePosition ?? Duration.zero)) {
-        _pendingAutoSwitchResumePosition = pending;
-      }
-      return;
-    }
-    final targetResumePosition = playbackRecoveryPosition(
-      resumePosition ?? _pendingAutoSwitchResumePosition ?? Duration.zero,
-    );
-    _pendingAutoSwitchResumePosition = null;
-    _autoSwitching = true;
-    try {
-      final next = _nextPlayableLine();
-      if (next == null) {
-        if (!widget.request.offlineOnly && !_lineScanComplete) {
-          _startExpandedLineLookup(autoplay: true);
-          if (mounted) {
+    await _recoveryController.runAutoSwitch(
+      resumePosition: resumePosition,
+      attempt: (targetResumePosition) async {
+        if (!mounted || !_currentSettings.autoSwitchLine) return;
+        final next = _nextPlayableLine();
+        if (next == null) {
+          if (!widget.request.offlineOnly && !_lineScanComplete) {
+            _startExpandedLineLookup(autoplay: true);
+            if (mounted) {
+              setState(() {
+                _playerMessage = '当前线路失败，正在后台搜索备用线路…';
+              });
+            }
+          } else if (mounted) {
             setState(() {
-              _playerMessage = '当前线路失败，正在后台搜索备用线路…';
+              _playerMessage = _emptyLineMessage(
+                _lines,
+                subject: widget.request.subject,
+              );
             });
+            _recordFinalPlaybackFailure(reason: 'no_backup_line');
           }
-        } else if (mounted) {
-          setState(() {
-            _playerMessage = _emptyLineMessage(
-              _lines,
-              subject: widget.request.subject,
-            );
-          });
-          _recordFinalPlaybackFailure(reason: 'no_backup_line');
+          return;
         }
-        return;
-      }
-      if (!mounted) return;
-      final switchTarget = next;
-      final previous = _line;
-      _beginPlaybackRecovery(
-        switchTarget,
-        strategy: 'auto_switch',
-        previous: previous,
-        position: targetResumePosition,
-      );
-      setState(() {
-        _line = switchTarget;
-        _playerMessage =
-            '当前线路失败，已切换到 ${playbackLineProviderLabel(switchTarget)}。';
-      });
-      await _openLine(
-        switchTarget,
-        force: true,
-        resumePosition: targetResumePosition,
-      );
-    } finally {
-      _autoSwitching = false;
-      if (_autoSwitchRetryPending) {
-        _autoSwitchRetryPending = false;
-        final pendingResumePosition = _pendingAutoSwitchResumePosition;
-        _pendingAutoSwitchResumePosition = null;
-        scheduleMicrotask(
-          () => _tryAutoSwitchLine(resumePosition: pendingResumePosition),
+        if (!mounted) return;
+        final switchTarget = next;
+        final previous = _line;
+        _beginPlaybackRecovery(
+          switchTarget,
+          strategy: 'auto_switch',
+          previous: previous,
+          position: targetResumePosition,
         );
-      }
-    }
+        setState(() {
+          _line = switchTarget;
+          _playerMessage =
+              '当前线路失败，已切换到 ${playbackLineProviderLabel(switchTarget)}。';
+        });
+        await _openLine(
+          switchTarget,
+          force: true,
+          resumePosition: targetResumePosition,
+        );
+      },
+    );
   }
 
   PlaybackLine? _nextPlayableLine() {
@@ -2028,9 +1984,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _failedLineIds.clear();
     _lineFailureCounts.clear();
     _handledFailureOpenSerial = null;
-    _autoSwitchRetryPending = false;
+    _recoveryController.clearPendingAutoSwitch();
     _pendingInitialResumePosition = null;
-    _pendingAutoSwitchResumePosition = null;
     _nativeVideo.resumeSeek.cancel();
     setState(() {
       _episode = episode;
