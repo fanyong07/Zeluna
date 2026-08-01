@@ -60,6 +60,8 @@ artifacts/
 dist/
 output/
 release/
+!android/app/src/release/
+!android/app/src/release/AndroidManifest.xml
 .vscode/
 
 # Local helper scripts used only while publishing documentation
