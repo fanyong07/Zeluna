@@ -11,9 +11,7 @@ Future<void> main(List<String> arguments) async {
     await File('assets/data/sources_catalog.json').readAsString(),
   );
   if (decoded is! Map) throw const FormatException('Invalid source catalog');
-  final catalog = SourceCatalogState.fromJson(
-    decoded.cast<String, dynamic>(),
-  );
+  final catalog = SourceCatalogState.fromJson(decoded.cast<String, dynamic>());
 
   final hydrator = TvBoxXbpqHydrator();
   final m3u = M3uSourceAdapter();
