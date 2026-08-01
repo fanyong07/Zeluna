@@ -1,5 +1,6 @@
 import 'package:http/http.dart' as http;
 
+import '../core/network/network_http_client.dart';
 import 'drpy_runtime_models.dart';
 
 Future<void> ensurePublicDrpyHttpUri(Uri uri) async {
@@ -21,7 +22,7 @@ Future<void> ensurePublicDrpyHttpUri(Uri uri) async {
 }
 
 http.Client createDrpyPublicHttpClient({Object? addressLookup}) =>
-    http.Client();
+    createUntrustedSourceHttpClient(maxResponseBytes: 2 * 1024 * 1024);
 
 class DrpyRuntime {
   DrpyRuntime({

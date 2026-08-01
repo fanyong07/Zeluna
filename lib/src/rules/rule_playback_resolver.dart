@@ -171,7 +171,7 @@ class RulePlaybackResolver {
           injectedClient ??
           (line.publicHttpOnly
               ? _drpyRuntime.createPublicHttpClient()
-              : http.Client());
+              : createTrustedMediaProbeHttpClient());
       try {
         final headers = <String, String>{
           'User-Agent': _desktopUserAgent,
