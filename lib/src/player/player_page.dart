@@ -22,6 +22,7 @@ import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'app_fullscreen.dart';
 import 'danmaku_overlay.dart';
+import 'gestures/player_gesture_controller.dart';
 import 'lines/playback_line_controller.dart';
 import 'lines/playback_recovery_controller.dart';
 import 'playback_line_display.dart';
@@ -48,7 +49,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late AnimeEpisode _episode;
   late final NativeVideoController _nativeVideo;
   late final WebVideoController _webVideo;
-  late final FocusNode _shortcutFocusNode;
+  late final PlayerGestureController _gestureController;
   late final PlaybackSessionController _sessionController;
   late final PlaybackLineController _lineController;
   late final PlaybackRecoveryController _recoveryController;
@@ -112,7 +113,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _finalFailureTraceRecorded = false;
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
-  Timer? _controlsHideTimer;
   DateTime? _ignoreNativeErrorsUntil;
   var _backupLookupInProgress = false;
   var _backupLookupSerial = 0;
@@ -156,6 +156,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Timer? get _nativeResumeSeekTimer => _nativeVideo.resumeSeekTimer;
   set _nativeResumeSeekTimer(Timer? value) =>
       _nativeVideo.replaceResumeSeekTimer(value);
+  FocusNode get _shortcutFocusNode => _gestureController.shortcutFocusNode;
+  Timer? get _controlsHideTimer => _gestureController.controlsHideTimer;
+  set _controlsHideTimer(Timer? value) =>
+      _gestureController.replaceControlsHideTimer(value);
   StreamSubscription<PlaybackLineLookupUpdate>? get _lineLookupSubscription =>
       _lineController.lookupSubscription;
   set _lineLookupSubscription(
@@ -181,7 +185,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     WidgetsBinding.instance.addObserver(this);
     _nativeVideo = NativeVideoController();
     _webVideo = WebVideoController();
-    _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
+    _gestureController = PlayerGestureController();
     _episode = widget.request.episode;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _lineController = PlaybackLineController();
@@ -346,7 +350,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
-    _controlsHideTimer?.cancel();
     _superResolutionPerformanceTimer?.cancel();
     for (final timer in _localDanmakuTimers) {
       timer.cancel();
@@ -360,7 +363,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController.dispose();
     unawaited(_lineController.dispose());
     _danmakuInput.dispose();
-    _shortcutFocusNode.dispose();
+    _gestureController.dispose();
     _sessionController.dispose();
     super.dispose();
   }
