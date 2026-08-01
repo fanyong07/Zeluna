@@ -4055,6 +4055,8 @@ bool _hasIsoBmffSignature(List<int> bytes) {
 
 String _mp4StartupProfile(List<int> bytes) {
   var offset = 0;
+  var sawMoov = false;
+  var sawMdat = false;
   while (offset + 8 <= bytes.length) {
     var size = _readBigEndianUint32(bytes, offset);
     final type = String.fromCharCodes(bytes.skip(offset + 4).take(4));
@@ -4064,8 +4066,19 @@ String _mp4StartupProfile(List<int> bytes) {
       size = _readBigEndianUint64(bytes, offset + 8);
       headerSize = 16;
     }
-    if (type == 'moov') return PlaybackStartupProfile.mp4FastStart;
-    if (type == 'mdat') return PlaybackStartupProfile.mp4TailMoov;
+    // styp/moof identifies fragmented ISO-BMFF. It does not prove that a
+    // classic MP4 stores its moov box at the tail.
+    if (type == 'styp' || type == 'moof') {
+      return PlaybackStartupProfile.unknown;
+    }
+    if (type == 'moov') {
+      if (sawMdat) return PlaybackStartupProfile.mp4TailMoov;
+      sawMoov = true;
+    }
+    if (type == 'mdat') {
+      if (sawMoov) return PlaybackStartupProfile.mp4FastStart;
+      sawMdat = true;
+    }
     if (size == 0 || size < headerSize) break;
     final nextOffset = offset + size;
     if (nextOffset <= offset || nextOffset > bytes.length) break;

@@ -370,6 +370,37 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             "https://source.example/watch/1",
         )
 
+    async def test_startup_profile_survives_database_cache_round_trip(self):
+        item = self.service._line_dict(
+            AggregatedVideoLine(
+                url="https://cdn.example/video.mp4",
+                title="Fast start",
+                format="mp4",
+                source="crawler:test",
+                verification_status=SERVER_VERIFIED,
+                startup_profile=STARTUP_MP4_FASTSTART,
+                startup_latency_ms=143,
+            )
+        )
+        async with self.sessions() as session:
+            await self.service._store_cache(
+                session,
+                "bangumi:cache-profile",
+                1,
+                "Cache profile",
+                [item],
+            )
+        async with self.sessions() as session:
+            cache_state, cached = await self.service._cache_lookup(
+                session,
+                "bangumi:cache-profile",
+                1,
+            )
+
+        self.assertEqual(cache_state, "fresh")
+        self.assertEqual(cached[0]["startup_profile"], STARTUP_MP4_FASTSTART)
+        self.assertEqual(cached[0]["startup_latency_ms"], 143)
+
     def test_playable_statistics_ignore_placeholder_only_inventory(self):
         placeholders = [
             {
@@ -955,6 +986,26 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             "tail.example",
             {urlparse(item["url"]).hostname for item in selected},
+        )
+
+    def test_quick_inventory_keeps_input_order_when_scores_are_equal(self):
+        items = [
+            {
+                "url": f"https://{host}.example/video.m3u8",
+                "format": "hls",
+                "available": True,
+                "status": SERVER_VERIFIED,
+                "startup_profile": STARTUP_HLS,
+                "startup_latency_ms": 125,
+            }
+            for host in ("first", "second", "third")
+        ]
+
+        selected = self.service._select_quick_lines(items)
+
+        self.assertEqual(
+            [urlparse(item["url"]).hostname for item in selected],
+            ["first.example", "second.example", "third.example"],
         )
 
 

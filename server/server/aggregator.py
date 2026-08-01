@@ -277,6 +277,8 @@ def _declared_startup_profile(line: AggregatedVideoLine) -> str:
 
 def _mp4_startup_profile(sample: bytes) -> str:
     offset = 0
+    saw_moov = False
+    saw_mdat = False
     while offset + 8 <= len(sample):
         size = int.from_bytes(sample[offset:offset + 4], "big")
         box_type = sample[offset + 4:offset + 8]
@@ -286,10 +288,18 @@ def _mp4_startup_profile(sample: bytes) -> str:
                 break
             size = int.from_bytes(sample[offset + 8:offset + 16], "big")
             header_size = 16
+        # styp/moof identifies fragmented ISO-BMFF. It does not prove that a
+        # classic MP4 stores its moov box at the tail.
+        if box_type in {b"styp", b"moof"}:
+            return STARTUP_UNKNOWN
         if box_type == b"moov":
-            return STARTUP_MP4_FASTSTART
+            if saw_mdat:
+                return STARTUP_MP4_TAIL_MOOV
+            saw_moov = True
         if box_type == b"mdat":
-            return STARTUP_MP4_TAIL_MOOV
+            if saw_moov:
+                return STARTUP_MP4_FASTSTART
+            saw_mdat = True
         if size == 0 or size < header_size:
             break
         next_offset = offset + size

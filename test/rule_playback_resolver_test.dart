@@ -1306,6 +1306,76 @@ encrypted-segment.ts
     expect(tailMoov.startupProfile, PlaybackStartupProfile.mp4TailMoov);
   });
 
+  test('fragmented and incomplete MP4 samples keep startup unknown', () async {
+    final samples = <String, List<int>>{
+      '/moof-only.mp4': <int>[..._isoBox('moof'), ..._isoBox('mdat')],
+      '/media-segment.m4s': <int>[
+        ..._isoBox('styp', size: 24),
+        ..._isoBox('moof'),
+        ..._isoBox('mdat'),
+      ],
+      '/fragmented.mp4': <int>[
+        ..._isoBox('ftyp', size: 24),
+        ..._isoBox('moov'),
+        ..._isoBox('moof'),
+        ..._isoBox('mdat'),
+      ],
+      '/incomplete.mp4': <int>[
+        ..._isoBox('ftyp', size: 24),
+        0,
+        0,
+        4,
+        0,
+        ...ascii.encode('mdat'),
+        ...List<int>.filled(16, 0),
+      ],
+    };
+    final resolver = RulePlaybackResolver(
+      client: MockClient((request) async {
+        return http.Response.bytes(
+          samples[request.url.path]!,
+          206,
+          headers: {'content-type': 'video/mp4'},
+        );
+      }),
+    );
+
+    for (final entry in samples.entries) {
+      final verified = await resolver.verifyPlaybackLine(
+        line: _networkLine('https://cdn.example.com${entry.key}'),
+        enrichMetadata: false,
+      );
+      expect(verified.available, isTrue, reason: entry.key);
+      expect(
+        verified.startupProfile,
+        PlaybackStartupProfile.unknown,
+        reason: entry.key,
+      );
+    }
+  });
+
+  test('unknown client startup probe preserves a known profile', () async {
+    final resolver = RulePlaybackResolver(
+      client: MockClient((_) async {
+        return http.Response.bytes(
+          <int>[..._isoBox('moof'), ..._isoBox('mdat')],
+          206,
+          headers: {'content-type': 'video/mp4'},
+        );
+      }),
+    );
+
+    final verified = await resolver.verifyPlaybackLine(
+      line: _networkLine(
+        'https://cdn.example.com/known.mp4',
+        startupProfile: PlaybackStartupProfile.mp4FastStart,
+      ),
+      enrichMetadata: false,
+    );
+
+    expect(verified.startupProfile, PlaybackStartupProfile.mp4FastStart);
+  });
+
   test('HLS latency includes the first media segment verification', () async {
     final resolver = RulePlaybackResolver(
       client: MockClient((request) async {
@@ -1486,6 +1556,7 @@ segment-1.ts
     expect(line.codecs, 'hev1.1.6.L120,mp4a.40.2');
     expect(line.sizeEstimated, isTrue);
     expect(line.sizeBytes, 60960000);
+    expect(line.startupProfile, PlaybackStartupProfile.unknown);
     expect(line.sizeLabel, '约 58.1 MB');
   });
 
@@ -2205,22 +2276,22 @@ List<int> _mp4ProbeSample() {
 }
 
 List<int> _mp4StartupSample({required bool moovBeforeMdat}) {
-  List<int> box(String type, {int size = 8}) => <int>[
-    (size >> 24) & 0xff,
-    (size >> 16) & 0xff,
-    (size >> 8) & 0xff,
-    size & 0xff,
-    ...ascii.encode(type),
-    ...List<int>.filled(size - 8, 0),
-  ];
-
   return <int>[
-    ...box('ftyp', size: 24),
-    if (moovBeforeMdat) ...box('moov'),
-    ...box('mdat'),
-    if (!moovBeforeMdat) ...box('moov'),
+    ..._isoBox('ftyp', size: 24),
+    if (moovBeforeMdat) ..._isoBox('moov'),
+    ..._isoBox('mdat'),
+    if (!moovBeforeMdat) ..._isoBox('moov'),
   ];
 }
+
+List<int> _isoBox(String type, {int size = 8}) => <int>[
+  (size >> 24) & 0xff,
+  (size >> 16) & 0xff,
+  (size >> 8) & 0xff,
+  size & 0xff,
+  ...ascii.encode(type),
+  ...List<int>.filled(size - 8, 0),
+];
 
 MockClient _singleLineClient({
   required String mediaPath,
@@ -2293,7 +2364,10 @@ Future<PlaybackLine> _resolveSinglePlayableLine(
   return lines.single;
 }
 
-PlaybackLine _networkLine(String url) => PlaybackLine(
+PlaybackLine _networkLine(
+  String url, {
+  String startupProfile = PlaybackStartupProfile.unknown,
+}) => PlaybackLine(
   id: 'probe-line',
   episodeId: 1,
   providerId: 'probe',
@@ -2302,6 +2376,7 @@ PlaybackLine _networkLine(String url) => PlaybackLine(
   quality: '',
   format: '',
   url: url,
+  startupProfile: startupProfile,
   available: true,
 );
 

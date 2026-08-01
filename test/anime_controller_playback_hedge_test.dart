@@ -189,6 +189,69 @@ void main() {
     expect(ranked.map((line) => line.id), ['fast', 'hls', 'unknown', 'tail']);
   });
 
+  test('startup ranking keeps input order when every score is equal', () {
+    final ranked = rankPlaybackLinesForStartup([
+      _startupLine('first', PlaybackStartupProfile.hls, latencyMs: 80),
+      _startupLine('second', PlaybackStartupProfile.hls, latencyMs: 80),
+      _startupLine('third', PlaybackStartupProfile.hls, latencyMs: 80),
+    ]);
+
+    expect(ranked.map((line) => line.id), ['first', 'second', 'third']);
+  });
+
+  test(
+    'a cancelled backend lookup cannot populate the prefetch cache',
+    () async {
+      final backendResponse = Completer<http.Response>();
+      final harness = await _PlaybackHarness.create(
+        playbackResponse: (_) => backendResponse.future,
+        ruleId: 'test:cancelled-backend-fallback',
+      );
+      addTearDown(() async {
+        if (!backendResponse.isCompleted) {
+          backendResponse.complete(http.Response('[]', 200));
+        }
+        await harness.dispose();
+      });
+      final cancellationToken = RulePlaybackCancellationToken();
+      final cancelledLookup = harness.controller.linesForEpisodeMode(
+        _subject,
+        _episode,
+        cancellationToken: cancellationToken,
+      );
+      await _waitUntil(() => harness.quickPlaybackRequests == 1);
+
+      cancellationToken.cancel();
+      backendResponse.complete(
+        http.Response(
+          jsonEncode([
+            {
+              'url': 'https://cdn.example/cancelled.m3u8',
+              'source': 'maccms:test',
+              'format': 'hls',
+              'status': 'server_verified',
+              'available': true,
+            },
+          ]),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        ),
+      );
+
+      expect(await cancelledLookup, isEmpty);
+      expect(
+        harness.controller.prefetchedLineForEpisode(_subject, _episode),
+        isNull,
+      );
+      final retry = await harness.controller.linesForEpisodeMode(
+        _subject,
+        _episode,
+      );
+      expect(retry.single.url, 'https://cdn.example/cancelled.m3u8');
+      expect(harness.quickPlaybackRequests, 2);
+    },
+  );
+
   test(
     'detail prefetch probes three quick lines once and caches the best startup',
     () async {
@@ -263,6 +326,51 @@ void main() {
       expect(harness.resolver.maxConcurrentVerifications, 3);
     },
   );
+
+  test('an account switch blocks an old prefetch from writing back', () async {
+    const oldUrl = 'https://old-account.example/video.m3u8';
+    final verificationGate = Completer<void>();
+    final harness = await _PlaybackHarness.create(
+      playbackResponse: (_) async => http.Response(
+        jsonEncode([
+          {
+            'url': oldUrl,
+            'source': 'crawler:old-account',
+            'title': 'Old account line',
+            'format': 'hls',
+            'status': 'server_verified',
+            'available': true,
+          },
+        ]),
+        200,
+        headers: const {'content-type': 'application/json; charset=utf-8'},
+      ),
+      ruleId: 'test:unused-account-fallback',
+      verificationGate: verificationGate.future,
+    );
+    addTearDown(() async {
+      if (!verificationGate.isCompleted) verificationGate.complete();
+      await harness.dispose();
+    });
+
+    final detail = await harness.controller.detail(_subject);
+    await _waitUntil(() => harness.resolver.verifyCalls == 1);
+    await harness.controller.registerAccount(
+      email: 'prefetch-switch@example.com',
+      nickname: 'Prefetch switch',
+      password: 'test-pass',
+    );
+    verificationGate.complete();
+    await _waitUntil(() => harness.resolver.activeVerifications == 0);
+
+    expect(
+      harness.controller.prefetchedLineForEpisode(
+        detail.subject,
+        detail.episodes.first,
+      ),
+      isNull,
+    );
+  });
 }
 
 class _PlaybackHarness {
@@ -290,6 +398,7 @@ class _PlaybackHarness {
     required String ruleId,
     Map<String, ({Duration latency, String startupProfile})> probeResults =
         const {},
+    Future<void>? verificationGate,
   }) async {
     final root = await Directory.systemTemp.createTemp(
       'anime-controller-playback-hedge-',
@@ -316,7 +425,11 @@ class _PlaybackHarness {
       }
       return http.Response('{}', 200);
     });
-    final resolver = _ReadyRuleResolver(ruleId, probeResults: probeResults);
+    final resolver = _ReadyRuleResolver(
+      ruleId,
+      probeResults: probeResults,
+      verificationGate: verificationGate,
+    );
     final container = ProviderContainer(
       overrides: [
         cloudAccountServiceProvider.overrideWithValue(
@@ -358,16 +471,23 @@ class _PlaybackHarness {
 }
 
 class _ReadyRuleResolver extends RulePlaybackResolver {
-  _ReadyRuleResolver(this.readyRuleId, {this.probeResults = const {}});
+  _ReadyRuleResolver(
+    this.readyRuleId, {
+    this.probeResults = const {},
+    this.verificationGate,
+  });
 
   final String readyRuleId;
   final Map<String, ({Duration latency, String startupProfile})> probeResults;
+  final Future<void>? verificationGate;
   int calls = 0;
   int readyCalls = 0;
   int verifyCalls = 0;
   int _activeVerifications = 0;
   int maxConcurrentVerifications = 0;
   final List<bool> forceRefreshValues = <bool>[];
+
+  int get activeVerifications => _activeVerifications;
 
   @override
   Future<PlaybackLine> verifyPlaybackLine({
@@ -385,7 +505,12 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
     final probeResult = probeResults[line.url];
     final latency = probeResult?.latency ?? const Duration(milliseconds: 5);
     try {
-      await Future<void>.delayed(latency);
+      final gate = verificationGate;
+      if (gate == null) {
+        await Future<void>.delayed(latency);
+      } else {
+        await gate;
+      }
     } finally {
       _activeVerifications--;
     }

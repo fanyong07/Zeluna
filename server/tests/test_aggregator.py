@@ -13,12 +13,14 @@ from server.aggregator import (
     STARTUP_HLS,
     STARTUP_MP4_FASTSTART,
     STARTUP_MP4_TAIL_MOOV,
+    STARTUP_UNKNOWN,
     STALE_ROUTE,
     UNAVAILABLE,
     AggregatedVideoLine,
     ContentAggregator,
     LineVerificationResult,
     SourceMatch,
+    _mp4_startup_profile,
     _source_match_score,
 )
 from server.scrapers.base import SubjectResult, VideoLine
@@ -35,6 +37,10 @@ def _mp4_startup_sample(*, moov_before_mdat: bool) -> bytes:
     if not moov_before_mdat:
         parts.append(box(b"moov"))
     return b"".join(parts)
+
+
+def _iso_box(box_type: bytes, size: int = 8) -> bytes:
+    return size.to_bytes(4, "big") + box_type + bytes(size - 8)
 
 
 class AggregatorTests(unittest.IsolatedAsyncioTestCase):
@@ -552,6 +558,57 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             tail_moov.startup_profile,
             STARTUP_MP4_TAIL_MOOV,
         )
+
+    def test_mp4_startup_profile_is_conservative_for_fragmented_samples(self):
+        fragmented_samples = (
+            _iso_box(b"moof") + _iso_box(b"mdat"),
+            _iso_box(b"styp", 24) + _iso_box(b"moof") + _iso_box(b"mdat"),
+            _iso_box(b"ftyp", 24)
+            + _iso_box(b"moov")
+            + _iso_box(b"moof")
+            + _iso_box(b"mdat"),
+        )
+        for sample in fragmented_samples:
+            with self.subTest(sample=sample[4:8]):
+                self.assertEqual(_mp4_startup_profile(sample), STARTUP_UNKNOWN)
+
+        incomplete_mdat = (
+            _iso_box(b"ftyp", 24)
+            + (1024).to_bytes(4, "big")
+            + b"mdat"
+            + bytes(16)
+        )
+        self.assertEqual(
+            _mp4_startup_profile(incomplete_mdat),
+            STARTUP_UNKNOWN,
+        )
+        self.assertEqual(_mp4_startup_profile(b"not-an-mp4"), STARTUP_UNKNOWN)
+
+    async def test_dash_startup_profile_remains_unknown(self):
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            line_http_transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={"content-type": "application/dash+xml"},
+                    text='<MPD type="static"><Period /></MPD>',
+                )
+            ),
+        )
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(return_value=True),
+        ):
+            result = await self.aggregator._line_verification_status(
+                AggregatedVideoLine(
+                    url="https://cdn.example/video.mpd",
+                    format="dash",
+                ),
+                detailed=True,
+            )
+
+        self.assertEqual(result.status, SERVER_VERIFIED)
+        self.assertEqual(result.startup_profile, STARTUP_UNKNOWN)
 
     async def test_hls_manifest_with_dead_first_segment_is_rejected(self):
         def handler(request):
