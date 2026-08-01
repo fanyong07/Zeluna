@@ -24,6 +24,8 @@ import 'app_fullscreen.dart';
 import 'danmaku_overlay.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
+import 'session/playback_session_controller.dart';
+import 'session/playback_session_event.dart';
 import 'web_stream_player.dart';
 
 const _nativeResumeSeekMaxAttempts = 15;
@@ -44,6 +46,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final VideoController _controller;
   late final WebStreamPlayerController _webPlayerController;
   late final FocusNode _shortcutFocusNode;
+  late final PlaybackSessionController _sessionController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
@@ -153,6 +156,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webPlayerController = WebStreamPlayerController();
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
+    _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
@@ -226,6 +230,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _recordFirstFrame(PlaybackLine line) {
     if (_firstFrameTraceOpenSerial == _openLineSerial) return;
     _firstFrameTraceOpenSerial = _openLineSerial;
+    _sessionController.dispatch(PlaybackSessionEvent.firstFrame(line.id));
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
     _playbackTrace.recordBufferingChanged(
       buffering: false,
@@ -261,6 +266,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     PlaybackLine? previous,
     Duration position = Duration.zero,
   }) {
+    if (strategy == 'auto_switch' && previous?.id != target.id) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.alternativeSelected(target.id),
+      );
+    }
     _pendingRecoveryLineId = target.id;
     _pendingRecoveryStrategy = strategy;
     _pendingRecoveryFromProvider = previous?.providerId;
@@ -278,6 +288,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _recordFinalPlaybackFailure({required String reason}) {
     if (_finalFailureTraceRecorded) return;
     _finalFailureTraceRecorded = true;
+    _sessionController.dispatch(
+      PlaybackSessionEvent.mediaError(reason, hasAlternative: false),
+    );
     final current = _line;
     _playbackTrace.recordBufferingChanged(
       buffering: false,
@@ -324,6 +337,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_player.dispose());
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
+    _sessionController.dispose();
     super.dispose();
   }
 
@@ -332,6 +346,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final inForeground = state == AppLifecycleState.resumed;
     if (_appInForeground == inForeground) return;
     _appInForeground = inForeground;
+    _sessionController.dispatch(
+      inForeground
+          ? PlaybackSessionEvent.applicationResumed()
+          : PlaybackSessionEvent.applicationPaused(),
+    );
     _resetPlaybackStallWatchdog(
       grace: inForeground ? const Duration(seconds: 3) : Duration.zero,
     );
@@ -710,6 +729,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       ..add(
         _player.stream.playing.listen((value) {
           if (!mounted || _usesWebPlayer) return;
+          _sessionController.dispatch(
+            value
+                ? PlaybackSessionEvent.playbackResumed()
+                : PlaybackSessionEvent.playbackPaused(),
+          );
           setState(() => _playing = value);
           _resetPlaybackStallWatchdog(
             grace: value ? const Duration(seconds: 2) : Duration.zero,
@@ -789,6 +813,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       ..add(
         _player.stream.buffering.listen((value) {
           if (!mounted || _usesWebPlayer) return;
+          _sessionController.dispatch(
+            value
+                ? PlaybackSessionEvent.bufferingStarted()
+                : PlaybackSessionEvent.bufferingEnded(),
+          );
           final changed = _buffering != value;
           final current = _line;
           if (changed) {
@@ -827,6 +856,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _player.stream.completed.listen((completed) {
           if (_usesWebPlayer) return;
           if (completed) {
+            _sessionController.dispatch(PlaybackSessionEvent.playbackEnded());
             _backupLookupDelayTimer?.cancel();
             _backupLookupDelayTimer = null;
             _resetPlaybackStallWatchdog();
@@ -1248,6 +1278,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
     final serial = ++_lineLookupSerial;
+    _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
     _cancelSingleBackupLookup();
     _lineLookupCancellationToken?.cancel();
     final previousSubscription = _lineLookupSubscription;
@@ -1298,6 +1329,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         return;
       }
       final available = _availableLines(lines);
+      for (final discovered in available) {
+        _sessionController.dispatch(
+          PlaybackSessionEvent.lineDiscovered(discovered.id),
+        );
+        if (discovered.serverVerified || discovered.clientVerified) {
+          _sessionController.dispatch(
+            PlaybackSessionEvent.lineVerified(discovered.id),
+          );
+        }
+      }
       PlaybackLine? nextLine = _line;
       if (!_isPlayableLine(nextLine) && available.isNotEmpty) {
         nextLine = _preferredPlayableLine(available);
@@ -1712,6 +1753,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final requestedResumePosition = playbackRecoveryPosition(
       resumePosition ?? _pendingInitialResumePosition ?? Duration.zero,
     );
+    _sessionController.dispatch(
+      PlaybackSessionEvent.openRequested(
+        line.id,
+        position: requestedResumePosition,
+      ),
+    );
     _cancelPendingNativeResume();
     final serial = ++_openLineSerial;
     _handledFailureOpenSerial = null;
@@ -1757,6 +1804,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (!mounted || serial != _openLineSerial) return;
     _lines = upsertPlaybackLine(_lines, line);
     if (!_isPlayableLine(line)) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.lineFailed(
+          line.id,
+          reason: 'verification_rejected',
+          hasAlternative: _nextPlayableLine() != null,
+        ),
+      );
       _playbackTrace.record('line_rejected', fields: _lineTraceFields(line));
       _markLineFailure(line, definitive: true);
       setState(() {
@@ -1799,6 +1853,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           waitingForReady: _loadingLine,
           hasAlternative: _nextPlayableLine() != null,
         )) {
+          _sessionController.dispatch(
+            PlaybackSessionEvent.softTimeout(hasAlternative: true),
+          );
           _handleWebError(message: '7 秒内没有出画面，已尝试切换备用线路。');
           return;
         }
@@ -1809,6 +1866,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
               !webPlaybackStartupTimedOut(waitingForReady: _loadingLine)) {
             return;
           }
+          _sessionController.dispatch(
+            PlaybackSessionEvent.hardTimeout(
+              hasAlternative: _nextPlayableLine() != null,
+            ),
+          );
           _handleWebError(message: '长时间未能开始播放，已尝试切换其他线路。');
         });
       });
@@ -1858,6 +1920,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             return;
           }
           _nativeFirstFrameTimer = null;
+          _sessionController.dispatch(
+            hardTimedOut
+                ? PlaybackSessionEvent.hardTimeout(
+                    hasAlternative: hasAlternative,
+                  )
+                : PlaybackSessionEvent.softTimeout(
+                    hasAlternative: hasAlternative,
+                  ),
+          );
           _handleRuntimeLineFailure(
             line,
             message: hardTimedOut ? '长时间未能开始播放。' : '暂时没有出画面。',
@@ -1929,11 +2000,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
     final resumePosition = _currentRecoveryPosition;
+    final hasAlternative = _nextPlayableLine() != null;
     final shouldSwitch = _markLineFailure(
       line,
       definitive: shouldSwitchAfterPlaybackInterruption(
         position: resumePosition,
-        hasAlternative: _nextPlayableLine() != null,
+        hasAlternative: hasAlternative,
+      ),
+    );
+    _sessionController.dispatch(
+      PlaybackSessionEvent.lineFailed(
+        line.id,
+        reason: message,
+        hasAlternative: hasAlternative,
       ),
     );
     _playbackTrace.record(
@@ -2212,6 +2291,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final max = _duration.inMilliseconds;
     final clamped = target.inMilliseconds.clamp(0, max);
     final position = Duration(milliseconds: clamped);
+    _sessionController.dispatch(PlaybackSessionEvent.userSeek(position));
     _resetPlaybackStallWatchdog(
       position: position,
       grace: const Duration(seconds: 5),
@@ -2315,6 +2395,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       setState(() => _episodePanel = false);
       return;
     }
+    _sessionController.dispatch(
+      PlaybackSessionEvent.episodeChanged(episode.id),
+    );
     ++_danmakuLoadSerial;
     final playbackSerial = ++_openLineSerial;
     _danmakuRequestedEpisodeId = null;
@@ -2379,6 +2462,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _selectLine(PlaybackLine line) {
     _revealPlayerControls();
+    if (_line?.id != line.id) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.alternativeSelected(line.id),
+      );
+    }
     final resumePosition = _currentRecoveryPosition;
     _clearLineFailure(line.id);
     _handledFailureOpenSerial = null;
@@ -2841,6 +2929,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         )) {
       return;
     }
+    _sessionController.dispatch(
+      value
+          ? PlaybackSessionEvent.playbackResumed()
+          : PlaybackSessionEvent.playbackPaused(),
+    );
     setState(() => _playing = value);
     _resetPlaybackStallWatchdog(
       grace: value ? const Duration(seconds: 2) : Duration.zero,
