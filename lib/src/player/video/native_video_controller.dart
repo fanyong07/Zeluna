@@ -136,6 +136,126 @@ final class NativeResumeSeekController {
   }
 }
 
+enum NativeStartupTimeoutPhase { soft, hard }
+
+final class NativePlaybackStartupSnapshot {
+  const NativePlaybackStartupSnapshot({
+    required this.playing,
+    required this.position,
+    required this.buffer,
+    required this.buffering,
+    required this.hasAlternative,
+  });
+
+  final bool playing;
+  final Duration position;
+  final Duration buffer;
+  final bool buffering;
+  final bool hasAlternative;
+}
+
+final class NativeStartupTimeoutEvent {
+  const NativeStartupTimeoutEvent({
+    required this.phase,
+    required this.hasAlternative,
+  });
+
+  final NativeStartupTimeoutPhase phase;
+  final bool hasAlternative;
+}
+
+/// Owns native first-frame timeout polling independently from page state.
+final class NativeFirstFrameWatchdog {
+  Timer? _timer;
+  var _generation = 0;
+  var _disposed = false;
+
+  bool get isActive => _timer != null;
+  bool get isDisposed => _disposed;
+
+  void start({
+    required bool Function() isCurrent,
+    required NativePlaybackStartupSnapshot Function() readSnapshot,
+    required void Function(NativeStartupTimeoutEvent event) onTimeout,
+    Duration softTimeout = const Duration(seconds: 7),
+    Duration hardTimeout = const Duration(seconds: 25),
+    Duration pollInterval = const Duration(seconds: 1),
+  }) {
+    cancel();
+    if (_disposed) return;
+    assert(softTimeout > Duration.zero);
+    assert(hardTimeout >= softTimeout);
+    assert(pollInterval > Duration.zero);
+    final generation = _generation;
+
+    late void Function(Duration delay, Duration elapsed) schedule;
+    schedule = (delay, elapsed) {
+      if (_disposed || generation != _generation) return;
+      _timer = Timer(delay, () {
+        _timer = null;
+        if (_disposed || generation != _generation || !isCurrent()) return;
+        final snapshot = readSnapshot();
+        if (nativePlaybackHasFirstFrame(
+          playing: snapshot.playing,
+          position: snapshot.position,
+        )) {
+          return;
+        }
+        final hardTimedOut = elapsed >= hardTimeout;
+        if (!hardTimedOut &&
+            !nativePlaybackShouldSwitchAtSoftTimeout(
+              position: snapshot.position,
+              buffer: snapshot.buffer,
+              buffering: snapshot.buffering,
+              hasAlternative: snapshot.hasAlternative,
+            )) {
+          final remaining = hardTimeout - elapsed;
+          final nextDelay = remaining < pollInterval ? remaining : pollInterval;
+          schedule(nextDelay, elapsed + nextDelay);
+          return;
+        }
+        onTimeout(
+          NativeStartupTimeoutEvent(
+            phase: hardTimedOut
+                ? NativeStartupTimeoutPhase.hard
+                : NativeStartupTimeoutPhase.soft,
+            hasAlternative: snapshot.hasAlternative,
+          ),
+        );
+      });
+    };
+    schedule(softTimeout, softTimeout);
+  }
+
+  bool handleProgress({
+    required Duration previousPosition,
+    required Duration currentPosition,
+  }) {
+    if (_disposed ||
+        _timer == null ||
+        !nativePlaybackReachedFirstFrame(
+          previousPosition: previousPosition,
+          currentPosition: currentPosition,
+        )) {
+      return false;
+    }
+    cancel();
+    return true;
+  }
+
+  void cancel() {
+    _generation++;
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void dispose() {
+    if (_disposed) return;
+    _disposed = true;
+    cancel();
+  }
+}
+
 /// Owns the native media-kit objects and every subscription/timer tied to
 /// their lifetime. UI code may subscribe through [track], but it never disposes
 /// individual native resources itself.
@@ -151,13 +271,13 @@ final class NativeVideoController {
   final Player player;
   late final VideoController surfaceController;
   late final NativeResumeSeekController resumeSeek;
+  final NativeFirstFrameWatchdog _firstFrameWatchdog =
+      NativeFirstFrameWatchdog();
   final List<StreamSubscription<dynamic>> _subscriptions = [];
-  Timer? _firstFrameTimer;
   bool _disposed = false;
 
   bool get isDisposed => _disposed;
-  bool get hasFirstFrameTimer => _firstFrameTimer != null;
-  Timer? get firstFrameTimer => _firstFrameTimer;
+  bool get awaitingFirstFrame => _firstFrameWatchdog.isActive;
 
   void track(StreamSubscription<dynamic> subscription) {
     if (_disposed) {
@@ -167,21 +287,37 @@ final class NativeVideoController {
     _subscriptions.add(subscription);
   }
 
-  void replaceFirstFrameTimer(Timer? timer) {
-    _firstFrameTimer?.cancel();
-    _firstFrameTimer = _disposed ? null : timer;
-    if (_disposed) timer?.cancel();
+  void startFirstFrameWatchdog({
+    required bool Function() isCurrent,
+    required NativePlaybackStartupSnapshot Function() readSnapshot,
+    required void Function(NativeStartupTimeoutEvent event) onTimeout,
+  }) {
+    if (_disposed) return;
+    _firstFrameWatchdog.start(
+      isCurrent: isCurrent,
+      readSnapshot: readSnapshot,
+      onTimeout: onTimeout,
+    );
   }
 
-  void clearFirstFrameTimer() {
-    _firstFrameTimer?.cancel();
-    _firstFrameTimer = null;
+  bool handlePlaybackProgress({
+    required Duration previousPosition,
+    required Duration currentPosition,
+  }) {
+    return _firstFrameWatchdog.handleProgress(
+      previousPosition: previousPosition,
+      currentPosition: currentPosition,
+    );
+  }
+
+  void cancelFirstFrameWatchdog() {
+    _firstFrameWatchdog.cancel();
   }
 
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    clearFirstFrameTimer();
+    _firstFrameWatchdog.dispose();
     resumeSeek.dispose();
     final subscriptions = List.of(_subscriptions);
     _subscriptions.clear();

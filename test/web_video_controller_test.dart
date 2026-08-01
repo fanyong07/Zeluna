@@ -1,44 +1,86 @@
-import 'dart:async';
-
 import 'package:anime/src/player/video/web_video_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test(
-    'replacing a web startup watchdog cancels the previous callback',
-    () async {
+  testWidgets('replacing a web startup watchdog cancels the previous attempt', (
+    tester,
+  ) async {
+    final controller = WebVideoController();
+    addTearDown(controller.dispose);
+    final events = <WebStartupTimeoutEvent>[];
+
+    void start(Duration softTimeout) {
+      controller.startStartupWatchdog(
+        isCurrent: () => true,
+        waitingForReady: () => true,
+        hasAlternative: () => true,
+        onTimeout: events.add,
+        softTimeout: softTimeout,
+        hardTimeout: const Duration(milliseconds: 60),
+      );
+    }
+
+    start(const Duration(milliseconds: 5));
+    start(const Duration(milliseconds: 20));
+    await tester.pump(const Duration(milliseconds: 45));
+
+    expect(events, hasLength(1));
+    expect(events.single.phase, WebStartupTimeoutPhase.soft);
+    expect(events.single.hasAlternative, isTrue);
+  });
+
+  testWidgets(
+    'web startup waits until the hard timeout without an alternative',
+    (tester) async {
       final controller = WebVideoController();
       addTearDown(controller.dispose);
-      var callbacks = 0;
+      final events = <WebStartupTimeoutEvent>[];
 
-      controller.replaceStartupTimer(
-        Timer(const Duration(milliseconds: 5), () => callbacks++),
+      controller.startStartupWatchdog(
+        isCurrent: () => true,
+        waitingForReady: () => true,
+        hasAlternative: () => false,
+        onTimeout: events.add,
+        softTimeout: const Duration(milliseconds: 5),
+        hardTimeout: const Duration(milliseconds: 25),
       );
-      controller.replaceStartupTimer(
-        Timer(const Duration(milliseconds: 15), () => callbacks++),
-      );
-      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await tester.pump(const Duration(milliseconds: 45));
 
-      expect(callbacks, 1);
+      expect(events, hasLength(1));
+      expect(events.single.phase, WebStartupTimeoutPhase.hard);
+      expect(events.single.hasAlternative, isFalse);
     },
   );
 
-  test(
-    'dispose prevents startup watchdog callbacks and rejects late timers',
-    () async {
-      final controller = WebVideoController();
-      var callbacks = 0;
-      controller.replaceStartupTimer(
-        Timer(const Duration(milliseconds: 10), () => callbacks++),
-      );
+  testWidgets('ready state and dispose prevent late web timeout callbacks', (
+    tester,
+  ) async {
+    final controller = WebVideoController();
+    var waiting = true;
+    var callbacks = 0;
+    controller.startStartupWatchdog(
+      isCurrent: () => true,
+      waitingForReady: () => waiting,
+      hasAlternative: () => true,
+      onTimeout: (_) => callbacks++,
+      softTimeout: const Duration(milliseconds: 15),
+      hardTimeout: const Duration(milliseconds: 30),
+    );
+    waiting = false;
+    await tester.pump(const Duration(milliseconds: 25));
+    controller.startStartupWatchdog(
+      isCurrent: () => true,
+      waitingForReady: () => true,
+      hasAlternative: () => true,
+      onTimeout: (_) => callbacks++,
+      softTimeout: const Duration(milliseconds: 10),
+      hardTimeout: const Duration(milliseconds: 20),
+    );
+    controller.dispose();
+    await tester.pump(const Duration(milliseconds: 25));
 
-      controller.dispose();
-      controller.replaceStartupTimer(Timer(Duration.zero, () => callbacks++));
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-
-      expect(controller.isDisposed, isTrue);
-      expect(controller.startupTimer, isNull);
-      expect(callbacks, 0);
-    },
-  );
+    expect(controller.isDisposed, isTrue);
+    expect(controller.startupWatchdogActive, isFalse);
+    expect(callbacks, 0);
+  });
 }

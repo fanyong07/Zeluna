@@ -110,14 +110,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   VideoController get _controller => _nativeVideo.surfaceController;
   WebStreamPlayerController get _webPlayerController =>
       _webVideo.surfaceController;
-  Timer? get _webLoadTimer => _webVideo.startupTimer;
-  set _webLoadTimer(Timer? value) => _webVideo.replaceStartupTimer(value);
   Timer? get _backupLookupDelayTimer => _recoveryController.backupLookupTimer;
   set _backupLookupDelayTimer(Timer? value) =>
       _recoveryController.replaceBackupLookupTimer(value);
-  Timer? get _nativeFirstFrameTimer => _nativeVideo.firstFrameTimer;
-  set _nativeFirstFrameTimer(Timer? value) =>
-      _nativeVideo.replaceFirstFrameTimer(value);
   FocusNode get _shortcutFocusNode => _gestureController.shortcutFocusNode;
   Timer? get _controlsHideTimer => _gestureController.controlsHideTimer;
   set _controlsHideTimer(Timer? value) =>
@@ -818,15 +813,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _notePlaybackProgress(value);
           _nativeVideo.resumeSeek.handleProgress(value);
           final previousPosition = _position;
-          final reachedFirstFrame =
-              _nativeFirstFrameTimer != null &&
-              nativePlaybackReachedFirstFrame(
-                previousPosition: previousPosition,
-                currentPosition: value,
-              );
+          final reachedFirstFrame = _nativeVideo.handlePlaybackProgress(
+            previousPosition: previousPosition,
+            currentPosition: value,
+          );
           if (reachedFirstFrame) {
-            _nativeFirstFrameTimer?.cancel();
-            _nativeFirstFrameTimer = null;
             _ignoreNativeErrorsUntil = null;
             final current = _line;
             if (current != null) {
@@ -1321,8 +1312,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       position: Duration.zero,
       grace: const Duration(seconds: 5),
     );
-    _webLoadTimer?.cancel();
-    _nativeFirstFrameTimer?.cancel();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
     _ignoreNativeErrorsUntil = null;
     _revealPlayerControls();
     _anime4kController.resetVideo();
@@ -1385,38 +1376,28 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         fields: <String, Object?>{..._lineTraceFields(line), 'player': 'web'},
       );
       unawaited(_player.stop());
-      _webLoadTimer = Timer(const Duration(seconds: 7), () {
-        if (!mounted ||
-            serial != _openLineSerial ||
-            _loadedUrl != url ||
-            !webPlaybackStartupTimedOut(waitingForReady: _loadingLine)) {
-          return;
-        }
-        if (webPlaybackShouldSwitchAtSoftTimeout(
-          waitingForReady: _loadingLine,
-          hasAlternative: _nextPlayableLine() != null,
-        )) {
+      _webVideo.startStartupWatchdog(
+        isCurrent: () =>
+            mounted && serial == _openLineSerial && _loadedUrl == url,
+        waitingForReady: () => _loadingLine,
+        hasAlternative: () => _nextPlayableLine() != null,
+        onTimeout: (event) {
           _sessionController.dispatch(
-            PlaybackSessionEvent.softTimeout(hasAlternative: true),
+            event.phase == WebStartupTimeoutPhase.soft
+                ? PlaybackSessionEvent.softTimeout(
+                    hasAlternative: event.hasAlternative,
+                  )
+                : PlaybackSessionEvent.hardTimeout(
+                    hasAlternative: event.hasAlternative,
+                  ),
           );
-          _handleWebError(message: '7 秒内没有出画面，已尝试切换备用线路。');
-          return;
-        }
-        _webLoadTimer = Timer(const Duration(seconds: 18), () {
-          if (!mounted ||
-              serial != _openLineSerial ||
-              _loadedUrl != url ||
-              !webPlaybackStartupTimedOut(waitingForReady: _loadingLine)) {
-            return;
-          }
-          _sessionController.dispatch(
-            PlaybackSessionEvent.hardTimeout(
-              hasAlternative: _nextPlayableLine() != null,
-            ),
+          _handleWebError(
+            message: event.phase == WebStartupTimeoutPhase.soft
+                ? '7 秒内没有出画面，已尝试切换备用线路。'
+                : '长时间未能开始播放，已尝试切换其他线路。',
           );
-          _handleWebError(message: '长时间未能开始播放，已尝试切换其他线路。');
-        });
-      });
+        },
+      );
       setState(() {
         _loadingLine = true;
         _playbackFailed = false;
@@ -1430,55 +1411,33 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     try {
       if (supportsWebStreamPlayer) _webPlayerController.pause();
-      const nativeSoftTimeout = Duration(seconds: 7);
-      const nativeHardTimeout = Duration(seconds: 25);
-      const nativeFallbackPollInterval = Duration(seconds: 1);
-      late void Function(Duration delay, Duration elapsed)
-      scheduleNativeStartupCheck;
-      scheduleNativeStartupCheck = (delay, elapsed) {
-        _nativeFirstFrameTimer = Timer(delay, () {
-          if (!mounted ||
-              serial != _openLineSerial ||
-              _loadedUrl != url ||
-              nativePlaybackHasFirstFrame(
-                playing: _playing,
-                position: _position,
-              )) {
-            return;
-          }
-          final hardTimedOut = elapsed >= nativeHardTimeout;
-          final hasAlternative = _nextPlayableLine() != null;
-          if (!hardTimedOut &&
-              !nativePlaybackShouldSwitchAtSoftTimeout(
-                position: _position,
-                buffer: _buffer,
-                buffering: _buffering,
-                hasAlternative: hasAlternative,
-              )) {
-            final remaining = nativeHardTimeout - elapsed;
-            final nextDelay = remaining < nativeFallbackPollInterval
-                ? remaining
-                : nativeFallbackPollInterval;
-            scheduleNativeStartupCheck(nextDelay, elapsed + nextDelay);
-            return;
-          }
-          _nativeFirstFrameTimer = null;
+      _nativeVideo.startFirstFrameWatchdog(
+        isCurrent: () =>
+            mounted && serial == _openLineSerial && _loadedUrl == url,
+        readSnapshot: () => NativePlaybackStartupSnapshot(
+          playing: _playing,
+          position: _position,
+          buffer: _buffer,
+          buffering: _buffering,
+          hasAlternative: _nextPlayableLine() != null,
+        ),
+        onTimeout: (event) {
+          final hardTimedOut = event.phase == NativeStartupTimeoutPhase.hard;
           _sessionController.dispatch(
             hardTimedOut
                 ? PlaybackSessionEvent.hardTimeout(
-                    hasAlternative: hasAlternative,
+                    hasAlternative: event.hasAlternative,
                   )
                 : PlaybackSessionEvent.softTimeout(
-                    hasAlternative: hasAlternative,
+                    hasAlternative: event.hasAlternative,
                   ),
           );
           _handleRuntimeLineFailure(
             line,
             message: hardTimedOut ? '长时间未能开始播放。' : '暂时没有出画面。',
           );
-        });
-      };
-      scheduleNativeStartupCheck(nativeSoftTimeout, nativeSoftTimeout);
+        },
+      );
       final media = line.headers.isEmpty
           ? Media(url)
           : Media(url, httpHeaders: line.headers);
@@ -1515,7 +1474,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'error_type': error.runtimeType.toString(),
         },
       );
-      _nativeFirstFrameTimer?.cancel();
+      _nativeVideo.cancelFirstFrameWatchdog();
       _handleRuntimeLineFailure(
         line,
         message: '当前线路无法播放：${_friendlyPlaybackError(error)}',
@@ -1534,8 +1493,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _handleRuntimeLineFailure(PlaybackLine line, {required String message}) {
     if (!mounted || _handledFailureOpenSerial == _openLineSerial) return;
     _handledFailureOpenSerial = _openLineSerial;
-    _webLoadTimer?.cancel();
-    _nativeFirstFrameTimer?.cancel();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
     final resumePosition = _currentRecoveryPosition;
     final hasAlternative = _nextPlayableLine() != null;
     final shouldSwitch = _markLineFailure(
@@ -1609,7 +1568,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       // attempt still has its startup timer and will be judged independently.
       return;
     }
-    _nativeFirstFrameTimer?.cancel();
+    _nativeVideo.cancelFirstFrameWatchdog();
     if (!_isPlayableLine(_line)) {
       if (!mounted) return;
       setState(() {
@@ -1832,8 +1791,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _danmakuController.changeEpisode();
     _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
-    _webLoadTimer?.cancel();
-    _nativeFirstFrameTimer?.cancel();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
     _cancelSingleBackupLookup();
     unawaited(_lineRepository.cancelLookup());
     _lineRepository.resetForEpisode(
@@ -2279,8 +2238,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _handleWebReady() {
     if (!mounted) return;
-    _webLoadTimer?.cancel();
-    _webLoadTimer = null;
+    _webVideo.cancelStartupWatchdog();
     final current = _line;
     if (current != null) _clearLineFailure(current.id);
     setState(() {
@@ -2330,8 +2288,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       grace: value ? const Duration(seconds: 2) : Duration.zero,
     );
     if (value) {
-      _webLoadTimer?.cancel();
-      _webLoadTimer = null;
+      _webVideo.cancelStartupWatchdog();
       if (_line != null) {
         _clearLineFailure(_line!.id);
         _preferredProviderId = _line!.providerId;
