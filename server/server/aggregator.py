@@ -41,6 +41,11 @@ SERVER_VERIFIED = "server_verified"
 CLIENT_PROBE_REQUIRED = "client_probe_required"
 UNAVAILABLE = "unavailable"
 
+STARTUP_UNKNOWN = "unknown"
+STARTUP_HLS = "hls"
+STARTUP_MP4_FASTSTART = "mp4_faststart"
+STARTUP_MP4_TAIL_MOOV = "mp4_tail_moov"
+
 DNS_FAILURE = "dns_failure"
 CONNECT_TIMEOUT = "connect_timeout"
 READ_TIMEOUT = "read_timeout"
@@ -234,6 +239,8 @@ class AggregatedVideoLine:
     source: str = ""           # 来源标识
     headers: dict = field(default_factory=dict)
     verification_status: str = "unverified"
+    startup_profile: str = STARTUP_UNKNOWN
+    startup_latency_ms: int = 0
 
 
 @dataclass
@@ -252,6 +259,65 @@ class LineVerificationResult:
     status: str
     error_category: str = ""
     latency_ms: int = 0
+    startup_profile: str = STARTUP_UNKNOWN
+
+
+def _declared_startup_profile(line: AggregatedVideoLine) -> str:
+    if line.startup_profile != STARTUP_UNKNOWN:
+        return line.startup_profile
+    normalized_format = (line.format or "").strip().lower()
+    try:
+        path = urlparse(line.url).path.lower()
+    except ValueError:
+        path = ""
+    if normalized_format == "hls" or path.endswith(".m3u8"):
+        return STARTUP_HLS
+    return STARTUP_UNKNOWN
+
+
+def _mp4_startup_profile(sample: bytes) -> str:
+    offset = 0
+    while offset + 8 <= len(sample):
+        size = int.from_bytes(sample[offset:offset + 4], "big")
+        box_type = sample[offset + 4:offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > len(sample):
+                break
+            size = int.from_bytes(sample[offset + 8:offset + 16], "big")
+            header_size = 16
+        if box_type == b"moov":
+            return STARTUP_MP4_FASTSTART
+        if box_type == b"mdat":
+            return STARTUP_MP4_TAIL_MOOV
+        if size == 0 or size < header_size:
+            break
+        next_offset = offset + size
+        if next_offset <= offset or next_offset > len(sample):
+            break
+        offset = next_offset
+    return STARTUP_UNKNOWN
+
+
+def _sample_startup_profile(
+    line: AggregatedVideoLine,
+    response_url: str,
+    content_type: str,
+    body: bytes,
+) -> str:
+    normalized_format = (line.format or "").strip().lower()
+    try:
+        path = urlparse(response_url).path.lower()
+    except ValueError:
+        path = ""
+    looks_like_mp4 = (
+        normalized_format in {"mp4", "m4v", "mov"}
+        or path.endswith((".mp4", ".m4v", ".mov"))
+        or "video/mp4" in content_type
+        or "video/quicktime" in content_type
+        or (len(body) >= 8 and body[4:8] in {b"ftyp", b"styp", b"moof"})
+    )
+    return _mp4_startup_profile(body) if looks_like_mp4 else STARTUP_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -670,6 +736,7 @@ class ContentAggregator:
                         replace(
                             line,
                             verification_status=CLIENT_PROBE_REQUIRED,
+                            startup_profile=_declared_startup_profile(line),
                         )
                         for line in raw_lines
                         if _is_client_probe_candidate_url(line.url)
@@ -717,6 +784,8 @@ class ContentAggregator:
                             lines.append(replace(
                                 line,
                                 verification_status=SERVER_VERIFIED,
+                                startup_profile=check.startup_profile,
+                                startup_latency_ms=check.latency_ms,
                             ))
                         elif (
                             status == CLIENT_PROBE_REQUIRED
@@ -725,6 +794,12 @@ class ContentAggregator:
                             lines.append(replace(
                                 line,
                                 verification_status=CLIENT_PROBE_REQUIRED,
+                                startup_profile=(
+                                    check.startup_profile
+                                    if check.startup_profile != STARTUP_UNKNOWN
+                                    else _declared_startup_profile(line)
+                                ),
+                                startup_latency_ms=check.latency_ms,
                             ))
                 statuses = {line.verification_status for line in lines}
                 status = (
@@ -1154,11 +1229,16 @@ class ContentAggregator:
         """
         started_at = time.monotonic()
 
-        def finish(status: str, error_category: str = ""):
+        def finish(
+            status: str,
+            error_category: str = "",
+            startup_profile: str = STARTUP_UNKNOWN,
+        ):
             result = LineVerificationResult(
                 status=status,
                 error_category=error_category,
                 latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                startup_profile=startup_profile,
             )
             return result if detailed else result.status
 
@@ -1254,8 +1334,17 @@ class ContentAggregator:
                         or "mpegurl" in content_type
                     )
                     if not is_hls:
+                        startup_profile = _sample_startup_profile(
+                            line,
+                            response_url,
+                            content_type,
+                            body,
+                        )
                         return (
-                            finish(SERVER_VERIFIED)
+                            finish(
+                                SERVER_VERIFIED,
+                                startup_profile=startup_profile,
+                            )
                             if status in (200, 206) and bool(body)
                             else finish(UNAVAILABLE, EMPTY_MEDIA)
                         )
@@ -1349,7 +1438,10 @@ class ContentAggregator:
                         ("<html", "<!doctype html")
                     ):
                         return finish(UNAVAILABLE, EMPTY_MEDIA)
-                    return finish(SERVER_VERIFIED)
+                    return finish(
+                        SERVER_VERIFIED,
+                        startup_profile=STARTUP_HLS,
+                    )
                 return finish(UNAVAILABLE, MALFORMED_MANIFEST)
         except asyncio.CancelledError:
             raise

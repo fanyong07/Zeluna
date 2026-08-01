@@ -299,6 +299,7 @@ void main() {
         codecs: 'avc1.640028',
         format: 'HLS',
         adaptive: true,
+        startupProfile: PlaybackStartupProfile.hls,
         cacheState: 'stale',
         sourceErrorCategory: 'server_blocked_client_candidate',
       );
@@ -324,6 +325,7 @@ void main() {
       expect(merged.single.serverVerified, isTrue);
       expect(merged.single.clientVerified, isTrue);
       expect(merged.single.requiresClientProbe, isFalse);
+      expect(merged.single.startupProfile, PlaybackStartupProfile.hls);
       expect(merged.single.cacheState, 'stale');
       expect(
         merged.single.sourceErrorCategory,
@@ -871,6 +873,7 @@ PlaybackLine _line(
   bool serverVerified = false,
   bool requiresClientProbe = false,
   bool clientVerified = false,
+  String startupProfile = PlaybackStartupProfile.unknown,
   String cacheState = 'unknown',
   String sourceErrorCategory = '',
   String? message,
@@ -895,6 +898,7 @@ PlaybackLine _line(
     serverVerified: serverVerified,
     requiresClientProbe: requiresClientProbe,
     clientVerified: clientVerified,
+    startupProfile: startupProfile,
     cacheState: cacheState,
     sourceErrorCategory: sourceErrorCategory,
     available: available,

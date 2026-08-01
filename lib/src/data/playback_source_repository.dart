@@ -1119,6 +1119,7 @@ List<PlaybackLine> _withFallbackLatency(
                 serverVerified: line.serverVerified,
                 requiresClientProbe: line.requiresClientProbe,
                 clientVerified: line.clientVerified,
+                startupProfile: line.startupProfile,
                 cacheState: line.cacheState,
                 sourceErrorCategory: line.sourceErrorCategory,
                 expiresAt: line.expiresAt,

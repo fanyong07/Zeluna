@@ -1280,6 +1280,54 @@ encrypted-segment.ts
     },
   );
 
+  test('MP4 probe distinguishes fast-start and tail-moov containers', () async {
+    final resolver = RulePlaybackResolver(
+      client: MockClient((request) async {
+        return http.Response.bytes(
+          _mp4StartupSample(
+            moovBeforeMdat: request.url.path.contains('fast-start'),
+          ),
+          206,
+          headers: {'content-type': 'video/mp4'},
+        );
+      }),
+    );
+
+    final fastStart = await resolver.verifyPlaybackLine(
+      line: _networkLine('https://cdn.example.com/fast-start.mp4'),
+      enrichMetadata: false,
+    );
+    final tailMoov = await resolver.verifyPlaybackLine(
+      line: _networkLine('https://cdn.example.com/tail-moov.mp4'),
+      enrichMetadata: false,
+    );
+
+    expect(fastStart.startupProfile, PlaybackStartupProfile.mp4FastStart);
+    expect(tailMoov.startupProfile, PlaybackStartupProfile.mp4TailMoov);
+  });
+
+  test('HLS latency includes the first media segment verification', () async {
+    final resolver = RulePlaybackResolver(
+      client: MockClient((request) async {
+        if (request.url.path == '/latency.m3u8') return _playableHls();
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        return _playableSegment();
+      }),
+    );
+
+    final verified = await resolver.verifyPlaybackLine(
+      line: _networkLine('https://cdn.example.com/latency.m3u8'),
+      enrichMetadata: false,
+    );
+
+    expect(verified.available, isTrue);
+    expect(verified.startupProfile, PlaybackStartupProfile.hls);
+    expect(
+      verified.latency,
+      greaterThanOrEqualTo(const Duration(milliseconds: 70)),
+    );
+  });
+
   test('Range rejection retries one bounded GET without Range', () async {
     var requests = 0;
     final resolver = RulePlaybackResolver(
@@ -2153,6 +2201,24 @@ List<int> _mp4ProbeSample() {
     24,
     ...ascii.encode('ftyp'),
     ...List<int>.filled(16, 0),
+  ];
+}
+
+List<int> _mp4StartupSample({required bool moovBeforeMdat}) {
+  List<int> box(String type, {int size = 8}) => <int>[
+    (size >> 24) & 0xff,
+    (size >> 16) & 0xff,
+    (size >> 8) & 0xff,
+    size & 0xff,
+    ...ascii.encode(type),
+    ...List<int>.filled(size - 8, 0),
+  ];
+
+  return <int>[
+    ...box('ftyp', size: 24),
+    if (moovBeforeMdat) ...box('moov'),
+    ...box('mdat'),
+    if (!moovBeforeMdat) ...box('moov'),
   ];
 }
 

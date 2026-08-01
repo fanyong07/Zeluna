@@ -52,6 +52,8 @@ void main() {
             'cached': true,
             'cache_state': 'fresh',
             'source_latency_ms': 420,
+            'startup_profile': 'hls',
+            'startup_latency_ms': 180,
           },
           {
             'url': 'https://cdn.example.com/modu/index.m3u8',
@@ -98,7 +100,9 @@ void main() {
     expect(lines.first.headers['Referer'], 'https://player.example.com/');
     expect(lines.first.message, '来自在线服务（已缓存）');
     expect(lines.first.cacheState, 'fresh');
-    expect(lines.first.latency, const Duration(milliseconds: 420));
+    expect(lines.first.startupProfile, PlaybackStartupProfile.hls);
+    expect(lines.first.latency, const Duration(milliseconds: 180));
+    expect(lines[1].startupProfile, PlaybackStartupProfile.unknown);
     expect(lines.last.available, isFalse);
     expect(lines.last.url, isNull);
     expect(lines.last.message, '当前站点没有匹配到这部作品');

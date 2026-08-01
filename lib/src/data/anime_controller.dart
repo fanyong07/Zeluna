@@ -109,6 +109,54 @@ Future<List<PlaybackLine>> probeSinglePlaybackBackupSequentially(
   return List<PlaybackLine>.unmodifiable(checked);
 }
 
+List<PlaybackLine> rankPlaybackLinesForStartup(Iterable<PlaybackLine> lines) {
+  final indexed = lines.indexed.toList(growable: false);
+  final sorted = [...indexed]
+    ..sort((left, right) {
+      final availability = _startupAvailabilityRank(
+        left.$2,
+      ).compareTo(_startupAvailabilityRank(right.$2));
+      if (availability != 0) return availability;
+      final profile = _startupProfileRank(
+        left.$2,
+      ).compareTo(_startupProfileRank(right.$2));
+      if (profile != 0) return profile;
+      final latency = (left.$2.latency ?? const Duration(days: 1)).compareTo(
+        right.$2.latency ?? const Duration(days: 1),
+      );
+      if (latency != 0) return latency;
+      return left.$1.compareTo(right.$1);
+    });
+  return List<PlaybackLine>.unmodifiable(sorted.map((entry) => entry.$2));
+}
+
+int _startupAvailabilityRank(PlaybackLine line) {
+  if (line.available && line.clientVerified) return 0;
+  if (line.available && line.serverVerified) return 1;
+  if (line.available) return 2;
+  if (line.requiresClientProbe) return 3;
+  return 4;
+}
+
+int _startupProfileRank(PlaybackLine line) {
+  switch (line.startupProfile) {
+    case PlaybackStartupProfile.mp4FastStart:
+      return 0;
+    case PlaybackStartupProfile.hls:
+      return 1;
+    case PlaybackStartupProfile.mp4TailMoov:
+      return 3;
+  }
+  final format = line.format.trim().toLowerCase();
+  if (format == 'hls' ||
+      format == 'dash' ||
+      format.contains('m3u8') ||
+      format.contains('mpeg-dash')) {
+    return 1;
+  }
+  return 2;
+}
+
 class _CredentialAccountContext {
   String? _accountId;
   int _revision = 0;
@@ -816,11 +864,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final cancellationToken = RulePlaybackCancellationToken();
     late final Future<void> prefetch;
     prefetch =
-        linesForEpisode(
+        _prefetchAndRankPlayback(
           subject,
           episode,
           cancellationToken: cancellationToken,
-        ).then<void>((_) {}, onError: (_, _) {}).whenComplete(() {
+        ).onError((_, _) {}).whenComplete(() {
           if (identical(_playbackPrefetches[key], prefetch)) {
             _playbackPrefetches.remove(key);
             _playbackPrefetchCancellationTokens.remove(key);
@@ -828,6 +876,61 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         });
     _playbackPrefetches[key] = prefetch;
     _playbackPrefetchCancellationTokens[key] = cancellationToken;
+  }
+
+  Future<void> _prefetchAndRankPlayback(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required RulePlaybackCancellationToken cancellationToken,
+  }) async {
+    final accountContextVersion = _accountContextVersion;
+    final lines = await linesForEpisode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+    if (accountContextVersion != _accountContextVersion ||
+        cancellationToken.isCancelled) {
+      return;
+    }
+    var backendLines = lines
+        .where((line) => line.providerId.startsWith('zeluna:'))
+        .toList(growable: false);
+    if (backendLines.isEmpty) return;
+
+    final refreshThreshold = DateTime.now().add(const Duration(seconds: 15));
+    final candidates = backendLines
+        .where(
+          (line) =>
+              !line.clientVerified &&
+              (line.serverVerified || line.requiresClientProbe) &&
+              (line.url?.trim().isNotEmpty ?? false) &&
+              (line.expiresAt == null ||
+                  line.expiresAt!.isAfter(refreshThreshold)),
+        )
+        .take(3)
+        .toList(growable: false);
+    await for (final verified in probePlaybackLinesProgressively(
+      candidates,
+      maxConcurrent: 3,
+      cancellationToken: cancellationToken,
+      verify: (line) => verifyPlaybackLine(
+        line,
+        enrichMetadata: false,
+        cancellationToken: cancellationToken,
+      ),
+    )) {
+      backendLines = _replacePlaybackLine(backendLines, verified);
+    }
+    if (accountContextVersion != _accountContextVersion ||
+        cancellationToken.isCancelled) {
+      return;
+    }
+    _cacheBackendPlaybackLines(
+      subject,
+      episode,
+      rankPlaybackLinesForStartup(backendLines),
+    );
   }
 
   void _cancelPlaybackPrefetches() {

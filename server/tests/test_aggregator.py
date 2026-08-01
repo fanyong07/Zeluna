@@ -10,6 +10,9 @@ from server.aggregator import (
     PARSER_MISMATCH,
     READ_TIMEOUT,
     SERVER_VERIFIED,
+    STARTUP_HLS,
+    STARTUP_MP4_FASTSTART,
+    STARTUP_MP4_TAIL_MOOV,
     STALE_ROUTE,
     UNAVAILABLE,
     AggregatedVideoLine,
@@ -19,6 +22,19 @@ from server.aggregator import (
     _source_match_score,
 )
 from server.scrapers.base import SubjectResult, VideoLine
+
+
+def _mp4_startup_sample(*, moov_before_mdat: bool) -> bytes:
+    def box(box_type: bytes, size: int = 8) -> bytes:
+        return size.to_bytes(4, "big") + box_type + bytes(size - 8)
+
+    parts = [box(b"ftyp", 24)]
+    if moov_before_mdat:
+        parts.append(box(b"moov"))
+    parts.append(box(b"mdat"))
+    if not moov_before_mdat:
+        parts.append(box(b"moov"))
+    return b"".join(parts)
 
 
 class AggregatorTests(unittest.IsolatedAsyncioTestCase):
@@ -481,14 +497,61 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "server.aggregator._is_public_http_url",
             new=AsyncMock(return_value=True),
         ):
-            reachable = await self.aggregator._line_reachable(
+            result = await self.aggregator._line_verification_status(
                 AggregatedVideoLine(
                     url="https://cdn.example/video.m3u8",
                     format="hls",
-                )
+                ),
+                detailed=True,
             )
 
-        self.assertTrue(reachable)
+        self.assertEqual(result.status, SERVER_VERIFIED)
+        self.assertEqual(result.startup_profile, STARTUP_HLS)
+        self.assertGreaterEqual(result.latency_ms, 0)
+
+    async def test_mp4_verification_classifies_fast_start_and_tail_moov(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                206,
+                headers={"content-type": "video/mp4"},
+                content=_mp4_startup_sample(
+                    moov_before_mdat="fast" in request.url.path
+                ),
+            )
+
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            line_http_transport=httpx.MockTransport(handler),
+        )
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(return_value=True),
+        ):
+            fast_start = await self.aggregator._line_verification_status(
+                AggregatedVideoLine(
+                    url="https://cdn.example/fast.mp4",
+                    format="mp4",
+                ),
+                detailed=True,
+            )
+            tail_moov = await self.aggregator._line_verification_status(
+                AggregatedVideoLine(
+                    url="https://cdn.example/tail.mp4",
+                    format="mp4",
+                ),
+                detailed=True,
+            )
+
+        self.assertEqual(fast_start.status, SERVER_VERIFIED)
+        self.assertEqual(
+            fast_start.startup_profile,
+            STARTUP_MP4_FASTSTART,
+        )
+        self.assertEqual(tail_moov.status, SERVER_VERIFIED)
+        self.assertEqual(
+            tail_moov.startup_profile,
+            STARTUP_MP4_TAIL_MOOV,
+        )
 
     async def test_hls_manifest_with_dead_first_segment_is_rejected(self):
         def handler(request):

@@ -199,6 +199,10 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final sourceLatencyMs = int.tryParse(
           json['source_latency_ms']?.toString() ?? '',
         );
+        final startupLatencyMs = int.tryParse(
+          json['startup_latency_ms']?.toString() ?? '',
+        );
+        final startupProfile = _startupProfileFromJson(json['startup_profile']);
         lines.add(
           PlaybackLine(
             id: 'zeluna:${_stableHash('$stableId|${episode.number}|$source|$url|$index')}',
@@ -212,7 +216,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             format: json['format']?.toString().trim() ?? 'auto',
             url: hasPlayableUrl ? url : null,
             headers: Map<String, String>.unmodifiable(headers),
-            latency: sourceLatencyMs != null && sourceLatencyMs > 0
+            latency: startupLatencyMs != null && startupLatencyMs > 0
+                ? Duration(milliseconds: startupLatencyMs)
+                : sourceLatencyMs != null && sourceLatencyMs > 0
                 ? Duration(milliseconds: sourceLatencyMs)
                 : null,
             // Server-verified lines crossed the trusted backend boundary.
@@ -221,6 +227,7 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             publicHttpOnly: requiresClientProbe,
             serverVerified: serverVerified,
             requiresClientProbe: requiresClientProbe,
+            startupProfile: startupProfile,
             cacheState: cacheState,
             sourceErrorCategory: sourceErrorCategory,
             expiresAt: expiresAt,
@@ -261,6 +268,15 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
   void dispose() {
     if (_ownsClient) _client.close();
   }
+}
+
+String _startupProfileFromJson(Object? value) {
+  return switch (value?.toString().trim().toLowerCase()) {
+    PlaybackStartupProfile.hls => PlaybackStartupProfile.hls,
+    PlaybackStartupProfile.mp4FastStart => PlaybackStartupProfile.mp4FastStart,
+    PlaybackStartupProfile.mp4TailMoov => PlaybackStartupProfile.mp4TailMoov,
+    _ => PlaybackStartupProfile.unknown,
+  };
 }
 
 DateTime? _epochDateTime(Object? value) {

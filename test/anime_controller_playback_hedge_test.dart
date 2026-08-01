@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/data/bangumi_credential_store.dart';
+import 'package:anime/src/data/bangumi_metadata_repository.dart';
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
@@ -176,6 +177,92 @@ void main() {
       expect(harness.resolver.forceRefreshValues, [isFalse]);
     },
   );
+
+  test('startup ranking keeps tail-moov MP4 behind streamable lines', () {
+    final ranked = rankPlaybackLinesForStartup([
+      _startupLine('tail', PlaybackStartupProfile.mp4TailMoov, latencyMs: 5),
+      _startupLine('unknown', PlaybackStartupProfile.unknown, latencyMs: 10),
+      _startupLine('hls', PlaybackStartupProfile.hls, latencyMs: 30),
+      _startupLine('fast', PlaybackStartupProfile.mp4FastStart, latencyMs: 80),
+    ]);
+
+    expect(ranked.map((line) => line.id), ['fast', 'hls', 'unknown', 'tail']);
+  });
+
+  test(
+    'detail prefetch probes three quick lines once and caches the best startup',
+    () async {
+      const tailUrl = 'https://tail.example/video.mp4';
+      const hlsUrl = 'https://hls.example/video.m3u8';
+      const fastUrl = 'https://fast.example/video.mp4';
+      final harness = await _PlaybackHarness.create(
+        playbackResponse: (_) async => http.Response(
+          jsonEncode([
+            {
+              'url': tailUrl,
+              'source': 'crawler:tail',
+              'title': 'Tail MP4',
+              'format': 'mp4',
+              'status': 'server_verified',
+              'available': true,
+            },
+            {
+              'url': hlsUrl,
+              'source': 'crawler:hls',
+              'title': 'HLS',
+              'format': 'hls',
+              'status': 'server_verified',
+              'available': true,
+            },
+            {
+              'url': fastUrl,
+              'source': 'crawler:fast',
+              'title': 'Fast MP4',
+              'format': 'mp4',
+              'status': 'server_verified',
+              'available': true,
+            },
+          ]),
+          200,
+          headers: const {'content-type': 'application/json; charset=utf-8'},
+        ),
+        ruleId: 'test:unused-prefetch-fallback',
+        probeResults: const {
+          tailUrl: (
+            latency: Duration(milliseconds: 10),
+            startupProfile: PlaybackStartupProfile.mp4TailMoov,
+          ),
+          hlsUrl: (
+            latency: Duration(milliseconds: 20),
+            startupProfile: PlaybackStartupProfile.hls,
+          ),
+          fastUrl: (
+            latency: Duration(milliseconds: 40),
+            startupProfile: PlaybackStartupProfile.mp4FastStart,
+          ),
+        },
+      );
+      addTearDown(harness.dispose);
+
+      final detail = await harness.controller.detail(_subject);
+      await _waitUntil(() {
+        return harness.controller
+                .prefetchedLineForEpisode(detail.subject, detail.episodes.first)
+                ?.startupProfile ==
+            PlaybackStartupProfile.mp4FastStart;
+      });
+      final prefetched = harness.controller.prefetchedLineForEpisode(
+        detail.subject,
+        detail.episodes.first,
+      );
+
+      expect(prefetched?.url, fastUrl);
+      expect(prefetched?.clientVerified, isTrue);
+      expect(harness.quickPlaybackRequests, 1);
+      expect(harness.resolver.verifyCalls, 3);
+      expect(harness.resolver.maxConcurrentVerifications, 3);
+    },
+  );
 }
 
 class _PlaybackHarness {
@@ -201,6 +288,8 @@ class _PlaybackHarness {
     required FutureOr<http.Response> Function(http.Request request)
     playbackResponse,
     required String ruleId,
+    Map<String, ({Duration latency, String startupProfile})> probeResults =
+        const {},
   }) async {
     final root = await Directory.systemTemp.createTemp(
       'anime-controller-playback-hedge-',
@@ -227,7 +316,7 @@ class _PlaybackHarness {
       }
       return http.Response('{}', 200);
     });
-    final resolver = _ReadyRuleResolver(ruleId);
+    final resolver = _ReadyRuleResolver(ruleId, probeResults: probeResults);
     final container = ProviderContainer(
       overrides: [
         cloudAccountServiceProvider.overrideWithValue(
@@ -241,6 +330,9 @@ class _PlaybackHarness {
         ),
         sourceCatalogRepositoryProvider.overrideWithValue(
           const _EmptySourceCatalogRepository(),
+        ),
+        bangumiMetadataRepositoryProvider.overrideWithValue(
+          _PlaybackDetailMetadataRepository(),
         ),
         rulePlaybackResolverProvider.overrideWithValue(resolver),
         zelunaBackendHttpClientProvider.overrideWithValue(client),
@@ -266,12 +358,15 @@ class _PlaybackHarness {
 }
 
 class _ReadyRuleResolver extends RulePlaybackResolver {
-  _ReadyRuleResolver(this.readyRuleId);
+  _ReadyRuleResolver(this.readyRuleId, {this.probeResults = const {}});
 
   final String readyRuleId;
+  final Map<String, ({Duration latency, String startupProfile})> probeResults;
   int calls = 0;
   int readyCalls = 0;
   int verifyCalls = 0;
+  int _activeVerifications = 0;
+  int maxConcurrentVerifications = 0;
   final List<bool> forceRefreshValues = <bool>[];
 
   @override
@@ -283,7 +378,17 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
   }) async {
     verifyCalls++;
     forceRefreshValues.add(forceRefresh);
-    await Future<void>.delayed(const Duration(milliseconds: 5));
+    _activeVerifications++;
+    if (_activeVerifications > maxConcurrentVerifications) {
+      maxConcurrentVerifications = _activeVerifications;
+    }
+    final probeResult = probeResults[line.url];
+    final latency = probeResult?.latency ?? const Duration(milliseconds: 5);
+    try {
+      await Future<void>.delayed(latency);
+    } finally {
+      _activeVerifications--;
+    }
     return PlaybackLine(
       id: line.id,
       episodeId: line.episodeId,
@@ -294,7 +399,7 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
       format: line.format,
       url: line.url,
       headers: line.headers,
-      latency: const Duration(milliseconds: 5),
+      latency: latency,
       sizeLabel: line.sizeLabel,
       sizeBytes: line.sizeBytes,
       sizeEstimated: line.sizeEstimated,
@@ -308,6 +413,7 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
       serverVerified: line.serverVerified,
       requiresClientProbe: false,
       clientVerified: true,
+      startupProfile: probeResult?.startupProfile ?? line.startupProfile,
       cacheState: line.cacheState,
       sourceErrorCategory: line.sourceErrorCategory,
       expiresAt: line.expiresAt,
@@ -365,6 +471,54 @@ class _EmptySourceCatalogRepository extends SourceCatalogRepository {
   Future<SourceCatalogState> loadCatalog({
     Map<String, bool> enabledOverrides = const {},
   }) async => const SourceCatalogState();
+}
+
+class _PlaybackDetailMetadataRepository extends BangumiMetadataRepository {
+  _PlaybackDetailMetadataRepository()
+    : super(client: MockClient((_) async => http.Response('not found', 404)));
+
+  @override
+  Future<AnimeDetailBundle> detail(
+    int subjectId, {
+    AnimeSubject? fallbackSubject,
+  }) async => const AnimeDetailBundle(
+    subject: _subject,
+    episodes: [_episode],
+    characters: [],
+    staff: [],
+    recommendations: [],
+  );
+}
+
+PlaybackLine _startupLine(
+  String id,
+  String startupProfile, {
+  required int latencyMs,
+}) {
+  return PlaybackLine(
+    id: id,
+    episodeId: _episode.id,
+    providerId: 'zeluna:site:$id',
+    providerName: id,
+    title: id,
+    quality: '',
+    format: startupProfile == PlaybackStartupProfile.hls ? 'hls' : 'mp4',
+    url: 'https://$id.example/video',
+    latency: Duration(milliseconds: latencyMs),
+    clientVerified: true,
+    startupProfile: startupProfile,
+    available: true,
+  );
+}
+
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for playback prefetch.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
 }
 
 RulePlugin _rule(String id) => RulePlugin(

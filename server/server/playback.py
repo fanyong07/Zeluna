@@ -24,6 +24,10 @@ from .aggregator import (
     RESTRICTED,
     SERVER_VERIFIED,
     SERVER_BLOCKED_CLIENT_CANDIDATE,
+    STARTUP_HLS,
+    STARTUP_MP4_FASTSTART,
+    STARTUP_MP4_TAIL_MOOV,
+    STARTUP_UNKNOWN,
     STALE_ROUTE,
     UNAVAILABLE,
     UNKNOWN_EXCEPTION,
@@ -1129,6 +1133,8 @@ class PlaybackService:
             "format": line.format,
             "source": line.source,
             "headers": line.headers,
+            "startup_profile": line.startup_profile,
+            "startup_latency_ms": line.startup_latency_ms,
             "available": server_verified,
             "status": (
                 SERVER_VERIFIED
@@ -1284,9 +1290,51 @@ class PlaybackService:
                 or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
             )
         ]
+        def startup_profile(item: dict) -> str:
+            return str(
+                item.get("startup_profile") or STARTUP_UNKNOWN
+            ).strip().lower()
+
+        has_non_tail_available = any(
+            item.get("available") is True
+            and startup_profile(item) != STARTUP_MP4_TAIL_MOOV
+            for _, item in candidates
+        )
+        if has_non_tail_available:
+            candidates = [
+                entry
+                for entry in candidates
+                if not (
+                    entry[1].get("available") is True
+                    and startup_profile(entry[1]) == STARTUP_MP4_TAIL_MOOV
+                )
+            ]
+
+        def startup_rank(item: dict) -> int:
+            profile = startup_profile(item)
+            if profile == STARTUP_MP4_FASTSTART:
+                return 0
+            if profile == STARTUP_HLS:
+                return 1
+            if profile == STARTUP_MP4_TAIL_MOOV:
+                return 3
+            normalized_format = str(item.get("format") or "").strip().lower()
+            if normalized_format in {"hls", "dash"} or "m3u8" in normalized_format:
+                return 1
+            return 2
+
+        def startup_latency(item: dict) -> int:
+            try:
+                value = int(item.get("startup_latency_ms") or 0)
+            except (TypeError, ValueError):
+                return 2**31 - 1
+            return value if value > 0 else 2**31 - 1
+
         candidates.sort(
             key=lambda entry: (
                 0 if entry[1].get("available") is True else 1,
+                startup_rank(entry[1]),
+                startup_latency(entry[1]),
                 entry[0],
             )
         )

@@ -1935,6 +1935,7 @@ class RulePlaybackResolver {
       isLive: probe.isLive,
       adaptive: probe.adaptive,
       publicHttpOnly: publicHttpOnly,
+      startupProfile: probe.startupProfile,
       available: true,
       message: '已解析到当前集的播放地址。',
     );
@@ -2120,6 +2121,12 @@ class RulePlaybackResolver {
     required bool enrichMetadata,
   }) async {
     final stopwatch = Stopwatch()..start();
+
+    Duration totalLatency() {
+      if (stopwatch.isRunning) stopwatch.stop();
+      return stopwatch.elapsed;
+    }
+
     try {
       var sample = await _sendPlayableProbe(
         client,
@@ -2127,9 +2134,7 @@ class RulePlaybackResolver {
         headers,
         timeout: _playableProbeTimeout,
       );
-      stopwatch.stop();
       var response = sample.response;
-      final measuredLatency = sample.latency ?? stopwatch.elapsed;
       if (response.statusCode >= 200 && response.statusCode < 300) {
         if (!sample.sampleComplete &&
             _isManifestResponse(requestUri, response)) {
@@ -2158,7 +2163,7 @@ class RulePlaybackResolver {
           return _PlayableProbeResult(
             false,
             validation.message,
-            latency: measuredLatency,
+            latency: totalLatency(),
           );
         }
         final detectedFormat = _detectedMediaFormat(
@@ -2182,7 +2187,7 @@ class RulePlaybackResolver {
             return _PlayableProbeResult(
               false,
               '媒体清单格式无效，无法确认真实播放分片。',
-              latency: measuredLatency,
+              latency: totalLatency(),
             );
           }
           // Container metadata is optional for a signature-confirmed file.
@@ -2199,7 +2204,7 @@ class RulePlaybackResolver {
             return _PlayableProbeResult(
               false,
               hlsFailure,
-              latency: measuredLatency,
+              latency: totalLatency(),
             );
           }
         }
@@ -2214,15 +2219,16 @@ class RulePlaybackResolver {
             return _PlayableProbeResult(
               false,
               dashFailure,
-              latency: measuredLatency,
+              latency: totalLatency(),
             );
           }
         }
         return _PlayableProbeResult(
           true,
           '',
-          latency: measuredLatency,
+          latency: totalLatency(),
           format: metadata.format,
+          startupProfile: metadata.startupProfile,
           sizeBytes: metadata.sizeBytes,
           sizeEstimated: metadata.sizeEstimated,
           videoWidth: metadata.videoWidth,
@@ -2237,34 +2243,32 @@ class RulePlaybackResolver {
         return _PlayableProbeResult(
           false,
           '视频 CDN 拒绝访问，可能有防盗链或地区限制。',
-          latency: measuredLatency,
+          latency: totalLatency(),
         );
       }
       if (response.statusCode == 404) {
         return _PlayableProbeResult(
           false,
           '视频 CDN 返回 404，这条播放地址已经失效。',
-          latency: measuredLatency,
+          latency: totalLatency(),
         );
       }
       return _PlayableProbeResult(
         false,
         '视频 CDN 返回 HTTP ${response.statusCode}。',
-        latency: measuredLatency,
+        latency: totalLatency(),
       );
     } on TimeoutException {
-      stopwatch.stop();
       return _PlayableProbeResult(
         false,
         '视频 CDN 连接超时。',
-        latency: stopwatch.elapsed,
+        latency: totalLatency(),
       );
     } catch (error) {
-      stopwatch.stop();
       return _PlayableProbeResult(
         false,
         '视频 CDN 无法访问：${_shortError(error)}',
-        latency: stopwatch.elapsed,
+        latency: totalLatency(),
       );
     }
   }
@@ -2802,6 +2806,7 @@ class _PlayableProbeResponse {
 class _ProbeMediaMetadata {
   const _ProbeMediaMetadata({
     this.format,
+    this.startupProfile = PlaybackStartupProfile.unknown,
     this.sizeBytes,
     this.sizeEstimated = false,
     this.videoWidth,
@@ -2821,6 +2826,7 @@ class _ProbeMediaMetadata {
   });
 
   final String? format;
+  final String startupProfile;
   final int? sizeBytes;
   final bool sizeEstimated;
   final int? videoWidth;
@@ -2839,6 +2845,7 @@ class _ProbeMediaMetadata {
   final List<_DashProbeResource> dashResources;
 
   _ProbeMediaMetadata copyWith({
+    String? startupProfile,
     int? sizeBytes,
     bool? sizeEstimated,
     bool? isLive,
@@ -2850,6 +2857,7 @@ class _ProbeMediaMetadata {
   }) {
     return _ProbeMediaMetadata(
       format: format,
+      startupProfile: startupProfile ?? this.startupProfile,
       sizeBytes: sizeBytes ?? this.sizeBytes,
       sizeEstimated: sizeEstimated ?? this.sizeEstimated,
       videoWidth: videoWidth,
@@ -2886,7 +2894,7 @@ _ProbeMediaMetadata _mediaMetadataFromSample(
       sourceUri,
       text,
       sampleComplete: sample.sampleComplete,
-    );
+    ).copyWith(startupProfile: PlaybackStartupProfile.hls);
   }
   if (format == 'DASH') return _dashProbeMetadata(sourceUri, text);
 
@@ -2895,6 +2903,9 @@ _ProbeMediaMetadata _mediaMetadataFromSample(
       : _resolutionDimensionsForUrl(sourceUri);
   return _ProbeMediaMetadata(
     format: format,
+    startupProfile: format == 'MP4'
+        ? _mp4StartupProfile(sample.sample)
+        : PlaybackStartupProfile.unknown,
     sizeBytes: _responseTotalBytes(sample.response),
     videoWidth: dimensions?.width,
     videoHeight: dimensions?.height,
@@ -3811,6 +3822,7 @@ class _PlayableProbeResult {
     this.message, {
     this.latency,
     this.format,
+    this.startupProfile = PlaybackStartupProfile.unknown,
     this.sizeBytes,
     this.sizeEstimated = false,
     this.videoWidth,
@@ -3825,6 +3837,7 @@ class _PlayableProbeResult {
   final String message;
   final Duration? latency;
   final String? format;
+  final String startupProfile;
   final int? sizeBytes;
   final bool sizeEstimated;
   final int? videoWidth;
@@ -3866,6 +3879,11 @@ PlaybackLine _copyPlaybackLineWithProbe(
     serverVerified: line.serverVerified,
     requiresClientProbe: false,
     clientVerified: probe.available || line.clientVerified,
+    startupProfile:
+        probe.available &&
+            probe.startupProfile != PlaybackStartupProfile.unknown
+        ? probe.startupProfile
+        : line.startupProfile,
     cacheState: line.cacheState,
     sourceErrorCategory: line.sourceErrorCategory,
     expiresAt: line.expiresAt,
@@ -4034,6 +4052,37 @@ bool _hasIsoBmffSignature(List<int> bytes) {
   }
   return false;
 }
+
+String _mp4StartupProfile(List<int> bytes) {
+  var offset = 0;
+  while (offset + 8 <= bytes.length) {
+    var size = _readBigEndianUint32(bytes, offset);
+    final type = String.fromCharCodes(bytes.skip(offset + 4).take(4));
+    var headerSize = 8;
+    if (size == 1) {
+      if (offset + 16 > bytes.length) break;
+      size = _readBigEndianUint64(bytes, offset + 8);
+      headerSize = 16;
+    }
+    if (type == 'moov') return PlaybackStartupProfile.mp4FastStart;
+    if (type == 'mdat') return PlaybackStartupProfile.mp4TailMoov;
+    if (size == 0 || size < headerSize) break;
+    final nextOffset = offset + size;
+    if (nextOffset <= offset || nextOffset > bytes.length) break;
+    offset = nextOffset;
+  }
+  return PlaybackStartupProfile.unknown;
+}
+
+int _readBigEndianUint32(List<int> bytes, int offset) =>
+    (bytes[offset] << 24) |
+    (bytes[offset + 1] << 16) |
+    (bytes[offset + 2] << 8) |
+    bytes[offset + 3];
+
+int _readBigEndianUint64(List<int> bytes, int offset) =>
+    (_readBigEndianUint32(bytes, offset) << 32) |
+    _readBigEndianUint32(bytes, offset + 4);
 
 bool _hasMpegTransportStreamSignature(List<int> bytes) {
   for (final stride in const <int>[188, 192, 204]) {

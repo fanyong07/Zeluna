@@ -13,6 +13,9 @@ from server.aggregator import (
     PARSER_MISMATCH,
     SERVER_VERIFIED,
     SERVER_BLOCKED_CLIENT_CANDIDATE,
+    STARTUP_HLS,
+    STARTUP_MP4_FASTSTART,
+    STARTUP_MP4_TAIL_MOOV,
     UNAVAILABLE,
     AggregatedVideoLine,
     SourceMatch,
@@ -352,11 +355,15 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 source="crawler:dm706",
                 headers={"Referer": "https://source.example/watch/1"},
                 verification_status=CLIENT_PROBE_REQUIRED,
+                startup_profile=STARTUP_HLS,
+                startup_latency_ms=275,
             )
         )
 
         self.assertFalse(item["available"])
         self.assertEqual(item["status"], CLIENT_PROBE_REQUIRED)
+        self.assertEqual(item["startup_profile"], STARTUP_HLS)
+        self.assertEqual(item["startup_latency_ms"], 275)
         self.assertEqual(item["expires_at"], expires_at)
         self.assertEqual(
             item["headers"]["Referer"],
@@ -897,6 +904,57 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [urlparse(item["url"]).hostname for item in selected],
             ["a.example", "b.example", "c.example"],
+        )
+
+    def test_quick_inventory_prefers_startable_media_and_drops_tail_moov(self):
+        items = [
+            {
+                "url": "https://tail.example/video.mp4",
+                "format": "mp4",
+                "available": True,
+                "status": SERVER_VERIFIED,
+                "startup_profile": STARTUP_MP4_TAIL_MOOV,
+                "startup_latency_ms": 10,
+            },
+            {
+                "url": "https://slow-hls.example/video.m3u8",
+                "format": "hls",
+                "available": True,
+                "status": SERVER_VERIFIED,
+                "startup_profile": STARTUP_HLS,
+                "startup_latency_ms": 900,
+            },
+            {
+                "url": "https://fast-hls.example/video.m3u8",
+                "format": "hls",
+                "available": True,
+                "status": SERVER_VERIFIED,
+                "startup_profile": STARTUP_HLS,
+                "startup_latency_ms": 120,
+            },
+            {
+                "url": "https://faststart.example/video.mp4",
+                "format": "mp4",
+                "available": True,
+                "status": SERVER_VERIFIED,
+                "startup_profile": STARTUP_MP4_FASTSTART,
+                "startup_latency_ms": 500,
+            },
+        ]
+
+        selected = self.service._select_quick_lines(items)
+
+        self.assertEqual(
+            [urlparse(item["url"]).hostname for item in selected],
+            [
+                "faststart.example",
+                "fast-hls.example",
+                "slow-hls.example",
+            ],
+        )
+        self.assertNotIn(
+            "tail.example",
+            {urlparse(item["url"]).hostname for item in selected},
         )
 
 

@@ -250,6 +250,9 @@ PlaybackLine preservePlaybackLineProbeMetadata({
         ? false
         : incoming.requiresClientProbe,
     clientVerified: incoming.clientVerified || previous.clientVerified,
+    startupProfile: incoming.startupProfile == PlaybackStartupProfile.unknown
+        ? previous.startupProfile
+        : incoming.startupProfile,
     cacheState: incoming.cacheState == 'unknown'
         ? previous.cacheState
         : incoming.cacheState,

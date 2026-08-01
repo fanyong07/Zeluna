@@ -198,6 +198,13 @@ class AnimeEpisode {
   }
 }
 
+abstract final class PlaybackStartupProfile {
+  static const unknown = 'unknown';
+  static const hls = 'hls';
+  static const mp4FastStart = 'mp4_faststart';
+  static const mp4TailMoov = 'mp4_tail_moov';
+}
+
 class PlaybackLine {
   const PlaybackLine({
     required this.id,
@@ -223,6 +230,7 @@ class PlaybackLine {
     this.serverVerified = false,
     this.requiresClientProbe = false,
     this.clientVerified = false,
+    this.startupProfile = PlaybackStartupProfile.unknown,
     this.cacheState = 'unknown',
     this.sourceErrorCategory = '',
     this.expiresAt,
@@ -256,6 +264,11 @@ class PlaybackLine {
   final bool serverVerified;
   final bool requiresClientProbe;
   final bool clientVerified;
+
+  /// Describes whether a verified media container can reach its first frame
+  /// without an extra seek. MP4 files with `moov` after `mdat` remain usable
+  /// backups, but should not win first-play selection.
+  final String startupProfile;
   final String cacheState;
   final String sourceErrorCategory;
   final DateTime? expiresAt;
