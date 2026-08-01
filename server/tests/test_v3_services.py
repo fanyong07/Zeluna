@@ -10,9 +10,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.aggregator import (
     CLIENT_PROBE_REQUIRED,
+    PARSER_MISMATCH,
     SERVER_VERIFIED,
+    SERVER_BLOCKED_CLIENT_CANDIDATE,
+    UNAVAILABLE,
     AggregatedVideoLine,
     SourceMatch,
+    SourceResolutionOutcome,
     aggregator,
 )
 from server.catalog import CatalogService
@@ -730,6 +734,21 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                     session,
                     "bangumi:client-candidate",
                     {"client-candidate": CLIENT_PROBE_REQUIRED},
+                    diagnostics={
+                        "client-candidate": SourceResolutionOutcome(
+                            match=SourceMatch(
+                                source_id="maccms:client-candidate:1",
+                                source_name="client-candidate",
+                                title="Client Candidate",
+                                content_type="anime",
+                                year=2024,
+                            ),
+                            lines=[],
+                            status=CLIENT_PROBE_REQUIRED,
+                            error_category=SERVER_BLOCKED_CLIENT_CANDIDATE,
+                            latency_ms=800,
+                        )
+                    },
                 )
             async with self.sessions() as session:
                 matches = await self.service._load_bindings(
@@ -741,6 +760,86 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.source_name for item in matches], ["client-candidate"])
         self.assertEqual(health.consecutive_failures, 0)
         self.assertEqual(health.last_status, CLIENT_PROBE_REQUIRED)
+        self.assertEqual(
+            health.last_error_category,
+            SERVER_BLOCKED_CLIENT_CANDIDATE,
+        )
+        self.assertEqual(health.latency_ms, 800)
+
+    async def test_deterministic_failure_updates_recent_health_and_latency(self):
+        match = SourceMatch(
+            source_id="maccms:broken:1",
+            source_name="broken",
+            title="Broken Anime",
+            content_type="anime",
+            year=2024,
+        )
+        diagnostic = SourceResolutionOutcome(
+            match=match,
+            lines=[],
+            status=UNAVAILABLE,
+            error_category=PARSER_MISMATCH,
+            latency_ms=1200,
+        )
+
+        async with self.sessions() as session:
+            await self.service._record_health(
+                session,
+                "bangumi:broken",
+                {"broken": UNAVAILABLE},
+                diagnostics={"broken": diagnostic},
+            )
+        async with self.sessions() as session:
+            health = await session.scalar(select(SourceHealth))
+
+        self.assertEqual(health.consecutive_failures, 2)
+        self.assertEqual(health.last_error_category, PARSER_MISMATCH)
+        self.assertEqual(health.latency_ms, 1200)
+        self.assertAlmostEqual(health.recent_success_rate, 0.325)
+        self.assertGreater(health.last_failure_at, 0)
+
+    def test_source_rank_prefers_recent_fast_source_over_lifetime_counts(self):
+        slow_binding = SourceBinding(
+            stable_id="bangumi:rank",
+            source_id="maccms:slow:1",
+            source_name="slow",
+            score=105,
+            success_count=500,
+            failure_count=0,
+            last_success_at=1,
+            last_failure_at=0,
+        )
+        fast_binding = SourceBinding(
+            stable_id="bangumi:rank",
+            source_id="maccms:fast:1",
+            source_name="fast",
+            score=100,
+            success_count=2,
+            failure_count=1,
+            last_success_at=2,
+            last_failure_at=1,
+        )
+        slow_health = SourceHealth(
+            source_name="slow",
+            consecutive_failures=2,
+            last_status="unhealthy",
+            last_error_category=PARSER_MISMATCH,
+            latency_ms=9000,
+            recent_success_rate=0.1,
+        )
+        fast_health = SourceHealth(
+            source_name="fast",
+            consecutive_failures=0,
+            last_status="healthy",
+            last_error_category="",
+            latency_ms=350,
+            recent_success_rate=0.95,
+        )
+
+        self.assertGreater(
+            self.service._source_binding_rank(fast_binding, fast_health),
+            self.service._source_binding_rank(slow_binding, slow_health),
+        )
 
     async def test_quick_refresh_is_not_blocked_by_full_refresh_capacity(self):
         expected = [{"url": "https://cdn.example/quick.m3u8"}]

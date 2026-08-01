@@ -6,10 +6,15 @@ import httpx
 
 from server.aggregator import (
     CLIENT_PROBE_REQUIRED,
+    MALFORMED_MANIFEST,
+    PARSER_MISMATCH,
+    READ_TIMEOUT,
     SERVER_VERIFIED,
+    STALE_ROUTE,
     UNAVAILABLE,
     AggregatedVideoLine,
     ContentAggregator,
+    LineVerificationResult,
     SourceMatch,
     _source_match_score,
 )
@@ -278,7 +283,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "server.aggregator._is_public_http_url",
             new=AsyncMock(return_value=True),
         ):
-            lines, health = await self.aggregator.resolve_source_matches(
+            lines, health, diagnostics = await self.aggregator.resolve_source_matches(
                 [
                     SourceMatch(
                         source_id="crawler:dead:1",
@@ -289,10 +294,88 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ],
                 episode=1,
+                include_diagnostics=True,
             )
 
         self.assertEqual(lines, [])
         self.assertEqual(health, {"dead": UNAVAILABLE})
+        self.assertEqual(diagnostics["dead"].error_category, STALE_ROUTE)
+
+    async def test_malformed_hls_manifest_keeps_structured_error_category(self):
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            line_http_transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, text="not an hls manifest")
+            ),
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/broken.m3u8",
+            format="hls",
+        )
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(return_value=True),
+        ):
+            result = await self.aggregator._line_verification_status(
+                line,
+                detailed=True,
+            )
+
+        self.assertIsInstance(result, LineVerificationResult)
+        self.assertEqual(result.status, UNAVAILABLE)
+        self.assertEqual(result.error_category, MALFORMED_MANIFEST)
+
+    async def test_read_timeout_keeps_structured_error_category(self):
+        def timeout(_request):
+            raise httpx.ReadTimeout("slow media response")
+
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            line_http_transport=httpx.MockTransport(timeout),
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/slow.m3u8",
+            format="hls",
+        )
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(return_value=True),
+        ):
+            result = await self.aggregator._line_verification_status(
+                line,
+                detailed=True,
+            )
+
+        self.assertEqual(result.status, UNAVAILABLE)
+        self.assertEqual(result.error_category, READ_TIMEOUT)
+
+    async def test_parser_exception_is_reported_in_source_diagnostics(self):
+        crawler = AsyncMock()
+        crawler.content_types = ["anime"]
+        crawler.get_video_urls = AsyncMock(
+            side_effect=ValueError("unexpected source payload")
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={"broken": crawler}
+        )
+
+        lines, health, diagnostics = await self.aggregator.resolve_source_matches(
+            [
+                SourceMatch(
+                    source_id="crawler:broken:1",
+                    source_name="broken",
+                    title="Broken Anime",
+                    content_type="anime",
+                    year=2025,
+                )
+            ],
+            episode=1,
+            include_diagnostics=True,
+        )
+
+        self.assertEqual(lines, [])
+        self.assertEqual(health, {"broken": UNAVAILABLE})
+        self.assertEqual(diagnostics["broken"].error_category, PARSER_MISMATCH)
 
     async def test_fake_ip_dns_result_is_deferred_to_public_only_client_probe(self):
         self.aggregator = ContentAggregator(crawler_scrapers={})
@@ -318,9 +401,13 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "server.aggregator._is_public_http_url",
             new=AsyncMock(return_value=False),
         ):
-            status = await self.aggregator._line_verification_status(line)
+            result = await self.aggregator._line_verification_status(
+                line,
+                detailed=True,
+            )
 
-        self.assertEqual(status, UNAVAILABLE)
+        self.assertEqual(result.status, UNAVAILABLE)
+        self.assertEqual(result.error_category, PARSER_MISMATCH)
 
     async def test_search_uses_independent_crawler_without_upstream_aggregator(self):
         crawler = AsyncMock()

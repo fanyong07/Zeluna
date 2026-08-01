@@ -30,4 +30,68 @@ void main() {
     expect(events[1], isNot(contains('account')));
     expect(events[1], isNot(contains('headers')));
   });
+
+  test(
+    'playback trace records buffering duration without duplicate starts',
+    () {
+      var now = DateTime.utc(2026, 8, 1, 12);
+      final events = <Map<String, Object?>>[];
+      final trace = PlaybackPerformanceTrace(
+        attemptId: 'attempt-buffering',
+        clock: () => now,
+        sink: events.add,
+      );
+
+      trace.recordBufferingChanged(
+        buffering: true,
+        fields: const {'provider': 'zeluna:primary'},
+      );
+      trace.recordBufferingChanged(buffering: true);
+      now = now.add(const Duration(milliseconds: 840));
+      trace.recordBufferingChanged(
+        buffering: false,
+        fields: const {'outcome': 'resumed'},
+      );
+      trace.recordBufferingChanged(buffering: false);
+
+      expect(events.map((event) => event['event']), [
+        'buffering_started',
+        'buffering_ended',
+      ]);
+      expect(events.last['buffering_ms'], 840);
+      expect(events.last['outcome'], 'resumed');
+    },
+  );
+
+  test('playback trace drops sensitive fields and URL-shaped values', () {
+    final events = <Map<String, Object?>>[];
+    final trace = PlaybackPerformanceTrace(
+      attemptId: 'attempt-redaction',
+      clock: () => DateTime.utc(2026, 8, 1, 12),
+      sink: events.add,
+    );
+
+    trace.record(
+      'failure',
+      fields: const <String, Object?>{
+        'provider': 'zeluna:primary',
+        'media_url': 'https://signed.example/video.m3u8?token=secret',
+        'headers': {'Cookie': 'secret'},
+        'access_token': 'secret',
+        'message': 'https://signed.example/private',
+        'attempt_id': 'spoofed',
+        'event': 'spoofed',
+        'elapsed_ms': 999,
+      },
+    );
+
+    expect(events.single['provider'], 'zeluna:primary');
+    expect(events.single, isNot(contains('media_url')));
+    expect(events.single, isNot(contains('headers')));
+    expect(events.single, isNot(contains('access_token')));
+    expect(events.single, isNot(contains('message')));
+    expect(events.single['attempt_id'], 'attempt-redaction');
+    expect(events.single['event'], 'failure');
+    expect(events.single['elapsed_ms'], 0);
+  });
 }

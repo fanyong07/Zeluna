@@ -23,15 +23,70 @@ class PlaybackPerformanceTrace {
   final DateTime Function() _clock;
   final String attemptId;
   late final DateTime _startedAt;
+  DateTime? _bufferingStartedAt;
 
   void record(String event, {Map<String, Object?> fields = const {}}) {
     final now = _clock();
+    _emit(event, now, fields);
+  }
+
+  void recordBufferingChanged({
+    required bool buffering,
+    Map<String, Object?> fields = const {},
+  }) {
+    final now = _clock();
+    if (buffering) {
+      if (_bufferingStartedAt != null) return;
+      _bufferingStartedAt = now;
+      _emit('buffering_started', now, fields);
+      return;
+    }
+    final startedAt = _bufferingStartedAt;
+    if (startedAt == null) return;
+    _bufferingStartedAt = null;
+    _emit('buffering_ended', now, <String, Object?>{
+      ...fields,
+      'buffering_ms': now.difference(startedAt).inMilliseconds,
+    });
+  }
+
+  void _emit(String event, DateTime now, Map<String, Object?> fields) {
     _sink(<String, Object?>{
+      ..._safeFields(fields),
       'attempt_id': attemptId,
       'event': event,
       'elapsed_ms': now.difference(_startedAt).inMilliseconds,
-      ...fields,
     });
+  }
+
+  static Map<String, Object?> _safeFields(Map<String, Object?> fields) {
+    const blockedMarkers = <String>{
+      'url',
+      'header',
+      'cookie',
+      'token',
+      'account',
+      'email',
+      'password',
+      'title',
+    };
+    final safe = <String, Object?>{};
+    for (final entry in fields.entries) {
+      final key = entry.key.trim();
+      final normalizedKey = key.toLowerCase();
+      if (key.isEmpty || blockedMarkers.any(normalizedKey.contains)) continue;
+      final value = entry.value;
+      if (value is String) {
+        final normalizedValue = value.trim();
+        if (normalizedValue.contains('://')) continue;
+        safe[key] = normalizedValue.length <= 160
+            ? normalizedValue
+            : normalizedValue.substring(0, 160);
+      } else if (value == null || value is num || value is bool) {
+        safe[key] = value;
+      }
+    }
+    return safe;
   }
 
   static String _nextAttemptId(DateTime Function() clock) {

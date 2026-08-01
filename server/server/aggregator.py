@@ -14,7 +14,7 @@ import asyncio
 import ipaddress
 import re
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Optional
 from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin, urlparse
@@ -40,6 +40,32 @@ logger = logging.getLogger(__name__)
 SERVER_VERIFIED = "server_verified"
 CLIENT_PROBE_REQUIRED = "client_probe_required"
 UNAVAILABLE = "unavailable"
+
+DNS_FAILURE = "dns_failure"
+CONNECT_TIMEOUT = "connect_timeout"
+READ_TIMEOUT = "read_timeout"
+RESTRICTED = "restricted"
+STALE_ROUTE = "stale_route"
+MALFORMED_MANIFEST = "malformed_manifest"
+EMPTY_MEDIA = "empty_media"
+PARSER_MISMATCH = "parser_mismatch"
+SERVER_BLOCKED_CLIENT_CANDIDATE = "server_blocked_client_candidate"
+RATE_LIMITED = "rate_limited"
+UNKNOWN_EXCEPTION = "unknown_exception"
+
+_ERROR_CATEGORY_PRIORITY = {
+    SERVER_BLOCKED_CLIENT_CANDIDATE: 0,
+    RATE_LIMITED: 20,
+    RESTRICTED: 30,
+    DNS_FAILURE: 40,
+    CONNECT_TIMEOUT: 50,
+    READ_TIMEOUT: 60,
+    UNKNOWN_EXCEPTION: 70,
+    STALE_ROUTE: 80,
+    EMPTY_MEDIA: 90,
+    MALFORMED_MANIFEST: 100,
+    PARSER_MISMATCH: 110,
+}
 
 # Direct sites that passed search/detail/manifest/key/segment checks from the
 # production VPS.  The bonus keeps these direct candidates ahead of
@@ -219,6 +245,68 @@ class SourceMatch:
     year: int
     episode_count: int = 0
     score: int = 0
+
+
+@dataclass(frozen=True)
+class LineVerificationResult:
+    status: str
+    error_category: str = ""
+    latency_ms: int = 0
+
+
+@dataclass(frozen=True)
+class SourceResolutionOutcome:
+    """Tuple-compatible source result with health diagnostics attached."""
+
+    match: SourceMatch
+    lines: list[AggregatedVideoLine]
+    status: str
+    error_category: str = ""
+    latency_ms: int = 0
+
+    def __iter__(self) -> Iterator[object]:
+        # Existing callers intentionally keep the historical three-value
+        # unpacking contract while newer callers can read the extra fields.
+        yield self.match
+        yield self.lines
+        yield self.status
+
+
+def _classify_resolution_exception(error: BaseException) -> str:
+    if isinstance(error, socket.gaierror):
+        return DNS_FAILURE
+    if isinstance(error, httpx.ConnectTimeout):
+        return CONNECT_TIMEOUT
+    if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout)):
+        return READ_TIMEOUT
+    if isinstance(error, (asyncio.TimeoutError, httpx.PoolTimeout)):
+        return READ_TIMEOUT
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        if status == 429:
+            return RATE_LIMITED
+        if status in {401, 403, 451}:
+            return RESTRICTED
+        if status in {404, 410}:
+            return STALE_ROUTE
+    if isinstance(error, httpx.ConnectError):
+        message = str(error).casefold()
+        if any(
+            marker in message
+            for marker in ("getaddrinfo", "name or service", "nodename", "dns")
+        ):
+            return DNS_FAILURE
+        return CONNECT_TIMEOUT
+    if isinstance(error, (json.JSONDecodeError, KeyError, IndexError, ValueError)):
+        return PARSER_MISMATCH
+    return UNKNOWN_EXCEPTION
+
+
+def _strongest_error_category(categories: list[str], fallback: str) -> str:
+    values = [value for value in categories if value]
+    if not values:
+        return fallback
+    return max(values, key=lambda value: _ERROR_CATEGORY_PRIORITY.get(value, 0))
 
 
 class ContentAggregator:
@@ -555,15 +643,30 @@ class ContentAggregator:
         *,
         episode: int,
         verify: bool = True,
-    ) -> AsyncIterator[tuple[SourceMatch, list[AggregatedVideoLine], str]]:
+    ) -> AsyncIterator[SourceResolutionOutcome]:
         """Yield each resolved site as soon as its media checks finish."""
         semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
 
-        async def resolve_one(match: SourceMatch):
+        async def resolve_one(match: SourceMatch) -> SourceResolutionOutcome:
             async with semaphore:
-                raw_lines = await self.get_video_urls(match.source_id, episode)
+                started_at = time.monotonic()
+                try:
+                    raw_lines = await self.get_video_urls(match.source_id, episode)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    return SourceResolutionOutcome(
+                        match=match,
+                        lines=[],
+                        status=UNAVAILABLE,
+                        error_category=_classify_resolution_exception(error),
+                        latency_ms=max(
+                            0,
+                            int((time.monotonic() - started_at) * 1000),
+                        ),
+                    )
                 if not verify:
-                    return match, [
+                    lines = [
                         replace(
                             line,
                             verification_status=CLIENT_PROBE_REQUIRED,
@@ -571,13 +674,45 @@ class ContentAggregator:
                         for line in raw_lines
                         if _is_client_probe_candidate_url(line.url)
                     ]
+                    return SourceResolutionOutcome(
+                        match=match,
+                        lines=lines,
+                        status=(CLIENT_PROBE_REQUIRED if lines else UNAVAILABLE),
+                        error_category="" if lines else EMPTY_MEDIA,
+                        latency_ms=max(
+                            0,
+                            int((time.monotonic() - started_at) * 1000),
+                        ),
+                    )
                 lines: list[AggregatedVideoLine] = []
+                client_categories: list[str] = []
+                failure_categories: list[str] = []
                 if raw_lines:
                     checks = await asyncio.gather(
-                        *(self._line_verification_status(line) for line in raw_lines),
+                        *(
+                            self._line_verification_status(line, detailed=True)
+                            for line in raw_lines
+                        ),
                         return_exceptions=True,
                     )
-                    for line, status in zip(raw_lines, checks):
+                    for line, raw_check in zip(raw_lines, checks):
+                        if isinstance(raw_check, BaseException):
+                            check = LineVerificationResult(
+                                status=UNAVAILABLE,
+                                error_category=_classify_resolution_exception(raw_check),
+                            )
+                        elif isinstance(raw_check, LineVerificationResult):
+                            check = raw_check
+                        else:
+                            # Test doubles and older extensions may still
+                            # return the historical plain status string.
+                            check = LineVerificationResult(status=str(raw_check))
+                        status = check.status
+                        if check.error_category:
+                            if status == CLIENT_PROBE_REQUIRED:
+                                client_categories.append(check.error_category)
+                            elif status != SERVER_VERIFIED:
+                                failure_categories.append(check.error_category)
                         if status == SERVER_VERIFIED:
                             lines.append(replace(
                                 line,
@@ -591,17 +726,6 @@ class ContentAggregator:
                                 line,
                                 verification_status=CLIENT_PROBE_REQUIRED,
                             ))
-                return match, lines
-
-        tasks = [asyncio.create_task(resolve_one(match)) for match in matches]
-        try:
-            for completed in asyncio.as_completed(tasks):
-                try:
-                    match, lines = await completed
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    continue
                 statuses = {line.verification_status for line in lines}
                 status = (
                     SERVER_VERIFIED
@@ -610,7 +734,43 @@ class ContentAggregator:
                     if CLIENT_PROBE_REQUIRED in statuses
                     else UNAVAILABLE
                 )
-                yield match, lines, status
+                if status == SERVER_VERIFIED:
+                    error_category = ""
+                elif status == CLIENT_PROBE_REQUIRED:
+                    error_category = _strongest_error_category(
+                        client_categories,
+                        SERVER_BLOCKED_CLIENT_CANDIDATE,
+                    )
+                else:
+                    error_category = _strongest_error_category(
+                        failure_categories,
+                        EMPTY_MEDIA if not raw_lines else UNKNOWN_EXCEPTION,
+                    )
+                return SourceResolutionOutcome(
+                    match=match,
+                    lines=lines,
+                    status=status,
+                    error_category=error_category,
+                    latency_ms=max(
+                        0,
+                        int((time.monotonic() - started_at) * 1000),
+                    ),
+                )
+
+        tasks = [asyncio.create_task(resolve_one(match)) for match in matches]
+        try:
+            for completed in asyncio.as_completed(tasks):
+                try:
+                    outcome = await completed
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.debug(
+                        "Source resolution task failed: %s",
+                        type(error).__name__,
+                    )
+                    continue
+                yield outcome
         finally:
             for task in tasks:
                 if not task.done():
@@ -623,16 +783,28 @@ class ContentAggregator:
         *,
         episode: int,
         verify: bool = True,
-    ) -> tuple[list[AggregatedVideoLine], dict[str, str]]:
+        include_diagnostics: bool = False,
+    ) -> (
+        tuple[list[AggregatedVideoLine], dict[str, str]]
+        | tuple[
+            list[AggregatedVideoLine],
+            dict[str, str],
+            dict[str, SourceResolutionOutcome],
+        ]
+    ):
         """低并发解析多站线路，并区分服务器实播与客户端候选。"""
         health: dict[str, str] = {}
+        diagnostics: dict[str, SourceResolutionOutcome] = {}
         unique: dict[str, AggregatedVideoLine] = {}
-        async for match, lines, status in self.resolve_source_matches_progressively(
+        async for outcome in self.resolve_source_matches_progressively(
             matches,
             episode=episode,
             verify=verify,
         ):
+            match, lines, status = outcome
             health[match.source_name] = status
+            if isinstance(outcome, SourceResolutionOutcome):
+                diagnostics[match.source_name] = outcome
             for line in lines:
                 previous = unique.get(line.url)
                 if previous is None or (
@@ -640,6 +812,8 @@ class ContentAggregator:
                     and line.verification_status == SERVER_VERIFIED
                 ):
                     unique[line.url] = line
+        if include_diagnostics:
+            return list(unique.values()), health, diagnostics
         return list(unique.values()), health
 
     async def search(
@@ -968,16 +1142,38 @@ class ContentAggregator:
         return unique
 
     async def _line_verification_status(
-        self, line: "AggregatedVideoLine"
-    ) -> str:
+        self,
+        line: "AggregatedVideoLine",
+        *,
+        detailed: bool = False,
+    ) -> str | LineVerificationResult:
         """
         校验一条线路是否真能播:
           - m3u8: 清单有效，加密密钥（如有）和首个媒体分片均可读取
           - mp4/其它: HEAD 或 GET, 状态码 < 400 且非 HTML
         """
+        started_at = time.monotonic()
+
+        def finish(status: str, error_category: str = ""):
+            result = LineVerificationResult(
+                status=status,
+                error_category=error_category,
+                latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+            )
+            return result if detailed else result.status
+
+        def finish_http_failure(status: int):
+            if status == 429:
+                return finish(CLIENT_PROBE_REQUIRED, RATE_LIMITED)
+            if status in {401, 403, 451}:
+                return finish(CLIENT_PROBE_REQUIRED, RESTRICTED)
+            if status in {404, 410}:
+                return finish(UNAVAILABLE, STALE_ROUTE)
+            return finish(UNAVAILABLE, UNKNOWN_EXCEPTION)
+
         url = line.url
         if not url.lower().startswith(("http://", "https://")):
-            return UNAVAILABLE
+            return finish(UNAVAILABLE, STALE_ROUTE)
         headers = {"User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
@@ -994,6 +1190,8 @@ class ContentAggregator:
                 transport=self._line_http_transport,
             ) as c:
                 client_probe_sentinel = object()
+                unsafe_target_sentinel = object()
+                stale_redirect_sentinel = object()
 
                 async def fetch(target: str):
                     current = target
@@ -1002,13 +1200,13 @@ class ContentAggregator:
                             return (
                                 client_probe_sentinel
                                 if _is_client_probe_candidate_url(current)
-                                else None
+                                else unsafe_target_sentinel
                             )
                         async with c.stream("GET", current) as resp:
                             if resp.status_code in (301, 302, 303, 307, 308):
                                 location = resp.headers.get("location", "").strip()
                                 if not location:
-                                    return None
+                                    return stale_redirect_sentinel
                                 current = urljoin(str(resp.url), location)
                                 continue
                             body = bytearray()
@@ -1025,29 +1223,30 @@ class ContentAggregator:
                                 resp.headers.get("content-type", "").lower(),
                                 bytes(body),
                             )
-                    return None
+                    return stale_redirect_sentinel
 
                 current = url
                 for depth in range(4):
                     response = await fetch(current)
                     if response is client_probe_sentinel:
-                        return CLIENT_PROBE_REQUIRED
-                    if response is None:
-                        return UNAVAILABLE
+                        return finish(
+                            CLIENT_PROBE_REQUIRED,
+                            SERVER_BLOCKED_CLIENT_CANDIDATE,
+                        )
+                    if response is unsafe_target_sentinel:
+                        return finish(UNAVAILABLE, PARSER_MISMATCH)
+                    if response is stale_redirect_sentinel:
+                        return finish(UNAVAILABLE, STALE_ROUTE)
                     response_url, status, content_type, body = response
                     if status >= 400:
-                        return (
-                            CLIENT_PROBE_REQUIRED
-                            if status in {401, 403, 429, 451}
-                            else UNAVAILABLE
-                        )
+                        return finish_http_failure(status)
                     body_head = body[:512].decode("utf-8", errors="ignore").lstrip()
                     looks_html = (
                         "text/html" in content_type
                         or body_head.lower().startswith(("<html", "<!doctype html"))
                     )
                     if looks_html:
-                        return UNAVAILABLE
+                        return finish(UNAVAILABLE, PARSER_MISMATCH)
                     is_hls = (
                         "m3u8" in current.lower()
                         or line.format.lower() == "hls"
@@ -1056,12 +1255,12 @@ class ContentAggregator:
                     )
                     if not is_hls:
                         return (
-                            SERVER_VERIFIED
+                            finish(SERVER_VERIFIED)
                             if status in (200, 206) and bool(body)
-                            else UNAVAILABLE
+                            else finish(UNAVAILABLE, EMPTY_MEDIA)
                         )
                     if not body_head.startswith("#EXTM3U"):
-                        return UNAVAILABLE
+                        return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                     manifest_text = body.decode("utf-8", errors="ignore")
                     media_reference = next(
                         (
@@ -1072,11 +1271,11 @@ class ContentAggregator:
                         "",
                     )
                     if not media_reference:
-                        return UNAVAILABLE
+                        return finish(UNAVAILABLE, EMPTY_MEDIA)
                     media_url = urljoin(response_url, media_reference)
                     if media_reference.lower().split("?", 1)[0].endswith(".m3u8"):
                         if depth == 3:
-                            return UNAVAILABLE
+                            return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                         current = media_url
                         continue
                     key_reference = ""
@@ -1108,16 +1307,17 @@ class ContentAggregator:
                             urljoin(response_url, key_reference)
                         )
                         if key_response is client_probe_sentinel:
-                            return CLIENT_PROBE_REQUIRED
-                        if key_response is None:
-                            return UNAVAILABLE
+                            return finish(
+                                CLIENT_PROBE_REQUIRED,
+                                SERVER_BLOCKED_CLIENT_CANDIDATE,
+                            )
+                        if key_response is unsafe_target_sentinel:
+                            return finish(UNAVAILABLE, PARSER_MISMATCH)
+                        if key_response is stale_redirect_sentinel:
+                            return finish(UNAVAILABLE, STALE_ROUTE)
                         _, key_status, key_type, key_body = key_response
                         if key_status >= 400:
-                            return (
-                                CLIENT_PROBE_REQUIRED
-                                if key_status in {401, 403, 429, 451}
-                                else UNAVAILABLE
-                            )
+                            return finish_http_failure(key_status)
                         key_head = key_body[:512].decode(
                             "utf-8", errors="ignore"
                         ).lstrip().lower()
@@ -1126,32 +1326,35 @@ class ContentAggregator:
                             or "text/html" in key_type
                             or key_head.startswith(("<html", "<!doctype html"))
                         ):
-                            return UNAVAILABLE
+                            return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                     sample = await fetch(media_url)
                     if sample is client_probe_sentinel:
-                        return CLIENT_PROBE_REQUIRED
-                    if sample is None:
-                        return UNAVAILABLE
+                        return finish(
+                            CLIENT_PROBE_REQUIRED,
+                            SERVER_BLOCKED_CLIENT_CANDIDATE,
+                        )
+                    if sample is unsafe_target_sentinel:
+                        return finish(UNAVAILABLE, PARSER_MISMATCH)
+                    if sample is stale_redirect_sentinel:
+                        return finish(UNAVAILABLE, STALE_ROUTE)
                     _, sample_status, sample_type, sample_body = sample
                     if sample_status >= 400:
-                        return (
-                            CLIENT_PROBE_REQUIRED
-                            if sample_status in {401, 403, 429, 451}
-                            else UNAVAILABLE
-                        )
+                        return finish_http_failure(sample_status)
                     if len(sample_body) < 188:
-                        return UNAVAILABLE
+                        return finish(UNAVAILABLE, EMPTY_MEDIA)
                     sample_head = sample_body[:512].decode(
                         "utf-8", errors="ignore"
                     ).lstrip().lower()
                     if "text/html" in sample_type or sample_head.startswith(
                         ("<html", "<!doctype html")
                     ):
-                        return UNAVAILABLE
-                    return SERVER_VERIFIED
-                return UNAVAILABLE
-        except Exception:
-            return UNAVAILABLE
+                        return finish(UNAVAILABLE, EMPTY_MEDIA)
+                    return finish(SERVER_VERIFIED)
+                return finish(UNAVAILABLE, MALFORMED_MANIFEST)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return finish(UNAVAILABLE, _classify_resolution_exception(error))
 
     async def _line_reachable(self, line: "AggregatedVideoLine") -> bool:
         return await self._line_verification_status(line) == SERVER_VERIFIED

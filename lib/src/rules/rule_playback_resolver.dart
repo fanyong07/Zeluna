@@ -3866,6 +3866,8 @@ PlaybackLine _copyPlaybackLineWithProbe(
     serverVerified: line.serverVerified,
     requiresClientProbe: false,
     clientVerified: probe.available || line.clientVerified,
+    cacheState: line.cacheState,
+    sourceErrorCategory: line.sourceErrorCategory,
     expiresAt: line.expiresAt,
     available: probe.available,
     message: probe.available ? line.message : probe.message,

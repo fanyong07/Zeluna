@@ -299,6 +299,8 @@ void main() {
         codecs: 'avc1.640028',
         format: 'HLS',
         adaptive: true,
+        cacheState: 'stale',
+        sourceErrorCategory: 'server_blocked_client_candidate',
       );
       final refreshed = _line(
         'backend-line',
@@ -322,6 +324,11 @@ void main() {
       expect(merged.single.serverVerified, isTrue);
       expect(merged.single.clientVerified, isTrue);
       expect(merged.single.requiresClientProbe, isFalse);
+      expect(merged.single.cacheState, 'stale');
+      expect(
+        merged.single.sourceErrorCategory,
+        'server_blocked_client_candidate',
+      );
     },
   );
 
@@ -864,6 +871,8 @@ PlaybackLine _line(
   bool serverVerified = false,
   bool requiresClientProbe = false,
   bool clientVerified = false,
+  String cacheState = 'unknown',
+  String sourceErrorCategory = '',
   String? message,
 }) {
   return PlaybackLine(
@@ -886,6 +895,8 @@ PlaybackLine _line(
     serverVerified: serverVerified,
     requiresClientProbe: requiresClientProbe,
     clientVerified: clientVerified,
+    cacheState: cacheState,
+    sourceErrorCategory: sourceErrorCategory,
     available: available,
     message: message,
   );

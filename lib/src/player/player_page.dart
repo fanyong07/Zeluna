@@ -102,6 +102,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _lineLookupSerial = 0;
   var _openLineSerial = 0;
   int? _firstFrameTraceOpenSerial;
+  String? _pendingRecoveryLineId;
+  String? _pendingRecoveryStrategy;
+  String? _pendingRecoveryFromProvider;
+  var _finalFailureTraceRecorded = false;
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
@@ -182,6 +186,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         }
       } else if (!widget.request.offlineOnly) {
         unawaited(_resolveLinesForCurrentEpisode());
+      } else {
+        _recordFinalPlaybackFailure(reason: 'offline_line_unavailable');
       }
     });
   }
@@ -189,6 +195,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _startPlaybackTrace() {
     _playbackTrace = PlaybackPerformanceTrace();
     _firstFrameTraceOpenSerial = null;
+    _pendingRecoveryLineId = null;
+    _pendingRecoveryStrategy = null;
+    _pendingRecoveryFromProvider = null;
+    _finalFailureTraceRecorded = false;
     _playbackTrace.record(
       'play_requested',
       fields: <String, Object?>{
@@ -206,6 +216,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       'server_verified': line.serverVerified,
       'client_verified': line.clientVerified,
       'requires_client_probe': line.requiresClientProbe,
+      'cache_state': line.cacheState,
+      'source_error_category': line.sourceErrorCategory,
+      if (line.latency != null)
+        'source_latency_ms': line.latency!.inMilliseconds,
     };
   }
 
@@ -213,6 +227,75 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (_firstFrameTraceOpenSerial == _openLineSerial) return;
     _firstFrameTraceOpenSerial = _openLineSerial;
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: <String, Object?>{
+        ..._lineTraceFields(line),
+        'outcome': 'resumed',
+      },
+    );
+    final pendingRecoveryLineId = _pendingRecoveryLineId;
+    if (pendingRecoveryLineId != null) {
+      _playbackTrace.record(
+        'playback_recovered',
+        fields: <String, Object?>{
+          ..._lineTraceFields(line),
+          'recovery_strategy': pendingRecoveryLineId == line.id
+              ? _pendingRecoveryStrategy ?? 'unknown'
+              : 'manual_override',
+          if (_pendingRecoveryFromProvider?.isNotEmpty == true)
+            'from_provider': _pendingRecoveryFromProvider,
+          'to_provider': line.providerId,
+        },
+      );
+      _pendingRecoveryLineId = null;
+      _pendingRecoveryStrategy = null;
+      _pendingRecoveryFromProvider = null;
+    }
+    _finalFailureTraceRecorded = false;
+  }
+
+  void _beginPlaybackRecovery(
+    PlaybackLine target, {
+    required String strategy,
+    PlaybackLine? previous,
+    Duration position = Duration.zero,
+  }) {
+    _pendingRecoveryLineId = target.id;
+    _pendingRecoveryStrategy = strategy;
+    _pendingRecoveryFromProvider = previous?.providerId;
+    _playbackTrace.record(
+      strategy == 'auto_switch' ? 'auto_switch_started' : 'recovery_started',
+      fields: <String, Object?>{
+        if (previous != null) 'from_provider': previous.providerId,
+        'to_provider': target.providerId,
+        'recovery_strategy': strategy,
+        'position_ms': position.inMilliseconds,
+      },
+    );
+  }
+
+  void _recordFinalPlaybackFailure({required String reason}) {
+    if (_finalFailureTraceRecorded) return;
+    _finalFailureTraceRecorded = true;
+    final current = _line;
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: const <String, Object?>{'outcome': 'failed'},
+    );
+    _playbackTrace.record(
+      'playback_failed',
+      fields: <String, Object?>{
+        if (current != null) ..._lineTraceFields(current),
+        'reason': reason,
+        'position_ms': _currentRecoveryPosition.inMilliseconds,
+        'line_count': _lines.length,
+        'failed_line_count': _failedLineIds.length,
+      },
+    );
+    _pendingRecoveryLineId = null;
+    _pendingRecoveryStrategy = null;
+    _pendingRecoveryFromProvider = null;
   }
 
   @override
@@ -706,6 +789,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       ..add(
         _player.stream.buffering.listen((value) {
           if (!mounted || _usesWebPlayer) return;
+          final changed = _buffering != value;
+          final current = _line;
+          if (changed) {
+            _playbackTrace.recordBufferingChanged(
+              buffering: value,
+              fields: <String, Object?>{
+                if (current != null) ..._lineTraceFields(current),
+                'position_ms': _position.inMilliseconds,
+                'buffer_ahead_ms': playbackBufferedAhead(
+                  position: _position,
+                  buffer: _buffer,
+                ).inMilliseconds,
+              },
+            );
+          }
           setState(() => _buffering = value);
           if (value) {
             _backupLookupDelayTimer?.cancel();
@@ -1223,6 +1321,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _startExpandedLineLookup(autoplay: autoplay);
       } else if (available.isEmpty) {
         await _player.stop();
+        _recordFinalPlaybackFailure(reason: 'no_playable_line');
       }
     } catch (error) {
       if (!mounted || serial != _lineLookupSerial) return;
@@ -1236,6 +1335,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
         _playbackFailed = true;
       });
+      _recordFinalPlaybackFailure(reason: 'line_lookup_failed');
     }
   }
 
@@ -1453,6 +1553,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             );
             merged = _preserveLoadedLineIfProbeDisagrees(merged);
             final available = _availableLines(merged);
+            final previous = _line;
+            final recoveryPosition = _currentRecoveryPosition;
             PlaybackLine? selected = _line;
             if (selected != null) {
               final refreshed = _lineById(merged, selected.id);
@@ -1491,13 +1593,25 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                   : null;
             });
             if (shouldOpen) {
+              if (currentFailed) {
+                _beginPlaybackRecovery(
+                  target,
+                  strategy: 'auto_switch',
+                  previous: previous,
+                  position: recoveryPosition,
+                );
+              }
               unawaited(
                 _openLine(
                   target,
                   force: true,
-                  resumePosition: _currentRecoveryPosition,
+                  resumePosition: recoveryPosition,
                 ),
               );
+            } else if (update.isComplete &&
+                available.isEmpty &&
+                (_playbackFailed || !_isPlayableLine(_line))) {
+              _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
             }
           },
           onError: (Object error, StackTrace stackTrace) {
@@ -1511,6 +1625,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
               _lineLookupInProgress = false;
               _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
             });
+            if (_playbackFailed || !_isPlayableLine(_line)) {
+              _recordFinalPlaybackFailure(reason: 'source_scan_failed');
+            }
           },
           onDone: () {
             if (identical(_lineLookupSubscription, subscription)) {
@@ -1526,6 +1643,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
               _lineScanComplete = true;
               _lineLookupInProgress = false;
             });
+            if (_availableLines(_lines).isEmpty &&
+                (_playbackFailed || !_isPlayableLine(_line))) {
+              _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
+            }
           },
         );
     _lineLookupSubscription = subscription;
@@ -1594,6 +1715,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _cancelPendingNativeResume();
     final serial = ++_openLineSerial;
     _handledFailureOpenSerial = null;
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: const <String, Object?>{'outcome': 'line_changed'},
+    );
     _playbackTrace.record(
       'line_open_requested',
       fields: _lineTraceFields(line),
@@ -1820,6 +1945,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         'will_switch': shouldSwitch && _currentSettings.autoSwitchLine,
       },
     );
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: <String, Object?>{..._lineTraceFields(line), 'outcome': 'failed'},
+    );
     setState(() {
       _loadingLine = false;
       _playbackFailed = true;
@@ -1837,9 +1966,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             _lineFailureCounts[line.id] != 1) {
           return;
         }
+        _beginPlaybackRecovery(
+          line,
+          strategy: 'current_line_retry',
+          previous: line,
+          position: resumePosition,
+        );
         await _openLine(line, force: true, resumePosition: resumePosition);
       });
       return;
+    }
+    if (!_currentSettings.autoSwitchLine) {
+      _recordFinalPlaybackFailure(reason: 'auto_switch_disabled');
     }
     _startExpandedLineLookup(autoplay: true);
     unawaited(_tryAutoSwitchLine(resumePosition: resumePosition));
@@ -1993,19 +2131,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
               subject: widget.request.subject,
             );
           });
+          _recordFinalPlaybackFailure(reason: 'no_backup_line');
         }
         return;
       }
       if (!mounted) return;
       final switchTarget = next;
       final previous = _line;
-      _playbackTrace.record(
-        'line_switch',
-        fields: <String, Object?>{
-          if (previous != null) 'from_provider': previous.providerId,
-          'to_provider': switchTarget.providerId,
-          'position_ms': targetResumePosition.inMilliseconds,
-        },
+      _beginPlaybackRecovery(
+        switchTarget,
+        strategy: 'auto_switch',
+        previous: previous,
+        position: targetResumePosition,
       );
       setState(() {
         _line = switchTarget;

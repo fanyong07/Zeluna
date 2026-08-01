@@ -1116,6 +1116,12 @@ List<PlaybackLine> _withFallbackLatency(
                 isLive: line.isLive,
                 adaptive: line.adaptive,
                 publicHttpOnly: line.publicHttpOnly,
+                serverVerified: line.serverVerified,
+                requiresClientProbe: line.requiresClientProbe,
+                clientVerified: line.clientVerified,
+                cacheState: line.cacheState,
+                sourceErrorCategory: line.sourceErrorCategory,
+                expiresAt: line.expiresAt,
                 available: line.available,
                 message: line.message,
               )

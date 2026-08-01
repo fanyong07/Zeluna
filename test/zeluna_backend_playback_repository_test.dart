@@ -50,6 +50,8 @@ void main() {
             'source': 'maccms:iKun',
             'headers': {'Referer': 'https://player.example.com/'},
             'cached': true,
+            'cache_state': 'fresh',
+            'source_latency_ms': 420,
           },
           {
             'url': 'https://cdn.example.com/modu/index.m3u8',
@@ -95,6 +97,8 @@ void main() {
     );
     expect(lines.first.headers['Referer'], 'https://player.example.com/');
     expect(lines.first.message, '来自在线服务（已缓存）');
+    expect(lines.first.cacheState, 'fresh');
+    expect(lines.first.latency, const Duration(milliseconds: 420));
     expect(lines.last.available, isFalse);
     expect(lines.last.url, isNull);
     expect(lines.last.message, '当前站点没有匹配到这部作品');
@@ -128,6 +132,7 @@ void main() {
 
     expect(lines.single.available, isTrue);
     expect(lines.single.message, '来自可用缓存，正在后台更新线路');
+    expect(lines.single.cacheState, 'stale');
   });
 
   test('旧服务没有快速接口时会回退完整播放接口', () async {
@@ -209,6 +214,9 @@ void main() {
           'headers': {'Referer': 'https://source.example/watch/1'},
           'available': false,
           'status': 'client_probe_required',
+          'cache_state': 'cold',
+          'error_category': 'server_blocked_client_candidate',
+          'source_latency_ms': 730,
           'expires_at': expiresAt,
         },
       ]);
@@ -247,6 +255,9 @@ void main() {
     expect(candidate.serverVerified, isFalse);
     expect(candidate.requiresClientProbe, isTrue);
     expect(candidate.publicHttpOnly, isTrue);
+    expect(candidate.cacheState, 'cold');
+    expect(candidate.sourceErrorCategory, 'server_blocked_client_candidate');
+    expect(candidate.latency, const Duration(milliseconds: 730));
     expect(candidate.expiresAt, isNotNull);
 
     final verified = await RulePlaybackResolver(
@@ -257,6 +268,8 @@ void main() {
     expect(verified.clientVerified, isTrue);
     expect(verified.requiresClientProbe, isFalse);
     expect(verified.serverVerified, isFalse);
+    expect(verified.cacheState, 'cold');
+    expect(verified.sourceErrorCategory, 'server_blocked_client_candidate');
   });
 
   test('不受支持的旧来源不会再触发后端或本地规则查源', () async {

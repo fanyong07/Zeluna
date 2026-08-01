@@ -396,8 +396,12 @@ class SourceHealth(Base):
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_status: Mapped[str] = mapped_column(String(30), default="unknown")
+    last_error_category: Mapped[str] = mapped_column(String(50), default="")
     last_checked_at: Mapped[float] = mapped_column(Float, default=0.0)
+    last_success_at: Mapped[float] = mapped_column(Float, default=0.0)
+    last_failure_at: Mapped[float] = mapped_column(Float, default=0.0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    recent_success_rate: Mapped[float] = mapped_column(Float, default=0.5)
 
 
 def migration_head_revision() -> str:

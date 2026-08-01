@@ -186,6 +186,19 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         }
         final cached = json['cached'] == true;
         final stale = json['stale'] == true;
+        final rawCacheState = json['cache_state']?.toString().trim() ?? '';
+        final cacheState = rawCacheState.isNotEmpty
+            ? rawCacheState
+            : stale
+            ? 'stale'
+            : cached
+            ? 'fresh'
+            : 'cold';
+        final sourceErrorCategory =
+            json['error_category']?.toString().trim() ?? '';
+        final sourceLatencyMs = int.tryParse(
+          json['source_latency_ms']?.toString() ?? '',
+        );
         lines.add(
           PlaybackLine(
             id: 'zeluna:${_stableHash('$stableId|${episode.number}|$source|$url|$index')}',
@@ -199,12 +212,17 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             format: json['format']?.toString().trim() ?? 'auto',
             url: hasPlayableUrl ? url : null,
             headers: Map<String, String>.unmodifiable(headers),
+            latency: sourceLatencyMs != null && sourceLatencyMs > 0
+                ? Duration(milliseconds: sourceLatencyMs)
+                : null,
             // Server-verified lines crossed the trusted backend boundary.
             // Candidate-only lines must repeat public-address, manifest and
             // first-segment validation from the user's own network.
             publicHttpOnly: requiresClientProbe,
             serverVerified: serverVerified,
             requiresClientProbe: requiresClientProbe,
+            cacheState: cacheState,
+            sourceErrorCategory: sourceErrorCategory,
             expiresAt: expiresAt,
             available: available,
             message: available

@@ -223,6 +223,8 @@ class PlaybackLine {
     this.serverVerified = false,
     this.requiresClientProbe = false,
     this.clientVerified = false,
+    this.cacheState = 'unknown',
+    this.sourceErrorCategory = '',
     this.expiresAt,
     this.available = false,
     this.message,
@@ -254,6 +256,8 @@ class PlaybackLine {
   final bool serverVerified;
   final bool requiresClientProbe;
   final bool clientVerified;
+  final String cacheState;
+  final String sourceErrorCategory;
   final DateTime? expiresAt;
   final bool available;
   final String? message;

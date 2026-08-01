@@ -13,10 +13,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .aggregator import (
     CLIENT_PROBE_REQUIRED,
+    CONNECT_TIMEOUT,
+    DIRECT_SOURCE_PRIORITIES,
+    DNS_FAILURE,
+    EMPTY_MEDIA,
+    MALFORMED_MANIFEST,
+    PARSER_MISMATCH,
+    RATE_LIMITED,
+    READ_TIMEOUT,
+    RESTRICTED,
     SERVER_VERIFIED,
+    SERVER_BLOCKED_CLIENT_CANDIDATE,
+    STALE_ROUTE,
     UNAVAILABLE,
+    UNKNOWN_EXCEPTION,
     AggregatedVideoLine,
     SourceMatch,
+    SourceResolutionOutcome,
     aggregator,
 )
 from .catalog import catalog_service, parse_stable_id
@@ -46,6 +59,27 @@ from .database import (
 logger = logging.getLogger(__name__)
 
 _QUICK_CANDIDATE_GRACE_SECONDS = 0.35
+_SOURCE_HEALTH_EMA_ALPHA = 0.35
+_DETERMINISTIC_SOURCE_FAILURES = {
+    STALE_ROUTE,
+    MALFORMED_MANIFEST,
+    EMPTY_MEDIA,
+    PARSER_MISMATCH,
+}
+_SOURCE_ERROR_PENALTIES = {
+    "": 0,
+    SERVER_BLOCKED_CLIENT_CANDIDATE: 0,
+    RESTRICTED: 30,
+    RATE_LIMITED: 45,
+    DNS_FAILURE: 65,
+    CONNECT_TIMEOUT: 75,
+    READ_TIMEOUT: 90,
+    UNKNOWN_EXCEPTION: 120,
+    STALE_ROUTE: 230,
+    EMPTY_MEDIA: 250,
+    MALFORMED_MANIFEST: 280,
+    PARSER_MISMATCH: 320,
+}
 
 
 class PlaybackService:
@@ -461,16 +495,30 @@ class PlaybackService:
             matches = self._merge_matches(matches, discovered)
             await self._store_bindings(session, stable_id, matches)
 
-        lines, health = await aggregator.resolve_source_matches(
+        resolution = await aggregator.resolve_source_matches(
             matches,
             episode=episode,
             verify=True,
+            include_diagnostics=True,
         )
-        await self._record_health(session, stable_id, health)
+        if len(resolution) == 3:
+            lines, health, diagnostics = resolution
+        else:
+            # Preserve compatibility with older provider extensions and test
+            # doubles that still return only lines + status.
+            lines, health = resolution
+            diagnostics = {}
+        await self._record_health(
+            session,
+            stable_id,
+            health,
+            diagnostics=diagnostics,
+        )
         data = self._complete_site_inventory(
             [self._line_dict(line) for line in lines],
             matches=matches,
             health=health,
+            diagnostics=diagnostics,
         )
         await self._store_cache(session, stable_id, episode, title, data)
         return [
@@ -552,6 +600,7 @@ class PlaybackService:
         )
         resolved: dict[str, AggregatedVideoLine] = {}
         health: dict[str, str] = {}
+        diagnostics: dict[str, SourceResolutionOutcome] = {}
         quick_candidate_limit = min(
             6,
             max(2, PLAYBACK_QUICK_LINE_COUNT * 2),
@@ -561,8 +610,11 @@ class PlaybackService:
             match: SourceMatch,
             lines: list[AggregatedVideoLine],
             status: str,
+            outcome: object | None = None,
         ) -> bool:
             health[match.source_name] = status
+            if isinstance(outcome, SourceResolutionOutcome):
+                diagnostics[match.source_name] = outcome
             for line in lines:
                 previous = resolved.get(line.url)
                 if previous is None or (
@@ -594,7 +646,7 @@ class PlaybackService:
                 while True:
                     try:
                         if first_usable_at is None:
-                            match, lines, status = await anext(iterator)
+                            outcome = await anext(iterator)
                         else:
                             remaining = (
                                 _QUICK_CANDIDATE_GRACE_SECONDS
@@ -602,13 +654,14 @@ class PlaybackService:
                             )
                             if remaining <= 0:
                                 break
-                            match, lines, status = await asyncio.wait_for(
+                            outcome = await asyncio.wait_for(
                                 anext(iterator),
                                 timeout=remaining,
                             )
                     except (StopAsyncIteration, asyncio.TimeoutError):
                         break
-                    if remember_result(match, lines, status):
+                    match, lines, status = outcome
+                    if remember_result(match, lines, status, outcome):
                         found = True
                         first_usable_at = first_usable_at or time.monotonic()
                         quick_count = len(self._select_quick_lines([
@@ -623,14 +676,19 @@ class PlaybackService:
 
         async def resolve_one(
             match: SourceMatch,
-        ) -> tuple[SourceMatch, list[AggregatedVideoLine], str]:
+        ) -> object:
             async for result in aggregator.resolve_source_matches_progressively(
                 [match],
                 episode=episode,
                 verify=False,
             ):
                 return result
-            return match, [], UNAVAILABLE
+            return SourceResolutionOutcome(
+                match=match,
+                lines=[],
+                status=UNAVAILABLE,
+                error_category=EMPTY_MEDIA,
+            )
 
         async def discover_until_usable() -> tuple[bool, list[SourceMatch]]:
             # Discovery and source resolution overlap. Up to six foreground
@@ -699,10 +757,11 @@ class PlaybackService:
                         continue
                     tasks.discard(task)
                     try:
-                        match, lines, status = task.result()
+                        outcome = task.result()
+                        match, lines, status = outcome
                     except Exception:
                         continue
-                    if remember_result(match, lines, status):
+                    if remember_result(match, lines, status, outcome):
                         found = True
                         first_usable_at = first_usable_at or time.monotonic()
                         quick_count = len(self._select_quick_lines([
@@ -734,11 +793,17 @@ class PlaybackService:
             matches = self._merge_matches(matches, discovered)
             await self._store_bindings(session, stable_id, matches)
         if health:
-            await self._record_health(session, stable_id, health)
+            await self._record_health(
+                session,
+                stable_id,
+                health,
+                diagnostics=diagnostics,
+            )
         data = self._complete_site_inventory(
             [self._line_dict(line) for line in resolved.values()],
             matches=matches,
             health=health,
+            diagnostics=diagnostics,
         )
         await self._store_cache(session, stable_id, episode, title, data)
         return self._select_quick_lines([
@@ -840,31 +905,71 @@ class PlaybackService:
         health: SourceHealth | None,
     ) -> tuple[int, int, int, int, int]:
         if health is None:
-            health_tier = 2
+            recent_success_rate = 0.5
+            latency_ms = 0
+            error_category = ""
             consecutive_failures = 0
+            status_bonus = 100
+            half_open_penalty = 0
         elif health.consecutive_failures >= SOURCE_CIRCUIT_FAILURE_THRESHOLD:
             # The cooldown has elapsed, so this is a half-open recovery probe.
-            health_tier = 0
+            recent_success_rate = health.recent_success_rate
+            latency_ms = health.latency_ms
+            error_category = health.last_error_category
             consecutive_failures = health.consecutive_failures
+            status_bonus = 0
+            half_open_penalty = 900
         elif health.last_status in {"healthy", CLIENT_PROBE_REQUIRED}:
-            health_tier = 3
+            recent_success_rate = health.recent_success_rate
+            latency_ms = health.latency_ms
+            error_category = health.last_error_category
             consecutive_failures = health.consecutive_failures
+            status_bonus = (
+                240 if health.last_status == "healthy" else 170
+            )
+            half_open_penalty = 0
         elif health.last_status == "unknown":
-            health_tier = 2
+            recent_success_rate = health.recent_success_rate
+            latency_ms = health.latency_ms
+            error_category = health.last_error_category
             consecutive_failures = health.consecutive_failures
+            status_bonus = 100
+            half_open_penalty = 0
         else:
-            health_tier = 1
+            recent_success_rate = health.recent_success_rate
+            latency_ms = health.latency_ms
+            error_category = health.last_error_category
             consecutive_failures = health.consecutive_failures
+            status_bonus = 0
+            half_open_penalty = 0
+        recent_success_rate = max(0.0, min(1.0, recent_success_rate or 0.0))
+        latency_ms = max(0, latency_ms or 0)
         recent_binding_success = int(
             binding.last_success_at >= binding.last_failure_at
             and binding.last_success_at > 0
         )
+        bounded_lifetime_balance = max(
+            -20,
+            min(20, binding.success_count - binding.failure_count),
+        )
+        total_score = (
+            binding.score * 6
+            + DIRECT_SOURCE_PRIORITIES.get(binding.source_name, 0) * 10
+            + int(recent_success_rate * 500)
+            + status_bonus
+            + recent_binding_success * 60
+            + bounded_lifetime_balance
+            - min(latency_ms, 15_000) // 15
+            - consecutive_failures * 140
+            - _SOURCE_ERROR_PENALTIES.get(error_category or "", 120)
+            - half_open_penalty
+        )
         return (
-            health_tier,
+            total_score,
             recent_binding_success,
             binding.score,
-            binding.success_count - binding.failure_count,
-            -consecutive_failures,
+            -latency_ms,
+            -_SOURCE_ERROR_PENALTIES.get(error_category or "", 120),
         )
 
     async def _store_bindings(
@@ -902,6 +1007,8 @@ class PlaybackService:
         session: AsyncSession,
         stable_id: str,
         health: dict[str, str | bool],
+        *,
+        diagnostics: dict[str, SourceResolutionOutcome] | None = None,
     ) -> None:
         now = time.time()
         for source_name, raw_status in health.items():
@@ -909,6 +1016,11 @@ class PlaybackService:
                 SERVER_VERIFIED if raw_status is True
                 else UNAVAILABLE if raw_status is False
                 else str(raw_status)
+            )
+            diagnostic = (diagnostics or {}).get(source_name)
+            latency_ms = max(0, int(getattr(diagnostic, "latency_ms", 0) or 0))
+            error_category = str(
+                getattr(diagnostic, "error_category", "") or ""
             )
             binding_rows = (
                 await session.scalars(
@@ -939,22 +1051,52 @@ class PlaybackService:
                     failure_count=0,
                     consecutive_failures=0,
                     last_status="unknown",
+                    last_error_category="",
                     last_checked_at=0.0,
+                    last_success_at=0.0,
+                    last_failure_at=0.0,
                     latency_ms=0,
+                    recent_success_rate=0.5,
                 )
                 session.add(source)
             source.last_checked_at = now
+            if latency_ms > 0:
+                source.latency_ms = (
+                    latency_ms
+                    if not source.latency_ms
+                    else round(
+                        source.latency_ms * (1 - _SOURCE_HEALTH_EMA_ALPHA)
+                        + latency_ms * _SOURCE_HEALTH_EMA_ALPHA
+                    )
+                )
+            current_rate = source.recent_success_rate
+            if current_rate is None:
+                current_rate = 0.5
             if status == SERVER_VERIFIED:
                 source.success_count += 1
                 source.consecutive_failures = 0
                 source.last_status = "healthy"
+                source.last_error_category = ""
+                source.last_success_at = now
+                target_rate = 1.0
             elif status == CLIENT_PROBE_REQUIRED:
                 source.consecutive_failures = 0
                 source.last_status = CLIENT_PROBE_REQUIRED
+                source.last_error_category = error_category
+                target_rate = 0.65
             else:
                 source.failure_count += 1
-                source.consecutive_failures += 1
+                source.consecutive_failures += (
+                    2 if error_category in _DETERMINISTIC_SOURCE_FAILURES else 1
+                )
                 source.last_status = "unhealthy"
+                source.last_error_category = error_category or UNKNOWN_EXCEPTION
+                source.last_failure_at = now
+                target_rate = 0.0
+            source.recent_success_rate = (
+                current_rate * (1 - _SOURCE_HEALTH_EMA_ALPHA)
+                + target_rate * _SOURCE_HEALTH_EMA_ALPHA
+            )
         await session.commit()
 
     async def _store_cache(
@@ -1023,8 +1165,17 @@ class PlaybackService:
         *,
         matches: list[SourceMatch] | None = None,
         health: dict[str, str | bool] | None = None,
+        diagnostics: dict[str, SourceResolutionOutcome] | None = None,
     ) -> list[dict]:
         result = [dict(item) for item in items if isinstance(item, dict)]
+        diagnostics = diagnostics or {}
+        for item in result:
+            source_name = self._site_name(item.get("source"))
+            diagnostic = diagnostics.get(source_name)
+            if diagnostic is None:
+                continue
+            item["error_category"] = diagnostic.error_category
+            item["source_latency_ms"] = diagnostic.latency_ms
         represented_sites = {
             self._site_name(item.get("source"))
             for item in result
@@ -1058,6 +1209,16 @@ class PlaybackService:
                 "available": False,
                 "status": status,
                 "message": message,
+                "error_category": getattr(
+                    diagnostics.get(name),
+                    "error_category",
+                    "",
+                ),
+                "source_latency_ms": getattr(
+                    diagnostics.get(name),
+                    "latency_ms",
+                    0,
+                ),
                 "expires_at": 0,
             })
         return result

@@ -250,6 +250,12 @@ PlaybackLine preservePlaybackLineProbeMetadata({
         ? false
         : incoming.requiresClientProbe,
     clientVerified: incoming.clientVerified || previous.clientVerified,
+    cacheState: incoming.cacheState == 'unknown'
+        ? previous.cacheState
+        : incoming.cacheState,
+    sourceErrorCategory: incoming.sourceErrorCategory.isEmpty
+        ? previous.sourceErrorCategory
+        : incoming.sourceErrorCategory,
     expiresAt: incoming.expiresAt ?? previous.expiresAt,
     available: previous.clientVerified
         ? previous.available

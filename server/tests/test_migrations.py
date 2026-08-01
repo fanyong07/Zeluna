@@ -121,6 +121,42 @@ def test_existing_schema_deduplicates_cache_and_preserves_data(tmp_path):
         engine.dispose()
 
 
+def test_source_health_diagnostics_upgrade_preserves_existing_health(tmp_path):
+    database_path = tmp_path / "source-health.db"
+    config = _config(database_path)
+    command.upgrade(config, "0002_playback_cache_unique")
+
+    url = f"sqlite:///{database_path.as_posix()}"
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("""
+            INSERT INTO source_health (
+                source_name, success_count, failure_count,
+                consecutive_failures, last_status, last_checked_at, latency_ms
+            ) VALUES (
+                'kept-source', 9, 2, 0, 'healthy', 1234, 640
+            )
+        """))
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            row = connection.execute(text("""
+                SELECT success_count, failure_count, latency_ms,
+                       recent_success_rate, last_success_at,
+                       last_failure_at, last_error_category
+                FROM source_health
+                WHERE source_name = 'kept-source'
+            """)).one()
+        assert row == (9, 2, 640, 1.0, 1234.0, 0.0, "")
+        assert _revision(database_path) == migration_head_revision()
+    finally:
+        engine.dispose()
+
+
 def test_incompatible_existing_schema_is_not_stamped(tmp_path):
     database_path = tmp_path / "incompatible.db"
     with sqlite3.connect(database_path) as connection:
