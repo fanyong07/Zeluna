@@ -21,6 +21,7 @@ import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'app_fullscreen.dart';
+import 'danmaku/danmaku_controller.dart';
 import 'danmaku_overlay.dart';
 import 'gestures/player_gesture_controller.dart';
 import 'lines/playback_line_controller.dart';
@@ -53,6 +54,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlaybackSessionController _sessionController;
   late final PlaybackLineController _lineController;
   late final PlaybackRecoveryController _recoveryController;
+  late final DanmakuController _danmakuController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
@@ -127,7 +129,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   int? _pendingNativeResumeOpenSerial;
   var _nativeResumeSeekAttempts = 0;
   var _nativeResumeSeekInProgress = false;
-  final _localDanmakuTimers = <Timer>[];
   bool _episodePanel = false;
   bool _linePanel = false;
   bool _subtitlePanel = false;
@@ -135,11 +136,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _settingsPanel = false;
   bool _theaterMode = false;
   SubtitleCandidate? _selectedSubtitle;
-  final _danmakuInput = TextEditingController();
-  final List<_LocalDanmakuEntry> _localDanmaku = [];
-  List<DanmakuComment> _remoteDanmaku = const [];
-  var _danmakuLoadSerial = 0;
-  int? _danmakuRequestedEpisodeId;
 
   Player get _player => _nativeVideo.player;
   VideoController get _controller => _nativeVideo.surfaceController;
@@ -190,6 +186,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _lineController = PlaybackLineController();
     _recoveryController = PlaybackRecoveryController();
+    _danmakuController = DanmakuController()
+      ..addListener(_handleDanmakuChanged);
     _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
@@ -227,6 +225,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _recordFinalPlaybackFailure(reason: 'offline_line_unavailable');
       }
     });
+  }
+
+  void _handleDanmakuChanged() {
+    if (mounted) setState(() {});
   }
 
   void _startPlaybackTrace() {
@@ -351,10 +353,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       subscription.cancel();
     }
     _superResolutionPerformanceTimer?.cancel();
-    for (final timer in _localDanmakuTimers) {
-      timer.cancel();
-    }
-    _localDanmakuTimers.clear();
     unawaited(_restoreSystemUi());
     if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
     _appFullscreen.dispose();
@@ -362,7 +360,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webVideo.dispose();
     _recoveryController.dispose();
     unawaited(_lineController.dispose());
-    _danmakuInput.dispose();
+    _danmakuController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
     super.dispose();
@@ -450,8 +448,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                             !superResolutionStatus.previewingOriginal,
                         services: state.services,
                         danmaku: state.danmaku,
-                        remoteDanmaku: _remoteDanmaku,
-                        localDanmaku: _localDanmaku,
+                        remoteDanmaku: _danmakuController.remoteComments,
+                        localDanmaku: _danmakuController.localComments,
                         theaterMode: _theaterMode,
                         position: _position,
                         duration: _duration,
@@ -502,7 +500,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         onLinePanel: _toggleLinePanel,
                         onSubtitlePanel: _toggleSubtitlePanel,
                         onDanmakuPanel: _toggleDanmakuPanel,
-                        danmakuInput: _danmakuInput,
+                        danmakuInput: _danmakuController.input,
                         onSendDanmaku: (text) =>
                             _sendLocalDanmaku(text, settings: state.danmaku),
                         onWebReady: _handleWebReady,
@@ -2429,9 +2427,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController.dispatch(
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
-    ++_danmakuLoadSerial;
+    _danmakuController.changeEpisode();
     final playbackSerial = ++_openLineSerial;
-    _danmakuRequestedEpisodeId = null;
     _webLoadTimer?.cancel();
     _nativeFirstFrameTimer?.cancel();
     _cancelSingleBackupLookup();
@@ -2462,7 +2459,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _position = Duration.zero;
       _duration = Duration.zero;
       _buffer = Duration.zero;
-      _remoteDanmaku = const [];
       _episodePanel = false;
     });
     _startPlaybackTrace();
@@ -2865,56 +2861,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _loadDanmakuForCurrentEpisode() async {
     final episode = _episode;
-    if (_danmakuRequestedEpisodeId == episode.id) return;
-    _danmakuRequestedEpisodeId = episode.id;
-    final serial = ++_danmakuLoadSerial;
-    try {
-      final timeline = await ref
+    await _danmakuController.loadEpisode(
+      episodeId: episode.id,
+      load: () => ref
           .read(animeControllerProvider.notifier)
-          .danmakuTimelineForEpisode(widget.request.subject, episode);
-      if (!mounted ||
-          serial != _danmakuLoadSerial ||
-          episode.id != _episode.id) {
-        return;
-      }
-      setState(() => _remoteDanmaku = timeline.comments);
-    } catch (_) {
-      if (!mounted ||
-          serial != _danmakuLoadSerial ||
-          episode.id != _episode.id) {
-        return;
-      }
-      _danmakuRequestedEpisodeId = null;
-      setState(() => _remoteDanmaku = const []);
-    }
+          .danmakuTimelineForEpisode(widget.request.subject, episode),
+    );
   }
 
   void _sendLocalDanmaku(String text, {required DanmakuSettings settings}) {
-    final value = text.trim();
-    if (value.isEmpty) return;
-    if (!settings.enabled) {
-      _showPlayerToast('请先在弹幕设置中启用弹幕');
-      return;
+    switch (_danmakuController.sendLocal(text, settings: settings)) {
+      case LocalDanmakuSendResult.disabled:
+        _showPlayerToast('请先在弹幕设置中启用弹幕');
+      case LocalDanmakuSendResult.blocked:
+        _showPlayerToast('内容命中了本地屏蔽词');
+      case LocalDanmakuSendResult.accepted:
+      case LocalDanmakuSendResult.empty:
+        break;
     }
-    if (settings.blockKeywords.any(value.contains)) {
-      _showPlayerToast('内容命中了本地屏蔽词');
-      return;
-    }
-    final entry = _LocalDanmakuEntry(
-      id: DateTime.now().microsecondsSinceEpoch,
-      text: value,
-    );
-    setState(() {
-      _localDanmaku.add(entry);
-      _danmakuInput.clear();
-    });
-    late final Timer timer;
-    timer = Timer(const Duration(seconds: 9), () {
-      _localDanmakuTimers.remove(timer);
-      if (!mounted) return;
-      setState(() => _localDanmaku.removeWhere((item) => item.id == entry.id));
-    });
-    _localDanmakuTimers.add(timer);
   }
 
   void _handleWebReady() {
@@ -2992,17 +2956,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 }
 
-class _LocalDanmakuEntry {
-  const _LocalDanmakuEntry({required this.id, required this.text});
-
-  final int id;
-  final String text;
-}
-
 class _LocalDanmakuOverlay extends StatelessWidget {
   const _LocalDanmakuOverlay({required this.entries, required this.settings});
 
-  final List<_LocalDanmakuEntry> entries;
+  final List<LocalDanmakuEntry> entries;
   final DanmakuSettings settings;
 
   @override
@@ -3040,7 +2997,7 @@ class _LocalDanmakuBullet extends StatefulWidget {
     required this.settings,
   });
 
-  final _LocalDanmakuEntry entry;
+  final LocalDanmakuEntry entry;
   final int lane;
   final double width;
   final DanmakuSettings settings;
@@ -4054,7 +4011,7 @@ class _PlayerCanvas extends StatelessWidget {
   final ExternalServiceSettings services;
   final DanmakuSettings danmaku;
   final List<DanmakuComment> remoteDanmaku;
-  final List<_LocalDanmakuEntry> localDanmaku;
+  final List<LocalDanmakuEntry> localDanmaku;
   final bool theaterMode;
   final Duration position;
   final Duration duration;
