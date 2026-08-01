@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation stage `c590fb2` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `6f0f9ba` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -301,7 +301,42 @@ Remaining risks:
 
 ## G6 Client domain architecture
 
-Status: not_started
+Status: in_progress
+
+### AccountController
+
+Audit:
+
+- Account lifecycle ownership was concentrated in `AnimeController`: the local repository, active account, serialized operation queue, session restore, registration migration, credential migration, deletion recovery, and account-context revision all shared the aggregate controller's mutable state.
+- Account changes also need explicit ports into settings/library scope loading, download quiescence and cleanup, credential selection, and playback/source cache invalidation. Those cross-domain effects cannot be silently removed while the remaining G6 domains still use the compatibility controller.
+
+Changes:
+
+- Added an independent `AccountController` that owns local/cloud account state, monotonic context revisions, serialized operations, startup recovery, registration/login/logout, profile/password flows, guest-data and secure-credential migration, account deletion, and retryable cleanup.
+- Kept account-scoped settings/library migration deterministic and resumable. The controller still preserves pending non-secret markers on secure-store failure, never clears a Hive box, and deletes only paths already recorded for the account being removed.
+- `AnimeController` now exposes the existing public account API as a compatibility adapter. Typed callbacks isolate the still-unmigrated Settings and Downloads domains, apply account-scoped state, quiesce active downloads, clear stale playback/source caches, and publish session/profile changes.
+- Preserved the zero-version account-context behavior used by lightweight test adapters that override `AnimeController.build`, while production context ownership remains in `AccountController`.
+- Reduced `AnimeController` from 4,400 to 4,074 lines after this first G6 domain slice.
+
+Tests:
+
+- Added a direct ownership regression proving that concurrent account changes serialize through one queue, scope activations receive monotonic revisions, profile changes persist to the selected account, sign-out invalidates the old context, and cross-domain callbacks run in order.
+- Existing regressions continue to cover first-account guest import, account isolation, concurrent login ordering, password reset, interrupted registration, Bangumi/TMDB credential migration retries, stale credential rejection after account switching, deletion interruption/recovery, account UI, cloud/local repositories, download scope, and playback hedge behavior.
+- Focused account/cross-domain suite: 41 passed, 0 failed.
+- `catalog_page_test.dart`: 20 passed, 2 intentionally skipped, 0 failed after retaining compatibility for build-overriding test controllers.
+- Full `flutter test --reporter json`: 545 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `6f0f9ba refactor: split account controller`
+
+Remaining domains, in required order: Settings, Sources, Downloads, Library, Catalog, PlaybackDiscovery, Sync.
+
+Remaining risks:
+
+- Account scope activation still calls compatibility adapters inside `AnimeController`; those adapters will shrink as Settings, Sources, Downloads, Library, Catalog, and PlaybackDiscovery acquire their own owners.
+- Real signed-device and production account acceptance remains G13/G14 work. No signing material, production secret, real user database, or production environment was accessed.
 
 ## G7 Server architecture
 
