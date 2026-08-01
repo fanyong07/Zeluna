@@ -22,6 +22,7 @@ import '../shared_ui/poster_card.dart';
 import 'anime4k_shader_manager.dart';
 import 'app_fullscreen.dart';
 import 'danmaku_overlay.dart';
+import 'lines/playback_recovery_controller.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
@@ -48,6 +49,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final WebVideoController _webVideo;
   late final FocusNode _shortcutFocusNode;
   late final PlaybackSessionController _sessionController;
+  late final PlaybackRecoveryController _recoveryController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _anime4kShaders = Anime4KShaderManager();
   final _appFullscreen = AppFullscreenController();
@@ -113,9 +115,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _superResolutionApplySerial = 0;
   PlaybackSettings _currentSettings = const PlaybackSettings();
   Timer? _controlsHideTimer;
-  Timer? _stallWatchdogTimer;
   DateTime? _ignoreNativeErrorsUntil;
-  Timer? _backupLookupDelayTimer;
   RulePlaybackCancellationToken? _backupLookupCancellationToken;
   var _backupLookupInProgress = false;
   var _backupLookupSerial = 0;
@@ -151,6 +151,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _webVideo.surfaceController;
   Timer? get _webLoadTimer => _webVideo.startupTimer;
   set _webLoadTimer(Timer? value) => _webVideo.replaceStartupTimer(value);
+  Timer? get _backupLookupDelayTimer => _recoveryController.backupLookupTimer;
+  set _backupLookupDelayTimer(Timer? value) =>
+      _recoveryController.replaceBackupLookupTimer(value);
   Timer? get _nativeFirstFrameTimer => _nativeVideo.firstFrameTimer;
   set _nativeFirstFrameTimer(Timer? value) =>
       _nativeVideo.replaceFirstFrameTimer(value);
@@ -167,6 +170,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _shortcutFocusNode = FocusNode(debugLabel: 'player-shortcuts');
     _episode = widget.request.episode;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
+    _recoveryController = PlaybackRecoveryController();
     _startPlaybackTrace();
     _line = widget.request.initialLine;
     _lines = initialPlaybackLinesForDisplay(widget.request.initialLine);
@@ -177,9 +181,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       position: widget.request.resumePosition,
       grace: const Duration(seconds: 5),
     );
-    _stallWatchdogTimer = Timer.periodic(
+    _recoveryController.startStallWatchdog(
       const Duration(seconds: 1),
-      (_) => _checkPlaybackStall(),
+      _checkPlaybackStall,
     );
     _bindPlayer();
     _subscriptions.add(
@@ -328,8 +332,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       subscription.cancel();
     }
     _controlsHideTimer?.cancel();
-    _stallWatchdogTimer?.cancel();
-    _backupLookupDelayTimer?.cancel();
     _backupLookupCancellationToken?.cancel();
     _superResolutionPerformanceTimer?.cancel();
     _lineLookupCancellationToken?.cancel();
@@ -343,6 +345,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _appFullscreen.dispose();
     unawaited(_nativeVideo.dispose());
     _webVideo.dispose();
+    _recoveryController.dispose();
     _danmakuInput.dispose();
     _shortcutFocusNode.dispose();
     _sessionController.dispose();
@@ -1745,6 +1748,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     Duration? resumePosition,
   }) async {
     var line = requestedLine;
+    _recoveryController.cancelCurrentLineRetry();
     if (!_isPlayableLine(line)) {
       await _player.stop();
       if (!mounted) return;
@@ -2047,20 +2051,23 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           : '播放暂时中断，正在重试当前线路…';
     });
     if (!shouldSwitch) {
-      Future<void>.delayed(const Duration(milliseconds: 500), () async {
-        if (!mounted ||
-            _line?.id != line.id ||
-            _lineFailureCounts[line.id] != 1) {
-          return;
-        }
-        _beginPlaybackRecovery(
-          line,
-          strategy: 'current_line_retry',
-          previous: line,
-          position: resumePosition,
-        );
-        await _openLine(line, force: true, resumePosition: resumePosition);
-      });
+      _recoveryController.scheduleCurrentLineRetry(
+        const Duration(milliseconds: 500),
+        () async {
+          if (!mounted ||
+              _line?.id != line.id ||
+              _lineFailureCounts[line.id] != 1) {
+            return;
+          }
+          _beginPlaybackRecovery(
+            line,
+            strategy: 'current_line_retry',
+            previous: line,
+            position: resumePosition,
+          );
+          await _openLine(line, force: true, resumePosition: resumePosition);
+        },
+      );
       return;
     }
     if (!_currentSettings.autoSwitchLine) {
