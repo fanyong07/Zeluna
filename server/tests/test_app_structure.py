@@ -13,6 +13,7 @@ from server.routers import (
     health_router,
     legacy_account_router,
     legacy_config_router,
+    legacy_community_router,
     legacy_media_router,
     playback_router,
 )
@@ -44,6 +45,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             admin_router,
             legacy_account_router,
             legacy_config_router,
+            legacy_community_router,
             legacy_media_router,
         )
         for route in router.routes
@@ -62,6 +64,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
         endpoint_modules["/api/v2/vod/{subject_id:path}"] == "server.routers.compat_v2"
     )
     assert endpoint_modules["/vod/{id}/{episode}"] == "server.routers.legacy_media"
+    assert endpoint_modules["/latest"] == "server.routers.legacy_community"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 
