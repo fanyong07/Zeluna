@@ -10,7 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,8 @@ from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
 
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
+
+_MAX_CODE_FAILURES = 5
 
 
 class VerificationCodeRequest(BaseModel):
@@ -271,12 +273,33 @@ async def _consume_code(
     result = await session.execute(
         select(VerifyCode).where(
             VerifyCode.email == email,
-            VerifyCode.code == digest,
+            VerifyCode.purpose == purpose,
             VerifyCode.expires_at > time.time(),
         )
+        .order_by(VerifyCode.created_at.desc(), VerifyCode.id.desc())
+        .limit(1)
+        .with_for_update()
     )
     record = result.scalar_one_or_none()
     if record is None:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    retry_after = max(1, int(record.expires_at - time.time()))
+    if record.failed_attempts >= _MAX_CODE_FAILURES:
+        raise _too_many_requests(retry_after)
+    if not hmac.compare_digest(record.code, digest):
+        updated = await session.execute(
+            update(VerifyCode)
+            .where(
+                VerifyCode.id == record.id,
+                VerifyCode.failed_attempts < _MAX_CODE_FAILURES,
+            )
+            .values(failed_attempts=VerifyCode.failed_attempts + 1)
+            .returning(VerifyCode.failed_attempts)
+        )
+        failed_attempts = updated.scalar_one_or_none()
+        await session.commit()
+        if failed_attempts is None or failed_attempts >= _MAX_CODE_FAILURES:
+            raise _too_many_requests(retry_after)
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
     await session.delete(record)
     return record
@@ -305,6 +328,7 @@ async def request_code(
         VerifyCode(
             email=email,
             code=_code_digest(email, payload.purpose, code),
+            purpose=payload.purpose,
             expires_at=time.time() + 600,
         )
     )

@@ -263,6 +263,101 @@ def test_registration_code_requires_configured_email_delivery(tmp_path, monkeypa
     asyncio.run(engine.dispose())
 
 
+def test_verification_code_locks_after_email_and_purpose_failure_budget(
+    tmp_path, monkeypatch
+):
+    database_path = (tmp_path / "code-attempts.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    asyncio.run(prepare())
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    delivered = {}
+
+    async def capture_email(email: str, code: str, purpose: str):
+        delivered.update(email=email, code=code, purpose=purpose)
+
+    monkeypatch.setattr(account_api, "send_verification_email", capture_email)
+    monkeypatch.setattr(
+        account_api,
+        "_client_key",
+        lambda request: request.headers.get("X-Test-Client", "test-client"),
+    )
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+
+    with TestClient(app) as client:
+        sent = client.post(
+            "/api/v1/auth/code",
+            json={"email": "attempts@example.com", "purpose": "register"},
+        )
+        assert sent.status_code == 202
+
+        payload = {
+            "email": "attempts@example.com",
+            "nickname": "attempt-budget",
+            "password": "password-123",
+            "code": "000000" if delivered["code"] != "000000" else "111111",
+        }
+        for attempt in range(account_api._MAX_CODE_FAILURES - 1):
+            response = client.post(
+                "/api/v1/auth/register",
+                json=payload,
+                headers={"X-Test-Client": f"client-{attempt}"},
+            )
+            assert response.status_code == 400
+        locked = client.post(
+            "/api/v1/auth/register",
+            json=payload,
+            headers={"X-Test-Client": "client-lock"},
+        )
+        assert locked.status_code == 429
+        assert int(locked.headers["Retry-After"]) > 0
+
+        payload["code"] = delivered["code"]
+        still_locked = client.post(
+            "/api/v1/auth/register",
+            json=payload,
+            headers={"X-Test-Client": "client-correct"},
+        )
+        assert still_locked.status_code == 429
+
+        resent = client.post(
+            "/api/v1/auth/code",
+            json={"email": "attempts@example.com", "purpose": "register"},
+        )
+        assert resent.status_code == 202
+        payload["code"] = delivered["code"]
+        registered = client.post(
+            "/api/v1/auth/register",
+            json=payload,
+            headers={"X-Test-Client": "client-new-code"},
+        )
+        assert registered.status_code == 201
+
+    async def stored_attempts():
+        async with sessions() as session:
+            record = await session.scalar(
+                select(VerifyCode).where(
+                    VerifyCode.email == "attempts@example.com",
+                    VerifyCode.purpose == "register",
+                )
+            )
+            return record.failed_attempts if record else None
+
+    assert asyncio.run(stored_attempts()) is None
+    asyncio.run(engine.dispose())
+
+
 def test_tokens_are_unique_and_long_unicode_passwords_are_supported():
     assert create_jwt(1) != create_jwt(1)
 

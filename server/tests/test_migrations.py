@@ -111,6 +111,33 @@ def test_upgrade_head_is_idempotent_and_preserves_rows(tmp_path):
     assert _revision(database_path) == migration_head_revision()
 
 
+def test_verification_attempt_migration_preserves_legacy_codes(tmp_path):
+    database_path = tmp_path / "verification-attempts.db"
+    config = _config(database_path)
+    command.upgrade(config, "0003_source_health_diagnostics")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO verify_codes (email, code, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("legacy@example.com", "legacy-digest", 1.0, 2.0),
+        )
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT code, purpose, failed_attempts
+            FROM verify_codes WHERE email = ?
+            """,
+            ("legacy@example.com",),
+        ).fetchone()
+
+    assert row == ("legacy-digest", "legacy", 0)
+    assert _revision(database_path) == migration_head_revision()
+
+
 def test_existing_schema_deduplicates_cache_and_preserves_data(tmp_path):
     database_path = tmp_path / "existing.db"
     url = f"sqlite:///{database_path.as_posix()}"
