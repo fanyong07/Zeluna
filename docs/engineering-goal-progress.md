@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `024b688` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `3832d90` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1022,6 +1022,34 @@ Remaining risks:
 - Client-address rate limiting still needs an explicit trusted-proxy boundary; forwarded headers must remain untrusted by default.
 - Attempt tracking, verification-code consumption limits, login timing resistance, password-hash upgrades, and session lifecycle enforcement remain open G8 work.
 - The four-material inventory remains `total=4`, `read=4`, `skipped=0`; AniCh materials and VOD samples were not used as live providers, fixed routes, credentials, private protocols, or access-control bypasses.
+
+### Trusted proxy and bounded rate-limit state
+
+Audit:
+
+- Account rate limiting unconditionally accepted `X-Real-IP`. That assumption lived only in a comment and allowed direct clients or a misconfigured proxy chain to choose their limiter identity.
+- The process-local attempt table had no key-capacity bound. Unique IP/email keys could grow memory indefinitely, and ordinary Uvicorn startup could apply its own proxy-header rewriting before the application policy ran.
+
+Changes:
+
+- Forwarded client addresses are now accepted only when the direct peer belongs to an explicitly configured `ACCOUNT_TRUSTED_PROXY_CIDRS` network. The default is empty and therefore ignores `X-Real-IP`; malformed, chained, and untrusted values fall back to the direct peer. IPv4-mapped IPv6 addresses are canonicalized before comparison.
+- Both server launchers disable Uvicorn's implicit proxy-header processing. Production guidance requires the same `--no-proxy-headers` boundary for CLI launches and warns against broad/client networks in the trusted proxy list.
+- Replaced the unbounded default dictionary with a capacity-bounded attempt store. It preserves active rate-limit keys, reclaims only expired buckets, and returns `429` for a new key when saturated instead of evicting a live restriction. The default hard cap is 10,000 keys and is configurable within bounded limits.
+- The limiter remains a single-process fallback. Multi-instance deployments must enforce shared limits at the trusted gateway; this slice does not claim distributed enforcement.
+
+Tests:
+
+- Focused account security suite: 12 passed, 0 failed, including spoofed/untrusted headers, trusted IPv4/IPv6 forwarding, mapped addresses, malformed chains, capacity saturation, expiry reclamation, `Retry-After`, and production launcher configuration.
+- Full server suite: 144 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, unstaged/staged `git diff --check`, and final diff scope passed.
+
+Commit: `3832d90 security: harden account rate limiting`
+
+Remaining risks:
+
+- Verification-code consumption still needs email/purpose failure limiting that cannot be bypassed by rotating source addresses.
+- Login timing resistance, legacy password-hash upgrade, and the full session expiry/revocation audit remain open G8 work.
+- No production proxy, environment, account, database, secret, email delivery, or deployment was changed.
 
 ## G9 Privacy lifecycle
 
