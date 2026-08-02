@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -43,6 +44,8 @@ abstract interface class CloudAccountService {
   });
 
   Future<void> verifyPassword(String password);
+
+  Future<Uint8List> exportAccountData();
 
   Future<void> resetPassword({
     required String email,
@@ -110,9 +113,7 @@ class CloudAccountRepository implements CloudAccountService {
     final token = await _readToken();
     if (token == null) return null;
     try {
-      final response = await _client
-          .get(_endpoint('me'), headers: _authorizedHeaders(token))
-          .timeout(requestTimeout);
+      final response = await _send('GET', 'me', token: token);
       if (response.statusCode == 401) {
         await _tokenStore.delete();
         return null;
@@ -238,6 +239,22 @@ class CloudAccountRepository implements CloudAccountService {
   }
 
   @override
+  Future<Uint8List> exportAccountData() async {
+    final token = await _requiredToken();
+    final response = await _send(
+      'GET',
+      'privacy/export',
+      token: token,
+      maxResponseBytes: accountBackendExportMaxResponseBytes,
+    );
+    final body = _decodeSuccess(response);
+    if (body['schema_version'] != 1 || body['account'] is! Map) {
+      throw const AccountException('服务器返回的账号数据导出格式无效');
+    }
+    return Uint8List.fromList(response.bodyBytes);
+  }
+
+  @override
   Future<void> resetPassword({
     required String email,
     required String verificationCode,
@@ -283,6 +300,7 @@ class CloudAccountRepository implements CloudAccountService {
     String path, {
     Map<String, Object?>? body,
     String? token,
+    int maxResponseBytes = accountBackendDefaultMaxResponseBytes,
   }) async {
     try {
       final request = http.Request(method, _endpoint(path));
@@ -293,7 +311,23 @@ class CloudAccountRepository implements CloudAccountService {
       });
       if (body != null) request.body = jsonEncode(body);
       final streamed = await _client.send(request).timeout(requestTimeout);
-      return http.Response.fromStream(streamed).timeout(requestTimeout);
+      final declaredLength = streamed.contentLength;
+      if (declaredLength != null && declaredLength > maxResponseBytes) {
+        throw const AccountException('账号服务返回的数据过大，已停止读取');
+      }
+      final responseBytes = await _readBoundedBytes(
+        streamed.stream,
+        maxResponseBytes: maxResponseBytes,
+      ).timeout(requestTimeout);
+      return http.Response.bytes(
+        responseBytes,
+        streamed.statusCode,
+        headers: streamed.headers,
+        isRedirect: streamed.isRedirect,
+        persistentConnection: streamed.persistentConnection,
+        reasonPhrase: streamed.reasonPhrase,
+        request: streamed.request,
+      );
     } on TimeoutException {
       throw const AccountException('连接账号服务器超时，请检查网络后重试');
     } on http.ClientException {
@@ -392,14 +426,23 @@ class CloudAccountRepository implements CloudAccountService {
     ],
   );
 
-  Map<String, String> _authorizedHeaders(String token) => {
-    'Accept': 'application/json',
-    'Authorization': 'Bearer $token',
-  };
-
   void close() {
     if (_ownsClient) _client.close();
   }
+}
+
+Future<Uint8List> _readBoundedBytes(
+  Stream<List<int>> stream, {
+  required int maxResponseBytes,
+}) async {
+  final bytes = BytesBuilder(copy: false);
+  await for (final chunk in stream) {
+    if (bytes.length + chunk.length > maxResponseBytes) {
+      throw const AccountException('账号服务返回的数据过大，已停止读取');
+    }
+    bytes.add(chunk);
+  }
+  return bytes.takeBytes();
 }
 
 Uri _normalizeBaseUrl(String value) {

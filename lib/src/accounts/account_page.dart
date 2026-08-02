@@ -1,3 +1,5 @@
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -204,6 +206,12 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                         _clearCredentialFields();
                         _selectMode(_AccountPageMode.register);
                       },
+              ),
+              _AccountAction(
+                icon: Icons.download_outlined,
+                title: '导出我的账号数据',
+                subtitle: '保存为 JSON，包含云端资料、收藏、历史与本人发布内容',
+                onTap: _busy ? null : _exportAccountData,
               ),
               _AccountAction(
                 icon: Icons.logout_rounded,
@@ -902,6 +910,48 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
       successMode: _AccountPageMode.login,
       clearPasswords: true,
     );
+  }
+
+  Future<void> _exportAccountData() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _message = null;
+    });
+    try {
+      final bytes = await ref
+          .read(animeControllerProvider.notifier)
+          .exportCurrentAccountData();
+      final day = DateTime.now().toUtc().toIso8601String().substring(0, 10);
+      final savedPath = await FilePicker.platform.saveFile(
+        dialogTitle: '导出 Zeluna 账号数据',
+        fileName: 'zeluna-account-data-$day.json',
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = kIsWeb || savedPath != null ? '账号数据已导出' : '已取消导出';
+      });
+      _revealMessage();
+    } on AccountException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = error.message;
+      });
+      _revealMessage();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '无法保存账号数据，请检查存储权限后重试';
+      });
+      _revealMessage();
+    }
   }
 
   Future<void> _runAccountAction({

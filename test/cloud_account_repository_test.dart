@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
+import 'package:anime/src/core/network/network_security.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:http/http.dart' as http;
@@ -194,6 +195,35 @@ void main() {
     expect(tokens.value, 'session-token');
   });
 
+  test('session restore keeps the ordinary account response limit', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final client = MockClient.streaming((request, bodyStream) async {
+      expect(request.url.path, '/api/v1/auth/me');
+      return http.StreamedResponse(
+        const Stream<List<int>>.empty(),
+        200,
+        contentLength: accountBackendDefaultMaxResponseBytes + 1,
+      );
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+    final cached = LocalAccount(
+      id: 'cloud-1',
+      email: 'user@example.com',
+      nickname: '星野',
+      createdAt: DateTime.utc(2026),
+      lastLoginAt: DateTime.utc(2026),
+      cloudAuthenticated: true,
+    );
+
+    expect(await repository.restoreSession(cached), same(cached));
+    expect(tokens.value, 'session-token');
+  });
+
   test('cloud account cache never stores password material', () async {
     final root = await Directory.systemTemp.createTemp('cloud-account-cache-');
     Hive.init(root.path);
@@ -219,6 +249,59 @@ void main() {
     expect(raw['authSource'], 'cloud');
     expect(raw, isNot(contains('passwordHash')));
     expect(raw, isNot(contains('passwordSalt')));
+  });
+
+  test(
+    'account export is authenticated, bounded, and preserves token',
+    () async {
+      final tokens = _MemoryTokenStore()..value = 'session-token';
+      final client = MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.path, '/api/v1/auth/privacy/export');
+        expect(request.headers['Authorization'], 'Bearer session-token');
+        return http.Response(
+          jsonEncode({
+            'schema_version': 1,
+            'account': {'id': '42', 'email': 'user@example.com'},
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      final exported = await repository.exportAccountData();
+
+      expect(jsonDecode(utf8.decode(exported))['schema_version'], 1);
+      expect(tokens.value, 'session-token');
+    },
+  );
+
+  test('account export rejects an oversized declared response', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final client = MockClient.streaming((request, bodyStream) async {
+      return http.StreamedResponse(
+        const Stream<List<int>>.empty(),
+        200,
+        contentLength: accountBackendExportMaxResponseBytes + 1,
+      );
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+
+    await expectLater(
+      repository.exportAccountData(),
+      throwsA(isA<AccountException>()),
+    );
   });
 }
 

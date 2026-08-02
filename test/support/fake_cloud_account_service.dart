@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 
@@ -92,6 +95,20 @@ class FakeCloudAccountService implements CloudAccountService {
     if (account == null || _passwords[account.email] != password) {
       throw const AccountException('密码不正确，数据没有清除');
     }
+  }
+
+  @override
+  Future<Uint8List> exportAccountData() async {
+    final account = _current;
+    if (account == null) throw const AccountException('请先登录账号');
+    return Uint8List.fromList(
+      utf8.encode(
+        jsonEncode({
+          'schema_version': 1,
+          'account': {'id': account.id, 'email': account.email},
+        }),
+      ),
+    );
   }
 
   @override

@@ -11,6 +11,9 @@ enum NetworkServiceKind {
   metadataApi,
 }
 
+const accountBackendDefaultMaxResponseBytes = 1024 * 1024;
+const accountBackendExportMaxResponseBytes = 25 * 1024 * 1024;
+
 class NetworkSecurityException implements Exception {
   const NetworkSecurityException(this.message);
 
@@ -41,7 +44,7 @@ class NetworkRequestPolicy {
         service: NetworkServiceKind.accountBackend,
         httpsOnly: true,
         allowPrivateNetwork: false,
-        maxResponseBytes: 1024 * 1024,
+        maxResponseBytes: accountBackendExportMaxResponseBytes,
         requestTimeout: Duration(seconds: 15),
         allowSyntheticDns: true,
       ),

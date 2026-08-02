@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
@@ -359,6 +360,14 @@ final class AccountController {
           _publishSession(session);
         }
       });
+
+  Future<Uint8List> exportAccountData() {
+    _requireInitialized();
+    if (_activeAccount == null) {
+      throw const AccountException('请先登录账号');
+    }
+    return _cloudService.exportAccountData();
+  }
 
   Future<void> retryPendingCleanup() => _runOperation(() async {
     _requireInitialized();

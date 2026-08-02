@@ -66,6 +66,7 @@ void main() {
     expect(find.text('登录与安全'), findsOneWidget);
     expect(find.text('修改密码'), findsOneWidget);
     expect(find.text('切换账号'), findsOneWidget);
+    expect(find.text('导出我的账号数据'), findsOneWidget);
     expect(find.text('退出登录'), findsOneWidget);
     expect(find.text('清除此设备的账号数据'), findsOneWidget);
 

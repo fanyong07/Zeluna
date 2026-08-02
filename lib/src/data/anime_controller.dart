@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -928,6 +929,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<void> deleteCurrentAccount({required String password}) =>
       _accounts.deleteCurrent(password: password);
+
+  Future<Uint8List> exportCurrentAccountData() => _accounts.exportAccountData();
 
   Future<void> retryPendingAccountCleanup() => _accounts.retryPendingCleanup();
 
