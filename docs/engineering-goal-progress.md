@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `ec6fbb7` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `7cf3e1b` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -667,9 +667,32 @@ Tests:
 
 Commit: `ec6fbb7 refactor: isolate server admin routes`
 
+### Legacy account router isolation
+
+Audit:
+
+- Six retained protobuf account endpoints and their request/user helpers were still mixed into `server.main`. Production configuration already keeps them disabled because the old registration flow does not enforce the modern email-delivery boundary.
+- Only the compatibility routes use the legacy account request parser and user response mapping. The binary protobuf response helper is also used by retained catalog/community routes and therefore needed a small shared compatibility module.
+
+Changes:
+
+- Added `server.routers.legacy_account` for `/login`, `/code`, `/register`, `/user/check`, `/change_password`, and `/init`. One router-level `require_legacy_account_api` dependency keeps every endpoint at 404 unless the explicit compatibility flag is enabled.
+- Added `server.legacy_protocol` for the retained field parser, user mapping, and binary response wrapper. `server.main` imports only the binary wrapper required by its remaining compatibility routes.
+- Registered the legacy router through `server.app.create_app`, removed the six route implementations and account-only authentication/database imports from `main`, and preserved the shared database dependency for test and application overrides.
+- This extraction does not authorize or enable the legacy account API, change the modern `/api/v1/auth/*` system, send email, create a real account, or alter production configuration. `server.main` is now 1,329 lines.
+
+Tests:
+
+- Added regressions proving all six legacy account paths return 404 by default, the router runs only with the explicit flag, the retained protobuf field mapping is unchanged, and binary responses keep `application/octet-stream`.
+- Focused legacy/app/admin/playback suite: 14 passed, 0 failed.
+- Full server suite: 105 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths with all six legacy account paths and no duplicates.
+
+Commit: `7cf3e1b refactor: isolate legacy account router`
+
 Remaining G7 work:
 
-- Split retained legacy/community/compatibility route groups into explicit routers, leaving all administrative and legacy account surfaces fail-closed or isolated.
+- Split retained catalog/community/compatibility route groups into explicit routers; administrative and legacy account surfaces are now isolated and fail-closed.
 - Separate remaining route orchestration from services/repositories and complete independently testable server boundaries.
 - Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
 
