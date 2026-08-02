@@ -20,15 +20,11 @@ from .auth import (
     verify_password,
 )
 from .config import SECRET_KEY
-from .database import User, UserToken, VerifyCode, async_session
+from .database import User, UserToken, VerifyCode
+from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
 
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
-
-
-async def get_session():
-    async with async_session() as session:
-        yield session
 
 
 class VerificationCodeRequest(BaseModel):

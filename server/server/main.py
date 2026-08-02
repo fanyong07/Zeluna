@@ -8,18 +8,16 @@ AniCh API 复刻 — FastAPI 后端入口
 import json
 import logging
 import math
-import secrets
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, Query, Request, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Query, Request, Depends, HTTPException
 from fastapi.responses import Response, JSONResponse
 from sqlalchemy import select, func, delete, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import ADMIN_TOKEN, CORS_ORIGINS, LEGACY_ACCOUNT_API_ENABLED
 from .database import (
     async_session, init_db,
     User, UserToken, VerifyCode,
@@ -42,54 +40,27 @@ from .aggregator import aggregator
 from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service, parse_stable_id
 from .playback import playback_service
-from .account_api import router as account_router
+from .app import create_app
+from .dependencies import get_session, require_admin, require_legacy_account_api
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Zeluna API", version="3.0.0")
-app.include_router(account_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
-    allow_credentials="*" not in CORS_ORIGINS,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(_app):
     await init_db()
-    # 启动爬虫调度器
     await scheduler.start()
-    await _seed_data()
+    try:
+        await _seed_data()
+        yield
+    finally:
+        await scheduler.stop()
+        await playback_service.aclose()
+        await aggregator.aclose()
+        await catalog_service.aclose()
+        await m3u8_resolver.aclose()
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    await scheduler.stop()
-    await playback_service.aclose()
-    await aggregator.aclose()
-    await catalog_service.aclose()
-    await m3u8_resolver.aclose()
-
-
-async def get_session():
-    async with async_session() as session:
-        yield session
-
-
-async def require_admin(request: Request):
-    """管理端点默认关闭；生产环境必须通过环境变量显式配置。"""
-    supplied = request.headers.get("X-Zeluna-Admin", "").strip()
-    if not ADMIN_TOKEN or not secrets.compare_digest(supplied, ADMIN_TOKEN):
-        raise HTTPException(status_code=404, detail="Not found")
-
-
-def require_legacy_account_api():
-    if not LEGACY_ACCOUNT_API_ENABLED:
-        raise HTTPException(status_code=404, detail="Not found")
+app = create_app(lifespan=lifespan)
 
 
 # ────────────────────────────────────────────────────────────
