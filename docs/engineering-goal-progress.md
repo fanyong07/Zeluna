@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `e51c8c8` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `024b688` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -993,7 +993,35 @@ Commit: `e51c8c8 refactor: isolate playback health persistence`
 
 ## G8 Account and session security
 
-Status: not_started
+Status: in_progress
+
+### Strong account signing keys and JWT claim binding
+
+Audit:
+
+- The account signing key still defaulted to a repository-known historical placeholder, and token creation accepted missing, short, or low-diversity values. A deployment with incomplete environment configuration could therefore issue forgeable sessions instead of failing closed.
+- New account tokens carried expiry, issued-at, user ID, and a unique token ID, but did not bind the token to the Zeluna issuer and client audience. Existing deployed sessions still require a bounded compatibility path while the migration proceeds.
+
+Changes:
+
+- Removed the default account signing key. Account cryptographic operations now require an independent value of at least 32 UTF-8 bytes with basic diversity and reject empty, short, repeated-character, and historical placeholder values.
+- Registration-code requests validate the signing configuration before any mail-delivery attempt and return a controlled `503` when it is unavailable. No email, real account, database, or production environment was used.
+- New JWTs now require issuer, audience, subject, expiry, issued-at, and unique-token claims. Decoding rejects wrong issuer/audience and only accepts a signature-valid legacy token when both issuer and audience claims are entirely absent, preserving a narrow migration window without weakening validation for new-format tokens.
+- Deployment guidance now documents the fail-closed key requirements without exposing or generating signing material.
+
+Tests:
+
+- Focused account/session security suite: 16 passed, 0 failed.
+- Full server suite: 140 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, the repository security gate, and staged `git diff --check` passed.
+
+Commit: `024b688 security: require strong account signing keys`
+
+Remaining risks:
+
+- Client-address rate limiting still needs an explicit trusted-proxy boundary; forwarded headers must remain untrusted by default.
+- Attempt tracking, verification-code consumption limits, login timing resistance, password-hash upgrades, and session lifecycle enforcement remain open G8 work.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`; AniCh materials and VOD samples were not used as live providers, fixed routes, credentials, private protocols, or access-control bypasses.
 
 ## G9 Privacy lifecycle
 
