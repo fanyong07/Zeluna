@@ -7,6 +7,7 @@ import 'package:anime/src/accounts/local_account_repository.dart';
 class FakeCloudAccountService implements CloudAccountService {
   final _accounts = <String, LocalAccount>{};
   final _passwords = <String, String>{};
+  final _deletionDueAt = <String, DateTime>{};
   LocalAccount? _current;
 
   @override
@@ -60,6 +61,14 @@ class FakeCloudAccountService implements CloudAccountService {
     if (account == null || _passwords[normalized] != password) {
       throw const AccountException('邮箱或密码不正确');
     }
+    final deletionDueAt = _deletionDueAt[normalized];
+    if (deletionDueAt != null) {
+      throw AccountDeletionPendingException(
+        message: '账号处于删除冷静期，可在截止前撤销',
+        dueAt: deletionDueAt,
+        canCancel: deletionDueAt.isAfter(DateTime.now().toUtc()),
+      );
+    }
     _current = account.copyWith(lastLoginAt: DateTime.now().toUtc());
     _accounts[normalized] = _current!;
     return _current!;
@@ -109,6 +118,37 @@ class FakeCloudAccountService implements CloudAccountService {
         }),
       ),
     );
+  }
+
+  @override
+  Future<AccountDeletionSchedule> requestAccountDeletion(
+    String password,
+  ) async {
+    final account = _current;
+    if (account == null || _passwords[account.email] != password) {
+      throw const AccountException('密码不正确，账号没有进入删除流程');
+    }
+    final requestedAt = DateTime.now().toUtc();
+    final dueAt = requestedAt.add(const Duration(days: 7));
+    _deletionDueAt[account.email] = dueAt;
+    _current = null;
+    return AccountDeletionSchedule(requestedAt: requestedAt, dueAt: dueAt);
+  }
+
+  @override
+  Future<void> cancelAccountDeletion({
+    required String email,
+    required String password,
+  }) async {
+    final normalized = email.trim().toLowerCase();
+    if (_passwords[normalized] != password) {
+      throw const AccountException('邮箱或密码不正确');
+    }
+    final dueAt = _deletionDueAt[normalized];
+    if (dueAt != null && !dueAt.isAfter(DateTime.now().toUtc())) {
+      throw const AccountException('删除冷静期已经结束，无法撤销');
+    }
+    _deletionDueAt.remove(normalized);
   }
 
   @override

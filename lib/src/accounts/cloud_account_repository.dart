@@ -47,6 +47,13 @@ abstract interface class CloudAccountService {
 
   Future<Uint8List> exportAccountData();
 
+  Future<AccountDeletionSchedule> requestAccountDeletion(String password);
+
+  Future<void> cancelAccountDeletion({
+    required String email,
+    required String password,
+  });
+
   Future<void> resetPassword({
     required String email,
     required String verificationCode,
@@ -77,6 +84,27 @@ class SecureCloudAccountTokenStore implements CloudAccountTokenStore {
 
   @override
   Future<void> delete() => _storage.delete(key: _key);
+}
+
+class AccountDeletionSchedule {
+  const AccountDeletionSchedule({
+    required this.requestedAt,
+    required this.dueAt,
+  });
+
+  final DateTime requestedAt;
+  final DateTime dueAt;
+}
+
+class AccountDeletionPendingException extends AccountException {
+  const AccountDeletionPendingException({
+    required String message,
+    required this.dueAt,
+    required this.canCancel,
+  }) : super(message);
+
+  final DateTime dueAt;
+  final bool canCancel;
 }
 
 class CloudAccountRepository implements CloudAccountService {
@@ -114,7 +142,9 @@ class CloudAccountRepository implements CloudAccountService {
     if (token == null) return null;
     try {
       final response = await _send('GET', 'me', token: token);
-      if (response.statusCode == 401) {
+      if (response.statusCode == 401 ||
+          response.statusCode == 410 ||
+          response.statusCode == 423) {
         await _tokenStore.delete();
         return null;
       }
@@ -255,6 +285,45 @@ class CloudAccountRepository implements CloudAccountService {
   }
 
   @override
+  Future<AccountDeletionSchedule> requestAccountDeletion(
+    String password,
+  ) async {
+    final token = await _requiredToken();
+    final response = await _post(
+      'privacy/deletion',
+      token: token,
+      body: {'password': password},
+    );
+    final body = _decodeSuccess(response);
+    final requestedAt = _dateTimeFromSeconds(body['deletion_requested_at']);
+    final dueAt = _dateTimeFromSeconds(body['deletion_due_at']);
+    if (body['status'] != 'pending' ||
+        requestedAt == null ||
+        dueAt == null ||
+        !dueAt.isAfter(requestedAt)) {
+      throw const AccountException('服务器返回的账号删除时间无效');
+    }
+    try {
+      await _tokenStore.delete();
+    } catch (_) {
+      // The server already revoked every session. A stale local token is inert.
+    }
+    return AccountDeletionSchedule(requestedAt: requestedAt, dueAt: dueAt);
+  }
+
+  @override
+  Future<void> cancelAccountDeletion({
+    required String email,
+    required String password,
+  }) async {
+    final response = await _post(
+      'privacy/deletion/cancel',
+      body: {'email': _validateEmail(email), 'password': password},
+    );
+    _decodeSuccess(response);
+  }
+
+  @override
   Future<void> resetPassword({
     required String email,
     required String verificationCode,
@@ -352,6 +421,23 @@ class CloudAccountRepository implements CloudAccountService {
       unawaited(_tokenStore.delete());
     }
     final detail = body['detail'];
+    if (detail is Map) {
+      final detailMap = detail.cast<Object?, Object?>();
+      final code = detailMap['code']?.toString();
+      if (code == 'account_deletion_pending' ||
+          code == 'account_deletion_finalizing') {
+        final dueAt = _dateTimeFromSeconds(detailMap['deletion_due_at']);
+        if (dueAt != null) {
+          throw AccountDeletionPendingException(
+            message: detailMap['message']?.toString().trim().isNotEmpty == true
+                ? detailMap['message'].toString().trim()
+                : '账号正在删除流程中',
+            dueAt: dueAt,
+            canCancel: code == 'account_deletion_pending',
+          );
+        }
+      }
+    }
     final message = detail is String && detail.trim().isNotEmpty
         ? detail.trim()
         : switch (response.statusCode) {
@@ -429,6 +515,14 @@ class CloudAccountRepository implements CloudAccountService {
   void close() {
     if (_ownsClient) _client.close();
   }
+}
+
+DateTime? _dateTimeFromSeconds(Object? value) {
+  if (value is! num || !value.isFinite || value <= 0) return null;
+  return DateTime.fromMillisecondsSinceEpoch(
+    (value.toDouble() * 1000).round(),
+    isUtc: true,
+  );
 }
 
 Future<Uint8List> _readBoundedBytes(

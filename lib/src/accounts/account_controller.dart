@@ -369,6 +369,29 @@ final class AccountController {
     return _cloudService.exportAccountData();
   }
 
+  Future<AccountDeletionSchedule> requestCloudAccountDeletion({
+    required String password,
+  }) => _runOperation(() async {
+    _requireInitialized();
+    if (_activeAccount == null) throw const AccountException('请先登录账号');
+    await _quiesceDownloads();
+    final schedule = await _cloudService.requestAccountDeletion(password);
+    await _activate(null);
+    return schedule;
+  });
+
+  Future<void> cancelCloudAccountDeletionAndLogin({
+    required String email,
+    required String password,
+  }) => _runOperation(() async {
+    _requireInitialized();
+    await _cloudService.cancelAccountDeletion(email: email, password: password);
+    final account = await _cloudService.login(email: email, password: password);
+    await _localRepository.rememberCloudAccount(account);
+    await _quiesceDownloads();
+    await _activate(account);
+  });
+
   Future<void> retryPendingCleanup() => _runOperation(() async {
     _requireInitialized();
     final pending = _localRepository.pendingDeletion();

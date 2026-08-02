@@ -303,6 +303,142 @@ void main() {
       throwsA(isA<AccountException>()),
     );
   });
+
+  test(
+    'pending deletion login exposes only the cancellable deadline',
+    () async {
+      final tokens = _MemoryTokenStore();
+      final dueAt = DateTime.utc(2026, 8, 9, 12);
+      final client = MockClient((request) async {
+        expect(request.url.path, '/api/v1/auth/login');
+        return http.Response(
+          jsonEncode({
+            'detail': {
+              'code': 'account_deletion_pending',
+              'message': '账号处于删除冷静期，可在截止前撤销',
+              'deletion_due_at': dueAt.millisecondsSinceEpoch / 1000,
+            },
+          }),
+          423,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      await expectLater(
+        repository.login(email: 'user@example.com', password: 'password-123'),
+        throwsA(
+          isA<AccountDeletionPendingException>()
+              .having((error) => error.canCancel, 'canCancel', isTrue)
+              .having((error) => error.dueAt, 'dueAt', dueAt),
+        ),
+      );
+      expect(tokens.value, isNull);
+    },
+  );
+
+  test(
+    'deletion request is authenticated, timed, and clears the token',
+    () async {
+      final tokens = _MemoryTokenStore()..value = 'session-token';
+      final requestedAt = DateTime.utc(2026, 8, 2, 12);
+      final dueAt = requestedAt.add(const Duration(days: 7));
+      final client = MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/api/v1/auth/privacy/deletion');
+        expect(request.headers['Authorization'], 'Bearer session-token');
+        expect(jsonDecode(request.body)['password'], 'password-123');
+        return http.Response(
+          jsonEncode({
+            'status': 'pending',
+            'deletion_requested_at': requestedAt.millisecondsSinceEpoch / 1000,
+            'deletion_due_at': dueAt.millisecondsSinceEpoch / 1000,
+          }),
+          202,
+        );
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      final schedule = await repository.requestAccountDeletion('password-123');
+
+      expect(schedule.requestedAt, requestedAt);
+      expect(schedule.dueAt, dueAt);
+      expect(tokens.value, isNull);
+    },
+  );
+
+  test(
+    'deletion cancellation uses credentials without a bearer token',
+    () async {
+      final tokens = _MemoryTokenStore();
+      final client = MockClient((request) async {
+        expect(request.method, 'POST');
+        expect(request.url.path, '/api/v1/auth/privacy/deletion/cancel');
+        expect(request.headers['Authorization'], isNull);
+        expect(jsonDecode(request.body), {
+          'email': 'user@example.com',
+          'password': 'password-123',
+        });
+        return http.Response('', 204);
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      await repository.cancelAccountDeletion(
+        email: 'USER@example.com',
+        password: 'password-123',
+      );
+    },
+  );
+
+  test('session restore signs out a frozen account', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final client = MockClient(
+      (request) async => http.Response(
+        jsonEncode({
+          'detail': {
+            'code': 'account_deletion_pending',
+            'message': '账号处于删除冷静期，可在截止前撤销',
+            'deletion_due_at':
+                DateTime.utc(2026, 8, 9).millisecondsSinceEpoch / 1000,
+          },
+        }),
+        423,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      ),
+    );
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+    final cached = LocalAccount(
+      id: 'cloud-1',
+      email: 'user@example.com',
+      nickname: '星野',
+      createdAt: DateTime.utc(2026),
+      lastLoginAt: DateTime.utc(2026),
+      cloudAuthenticated: true,
+    );
+
+    expect(await repository.restoreSession(cached), isNull);
+    expect(tokens.value, isNull);
+  });
 }
 
 class _MemoryTokenStore implements CloudAccountTokenStore {

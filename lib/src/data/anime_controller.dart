@@ -932,6 +932,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<Uint8List> exportCurrentAccountData() => _accounts.exportAccountData();
 
+  Future<AccountDeletionSchedule> requestCloudAccountDeletion({
+    required String password,
+  }) => _accounts.requestCloudAccountDeletion(password: password);
+
+  Future<void> cancelCloudAccountDeletionAndLogin({
+    required String email,
+    required String password,
+  }) => _accounts.cancelCloudAccountDeletionAndLogin(
+    email: email,
+    password: password,
+  );
+
   Future<void> retryPendingAccountCleanup() => _accounts.retryPendingCleanup();
 
   Future<void> updateSettings(PlaybackSettings settings) =>

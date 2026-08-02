@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:anime/src/accounts/account_controller.dart';
+import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/data/bangumi_credential_store.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
@@ -35,8 +36,9 @@ void main() {
     var activationCalls = 0;
     var quiesceCalls = 0;
     final credentialBackend = _MemoryCredentialBackend();
+    final cloudService = FakeCloudAccountService();
     final controller = AccountController(
-      cloudService: FakeCloudAccountService(),
+      cloudService: cloudService,
       localRepository: LocalAccountRepository(accounts),
       settings: settings,
       library: library,
@@ -123,6 +125,35 @@ void main() {
       () => controller.ensureContext(signedInContext),
       throwsA(isA<AccountException>()),
     );
+
+    await controller.login(
+      email: 'second@example.com',
+      password: 'second-password',
+    );
+    final deletion = await controller.requestCloudAccountDeletion(
+      password: 'second-password',
+    );
+    expect(
+      deletion.dueAt.difference(deletion.requestedAt),
+      const Duration(days: 7),
+    );
+    expect(controller.activeAccount, isNull);
+    expect(
+      controller.session.available.map((account) => account.email),
+      contains('second@example.com'),
+    );
+    await expectLater(
+      controller.login(
+        email: 'second@example.com',
+        password: 'second-password',
+      ),
+      throwsA(isA<AccountDeletionPendingException>()),
+    );
+    await controller.cancelCloudAccountDeletionAndLogin(
+      email: 'second@example.com',
+      password: 'second-password',
+    );
+    expect(controller.activeAccount?.email, 'second@example.com');
   });
 }
 

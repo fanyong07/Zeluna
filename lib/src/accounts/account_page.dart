@@ -7,6 +7,7 @@ import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
+import 'cloud_account_repository.dart';
 import 'local_account_repository.dart';
 
 enum _AccountPageMode { manage, login, register, resetPassword, password }
@@ -226,6 +227,15 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                 subtitle: '云端账号会保留，本机收藏与历史将被删除',
                 color: Colors.redAccent,
                 onTap: _busy ? null : () => _confirmDeleteAccount(account),
+              ),
+              _AccountAction(
+                icon: Icons.person_off_outlined,
+                title: '永久删除云端账号',
+                subtitle: '7 天内可撤销；私有数据删除，公开内容匿名保留',
+                color: Colors.redAccent,
+                onTap: _busy
+                    ? null
+                    : () => _confirmCloudAccountDeletion(account),
               ),
             ],
           ),
@@ -718,14 +728,106 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
   }
 
   Future<void> _login() async {
-    await _runAccountAction(
-      action: () => ref
+    if (_busy) return;
+    final email = _email.text;
+    final password = _password.text;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _message = null;
+    });
+    try {
+      await ref
           .read(animeControllerProvider.notifier)
-          .loginAccount(email: _email.text, password: _password.text),
-      success: '登录成功，已切换到该账号',
-      successMode: _AccountPageMode.manage,
-      clearPasswords: true,
-    );
+          .loginAccount(email: email, password: password);
+      if (!mounted) return;
+      _clearPasswords();
+      setState(() {
+        _busy = false;
+        _mode = _AccountPageMode.manage;
+        _message = '登录成功，已切换到该账号';
+      });
+      _revealMessage();
+    } on AccountDeletionPendingException catch (error) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      if (!error.canCancel) {
+        setState(() => _error = error.message);
+        _revealMessage();
+        return;
+      }
+      final shouldCancel = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('账号正在删除冷静期'),
+          content: Text(
+            '账号计划于 ${_formatDeletionDeadline(error.dueAt)} 永久删除。'
+            '截止前可以撤销，撤销后会立即恢复登录。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('暂不撤销'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('撤销删除并登录'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      if (shouldCancel != true) {
+        setState(() => _message = '账号仍处于删除冷静期');
+        _revealMessage();
+        return;
+      }
+      setState(() => _busy = true);
+      try {
+        await ref
+            .read(animeControllerProvider.notifier)
+            .cancelCloudAccountDeletionAndLogin(
+              email: email,
+              password: password,
+            );
+        if (!mounted) return;
+        _clearPasswords();
+        setState(() {
+          _busy = false;
+          _mode = _AccountPageMode.manage;
+          _message = '账号删除已撤销，登录已恢复';
+        });
+        _revealMessage();
+      } on AccountException catch (cancelError) {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _error = cancelError.message;
+        });
+        _revealMessage();
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _error = '撤销没有完成，请稍后重试';
+        });
+        _revealMessage();
+      }
+    } on AccountException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = error.message;
+      });
+      _revealMessage();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '操作没有完成，请稍后重试';
+      });
+      _revealMessage();
+    }
   }
 
   Future<void> _register() async {
@@ -899,6 +1001,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
         ],
       ),
     );
+    _deletePassword.clear();
     if (confirmedPassword == null || confirmedPassword.isEmpty || !mounted) {
       return;
     }
@@ -910,6 +1013,100 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
       successMode: _AccountPageMode.login,
       clearPasswords: true,
     );
+  }
+
+  Future<void> _confirmCloudAccountDeletion(LocalAccount account) async {
+    _deletePassword.clear();
+    final confirmedPassword = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        scrollable: true,
+        title: const Text('永久删除云端账号？'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('“${account.nickname}”会立即冻结并退出所有设备。'),
+              const SizedBox(height: 10),
+              const Text(
+                '• 7 天内可使用邮箱和密码登录并撤销\n'
+                '• 期满删除云端收藏、历史、互动和账号资料\n'
+                '• 帖子、评论、弹幕及其图片会匿名保留\n'
+                '• 此设备上的本地数据不会自动删除',
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _deletePassword,
+                autofocus: true,
+                obscureText: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                autofillHints: const [AutofillHints.password],
+                textInputAction: TextInputAction.done,
+                onSubmitted: (value) {
+                  if (value.isNotEmpty) Navigator.of(dialogContext).pop(value);
+                },
+                decoration: const InputDecoration(labelText: '输入当前密码确认'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () {
+              if (_deletePassword.text.isNotEmpty) {
+                Navigator.of(dialogContext).pop(_deletePassword.text);
+              }
+            },
+            child: const Text('进入 7 天冷静期'),
+          ),
+        ],
+      ),
+    );
+    _deletePassword.clear();
+    if (confirmedPassword == null || confirmedPassword.isEmpty || !mounted) {
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+      _message = null;
+    });
+    try {
+      final schedule = await ref
+          .read(animeControllerProvider.notifier)
+          .requestCloudAccountDeletion(password: confirmedPassword);
+      if (!mounted) return;
+      _clearPasswords();
+      setState(() {
+        _busy = false;
+        _mode = _AccountPageMode.login;
+        _message =
+            '删除申请已提交，计划于 ${_formatDeletionDeadline(schedule.dueAt)} 完成；截止前可登录撤销';
+      });
+      _revealMessage();
+    } on AccountException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = error.message;
+      });
+      _revealMessage();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = '删除申请没有完成，请稍后重试';
+      });
+      _revealMessage();
+    }
   }
 
   Future<void> _exportAccountData() async {
@@ -1011,6 +1208,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
     _currentPassword.clear();
     _newPassword.clear();
     _confirmNewPassword.clear();
+    _deletePassword.clear();
   }
 
   void _clearCredentialFields() {
@@ -1018,6 +1216,13 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
     _nickname.clear();
     _clearPasswords();
   }
+}
+
+String _formatDeletionDeadline(DateTime value) {
+  final local = value.toLocal();
+  String twoDigits(int number) => number.toString().padLeft(2, '0');
+  return '${local.year}-${twoDigits(local.month)}-${twoDigits(local.day)} '
+      '${twoDigits(local.hour)}:${twoDigits(local.minute)}（本地时间）';
 }
 
 class _AccountStatusCard extends StatelessWidget {
