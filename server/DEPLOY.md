@@ -61,7 +61,7 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `TMDB_READ_ACCESS_TOKEN`：TMDB v4 Read Access Token，电视剧和电影目录必需。
 - `BANGUMI_ACCESS_TOKEN`：可选；未配置时使用 Bangumi 公共接口。
 - `ADMIN_TOKEN`：保护手动刷新和管理接口，必须是随机长字符串。
-- `SECRET_KEY`：账户令牌签名，必须是独立随机长字符串。
+- `SECRET_KEY`：账户令牌和验证码摘要密钥，必须是独立随机值且至少 32 字节；空值、短值、低多样性值和历史占位值会让账号操作 fail-closed 返回 `503`。
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。
 - `CORS_ORIGINS`：只填写正式 Web 客户端域名；安卓和 Windows 客户端不受此项影响。
 - `LEGACY_ACCOUNT_API_ENABLED`：正式环境保持 `false`，避免旧兼容注册接口绕过邮件验证。

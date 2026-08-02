@@ -24,6 +24,30 @@ from .database import User, UserToken
 
 
 _BCRYPT_SHA256_PREFIX = "$bcrypt-sha256$"
+_JWT_ISSUER = "zeluna"
+_JWT_AUDIENCE = "zeluna-clients"
+_INSECURE_SECRET_KEYS = {
+    "anich-secret-key-change-in-production",
+    "change-me",
+    "secret",
+}
+
+
+class AuthConfigurationError(RuntimeError):
+    pass
+
+
+def signing_key() -> str:
+    key = SECRET_KEY.strip()
+    if (
+        len(key.encode("utf-8")) < 32
+        or len(set(key)) < 8
+        or key.casefold() in _INSECURE_SECRET_KEYS
+    ):
+        raise AuthConfigurationError(
+            "SECRET_KEY must be a unique random value of at least 32 bytes"
+        )
+    return key
 
 
 def _password_bytes(password: str) -> bytes:
@@ -48,19 +72,48 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 def create_jwt(user_id: int) -> str:
+    now = int(time.time())
     payload = {
         "user_id": user_id,
+        "sub": str(user_id),
         "jti": secrets.token_urlsafe(16),
-        "exp": int(time.time()) + ACCESS_TOKEN_EXPIRE,
-        "iat": int(time.time()),
+        "iss": _JWT_ISSUER,
+        "aud": _JWT_AUDIENCE,
+        "exp": now + ACCESS_TOKEN_EXPIRE,
+        "iat": now,
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, signing_key(), algorithm=JWT_ALGORITHM)
 
 
 def decode_jwt(token: str) -> dict | None:
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return jwt.decode(
+            token,
+            signing_key(),
+            algorithms=[JWT_ALGORITHM],
+            audience=_JWT_AUDIENCE,
+            issuer=_JWT_ISSUER,
+            options={
+                "require": ["exp", "iat", "jti", "sub", "iss", "aud"],
+            },
+        )
     except jwt.PyJWTError:
+        try:
+            legacy = jwt.decode(
+                token,
+                signing_key(),
+                algorithms=[JWT_ALGORITHM],
+                options={
+                    "require": ["exp", "iat", "jti", "user_id"],
+                    "verify_aud": False,
+                },
+            )
+        except (AuthConfigurationError, jwt.PyJWTError):
+            return None
+        if "iss" in legacy or "aud" in legacy:
+            return None
+        return legacy
+    except AuthConfigurationError:
         return None
 
 

@@ -13,13 +13,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
+    AuthConfigurationError,
     create_jwt,
     decode_jwt,
     generate_verify_code,
     hash_password,
+    signing_key,
     verify_password,
 )
-from .config import SECRET_KEY
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
@@ -111,7 +112,14 @@ def _normalize_email(value: str) -> str:
 
 def _code_digest(email: str, purpose: str, code: str) -> str:
     payload = f"{purpose}:{email}:{code}".encode()
-    return hmac.new(SECRET_KEY.encode(), payload, hashlib.sha256).hexdigest()
+    try:
+        key = signing_key().encode()
+    except AuthConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="账号服务安全配置不可用",
+        ) from error
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
 def _token_digest(token: str) -> str:
@@ -129,7 +137,13 @@ def _user_payload(user: User) -> dict:
 
 
 async def _issue_token(session: AsyncSession, user: User) -> str:
-    token = create_jwt(user.id)
+    try:
+        token = create_jwt(user.id)
+    except AuthConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="账号服务安全配置不可用",
+        ) from error
     session.add(UserToken(user_id=user.id, token=_token_digest(token)))
     existing = list(
         await session.scalars(
@@ -147,6 +161,13 @@ async def _issue_token(session: AsyncSession, user: User) -> str:
 async def _current_account(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> tuple[User, UserToken]:
+    try:
+        signing_key()
+    except AuthConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="账号服务安全配置不可用",
+        ) from error
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:

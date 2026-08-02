@@ -1,13 +1,30 @@
 import asyncio
+import time
 
+import jwt
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server import account_api
-from server.auth import create_jwt, hash_password, verify_password
+from server import auth
+from server.auth import (
+    AuthConfigurationError,
+    create_jwt,
+    decode_jwt,
+    hash_password,
+    verify_password,
+)
 from server.database import Base, VerifyCode
+
+_TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
+
+
+@pytest.fixture(autouse=True)
+def secure_test_signing_key(monkeypatch):
+    monkeypatch.setattr(auth, "SECRET_KEY", _TEST_SECRET)
 
 
 def test_email_registration_login_session_and_logout(tmp_path, monkeypatch):
@@ -165,8 +182,97 @@ def test_registration_code_requires_configured_email_delivery(tmp_path, monkeypa
 def test_tokens_are_unique_and_long_unicode_passwords_are_supported():
     assert create_jwt(1) != create_jwt(1)
 
+    claims = decode_jwt(create_jwt(1))
+    assert claims is not None
+    assert claims["sub"] == "1"
+    assert claims["iss"] == "zeluna"
+    assert claims["aud"] == "zeluna-clients"
+
     password = "星野的安全密码" * 20
     hashed = hash_password(password)
     assert hashed.startswith("$bcrypt-sha256$")
     assert verify_password(password, hashed)
     assert not verify_password(password + "错误", hashed)
+
+
+def test_legacy_signed_session_without_issuer_remains_temporarily_compatible():
+    now = int(time.time())
+    legacy = jwt.encode(
+        {
+            "user_id": 7,
+            "jti": "legacy-session",
+            "iat": now,
+            "exp": now + 60,
+        },
+        _TEST_SECRET,
+        algorithm="HS256",
+    )
+    wrong_issuer = jwt.encode(
+        {
+            "user_id": 7,
+            "sub": "7",
+            "jti": "wrong-issuer",
+            "iss": "other-service",
+            "aud": "zeluna-clients",
+            "iat": now,
+            "exp": now + 60,
+        },
+        _TEST_SECRET,
+        algorithm="HS256",
+    )
+
+    assert decode_jwt(legacy)["user_id"] == 7
+    assert decode_jwt(wrong_issuer) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "short-secret",
+        "a" * 64,
+        "anich-secret-key-change-in-production",
+    ],
+)
+def test_weak_or_historical_signing_keys_are_rejected(value, monkeypatch):
+    monkeypatch.setattr(auth, "SECRET_KEY", value)
+
+    with pytest.raises(AuthConfigurationError):
+        auth.signing_key()
+
+
+def test_missing_or_weak_signing_key_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "SECRET_KEY", "")
+    with pytest.raises(AuthConfigurationError):
+        create_jwt(1)
+
+    database_path = (tmp_path / "missing-secret.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    asyncio.run(prepare())
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    async def reject_email(*_args):
+        raise AssertionError("missing signing key must stop before email delivery")
+
+    monkeypatch.setattr(account_api, "send_verification_email", reject_email)
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/code",
+            json={"email": "missing-secret@example.com", "purpose": "register"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "账号服务安全配置不可用"
+    asyncio.run(engine.dispose())

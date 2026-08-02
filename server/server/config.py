@@ -5,7 +5,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR}/data.db")
-SECRET_KEY = os.getenv("SECRET_KEY", "anich-secret-key-change-in-production")
+SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE = 30 * 24 * 3600  # 30 days
 
