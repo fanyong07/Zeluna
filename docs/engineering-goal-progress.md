@@ -869,10 +869,32 @@ Tests:
 
 Commit: `3a71f7e refactor: remove startup demo mutations`
 
+### Provider contract and registry
+
+Audit:
+
+- `BaseScraper` supplied a concrete inheritance base, but aggregation still constructed and closed implementations directly and had no validated provider registration or non-sensitive metadata contract.
+- The existing source inventory is compatibility orchestration and may contain internal adapter/site labels. It is not a safe provider metadata interface and must not be expanded to include endpoints, request headers, cookies, or tokens.
+
+Changes:
+
+- Added a structural `MediaProvider` protocol plus `ProviderRegistry`, `RegisteredProvider`, and immutable `ProviderMetadata` types.
+- Registration now rejects invalid/duplicate IDs, unsupported content types or capabilities, incomplete adapters, control characters, endpoint-like display names, and common private metadata markers.
+- `ContentAggregator` registers aggregate and crawler adapters through the validated registry, delegates ordered close ownership to it, and exposes a metadata tuple containing only stable ID, family, display name, content types, and capabilities. No route publishes provider endpoints or request internals.
+
+Tests:
+
+- Added contract regressions for safe metadata shape, private/incomplete registration rejection, unique default aggregate registrations, and registry-owned shutdown. Constructors were exercised without invoking provider search/detail/resolve or any external network request.
+- Focused provider/aggregator/v3-services suite: 47 passed, 3 subtests passed, 0 failed.
+- Full server suite: 125 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, and the repository security gate passed.
+
+Commit: `17ae385 refactor: define server provider contracts`
+
 Remaining G7 work:
 
-- Separate remaining service/repository orchestration and complete independently testable server boundaries.
-- Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
+- Continue separating aggregation/playback service and repository orchestration into independently testable boundaries.
+- Audit fixed provider domains/configuration and move runtime source selection behind explicit server-side governance without calling any production provider during the audit.
 
 ## G8 Account and session security
 
