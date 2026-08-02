@@ -146,7 +146,6 @@ def test_lifespan_starts_and_closes_resources_in_order():
     with (
         patch.object(main, "init_db", side_effect=recorder("init_db")),
         patch.object(main.scheduler, "start", side_effect=recorder("scheduler.start")),
-        patch.object(main, "_seed_data", side_effect=recorder("seed")),
         patch.object(main.scheduler, "stop", side_effect=recorder("scheduler.stop")),
         patch.object(
             main.playback_service, "aclose", side_effect=recorder("playback.close")
@@ -169,7 +168,6 @@ def test_lifespan_starts_and_closes_resources_in_order():
     assert calls == [
         "init_db",
         "scheduler.start",
-        "seed",
         "running",
         "scheduler.stop",
         "playback.close",
@@ -177,3 +175,7 @@ def test_lifespan_starts_and_closes_resources_in_order():
         "catalog.close",
         "m3u8.close",
     ]
+
+
+def test_application_startup_has_no_demo_seed_or_account_deletion_hook():
+    assert not hasattr(main, "_seed_data")
