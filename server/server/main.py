@@ -6,8 +6,6 @@ AniCh API 复刻 — FastAPI 后端入口
 """
 
 import json
-import logging
-import math
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -26,7 +24,7 @@ from .database import (
     Danmaku,
     Thread, ThreadImage, ThreadCollection, ThreadLike,
     Comment, CommentLike,
-    PlayHistory, PlaybackCache, upsert_playback_cache,
+    PlayHistory,
 )
 from .auth import get_current_user
 from . import protobuf_encoder as pb
@@ -39,8 +37,6 @@ from .playback import playback_service
 from .app import create_app
 from .dependencies import get_session
 from .legacy_protocol import protobuf_bytes as _pb_bytes
-
-logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -1159,154 +1155,3 @@ async def vod_from_scrapers(
         "title": "",
         "vod": vod_data,
     })
-
-
-# ────────────────────────────────────────────────────────────
-# 统一聚合 API (核心)
-# ────────────────────────────────────────────────────────────
-
-@app.get("/api/v2/search")
-async def unified_search(
-    keyword: str = Query(""),
-    content_type: str = Query(None),
-    max_results: int = Query(30),
-):
-    """
-    统一搜索 - 聚合所有源。
-
-    content_type: anime, tv, movie (逗号分隔)
-    """
-    types = content_type.split(",") if content_type else None
-    results = await aggregator.search(keyword, types, max_results)
-
-    return JSONResponse([
-        {
-            "id": r.id,
-            "title": r.title,
-            "original_title": r.original_title,
-            "cover_url": r.cover_url,
-            "banner_url": r.banner_url,
-            "summary": r.summary,
-            "content_type": r.content_type,
-            "language": r.language,
-            "year": r.year,
-            "regions": r.regions,
-            "genres": r.genres,
-            "rating": r.rating,
-            "rating_count": r.rating_count,
-            "total_episodes": r.total_episodes,
-            "status": r.status,
-            "sources": r.sources,
-        }
-        for r in results
-    ])
-
-
-@app.get("/api/v2/episodes/{subject_id:path}")
-async def unified_episodes(subject_id: str):
-    """统一剧集列表"""
-    episodes = await aggregator.get_episodes(subject_id)
-    return JSONResponse([
-        {"number": ep.number, "title": ep.title,
-         "thumbnail": ep.thumbnail, "duration": ep.duration}
-        for ep in episodes
-    ])
-
-
-@app.get("/api/v2/vod/{subject_id:path}")
-async def unified_vod(
-    subject_id: str,
-    episode: int = Query(1),
-    title: str = Query(""),
-    session: AsyncSession = Depends(get_session),
-):
-    """
-    统一视频源获取 - 返回所有可用播放线路。
-
-    先查预爬缓存 (PlaybackCache): 命中且未过期则秒回验证过的活链;
-    未命中再实时解析+可达性验证, 并回填缓存。
-    """
-    import time as _time
-    CACHE_TTL = 6 * 3600  # 缓存 6 小时有效
-
-    # 1. 查缓存
-    result = await session.execute(
-        select(PlaybackCache).where(
-            PlaybackCache.subject_id == subject_id,
-            PlaybackCache.episode == episode,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if row and row.line_count > 0 and (_time.time() - row.verified_at) < CACHE_TTL:
-        try:
-            cached_lines = json.loads(row.lines_json)
-            return JSONResponse([
-                {"url": l.get("url", ""), "title": l.get("title", ""),
-                 "quality": l.get("quality", ""),
-                 "format": l.get("format", ""),
-                 "source": l.get("source", ""),
-                 "headers": l.get("headers", {}),
-                 "cached": True}
-                for l in cached_lines
-            ])
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # 2. 未命中: 实时解析 + 可达性验证
-    lines = await aggregator.resolve_verified_lines(
-        subject_id, episode, title, verify=True
-    )
-    lines_data = [
-        {"url": l.url, "title": l.title, "quality": l.quality,
-         "format": l.format, "source": l.source, "headers": l.headers}
-        for l in lines
-    ]
-
-    # 3. 回填缓存
-    if lines_data:
-        try:
-            now = _time.time()
-            await upsert_playback_cache(
-                session,
-                subject_id=subject_id,
-                episode=episode,
-                title=title,
-                lines_json=json.dumps(lines_data, ensure_ascii=False),
-                line_count=len(lines_data),
-                verified_at=now,
-            )
-        except Exception as error:
-            logger.warning("Playback cache write failed: %s", error)
-
-    return JSONResponse([{**d, "cached": False} for d in lines_data])
-
-
-@app.get("/api/v2/home")
-async def unified_home():
-    """统一首页推荐"""
-    feed = await aggregator.get_home_feed()
-    return JSONResponse(feed)
-
-
-@app.get("/api/v2/resolve")
-async def resolve_m3u8(
-    url: str = Query(""),
-    keyword: str = Query(""),
-):
-    """
-    M3U8 解析端点
-
-    给定一个视频站 URL 或关键词，返回解析出的 m3u8/mp4 地址。
-    """
-    if url:
-        results = await m3u8_resolver.resolve_via_parse_services(url)
-    elif keyword:
-        results = await m3u8_resolver.search_and_resolve(keyword)
-    else:
-        results = []
-
-    return JSONResponse([
-        {"url": r["url"], "format": r.get("format", "hls"),
-         "source": r.get("source", "unknown")}
-        for r in results
-    ])

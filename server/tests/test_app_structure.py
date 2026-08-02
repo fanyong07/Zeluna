@@ -8,6 +8,7 @@ from server.app import create_app
 from server.routers import (
     admin_router,
     catalog_router,
+    compat_v2_router,
     health_router,
     legacy_account_router,
     legacy_config_router,
@@ -36,6 +37,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
         for router in (
             health_router,
             catalog_router,
+            compat_v2_router,
             playback_router,
             admin_router,
             legacy_account_router,
@@ -53,6 +55,9 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert endpoint_modules["/admin/scan"] == "server.routers.admin"
     assert endpoint_modules["/login"] == "server.routers.legacy_account"
     assert endpoint_modules["/check/api"] == "server.routers.legacy_config"
+    assert (
+        endpoint_modules["/api/v2/vod/{subject_id:path}"] == "server.routers.compat_v2"
+    )
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 

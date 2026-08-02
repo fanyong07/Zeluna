@@ -11,6 +11,7 @@ from .config import CORS_ORIGINS
 from .routers import (
     admin_router,
     catalog_router,
+    compat_v2_router,
     health_router,
     legacy_account_router,
     legacy_config_router,
@@ -25,6 +26,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(account_router)
     app.include_router(legacy_account_router)
     app.include_router(legacy_config_router)
+    app.include_router(compat_v2_router)
     app.include_router(health_router)
     app.include_router(catalog_router)
     app.include_router(playback_router)
