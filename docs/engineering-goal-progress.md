@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `8d15b2a` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `18fbc8e` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -593,7 +593,36 @@ Remaining risks:
 
 ## G7 Server architecture
 
-Status: not_started
+Status: in_progress
+
+### Application lifecycle and shared dependencies
+
+Audit:
+
+- `server.main` was a 1,794-line module that constructed FastAPI, duplicated database-session dependencies, owned admin/legacy guards, registered every modern and legacy route, and used deprecated `@app.on_event` startup/shutdown decorators.
+- The production JSON account router defined a second `get_session`, while the modern app and legacy routes depended on the copy in `main`. Baseline server validation from the correct `server` working directory was 93 passed, 5 warnings, and 3 subtests passed; four warnings came from the deprecated event decorators.
+
+Changes:
+
+- Added `server.app.create_app` as the application metadata, CORS, and production account-router composition boundary.
+- Added shared `server.dependencies` ownership for database sessions, fail-closed admin authorization, and the default-disabled legacy account guard. Both modern account and existing main routes now use the same dependency object, preserving test overrides.
+- Replaced deprecated startup/shutdown events with one async FastAPI lifespan. Database initialization, scheduler startup, seed compatibility, and ordered scheduler/service/resolver shutdown preserve the previous behavior, with cleanup in `finally` after scheduler startup.
+- Legacy route implementations still reside in `main`, but direct regression proves `/login` returns 404 when the legacy account flag is disabled. No legacy route was enabled or added.
+
+Tests:
+
+- Added four structure regressions covering shared session dependency identity, app metadata/CORS/account-router composition, default legacy 404 behavior, and ordered lifespan startup/shutdown.
+- App/account/playback route focused suite: 9 passed, 0 failed.
+- Full server suite: 97 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed. The four FastAPI `on_event` deprecation warnings are gone.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. The repository's 43 pre-existing Ruff-format differences were not bulk-reformatted into this slice; new files were formatted directly.
+
+Commit: `18fbc8e refactor: own server app lifecycle`
+
+Remaining G7 work:
+
+- Split modern and retained legacy route groups into explicit routers, leaving legacy/community/admin surfaces fail-closed or isolated.
+- Separate remaining route orchestration from services/repositories and complete independently testable server boundaries.
+- Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
 
 ## G8 Account and session security
 
