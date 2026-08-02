@@ -937,9 +937,31 @@ Tests:
 
 Commit: `5c4bb8d refactor: isolate catalog persistence`
 
+### Playback cache repository isolation
+
+Audit:
+
+- `PlaybackService` directly selected and decoded `PlaybackCache`, called the database upsert helper, and selected the oldest cache rows for scheduled refresh.
+- Cache freshness, partial/negative/stale TTLs, signed-line expiry filtering, inventory completion, and playable-line policy belong to the service and must remain unchanged; row retrieval/upsert/ordering belong to persistence.
+
+Changes:
+
+- Added `PlaybackRepository`, immutable `PlaybackCacheEntry`, and `SqlPlaybackRepository` with cache get/upsert/oldest operations.
+- Injected the repository factory into `PlaybackService`. Cache policy remains in the service, while SQL selection, conflict-safe upsert, and oldest-row ordering now stay behind the repository boundary.
+- No cache schema, TTL, line-count definition, refresh concurrency, ranking, provider activation, or public response changed.
+
+Tests:
+
+- Added in-memory repository regressions for conflict-safe update and oldest ordering, plus service injection coverage for cache hit decoding and available-line write counts.
+- Focused playback repository/cache/v3-services suite: 25 passed, 0 failed.
+- Full server suite: 133 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, and the repository security gate passed.
+
+Commit: `12cee7b refactor: isolate playback cache persistence`
+
 Remaining G7 work:
 
-- Isolate playback cache, binding, and source-health persistence behind a repository contract while preserving all ranking, TTL, single-flight, and circuit-breaker behavior.
+- Isolate playback binding and source-health persistence behind the same repository contract while preserving all ranking, single-flight, and circuit-breaker behavior.
 
 ## G8 Account and session security
 
