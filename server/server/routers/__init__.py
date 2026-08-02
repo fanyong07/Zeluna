@@ -4,6 +4,7 @@ from .admin import router as admin_router
 from .catalog import router as catalog_router
 from .health import router as health_router
 from .legacy_account import router as legacy_account_router
+from .legacy_config import router as legacy_config_router
 from .playback import router as playback_router
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "catalog_router",
     "health_router",
     "legacy_account_router",
+    "legacy_config_router",
     "playback_router",
 ]

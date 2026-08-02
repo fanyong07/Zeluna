@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import ADMIN_TOKEN, LEGACY_ACCOUNT_API_ENABLED
+from .config import ADMIN_TOKEN, LEGACY_ACCOUNT_API_ENABLED, LEGACY_CONFIG_API_ENABLED
 from .database import async_session
 
 
@@ -27,4 +27,11 @@ def require_legacy_account_api() -> None:
     """Legacy protobuf account routes remain disabled by default."""
 
     if not LEGACY_ACCOUNT_API_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+def require_legacy_config_api() -> None:
+    """Historical client configuration stays disabled by default."""
+
+    if not LEGACY_CONFIG_API_ENABLED:
         raise HTTPException(status_code=404, detail="Not found")

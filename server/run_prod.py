@@ -6,7 +6,8 @@
   - host=127.0.0.1 (只监听本地, 由 nginx 反代对外; 无 nginx 时改 0.0.0.0)
   - log_level=warning
 
-对外地址通过环境变量 PUBLIC_BASE_URL 配置, /check/api 会返回它。
+对外地址通过环境变量 PUBLIC_BASE_URL 配置；默认关闭的 /check/api
+仅在显式兼容模式下返回该地址，不下发第三方线路或代理配置。
 """
 
 import os

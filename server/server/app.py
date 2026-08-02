@@ -13,6 +13,7 @@ from .routers import (
     catalog_router,
     health_router,
     legacy_account_router,
+    legacy_config_router,
     playback_router,
 )
 
@@ -23,6 +24,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app = FastAPI(title="Zeluna API", version="3.0.0", lifespan=lifespan)
     app.include_router(account_router)
     app.include_router(legacy_account_router)
+    app.include_router(legacy_config_router)
     app.include_router(health_router)
     app.include_router(catalog_router)
     app.include_router(playback_router)

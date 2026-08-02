@@ -10,6 +10,7 @@ from server.routers import (
     catalog_router,
     health_router,
     legacy_account_router,
+    legacy_config_router,
     playback_router,
 )
 
@@ -38,6 +39,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             playback_router,
             admin_router,
             legacy_account_router,
+            legacy_config_router,
         )
         for route in router.routes
     }
@@ -50,6 +52,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert endpoint_modules["/admin/v3/playback/refresh"] == "server.routers.admin"
     assert endpoint_modules["/admin/scan"] == "server.routers.admin"
     assert endpoint_modules["/login"] == "server.routers.legacy_account"
+    assert endpoint_modules["/check/api"] == "server.routers.legacy_config"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 

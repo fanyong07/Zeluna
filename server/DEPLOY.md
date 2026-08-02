@@ -41,6 +41,7 @@ SMTP_FROM_NAME=Zeluna
 SMTP_USE_TLS=true
 CORS_ORIGINS=https://你的客户端网页域名
 LEGACY_ACCOUNT_API_ENABLED=false
+LEGACY_CONFIG_API_ENABLED=false
 PUBLIC_BASE_URL=https://你的后端域名
 PRECACHE_ENABLED=true
 SOURCE_MAX_CONCURRENCY=2
@@ -62,6 +63,7 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。
 - `CORS_ORIGINS`：只填写正式 Web 客户端域名；安卓和 Windows 客户端不受此项影响。
 - `LEGACY_ACCOUNT_API_ENABLED`：正式环境保持 `false`，避免旧兼容注册接口绕过邮件验证。
+- `LEGACY_CONFIG_API_ENABLED`：正式环境保持 `false`；仅迁移旧客户端时临时启用，响应也不会下发第三方线路或代理地址。
 - `DATABASE_AUTO_CREATE`：正式环境必须为 `false`；表结构只通过 Alembic 迁移变更。
 - `SOURCE_CIRCUIT_*`：连续失败达到阈值后短暂跳过坏源，并以指数冷却自动重试；客户端候选不算硬失败。
 

@@ -1097,23 +1097,6 @@ async def _seed_data():
         print("[seed] 已插入示例数据")
 
 
-@app.get("/check/api")
-async def check_api():
-    """API 配置检查 (兼容 AniCh 客户端)"""
-    import os
-    public = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
-    return JSONResponse({
-        "baseUrl": public,
-        "bilibiliApiUrl": "https://bili-dm.emmmm.eu.org",
-        "qqVideoApiUrl": "https://dm.video.qq.com",
-        "dandanApiUrl": "https://dandan.emmmm.eu.org",
-        "updateUrl": "https://api.github.com/repos/Sle2p/AniCh/releases/latest",
-        "githubProxyUrl": "https://gh.llkk.cc",
-        "apis": [public],
-        "ghproxy": ["https://gh.llkk.cc"],
-    })
-
-
 @app.get("/vod/{id}/{episode}")
 async def vod_from_scrapers(
     id: int,
