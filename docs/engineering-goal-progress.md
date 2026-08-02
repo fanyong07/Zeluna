@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `aa261c0` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `b402219` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -779,6 +779,28 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and the whole-app method/path uniqueness regression passed. The runtime table remains 75 unique method/path pairs.
 
 Commit: `aa261c0 refactor: isolate legacy community routes`
+
+### Legacy comment router isolation
+
+Audit:
+
+- Five retained comment operations (list, publish, replies, like, and unlike) remained in `server.main` after thread extraction.
+- Comment lists/replies allow anonymous reads and optionally report the authenticated user's like state. Publishing and like mutations require the existing `_` token header, duplicate likes are idempotent, and unlike keeps the stored count at or above zero.
+
+Changes:
+
+- Added `server.routers.legacy_comments` and moved all `/comment*` operations into it with the shared session/authentication objects.
+- Consolidated repeated user/content/like-state mapping without changing ordering, pagination, fallback anonymous user shape, JSON content decoding, response fields, or mutation commits.
+- Removed comment-only model imports from `server.main`. `server.main` is now 489 lines.
+
+Tests:
+
+- Added in-memory regressions proving anonymous comment reads remain available, anonymous publishing remains 401, authenticated unlike succeeds, and a zero like count is never decremented below zero.
+- Focused comments/app suite: 8 passed, 0 failed.
+- Full server suite: 116 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and method/path uniqueness regression passed. The runtime table remains 75 unique pairs.
+
+Commit: `b402219 refactor: isolate legacy comment routes`
 
 Remaining G7 work:
 
