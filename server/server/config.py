@@ -1,5 +1,6 @@
 """Zeluna 后端配置。生产凭据只从环境变量读取。"""
 
+import ipaddress
 import os
 from pathlib import Path
 
@@ -36,6 +37,22 @@ def _env_csv(name: str) -> frozenset[str]:
         for item in value.split(",")
         if item.strip()
     )
+
+
+def _env_networks(
+    name: str,
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    value = os.getenv(name, "")
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in value.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(candidate, strict=False))
+        except ValueError as error:
+            raise RuntimeError(f"{name} contains an invalid IP network") from error
+    return tuple(networks)
 
 
 # Production never mutates the schema during ordinary application startup.
@@ -105,6 +122,10 @@ SMTP_USE_SSL = _env_bool("SMTP_USE_SSL", False)
 EMAIL_DELIVERY_ENABLED = bool(SMTP_HOST and SMTP_FROM_EMAIL)
 LEGACY_ACCOUNT_API_ENABLED = _env_bool("LEGACY_ACCOUNT_API_ENABLED", False)
 LEGACY_CONFIG_API_ENABLED = _env_bool("LEGACY_CONFIG_API_ENABLED", False)
+ACCOUNT_TRUSTED_PROXY_NETWORKS = _env_networks("ACCOUNT_TRUSTED_PROXY_CIDRS")
+ACCOUNT_RATE_LIMIT_MAX_KEYS = max(
+    100, min(100_000, int(os.getenv("ACCOUNT_RATE_LIMIT_MAX_KEYS", "10000")))
+)
 PUBLIC_BASE_URL = (
     os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 )

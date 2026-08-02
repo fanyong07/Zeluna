@@ -65,6 +65,9 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。
 - `CORS_ORIGINS`：只填写正式 Web 客户端域名；安卓和 Windows 客户端不受此项影响。
 - `LEGACY_ACCOUNT_API_ENABLED`：正式环境保持 `false`，避免旧兼容注册接口绕过邮件验证。
+- `ACCOUNT_TRUSTED_PROXY_CIDRS`：仅填写会重写 `X-Real-IP` 的直属反向代理 IP/CIDR；默认留空时完全忽略该请求头。不要填写客户端网段或公网通配网段。
+- `ACCOUNT_RATE_LIMIT_MAX_KEYS`：进程内账号限流表的硬容量，默认 `10000`；容量耗尽时对新键 fail-closed，而不是淘汰仍有效的限制。多实例部署仍必须在网关配置共享限流。
+- `run_prod.py` 显式关闭 Uvicorn 的隐式代理头处理。若改用 Uvicorn CLI，也必须带 `--no-proxy-headers`，由 Zeluna 仅按上面的直属代理配置读取 `X-Real-IP`。
 - `LEGACY_CONFIG_API_ENABLED`：正式环境保持 `false`；仅迁移旧客户端时临时启用，响应也不会下发第三方线路或代理地址。
 - `DATABASE_AUTO_CREATE`：正式环境必须为 `false`；表结构只通过 Alembic 迁移变更。
 - `SOURCE_CIRCUIT_*`：连续失败达到阈值后短暂跳过坏源，并以指数冷却自动重试；客户端候选不算硬失败。

@@ -2,8 +2,10 @@
 
 import hashlib
 import hmac
+import ipaddress
 import time
-from collections import defaultdict, deque
+from collections import deque
+from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -21,6 +23,7 @@ from .auth import (
     signing_key,
     verify_password,
 )
+from .config import ACCOUNT_RATE_LIMIT_MAX_KEYS, ACCOUNT_TRUSTED_PROXY_NETWORKS
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
@@ -80,30 +83,102 @@ class ProfileRequest(BaseModel):
         return normalized
 
 
-_attempts: dict[str, deque[float]] = defaultdict(deque)
+@dataclass
+class _AttemptBucket:
+    events: deque[float]
+    window_seconds: int
 
 
-def _client_key(request: Request) -> str:
-    # The production reverse proxy replaces X-Real-IP, preventing spoofed
-    # values from reaching the app server.
-    return request.headers.get("X-Real-IP") or (
-        request.client.host if request.client else "unknown"
+class _AttemptStore:
+    """Bound the process-local fallback limiter without evicting active keys."""
+
+    def __init__(self, max_keys: int):
+        self._max_keys = max_keys
+        self._buckets: dict[str, _AttemptBucket] = {}
+
+    def clear(self) -> None:
+        self._buckets.clear()
+
+    def __len__(self) -> int:
+        return len(self._buckets)
+
+    def _purge_expired(self, now: float) -> None:
+        expired: list[str] = []
+        for key, bucket in self._buckets.items():
+            cutoff = now - bucket.window_seconds
+            while bucket.events and bucket.events[0] <= cutoff:
+                bucket.events.popleft()
+            if not bucket.events:
+                expired.append(key)
+        for key in expired:
+            self._buckets.pop(key, None)
+
+    def check(
+        self,
+        key: str,
+        *,
+        limit: int,
+        window_seconds: int,
+        now: float | None = None,
+    ) -> None:
+        current = time.monotonic() if now is None else now
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            if len(self._buckets) >= self._max_keys:
+                self._purge_expired(current)
+            if len(self._buckets) >= self._max_keys:
+                raise _too_many_requests(window_seconds)
+            bucket = _AttemptBucket(deque(), window_seconds)
+            self._buckets[key] = bucket
+        else:
+            bucket.window_seconds = window_seconds
+
+        cutoff = current - window_seconds
+        while bucket.events and bucket.events[0] <= cutoff:
+            bucket.events.popleft()
+        if len(bucket.events) >= limit:
+            retry_after = max(1, int(window_seconds - (current - bucket.events[0])))
+            raise _too_many_requests(retry_after)
+        bucket.events.append(current)
+
+
+def _too_many_requests(retry_after: int) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="请求过于频繁，请稍后再试",
+        headers={"Retry-After": str(max(1, retry_after))},
     )
 
 
+_attempts = _AttemptStore(ACCOUNT_RATE_LIMIT_MAX_KEYS)
+
+
+def _client_key(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    try:
+        peer_address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if isinstance(peer_address, ipaddress.IPv6Address) and peer_address.ipv4_mapped:
+        peer_address = peer_address.ipv4_mapped
+
+    if any(peer_address in network for network in ACCOUNT_TRUSTED_PROXY_NETWORKS):
+        forwarded = request.headers.get("X-Real-IP", "").strip()
+        try:
+            forwarded_address = ipaddress.ip_address(forwarded)
+            if (
+                isinstance(forwarded_address, ipaddress.IPv6Address)
+                and forwarded_address.ipv4_mapped
+            ):
+                forwarded_address = forwarded_address.ipv4_mapped
+            return forwarded_address.compressed
+        except ValueError:
+            pass
+    return peer_address.compressed
+
+
 def _rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
-    now = time.monotonic()
-    events = _attempts[key]
-    while events and events[0] <= now - window_seconds:
-        events.popleft()
-    if len(events) >= limit:
-        retry_after = max(1, int(window_seconds - (now - events[0])))
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="请求过于频繁，请稍后再试",
-            headers={"Retry-After": str(retry_after)},
-        )
-    events.append(now)
+    _attempts.check(key, limit=limit, window_seconds=window_seconds)
 
 
 def _normalize_email(value: str) -> str:

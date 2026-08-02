@@ -1,10 +1,14 @@
 import asyncio
+import ipaddress
 import time
 
 import jwt
 import pytest
+import run_prod
 from fastapi import FastAPI
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -25,6 +29,86 @@ _TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
 @pytest.fixture(autouse=True)
 def secure_test_signing_key(monkeypatch):
     monkeypatch.setattr(auth, "SECRET_KEY", _TEST_SECRET)
+    account_api._attempts.clear()
+    yield
+    account_api._attempts.clear()
+
+
+def _request(client_host: str, real_ip: str | None = None) -> Request:
+    headers = []
+    if real_ip is not None:
+        headers.append((b"x-real-ip", real_ip.encode("ascii")))
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "headers": headers,
+            "client": (client_host, 12345),
+        }
+    )
+
+
+def test_client_ip_header_is_only_honored_for_an_explicit_trusted_proxy(
+    monkeypatch,
+):
+    spoofed = _request("203.0.113.10", "198.51.100.42")
+    monkeypatch.setattr(account_api, "ACCOUNT_TRUSTED_PROXY_NETWORKS", ())
+    assert account_api._client_key(spoofed) == "203.0.113.10"
+
+    monkeypatch.setattr(
+        account_api,
+        "ACCOUNT_TRUSTED_PROXY_NETWORKS",
+        (ipaddress.ip_network("127.0.0.0/8"),),
+    )
+    proxied = _request("127.0.0.1", "2001:db8::7")
+    malformed = _request("127.0.0.1", "198.51.100.1, 203.0.113.2")
+    mapped_proxy = _request("::ffff:127.0.0.1", "::ffff:198.51.100.42")
+    assert account_api._client_key(proxied) == "2001:db8::7"
+    assert account_api._client_key(malformed) == "127.0.0.1"
+    assert account_api._client_key(mapped_proxy) == "198.51.100.42"
+
+
+def test_attempt_store_is_bounded_and_only_reclaims_expired_keys():
+    attempts = account_api._AttemptStore(max_keys=2)
+    attempts.check("first", limit=2, window_seconds=10, now=0)
+    attempts.check("second", limit=2, window_seconds=10, now=0)
+
+    with pytest.raises(HTTPException) as saturated:
+        attempts.check("third", limit=2, window_seconds=10, now=1)
+    assert saturated.value.status_code == 429
+    assert len(attempts) == 2
+
+    attempts.check("third", limit=2, window_seconds=10, now=11)
+    assert len(attempts) == 1
+
+
+def test_attempt_store_returns_retry_after_without_growing():
+    attempts = account_api._AttemptStore(max_keys=2)
+    attempts.check("login", limit=1, window_seconds=10, now=5)
+
+    with pytest.raises(HTTPException) as limited:
+        attempts.check("login", limit=1, window_seconds=10, now=7)
+    assert limited.value.status_code == 429
+    assert limited.value.headers == {"Retry-After": "8"}
+    assert len(attempts) == 1
+
+
+def test_production_runner_disables_implicit_proxy_header_trust(monkeypatch):
+    for name in ("TMDB_READ_ACCESS_TOKEN", "ADMIN_TOKEN", "SECRET_KEY"):
+        monkeypatch.setenv(name, f"test-{name.lower()}-with-at-least-32-bytes")
+    monkeypatch.setenv("SMTP_HOST", "smtp.invalid")
+    monkeypatch.setenv("SMTP_FROM_EMAIL", "noreply@example.invalid")
+    captured = {}
+    monkeypatch.setattr(
+        run_prod.uvicorn,
+        "run",
+        lambda *args, **kwargs: captured.update(kwargs),
+    )
+
+    run_prod.main()
+
+    assert captured["proxy_headers"] is False
 
 
 def test_email_registration_login_session_and_logout(tmp_path, monkeypatch):

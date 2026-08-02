@@ -13,7 +13,8 @@
 import os
 import uvicorn
 
-if __name__ == "__main__":
+
+def main() -> None:
     long_secrets = {
         "TMDB_READ_ACCESS_TOKEN": os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip(),
         "ADMIN_TOKEN": os.getenv("ADMIN_TOKEN", "").strip(),
@@ -41,4 +42,9 @@ if __name__ == "__main__":
         reload=False,
         workers=1,
         log_level=os.getenv("LOG_LEVEL", "warning"),
+        proxy_headers=False,
     )
+
+
+if __name__ == "__main__":
+    main()
