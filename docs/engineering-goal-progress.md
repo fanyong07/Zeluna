@@ -891,10 +891,33 @@ Tests:
 
 Commit: `17ae385 refactor: define server provider contracts`
 
+### Playback provider activation governance
+
+Audit:
+
+- A static, value-preserving scan found 69 URL literals across 19 server Python files. The highest concentrations remain in legacy MacCMS, common-VOD, HTML-site, and TVBox adapters. No URL was requested or probed during this audit.
+- Before this slice the global aggregator constructed and actively selected every bundled playback adapter, and the generic M3U8 search fallback was reachable by default. Fixed server-side adapter configuration therefore implied outbound runtime authority without an explicit operator allowlist.
+
+Changes:
+
+- Added `PLAYBACK_PROVIDER_IDS` as a normalized, deduplicated server environment allowlist. The real global aggregator passes the configured set explicitly and defaults to an empty set; unknown IDs fail startup instead of being ignored.
+- Added `M3U8_SEARCH_ENABLED`, defaulting to false. Search, parallel/progressive discovery, detail lookup, episode resolution, home feeds, source inventory/placeholders, and generic resolver fallback all enforce their respective activation gates.
+- Provider metadata now reports the safe enabled/disabled state. Disabled adapters remain inspectable and closable but receive no search/detail/resolve/latest call. Test/custom aggregator injection retains an explicit all-enabled default so contract tests do not depend on process environment.
+- Updated `.env.example` with fail-closed empty provider selection and disabled resolver search. No production environment was changed; later deployment/release acceptance must deliberately approve and configure the provider IDs required for that environment.
+
+Tests:
+
+- Added regressions for allowlist normalization, unknown-ID rejection, metadata enabled state, and a zero-authority aggregator. All aggregate/crawler search, detail, resolve, latest, progressive, and resolver methods were instrumented to fail if called; every disabled path remained uncalled.
+- Focused provider/aggregator/v3-services suite: 50 passed, 3 subtests passed, 0 failed.
+- Full server suite: 128 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, repository security gate, and route uniqueness checks passed. The runtime route table remains 75 flattened routes and 79 unique method/path pairs, with 0 duplicates.
+- Static post-change runtime evidence: 0 globally enabled providers, 0 source-inventory entries, resolver search false, and 0 audit network calls.
+
+Commit: `1b995a9 feat: govern playback provider activation`
+
 Remaining G7 work:
 
 - Continue separating aggregation/playback service and repository orchestration into independently testable boundaries.
-- Audit fixed provider domains/configuration and move runtime source selection behind explicit server-side governance without calling any production provider during the audit.
 
 ## G8 Account and session security
 
