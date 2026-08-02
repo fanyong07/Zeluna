@@ -53,6 +53,7 @@ class ProviderMetadata:
     display_name: str
     content_types: tuple[str, ...]
     capabilities: tuple[str, ...]
+    enabled: bool
 
     def as_public_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +62,7 @@ class ProviderMetadata:
             "display_name": self.display_name,
             "content_types": list(self.content_types),
             "capabilities": list(self.capabilities),
+            "enabled": self.enabled,
         }
 
 
@@ -84,6 +86,7 @@ class ProviderRegistry:
         display_name: str,
         adapter: MediaProvider,
         capabilities: tuple[str, ...] = ("search", "detail", "resolve", "latest"),
+        enabled: bool = True,
     ) -> RegisteredProvider:
         provider_id = provider_id.strip().lower()
         family = family.strip().lower()
@@ -133,6 +136,7 @@ class ProviderRegistry:
                 display_name=display_name,
                 content_types=content_types,
                 capabilities=normalized_capabilities,
+                enabled=enabled,
             ),
             adapter=adapter,
         )

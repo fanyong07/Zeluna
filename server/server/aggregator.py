@@ -34,7 +34,11 @@ from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
 from .scrapers.base import SubjectResult
-from .config import SOURCE_MAX_CONCURRENCY
+from .config import (
+    M3U8_SEARCH_ENABLED,
+    PLAYBACK_PROVIDER_IDS,
+    SOURCE_MAX_CONCURRENCY,
+)
 from .stable_identity import stable_digest
 
 logger = logging.getLogger(__name__)
@@ -402,6 +406,8 @@ class ContentAggregator:
         *,
         line_http_transport: httpx.AsyncBaseTransport | None = None,
         crawler_scrapers: dict[str, MediaProvider] | None = None,
+        enabled_provider_ids: frozenset[str] | None = None,
+        resolver_search_enabled: bool = True,
     ):
         self._maccms = MacCmsScraper()
         self._tvbox = TvBoxAdapterScraper()
@@ -420,6 +426,27 @@ class ContentAggregator:
             if crawler_scrapers is None
             else dict(crawler_scrapers)
         )
+        available_provider_ids = {
+            "aggregate.maccms",
+            "aggregate.tvbox",
+            "aggregate.vod",
+            *(f"crawler.{name}" for name in self._crawler_scrapers),
+        }
+        requested_provider_ids = (
+            available_provider_ids
+            if enabled_provider_ids is None
+            else {
+                item.strip().lower()
+                for item in enabled_provider_ids
+                if item.strip()
+            }
+        )
+        unknown_provider_ids = requested_provider_ids - available_provider_ids
+        if unknown_provider_ids:
+            unknown = ", ".join(sorted(unknown_provider_ids))
+            raise ValueError(f"Unknown playback provider ids: {unknown}")
+        self._enabled_provider_ids = frozenset(requested_provider_ids)
+        self._resolver_search_enabled = resolver_search_enabled
         self._line_http_transport = line_http_transport
         self._providers = ProviderRegistry()
         self._providers.register(
@@ -427,18 +454,21 @@ class ContentAggregator:
             family="aggregate",
             display_name="MacCMS",
             adapter=self._maccms,
+            enabled=self._provider_enabled("aggregate.maccms"),
         )
         self._providers.register(
             provider_id="aggregate.tvbox",
             family="aggregate",
             display_name="TVBox",
             adapter=self._tvbox,
+            enabled=self._provider_enabled("aggregate.tvbox"),
         )
         self._providers.register(
             provider_id="aggregate.vod",
             family="aggregate",
             display_name="VOD compatibility",
             adapter=self._vod,
+            enabled=self._provider_enabled("aggregate.vod"),
         )
         for provider_id, adapter in self._crawler_scrapers.items():
             self._providers.register(
@@ -446,15 +476,30 @@ class ContentAggregator:
                 family="crawler",
                 display_name=provider_id,
                 adapter=adapter,
+                enabled=self._provider_enabled(f"crawler.{provider_id}"),
             )
+
+    def _provider_enabled(self, provider_id: str) -> bool:
+        return provider_id in self._enabled_provider_ids
+
+    @property
+    def _active_crawler_scrapers(self) -> dict[str, MediaProvider]:
+        return {
+            name: scraper
+            for name, scraper in self._crawler_scrapers.items()
+            if self._provider_enabled(f"crawler.{name}")
+        }
 
     @property
     def source_inventory(self) -> tuple[tuple[str, str], ...]:
         """Return independently queried sources as ``(provider, name)`` pairs."""
-        return (
-            *(("maccms", site["name"]) for site in MACCMS_SITES),
-            *(("crawler", name) for name in self._crawler_scrapers),
+        inventory: list[tuple[str, str]] = []
+        if self._provider_enabled("aggregate.maccms"):
+            inventory.extend(("maccms", site["name"]) for site in MACCMS_SITES)
+        inventory.extend(
+            ("crawler", name) for name in self._active_crawler_scrapers
         )
+        return tuple(inventory)
 
     @property
     def configured_source_names(self) -> frozenset[str]:
@@ -569,6 +614,8 @@ class ContentAggregator:
         content_type: str,
         year: int,
     ) -> list[SourceMatch]:
+        if not self._provider_enabled("aggregate.maccms"):
+            return []
         expected_type = "series" if content_type == "tv" else content_type
         if expected_type and expected_type not in self._maccms.content_types:
             return []
@@ -607,18 +654,19 @@ class ContentAggregator:
         if not clean_aliases:
             return []
 
-        providers: list[tuple[str, MediaProvider, float]] = [
-            ("maccms", self._maccms, 8),
-            ("tvbox", self._tvbox, 2),
-            *(
-                (
-                    name,
-                    scraper,
-                    5 if name in DIRECT_SOURCE_PRIORITIES else 2,
-                )
-                for name, scraper in self._crawler_scrapers.items()
-            ),
-        ]
+        providers: list[tuple[str, MediaProvider, float]] = []
+        if self._provider_enabled("aggregate.maccms"):
+            providers.append(("maccms", self._maccms, 8))
+        if self._provider_enabled("aggregate.tvbox"):
+            providers.append(("tvbox", self._tvbox, 2))
+        providers.extend(
+            (
+                name,
+                scraper,
+                5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+            )
+            for name, scraper in self._active_crawler_scrapers.items()
+        )
         jobs = [
             asyncio.wait_for(
                 self._discover_scraper_matches(
@@ -674,29 +722,31 @@ class ContentAggregator:
         if not clean_aliases:
             return
 
-        providers: list[tuple[str, MediaProvider, float]] = [
-            ("tvbox", self._tvbox, 2),
-            *(
-                (
-                    name,
-                    scraper,
-                    5 if name in DIRECT_SOURCE_PRIORITIES else 2,
-                )
-                for name, scraper in self._crawler_scrapers.items()
-            ),
-        ]
-        tasks = [
-            asyncio.create_task(
-                asyncio.wait_for(
-                    self._discover_first_maccms_matches(
-                        clean_aliases,
-                        content_type=content_type,
-                        year=year,
-                    ),
-                    timeout=8,
+        providers: list[tuple[str, MediaProvider, float]] = []
+        if self._provider_enabled("aggregate.tvbox"):
+            providers.append(("tvbox", self._tvbox, 2))
+        providers.extend(
+            (
+                name,
+                scraper,
+                5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+            )
+            for name, scraper in self._active_crawler_scrapers.items()
+        )
+        tasks = []
+        if self._provider_enabled("aggregate.maccms"):
+            tasks.append(
+                asyncio.create_task(
+                    asyncio.wait_for(
+                        self._discover_first_maccms_matches(
+                            clean_aliases,
+                            content_type=content_type,
+                            year=year,
+                        ),
+                        timeout=8,
+                    )
                 )
             )
-        ]
         tasks.extend(
             asyncio.create_task(
                 asyncio.wait_for(
@@ -1023,11 +1073,12 @@ class ContentAggregator:
                 orig_ids=[r.source_id for r in selected])
             except Exception as e:
                 logger.warning(f"MacCMS search failed: {e}")
-        tasks.append(search_maccms())
+        if self._provider_enabled("aggregate.maccms"):
+            tasks.append(search_maccms())
 
         # 1. 独立动漫站适配器：每个站点直接搜索，不经过其它聚合服务。
         if "anime" in content_types:
-            for provider, scraper in self._crawler_scrapers.items():
+            for provider, scraper in self._active_crawler_scrapers.items():
                 async def search_crawler(
                     provider_name: str = provider,
                     provider_scraper: MediaProvider = scraper,
@@ -1050,7 +1101,10 @@ class ContentAggregator:
                 tasks.append(search_crawler())
 
         # 2. TVBox (国产剧+电影+动漫)
-        if any(ct in content_types for ct in ["tv", "movie", "anime"]):
+        if (
+            self._provider_enabled("aggregate.tvbox")
+            and any(ct in content_types for ct in ["tv", "movie", "anime"])
+        ):
             async def search_tvbox():
                 try:
                     results = await self._tvbox.search(keyword)
@@ -1066,7 +1120,10 @@ class ContentAggregator:
             tasks.append(search_tvbox())
 
         # 3. TVMaze + TMDB (美剧/英剧/电影)
-        if any(ct in content_types for ct in ["tv", "movie"]):
+        if (
+            self._provider_enabled("aggregate.vod")
+            and any(ct in content_types for ct in ["tv", "movie"])
+        ):
             async def search_intl():
                 try:
                     results = await self._vod.search(keyword)
@@ -1129,7 +1186,7 @@ class ContentAggregator:
         # 否则直接解析 source:original_id 格式
         source, sid = subject_id.split(":", 1) if ":" in subject_id else ("unknown", subject_id)
 
-        if source == "maccms":
+        if source == "maccms" and self._provider_enabled("aggregate.maccms"):
             # subject_id 形如 maccms:站名:vod_id
             detail = await self._maccms.get_detail(subject_id)
             if detail:
@@ -1139,7 +1196,7 @@ class ContentAggregator:
                 ]
             return []
 
-        if source == "tvbox":
+        if source == "tvbox" and self._provider_enabled("aggregate.tvbox"):
             # sid 可能是 display hash, 也可能是 tvbox:源名:vod_id 格式
             # 尝试直接作为 source_id 使用
             lookup_id = subject_id
@@ -1153,7 +1210,7 @@ class ContentAggregator:
                     for ep in detail.episodes
                 ]
 
-        elif source == "intl":
+        elif source == "intl" and self._provider_enabled("aggregate.vod"):
             if not subject_id.startswith("intl:"):
                 return []
             detail = await self._vod.get_detail(subject_id.replace("intl:", "", 1))
@@ -1167,7 +1224,7 @@ class ContentAggregator:
             parts = subject_id.split(":", 2)
             if len(parts) != 3:
                 return []
-            scraper = self._crawler_scrapers.get(parts[1])
+            scraper = self._active_crawler_scrapers.get(parts[1])
             if scraper is None:
                 return []
             detail = await scraper.get_detail(parts[2])
@@ -1192,7 +1249,10 @@ class ContentAggregator:
         """
         all_lines: list[AggregatedVideoLine] = []
 
-        if subject_id.startswith("maccms:"):
+        if (
+            subject_id.startswith("maccms:")
+            and self._provider_enabled("aggregate.maccms")
+        ):
             lines = await self._maccms.get_video_urls(subject_id, episode)
             for l in lines:
                 all_lines.append(AggregatedVideoLine(
@@ -1200,7 +1260,10 @@ class ContentAggregator:
                     format=l.format, source=l.source_name,
                 ))
 
-        elif subject_id.startswith("tvbox:"):
+        elif (
+            subject_id.startswith("tvbox:")
+            and self._provider_enabled("aggregate.tvbox")
+        ):
             lines = await self._tvbox.get_video_urls(subject_id, episode)
             for l in lines:
                 all_lines.append(AggregatedVideoLine(
@@ -1208,7 +1271,10 @@ class ContentAggregator:
                     format=l.format, source=f"tvbox:{l.source_name}",
                 ))
 
-        elif subject_id.startswith("intl:"):
+        elif (
+            subject_id.startswith("intl:")
+            and self._provider_enabled("aggregate.vod")
+        ):
             real_id = subject_id.replace("intl:", "", 1)
             lines = await self._vod.get_video_urls(real_id, episode)
             for l in lines:
@@ -1220,7 +1286,7 @@ class ContentAggregator:
         elif subject_id.startswith("crawler:"):
             parts = subject_id.split(":", 2)
             if len(parts) == 3:
-                scraper = self._crawler_scrapers.get(parts[1])
+                scraper = self._active_crawler_scrapers.get(parts[1])
                 if scraper is not None:
                     lines = await scraper.get_video_urls(parts[2], episode)
                     for line in lines:
@@ -1234,7 +1300,11 @@ class ContentAggregator:
                         ))
 
         # M3U8 fallback for under-served results
-        if len(all_lines) < 3 and title_hint:
+        if (
+            self._resolver_search_enabled
+            and len(all_lines) < 3
+            and title_hint
+        ):
             try:
                 extra_urls = await m3u8_resolver.search_and_resolve(title_hint)
                 for u in extra_urls[:10]:
@@ -1521,7 +1591,7 @@ class ContentAggregator:
         }
 
         # 独立动漫站分别取最新列表，再统一归一化；不依赖外部聚合服务。
-        providers = list(self._crawler_scrapers.items())
+        providers = list(self._active_crawler_scrapers.items())
         latest_groups = await asyncio.gather(
             *(scraper.get_latest(page=1) for _, scraper in providers),
             return_exceptions=True,
@@ -1545,24 +1615,28 @@ class ContentAggregator:
                 })
 
         # 从 TVBox 获取最新
-        try:
-            latest = await self._tvbox.get_latest(page=1)
-            for item in latest[:20]:
-                entry = {
-                    "id": item.source_id,
-                    "title": item.title,
-                    "cover_url": item.cover_url,
-                    "type": item.type,
-                }
-                if item.type == "movie":
-                    result["movies_trending"].append(entry)
-                else:
-                    result["series_trending"].append(entry)
-        except Exception:
-            pass
+        if self._provider_enabled("aggregate.tvbox"):
+            try:
+                latest = await self._tvbox.get_latest(page=1)
+                for item in latest[:20]:
+                    entry = {
+                        "id": item.source_id,
+                        "title": item.title,
+                        "cover_url": item.cover_url,
+                        "type": item.type,
+                    }
+                    if item.type == "movie":
+                        result["movies_trending"].append(entry)
+                    else:
+                        result["series_trending"].append(entry)
+            except Exception:
+                pass
 
         return result
 
 
 # 全局聚合器实例
-aggregator = ContentAggregator()
+aggregator = ContentAggregator(
+    enabled_provider_ids=PLAYBACK_PROVIDER_IDS,
+    resolver_search_enabled=M3U8_SEARCH_ENABLED,
+)

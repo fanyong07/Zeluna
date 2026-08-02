@@ -29,12 +29,19 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_csv(name: str) -> frozenset[str]:
+    value = os.getenv(name, "")
+    return frozenset(
+        item.strip().lower()
+        for item in value.split(",")
+        if item.strip()
+    )
+
+
 # Production never mutates the schema during ordinary application startup.
 # Local throwaway environments may opt in explicitly.
 DATABASE_AUTO_CREATE = _env_bool("DATABASE_AUTO_CREATE", False)
-SQLITE_BUSY_TIMEOUT_MS = max(
-    1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000"))
-)
+SQLITE_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "10000")))
 SQLITE_CONNECT_TIMEOUT_SECONDS = max(
     1.0, float(os.getenv("SQLITE_CONNECT_TIMEOUT_SECONDS", "30"))
 )
@@ -57,9 +64,7 @@ PLAYBACK_CACHE_HOURS = max(1, int(os.getenv("PLAYBACK_CACHE_HOURS", "6")))
 PLAYBACK_PARTIAL_CACHE_MINUTES = max(
     1, int(os.getenv("PLAYBACK_PARTIAL_CACHE_MINUTES", "10"))
 )
-PLAYBACK_STABLE_LINE_COUNT = max(
-    1, int(os.getenv("PLAYBACK_STABLE_LINE_COUNT", "4"))
-)
+PLAYBACK_STABLE_LINE_COUNT = max(1, int(os.getenv("PLAYBACK_STABLE_LINE_COUNT", "4")))
 PLAYBACK_NEGATIVE_CACHE_MINUTES = max(
     1, int(os.getenv("PLAYBACK_NEGATIVE_CACHE_MINUTES", "5"))
 )
@@ -72,6 +77,8 @@ PLAYBACK_QUICK_LINE_COUNT = max(
 )
 SOURCE_BINDING_HOURS = max(1, int(os.getenv("SOURCE_BINDING_HOURS", "24")))
 SOURCE_MAX_CONCURRENCY = max(1, min(4, int(os.getenv("SOURCE_MAX_CONCURRENCY", "2"))))
+PLAYBACK_PROVIDER_IDS = _env_csv("PLAYBACK_PROVIDER_IDS")
+M3U8_SEARCH_ENABLED = _env_bool("M3U8_SEARCH_ENABLED", False)
 SOURCE_CIRCUIT_FAILURE_THRESHOLD = max(
     2, min(20, int(os.getenv("SOURCE_CIRCUIT_FAILURE_THRESHOLD", "5")))
 )

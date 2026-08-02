@@ -267,7 +267,15 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             "media_type": "anime",
             "date": "2023-09-29",
         }
+        enabled_provider_ids = frozenset(
+            item.provider_id for item in aggregator.provider_metadata
+        )
         with (
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                enabled_provider_ids,
+            ),
             patch(
                 "server.playback.catalog_service.get_subject",
                 new=AsyncMock(return_value=metadata),
@@ -281,6 +289,8 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=(lines, {"iKun": True, "魔都": False})),
             ) as resolve,
         ):
+            expected_inventory = aggregator.source_inventory
+            expected_source_names = aggregator.configured_source_names
             async with self.sessions() as session:
                 first = await self.service.lines("bangumi:123", 1, session)
             async with self.sessions() as session:
@@ -288,10 +298,10 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first[0]["cached"])
         self.assertTrue(second[0]["cached"])
-        self.assertEqual(len(first), len(aggregator.source_inventory))
+        self.assertEqual(len(first), len(expected_inventory))
         self.assertEqual(
             {item["source"].split(":", 1)[1] for item in first},
-            aggregator.configured_source_names,
+            expected_source_names,
         )
         self.assertIn("crawler:dm706", {item["source"] for item in first})
         self.assertEqual(sum(item["available"] for item in first), 1)

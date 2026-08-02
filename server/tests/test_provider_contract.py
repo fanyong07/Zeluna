@@ -1,7 +1,10 @@
 import json
+import os
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from server.aggregator import ContentAggregator
+from server.config import _env_csv
 from server.providers import ProviderRegistry
 from server.scrapers.base import SubjectDetail, SubjectResult, VideoLine
 
@@ -49,7 +52,14 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         public = registration.metadata.as_public_dict()
         self.assertEqual(
             set(public),
-            {"id", "family", "display_name", "content_types", "capabilities"},
+            {
+                "id",
+                "family",
+                "display_name",
+                "content_types",
+                "capabilities",
+                "enabled",
+            },
         )
         serialized = json.dumps(public).casefold()
         for marker in ("http://", "https://", "header", "cookie", "token"):
@@ -97,6 +107,7 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 len(metadata), len({item.provider_id for item in metadata})
             )
+            self.assertTrue(all(item.enabled for item in metadata))
             serialized = json.dumps(
                 [item.as_public_dict() for item in metadata]
             ).casefold()
@@ -104,6 +115,104 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(marker, serialized)
         finally:
             await aggregator.aclose()
+
+    async def test_empty_allowlist_prevents_every_provider_operation(self):
+        provider = _ContractProvider()
+        aggregator = ContentAggregator(
+            crawler_scrapers={"blocked": provider},
+            enabled_provider_ids=frozenset(),
+            resolver_search_enabled=False,
+        )
+        try:
+            forbidden_calls = []
+            for adapter in (aggregator._maccms, aggregator._tvbox, aggregator._vod):
+                for method_name in (
+                    "search",
+                    "get_detail",
+                    "get_video_urls",
+                    "get_latest",
+                ):
+                    method = AsyncMock(
+                        side_effect=AssertionError(
+                            f"disabled provider method called: {method_name}"
+                        )
+                    )
+                    setattr(adapter, method_name, method)
+                    forbidden_calls.append(method)
+            progressive = MagicMock(
+                side_effect=AssertionError("disabled progressive search called")
+            )
+            aggregator._maccms.search_progressively = progressive
+            provider.search = AsyncMock(
+                side_effect=AssertionError("disabled provider searched")
+            )
+            provider.get_detail = AsyncMock(
+                side_effect=AssertionError("disabled provider detailed")
+            )
+            provider.get_video_urls = AsyncMock(
+                side_effect=AssertionError("disabled provider resolved")
+            )
+            provider.get_latest = AsyncMock(
+                side_effect=AssertionError("disabled provider listed")
+            )
+
+            self.assertEqual(aggregator.source_inventory, ())
+            self.assertFalse(any(item.enabled for item in aggregator.provider_metadata))
+            self.assertEqual(await aggregator.search("example", ["anime"]), [])
+            self.assertEqual(
+                await aggregator.discover_source_matches(["example"]),
+                [],
+            )
+            self.assertEqual(await aggregator.get_episodes("crawler:blocked:1"), [])
+            resolver = AsyncMock(
+                side_effect=AssertionError("disabled resolver search called")
+            )
+            with patch(
+                "server.aggregator.m3u8_resolver.search_and_resolve",
+                new=resolver,
+            ):
+                self.assertEqual(
+                    await aggregator.get_video_urls(
+                        "crawler:blocked:1",
+                        title_hint="example",
+                    ),
+                    [],
+                )
+            self.assertEqual(
+                await aggregator.get_home_feed(),
+                {
+                    "anime_trending": [],
+                    "series_trending": [],
+                    "movies_trending": [],
+                },
+            )
+            for method in forbidden_calls:
+                method.assert_not_awaited()
+            progressive.assert_not_called()
+            resolver.assert_not_awaited()
+        finally:
+            await aggregator.aclose()
+
+    async def test_unknown_allowlist_id_is_rejected_before_runtime_use(self):
+        with self.assertRaises(ValueError):
+            ContentAggregator(
+                crawler_scrapers={},
+                enabled_provider_ids=frozenset({"crawler.unknown"}),
+            )
+
+    def test_provider_allowlist_parser_normalizes_and_deduplicates(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PLAYBACK_PROVIDER_IDS": (
+                    " crawler.Example,aggregate.TVBOX,crawler.example "
+                )
+            },
+        ):
+            self.assertEqual(
+                _env_csv("PLAYBACK_PROVIDER_IDS"),
+                frozenset({"crawler.example", "aggregate.tvbox"}),
+            )
 
 
 if __name__ == "__main__":
