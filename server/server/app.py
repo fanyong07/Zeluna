@@ -15,6 +15,7 @@ from .routers import (
     health_router,
     legacy_account_router,
     legacy_config_router,
+    legacy_media_router,
     playback_router,
 )
 
@@ -26,6 +27,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(account_router)
     app.include_router(legacy_account_router)
     app.include_router(legacy_config_router)
+    app.include_router(legacy_media_router)
     app.include_router(compat_v2_router)
     app.include_router(health_router)
     app.include_router(catalog_router)

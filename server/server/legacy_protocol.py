@@ -2,7 +2,7 @@
 
 from fastapi.responses import Response
 
-from .database import User
+from .database import Bangumi, User
 
 
 def protobuf_bytes(data: bytes) -> Response:
@@ -23,6 +23,24 @@ def user_to_dict(user: User) -> dict:
         "address": user.address,
         "created_at": user.created_at,
         "updated_at": user.updated_at,
+    }
+
+
+def bangumi_to_dict(bangumi: Bangumi) -> dict:
+    return {
+        "id": bangumi.id,
+        "title": bangumi.title,
+        "summary": bangumi.summary,
+        "cover_url": bangumi.cover_url,
+        "banner_url": bangumi.banner_url,
+        "type": bangumi.type,
+        "lang": bangumi.lang,
+        "year": bangumi.year,
+        "status": bangumi.status,
+        "tags": bangumi.tags,
+        "genres": bangumi.genres,
+        "rating": bangumi.rating,
+        "episode_count": len(bangumi.episodes) if bangumi.episodes else 0,
     }
 
 

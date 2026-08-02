@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -12,6 +13,7 @@ from server.routers import (
     health_router,
     legacy_account_router,
     legacy_config_router,
+    legacy_media_router,
     playback_router,
 )
 
@@ -42,6 +44,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             admin_router,
             legacy_account_router,
             legacy_config_router,
+            legacy_media_router,
         )
         for route in router.routes
     }
@@ -58,8 +61,25 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert (
         endpoint_modules["/api/v2/vod/{subject_id:path}"] == "server.routers.compat_v2"
     )
+    assert endpoint_modules["/vod/{id}/{episode}"] == "server.routers.legacy_media"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
+
+
+def test_route_table_has_no_duplicate_method_path_pairs():
+    flattened = []
+    for route in main.app.routes:
+        included = getattr(route, "original_router", None)
+        flattened.extend(included.routes if included is not None else [route])
+
+    keys = [
+        (route.path, tuple(sorted(route.methods)))
+        for route in flattened
+        if hasattr(route, "path") and getattr(route, "methods", None)
+    ]
+    duplicates = [key for key, count in Counter(keys).items() if count > 1]
+
+    assert duplicates == []
 
 
 def test_modern_admin_route_is_inaccessible_without_configuration():

@@ -29,13 +29,13 @@ from .database import (
 from .auth import get_current_user
 from . import protobuf_encoder as pb
 from .scheduler import scheduler
-from .scrapers import registry as scraper_registry
 from .aggregator import aggregator
 from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service
 from .playback import playback_service
 from .app import create_app
 from .dependencies import get_session
+from .legacy_protocol import bangumi_to_dict as _bangumi_to_dict
 from .legacy_protocol import protobuf_bytes as _pb_bytes
 
 @asynccontextmanager
@@ -54,178 +54,6 @@ async def lifespan(_app):
 
 
 app = create_app(lifespan=lifespan)
-
-
-# ────────────────────────────────────────────────────────────
-# 番剧
-# ────────────────────────────────────────────────────────────
-
-@app.get("/bangumi/list")
-async def bangumi_list(
-    skip: int = Query(0),
-    type: str = Query(None),
-    lang: str = Query(None),
-    year: int = Query(None),
-    genre: str = Query(None),
-    mark: str = Query(None),
-    session: AsyncSession = Depends(get_session),
-):
-    """番剧列表 — protobuf 响应."""
-    stmt = select(Bangumi).options(selectinload(Bangumi.episodes)).limit(40).offset(skip)
-    if type:
-        stmt = stmt.where(Bangumi.type == type)
-    if lang:
-        stmt = stmt.where(Bangumi.lang == lang)
-    if year:
-        stmt = stmt.where(Bangumi.year == year)
-
-    result = await session.execute(stmt)
-    bangumi_list = result.scalars().all()
-
-    items = [_bangumi_to_dict(b) for b in bangumi_list]
-    return _pb_bytes(pb.encode_bangumi_list(items))
-
-
-@app.get("/bangumi/tag")
-async def bangumi_tags(
-    type: str = Query("genre"),
-    skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """番剧标签 — JSON 响应."""
-    result = await session.execute(select(Bangumi).limit(100))
-    all_bangumi = result.scalars().all()
-
-    genre_counts: dict[str, int] = {}
-    for b in all_bangumi:
-        try:
-            genres = json.loads(b.genres or "[]")
-        except (json.JSONDecodeError, TypeError):
-            genres = []
-        for g in genres:
-            genre_counts[g] = genre_counts.get(g, 0) + 1
-
-    tags = [
-        {"id": i + 1, "name": name, "count": count}
-        for i, (name, count) in enumerate(sorted(genre_counts.items()))
-    ]
-    return JSONResponse(tags)
-
-
-@app.get("/bangumi/latest")
-async def bangumi_latest(session: AsyncSession = Depends(get_session)):
-    """最新番剧 — protobuf 响应."""
-    stmt = select(Bangumi).options(selectinload(Bangumi.episodes)).order_by(Bangumi.updated_at.desc()).limit(20)
-    result = await session.execute(stmt)
-    items = [_bangumi_to_dict(b) for b in result.scalars().all()]
-    return _pb_bytes(pb.encode_bangumi_list(items))
-
-
-@app.get("/bangumi/detail/{id}")
-async def bangumi_detail(id: int, session: AsyncSession = Depends(get_session)):
-    """番剧详情 — JSON 响应."""
-    result = await session.execute(select(Bangumi).where(Bangumi.id == id))
-    bangumi = result.scalar_one_or_none()
-    if not bangumi:
-        raise HTTPException(404, "番剧不存在")
-
-    episodes_result = await session.execute(
-        select(BangumiEpisode).where(BangumiEpisode.bangumi_id == id).order_by(BangumiEpisode.number)
-    )
-    episodes = episodes_result.scalars().all()
-
-    tags = json.loads(bangumi.tags or "[]") if bangumi.tags else []
-    genres = json.loads(bangumi.genres or "[]") if bangumi.genres else []
-
-    return JSONResponse({
-        "id": bangumi.id,
-        "title": bangumi.title,
-        "summary": bangumi.summary,
-        "cover_url": bangumi.cover_url,
-        "banner_url": bangumi.banner_url,
-        "type": bangumi.type,
-        "lang": bangumi.lang,
-        "year": bangumi.year,
-        "status": bangumi.status,
-        "tags": tags,
-        "genres": genres,
-        "rating": bangumi.rating,
-        "rating_count": bangumi.rating_count,
-        "episode_count": len(episodes),
-        "episodes": [
-            {
-                "id": ep.id,
-                "number": ep.number,
-                "title": ep.title,
-                "duration": ep.duration,
-            }
-            for ep in episodes
-        ],
-        "created_at": bangumi.created_at,
-        "updated_at": bangumi.updated_at,
-    })
-
-
-@app.get("/bangumi/episodes/{id}")
-async def bangumi_episodes(id: int, session: AsyncSession = Depends(get_session)):
-    """剧集列表 — protobuf 响应."""
-    result = await session.execute(
-        select(BangumiEpisode).where(BangumiEpisode.bangumi_id == id).order_by(BangumiEpisode.number)
-    )
-    episodes = result.scalars().all()
-
-    items = []
-    for ep in episodes:
-        vod_data = []
-        try:
-            vod_data = json.loads(ep.vod_url or "[]")
-        except (json.JSONDecodeError, TypeError):
-            vod_data = [{"url": ep.vod_url, "type": "auto", "caption": f"EP{ep.number}"}]
-        items.extend(vod_data)
-
-    return _pb_bytes(pb.encode_episodes_list(items))
-
-
-@app.get("/bangumi/related/{id}")
-async def bangumi_related(id: int, session: AsyncSession = Depends(get_session)):
-    """相关推荐 — protobuf 响应."""
-    bangumi = (await session.execute(select(Bangumi).where(Bangumi.id == id))).scalar_one_or_none()
-    if not bangumi:
-        return _pb_bytes(pb.encode_related_list([]))
-
-    result = await session.execute(
-        select(Bangumi).options(selectinload(Bangumi.episodes)).where(Bangumi.id != id).limit(10)
-    )
-    items = [_bangumi_to_dict(b) for b in result.scalars().all()]
-    return _pb_bytes(pb.encode_related_list(items))
-
-
-@app.get("/vod/{id}/{episode}")
-async def vod_detail(id: int, episode: int, session: AsyncSession = Depends(get_session)):
-    """视频详情 — JSON 响应."""
-    result = await session.execute(
-        select(BangumiEpisode).where(
-            BangumiEpisode.bangumi_id == id,
-            BangumiEpisode.number == episode,
-        )
-    )
-    ep = result.scalar_one_or_none()
-    if not ep:
-        raise HTTPException(404, "剧集不存在")
-
-    vod_data = []
-    try:
-        vod_data = json.loads(ep.vod_url or "[]")
-    except (json.JSONDecodeError, TypeError):
-        vod_data = [{"url": ep.vod_url, "type": "auto", "caption": f"EP{ep.number}"}]
-
-    return JSONResponse({
-        "id": ep.id,
-        "bangumi_id": ep.bangumi_id,
-        "number": ep.number,
-        "title": ep.title,
-        "vod": vod_data,
-    })
 
 
 # ────────────────────────────────────────────────────────────
@@ -955,24 +783,6 @@ async def cancel_like_comment(
 # 辅助函数
 # ────────────────────────────────────────────────────────────
 
-def _bangumi_to_dict(b: Bangumi) -> dict:
-    return {
-        "id": b.id,
-        "title": b.title,
-        "summary": b.summary,
-        "cover_url": b.cover_url,
-        "banner_url": b.banner_url,
-        "type": b.type,
-        "lang": b.lang,
-        "year": b.year,
-        "status": b.status,
-        "tags": b.tags,
-        "genres": b.genres,
-        "rating": b.rating,
-        "episode_count": len(b.episodes) if b.episodes else 0,
-    }
-
-
 async def _seed_data():
     """初始化一些示例数据."""
     async with async_session() as session:
@@ -1091,67 +901,3 @@ async def _seed_data():
 
         await session.commit()
         print("[seed] 已插入示例数据")
-
-
-@app.get("/vod/{id}/{episode}")
-async def vod_from_scrapers(
-    id: int,
-    episode: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """从爬虫获取视频源 (覆盖原 VOD 端点)"""
-    # 先从数据库获取番剧信息
-    result = await session.execute(
-        select(Bangumi).where(Bangumi.id == id)
-    )
-    bangumi = result.scalar_one_or_none()
-    if not bangumi:
-        raise HTTPException(404, "番剧不存在")
-
-    # 从爬虫获取视频源
-    source_id = bangumi.bangumi_id
-    if not source_id:
-        # 没有外部 ID, 返回数据库中的 vod_url
-        result = await session.execute(
-            select(BangumiEpisode).where(
-                BangumiEpisode.bangumi_id == id,
-                BangumiEpisode.number == episode,
-            )
-        )
-        ep = result.scalar_one_or_none()
-        vod_data = []
-        if ep and ep.vod_url:
-            try:
-                vod_data = json.loads(ep.vod_url)
-            except (json.JSONDecodeError, TypeError):
-                vod_data = [{"url": ep.vod_url, "type": "auto", "caption": f"EP{ep.number}"}]
-
-        return JSONResponse({
-            "id": ep.id if ep else 0,
-            "bangumi_id": id,
-            "number": episode,
-            "title": ep.title if ep else "",
-            "vod": vod_data,
-        })
-
-    # 从爬虫获取
-    lines = await scraper_registry.get_video_sources_all(
-        source_id, episode,
-    )
-
-    vod_data = [
-        {
-            "url": line.url,
-            "type": line.format or "auto",
-            "caption": line.title or f"线路{i+1}",
-        }
-        for i, line in enumerate(lines)
-    ]
-
-    return JSONResponse({
-        "id": 0,
-        "bangumi_id": id,
-        "number": episode,
-        "title": "",
-        "vod": vod_data,
-    })
