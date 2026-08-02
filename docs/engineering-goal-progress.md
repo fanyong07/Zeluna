@@ -915,9 +915,31 @@ Tests:
 
 Commit: `1b995a9 feat: govern playback provider activation`
 
+### Catalog repository isolation
+
+Audit:
+
+- `CatalogService` mixed metadata-provider orchestration with SQLAlchemy queries, JSON cache decoding, row upserts, and transaction commits for `CatalogSubject`.
+- Search, home, and detail cache behavior already had stable freshness/completeness rules; the boundary needed to preserve those rules and one-row-per-stable-ID updates without changing provider calls or public responses.
+
+Changes:
+
+- Added a `CatalogRepository` protocol, immutable cache/write records, and `SqlCatalogRepository` under `server.repositories`.
+- Moved cached search/home/detail queries, malformed-cache filtering, stable-row upsert, and commit ownership into the SQL repository. `CatalogService` now creates one repository per request scope and retains only cache-policy, stable-identity normalization, provider orchestration, and result mapping.
+- Repository injection allows catalog service tests to prove cache-first behavior without a SQL implementation or provider network request. No schema, migration, TTL, ranking, provider endpoint, or response contract changed.
+
+Tests:
+
+- Added in-memory repository regressions for insert/update idempotency, search/home/detail round trips, malformed metadata filtering, and service-level repository injection with a network handler that fails if called.
+- Focused catalog repository/v3-services suite: 25 passed, 0 failed.
+- Full server suite: 131 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, and the repository security gate passed. Direct select/execute/scalar/add/commit operations in `server.catalog` are now zero.
+
+Commit: `5c4bb8d refactor: isolate catalog persistence`
+
 Remaining G7 work:
 
-- Continue separating aggregation/playback service and repository orchestration into independently testable boundaries.
+- Isolate playback cache, binding, and source-health persistence behind a repository contract while preserving all ranking, TTL, single-flight, and circuit-breaker behavior.
 
 ## G8 Account and session security
 
