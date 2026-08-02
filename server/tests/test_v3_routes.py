@@ -72,3 +72,31 @@ def test_modern_admin_route_accepts_only_configured_token():
     assert response.status_code == 200
     assert response.json() == {"refreshed": 2}
     refresh.assert_awaited_once_with(limit=2)
+
+
+def test_retained_admin_scan_uses_the_same_fail_closed_router():
+    scan = AsyncMock()
+    app = create_app()
+
+    with (
+        patch.object(dependencies, "ADMIN_TOKEN", "test-admin-token"),
+        patch("server.routers.admin.scheduler.scan_new_content", new=scan),
+    ):
+        client = TestClient(app)
+        rejected = client.post(
+            "/admin/scan",
+            headers={"X-Zeluna-Admin": "wrong-token"},
+        )
+        response = client.post(
+            "/admin/scan",
+            params={"content_types": "anime,movie"},
+            headers={"X-Zeluna-Admin": "test-admin-token"},
+        )
+
+    assert rejected.status_code == 404
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Scan triggered",
+        "types": ["anime", "movie"],
+    }
+    scan.assert_awaited_once_with(["anime", "movie"])

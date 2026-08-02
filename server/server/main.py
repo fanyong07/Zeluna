@@ -35,13 +35,12 @@ from .auth import (
 from . import protobuf_encoder as pb
 from .scheduler import scheduler
 from .scrapers import registry as scraper_registry
-from .metadata_sync import sync_all_pending, sync_service
 from .aggregator import aggregator
 from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service
 from .playback import playback_service
 from .app import create_app
-from .dependencies import get_session, require_admin, require_legacy_account_api
+from .dependencies import get_session, require_legacy_account_api
 
 logger = logging.getLogger(__name__)
 
@@ -1330,90 +1329,6 @@ async def _seed_data():
 
         await session.commit()
         print("[seed] 已插入示例数据")
-
-
-# ────────────────────────────────────────────────────────────
-# 爬虫管理端点
-# ────────────────────────────────────────────────────────────
-
-@app.get("/admin/scrapers", dependencies=[Depends(require_admin)])
-async def list_scrapers():
-    """列出所有爬虫"""
-    scrapers = []
-    for s in scraper_registry.all_scrapers:
-        scrapers.append({
-            "name": s.name,
-            "content_types": s.content_types,
-            "base_url": s.base_url,
-        })
-    return JSONResponse(scrapers)
-
-
-@app.get("/admin/scrapers/search", dependencies=[Depends(require_admin)])
-async def scraper_search(
-    keyword: str = Query(""),
-    content_type: str = Query(None),
-):
-    """通过爬虫搜索内容"""
-    types = [content_type] if content_type else None
-    results = await scraper_registry.search_all(keyword, types)
-    return JSONResponse([
-        {
-            "scraper": name,
-            "count": len(items),
-            "items": [
-                {
-                    "source_id": item.source_id,
-                    "title": item.title,
-                    "cover_url": item.cover_url,
-                    "type": item.type,
-                    "lang": item.lang,
-                    "year": item.year,
-                    "episode_count": item.episode_count,
-                }
-                for item in items[:10]
-            ],
-        }
-        for name, items in results
-    ])
-
-
-@app.post("/admin/scan", dependencies=[Depends(require_admin)])
-async def trigger_scan(
-    content_types: str = Query(None),
-):
-    """手动触发内容扫描"""
-    types = content_types.split(",") if content_types else None
-    await scheduler.scan_new_content(types)
-    return JSONResponse({"message": "Scan triggered", "types": types})
-
-
-@app.post("/admin/sync/metadata", dependencies=[Depends(require_admin)])
-async def trigger_metadata_sync(
-    content_types: str = Query(None),
-):
-    """手动触发元数据同步"""
-    types = content_types.split(",") if content_types else None
-    await sync_all_pending(types)
-    return JSONResponse({"message": "Metadata sync triggered", "types": types})
-
-
-@app.get("/admin/stats", dependencies=[Depends(require_admin)])
-async def scheduler_stats():
-    """调度器统计信息"""
-    return JSONResponse({
-        "scheduler": scheduler.stats,
-        "scrapers": {
-            name: {
-                "subjects_found": s.subjects_found,
-                "subjects_new": s.subjects_new,
-                "duration_seconds": s.duration_seconds,
-                "errors": s.errors,
-                "finished_at": s.finished_at.isoformat() if s.finished_at else None,
-            }
-            for name, s in scraper_registry.stats.items()
-        },
-    })
 
 
 @app.get("/check/api")

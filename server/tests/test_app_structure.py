@@ -41,6 +41,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
         == "server.routers.playback"
     )
     assert endpoint_modules["/admin/v3/playback/refresh"] == "server.routers.admin"
+    assert endpoint_modules["/admin/scan"] == "server.routers.admin"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 
