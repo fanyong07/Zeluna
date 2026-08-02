@@ -27,6 +27,7 @@ import '../sources/source_catalog_repository.dart';
 import '../sources/source_controller.dart';
 import '../sources/source_rule_bridge.dart';
 import '../settings/settings_controller.dart';
+import '../sync/sync_controller.dart';
 import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
 import 'chinese_metadata_repository.dart';
@@ -381,6 +382,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   LibraryController? _libraryController;
   CatalogController? _catalogController;
   PlaybackDiscoveryController? _playbackDiscoveryController;
+  SyncController? _syncController;
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -423,6 +425,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (controller == null) {
       throw StateError('播放发现尚未准备好');
     }
+    return controller;
+  }
+
+  SyncController get _syncDomain {
+    final controller = _syncController;
+    if (controller == null) throw StateError('同步控制器尚未准备好');
     return controller;
   }
 
@@ -482,6 +490,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
+    final services = settingsSnapshot.services;
+    final syncRepository = ref.read(externalServiceRepositoryProvider);
+    _syncController = SyncController(
+      uploadHistory: syncRepository.syncLocalHistory,
+      isContextCurrent: _accounts.isContextCurrent,
+    );
+    _syncDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+      services: services,
+    );
     final profileJson = _settings.get(_accountSettingsKey('profile'));
     _sourceController = SourceController(
       storage: HiveSourceStorage(_settings),
@@ -508,19 +527,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       storage: HiveLibraryStorage(_library),
       publishSnapshot: _publishLibrarySnapshot,
       syncHistory: (context, subject, episode) async {
-        if (!_accounts.isContextCurrent(context.contextVersion)) return;
-        final current = state.value;
-        if (current == null) return;
-        await ref
-            .read(externalServiceRepositoryProvider)
-            .syncLocalHistory(subject, episode, current.services);
+        await _syncDomain.syncHistory(
+          accountId: context.accountId,
+          contextVersion: context.contextVersion,
+          subject: subject,
+          episode: episode,
+        );
       },
     );
     final librarySnapshot = await _libraryDomain.loadForAccount(
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
-    final services = settingsSnapshot.services;
     final playbackResolver = ref.read(rulePlaybackResolverProvider);
     _playbackDiscoveryController = PlaybackDiscoveryController(
       backendRepository: _backendPlaybackRepositoryFor,
@@ -611,6 +629,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _libraryController?.dispose();
       _catalogController?.dispose();
       _playbackDiscoveryController?.dispose();
+      _syncController?.dispose();
     });
     return initialState;
   }
@@ -1100,6 +1119,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final profileJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'profile'),
     );
+    _syncDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+      services: settingsSnapshot.services,
+    );
     final sourceSnapshot = await _sourceDomain.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,
@@ -1259,6 +1283,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> _handleExternalServicesChanged(
     ExternalServicesChange change,
   ) async {
+    _syncDomain.applyServices(
+      change.current,
+      contextVersion: change.contextVersion,
+    );
     if (change.playbackBackendChanged) {
       _playbackDiscoveryDomain.applyServices(
         change.current,
@@ -1276,6 +1304,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _settingsController?.settleWrites();
     await _sourceController?.settleWrites();
     await _libraryController?.settleWrites();
+    await _syncController?.settle();
     await _catalogController?.settleWrites();
     await _downloadController?.quiesce();
   }
