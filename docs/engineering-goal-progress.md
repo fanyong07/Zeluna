@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `3832d90` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `79010fe` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1050,6 +1050,33 @@ Remaining risks:
 - Verification-code consumption still needs email/purpose failure limiting that cannot be bypassed by rotating source addresses.
 - Login timing resistance, legacy password-hash upgrade, and the full session expiry/revocation audit remain open G8 work.
 - No production proxy, environment, account, database, secret, email delivery, or deployment was changed.
+
+### Persistent verification-code failure budgets
+
+Audit:
+
+- Code-request endpoints limited sends by IP and email, but registration/password-reset consumption had no email-scoped failure budget. An attacker rotating client addresses could repeatedly guess a six-digit code during its ten-minute validity window.
+- The verification row did not persist its purpose or failure count, so a secure budget could not survive process restarts or be enforced consistently across server instances sharing the database.
+
+Changes:
+
+- Verification rows now persist their `purpose` and `failed_attempts`. Consumption selects the newest live row for the email/purpose pair, compares the HMAC digest in constant time, atomically increments failures, and locks the code after five wrong guesses until its expiry.
+- The budget is independent of source address, so rotating clients do not reset it. A locked code remains unusable even if the next guess is correct; explicitly requesting a fresh code replaces the old row and starts a new budget.
+- Added reversible Alembic revision `0004_verification_code_attempts`. Existing rows are preserved byte-for-byte and marked `legacy` with zero failures rather than being guessed into a modern purpose. No migration was run against a production or user database.
+
+Tests:
+
+- Focused account and migration suite: 23 passed, 0 failed. Direct regressions cover rotating-client failures, fifth-attempt lockout, locked-correct rejection, fresh-code recovery, successful consumption cleanup, legacy-row preservation, schema-head verification, and migration downgrade paths.
+- Full server suite: 146 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and migration autogeneration consistency passed.
+
+Commit: `79010fe security: limit verification code guesses`
+
+Remaining risks:
+
+- Login still needs timing-resistant handling for nonexistent users and safe upgrade of legacy password hashes.
+- Session expiry cleanup, maximum-session concurrency, and password change/reset revocation semantics still require an explicit G8 audit.
+- No production migration, account, database, secret, email delivery, environment, or deployment was changed.
 
 ## G9 Privacy lifecycle
 
