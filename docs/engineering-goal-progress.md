@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `7cf3e1b` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `760a371` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -689,6 +689,29 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths with all six legacy account paths and no duplicates.
 
 Commit: `7cf3e1b refactor: isolate legacy account router`
+
+### Legacy configuration endpoint closure
+
+Audit:
+
+- `/check/api` was a public historical client-configuration endpoint in `server.main`. It returned `PUBLIC_BASE_URL` together with hard-coded third-party danmaku, update, and proxy addresses copied from the retained compatibility shape.
+- The current Flutter catalog/playback/account clients use the Zeluna v3 and `/api/v1/auth/*` contracts and do not call `/check/api`. Only the production launcher comment referenced it.
+- Keeping the fixed values public conflicted with the four-material safety boundary: historical AniCh evidence must not become a fixed real route catalog or third-party configuration source.
+
+Changes:
+
+- Added a default-false `LEGACY_CONFIG_API_ENABLED` setting and fail-closed dependency, documented in `.env.example` and `server/DEPLOY.md`.
+- Moved `/check/api` into `server.routers.legacy_config`. It returns 404 unless explicitly enabled; enabled compatibility responses keep the old keys but contain only the configured Zeluna `PUBLIC_BASE_URL`, with every third-party API/update/proxy field empty and proxy lists empty.
+- Removed the hard-coded external addresses from `server.main` and updated the production launcher documentation. This slice did not contact any listed service, add a sampled route, or change production configuration. `server.main` is now 1,312 lines.
+
+Tests:
+
+- Added regressions for default 404 behavior, explicit compatibility enablement, the sanitized response shape, and router ownership.
+- Focused config/app/admin/playback suite: 14 passed, 0 failed.
+- Full server suite: 107 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths, exactly one `/check/api`, and no duplicates.
+
+Commit: `760a371 security: close legacy config endpoint`
 
 Remaining G7 work:
 
