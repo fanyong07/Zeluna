@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `4c23810` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `1a985f7` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1196,6 +1196,32 @@ Remaining risks:
 - Cleanup is currently activity-driven. A bounded scheduled retention job with observable last-run/count state remains required so an idle service does not retain expired artifacts indefinitely.
 - Privacy export remains unimplemented.
 - Permanent cloud-account erasure is not authorized by the existing local-cleanup UI and requires an explicit deletion/anonymization decision for public authored content before implementation. No real user data was changed.
+
+### Scheduled authentication retention
+
+Audit:
+
+- Activity-driven cleanup could leave expired authentication artifacts indefinitely on an otherwise idle service. Retention also had no operator-visible last-run time or aggregate deletion counts.
+
+Changes:
+
+- The server scheduler now owns a delayed privacy-retention loop. It runs after a bounded configurable interval (default 24 hours, minimum 1, maximum 168), reuses the fail-narrow expired-artifact predicate, commits atomically, and is cancelled through the existing scheduler shutdown lifecycle.
+- Scheduler stats expose only the last successful cleanup timestamp and aggregate verification-code/session counts. No email, account ID, token, code, IP address, or row content enters stats or logs.
+- Failures log only the exception class and retry after one hour; they do not terminate other scheduler work or spin without a bound.
+
+Tests:
+
+- Focused privacy/scheduler/app lifecycle suite: 11 passed, 0 failed. Direct regressions cover aggregate-only stats, absence of identifiers, task registration, and cancellation.
+- Full server suite: 156 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `1a985f7 privacy: schedule auth retention cleanup`
+
+Remaining risks:
+
+- Privacy export remains the next non-destructive G9 slice.
+- Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before an irreversible flow is implemented or exercised.
+- No production scheduler, cleanup, account, database, environment, or deployment was changed.
 
 ## G10 Cloud sync
 
