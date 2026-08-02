@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import select
@@ -52,12 +53,11 @@ from .config import (
     SOURCE_MAX_CONCURRENCY,
 )
 from .database import (
-    PlaybackCache,
     SourceBinding,
     SourceHealth,
     async_session,
-    upsert_playback_cache,
 )
+from .repositories.playback import PlaybackRepository, SqlPlaybackRepository
 
 
 logger = logging.getLogger(__name__)
@@ -87,8 +87,16 @@ _SOURCE_ERROR_PENALTIES = {
 
 
 class PlaybackService:
-    def __init__(self, *, session_factory=async_session):
+    def __init__(
+        self,
+        *,
+        session_factory=async_session,
+        repository_factory: Callable[[AsyncSession], PlaybackRepository] = (
+            SqlPlaybackRepository
+        ),
+    ):
         self._session_factory = session_factory
+        self._repository_factory = repository_factory
         self._closing = False
         self._refresh_semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
         # Foreground first-route discovery must never wait behind long-running
@@ -390,12 +398,7 @@ class PlaybackService:
         stable_id: str,
         episode: int,
     ) -> tuple[str, list[dict]]:
-        row = await session.scalar(
-            select(PlaybackCache).where(
-                PlaybackCache.subject_id == stable_id,
-                PlaybackCache.episode == episode,
-            )
-        )
+        row = await self._repository_factory(session).get_cache(stable_id, episode)
         if row is None:
             return "miss", []
         if row.line_count <= 0:
@@ -1111,8 +1114,7 @@ class PlaybackService:
         title: str,
         lines: list[dict],
     ) -> None:
-        await upsert_playback_cache(
-            session,
+        await self._repository_factory(session).upsert_cache(
             subject_id=stable_id,
             episode=episode,
             title=title,
@@ -1357,13 +1359,7 @@ class PlaybackService:
         refreshed = 0
         playable = 0
         async with self._session_factory() as session:
-            rows = (
-                await session.scalars(
-                    select(PlaybackCache)
-                    .order_by(PlaybackCache.verified_at.asc())
-                    .limit(max(1, limit))
-                )
-            ).all()
+            rows = await self._repository_factory(session).oldest_cache(limit=limit)
         for row in rows:
             async with self._session_factory() as session:
                 result = await self.lines(
