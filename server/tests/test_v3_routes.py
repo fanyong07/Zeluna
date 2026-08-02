@@ -57,12 +57,18 @@ def test_modern_admin_route_accepts_only_configured_token():
         patch.object(dependencies, "ADMIN_TOKEN", "test-admin-token"),
         patch("server.routers.admin.playback_service.refresh_due", new=refresh),
     ):
-        response = TestClient(app).post(
+        client = TestClient(app)
+        rejected = client.post(
+            "/admin/v3/playback/refresh",
+            headers={"X-Zeluna-Admin": "wrong-token"},
+        )
+        response = client.post(
             "/admin/v3/playback/refresh",
             params={"limit": 2},
             headers={"X-Zeluna-Admin": "test-admin-token"},
         )
 
+    assert rejected.status_code == 404
     assert response.status_code == 200
     assert response.json() == {"refreshed": 2}
     refresh.assert_awaited_once_with(limit=2)
