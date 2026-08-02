@@ -983,6 +983,7 @@ Commit: `e51c8c8 refactor: isolate playback health persistence`
 
 ### G7 completion verification
 
+- Updated `server/DEPLOY.md` to document the empty provider allowlist, disabled resolver/precache defaults, and the G13/G14 deployment authority boundary. Removed stale 2026-07-28 production/source assertions that were not revalidated in this Goal.
 - `flutter analyze --suppress-analytics`: 0 issues.
 - Full Flutter suite: 579 passed, 26 skipped legacy/platform-conditional cases, 0 failed.
 - Full server suite: 135 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.

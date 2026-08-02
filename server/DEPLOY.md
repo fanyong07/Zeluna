@@ -43,8 +43,10 @@ CORS_ORIGINS=https://你的客户端网页域名
 LEGACY_ACCOUNT_API_ENABLED=false
 LEGACY_CONFIG_API_ENABLED=false
 PUBLIC_BASE_URL=https://你的后端域名
-PRECACHE_ENABLED=true
+PRECACHE_ENABLED=false
 SOURCE_MAX_CONCURRENCY=2
+PLAYBACK_PROVIDER_IDS=
+M3U8_SEARCH_ENABLED=false
 SOURCE_CIRCUIT_FAILURE_THRESHOLD=5
 SOURCE_CIRCUIT_BASE_COOLDOWN_SECONDS=300
 SOURCE_CIRCUIT_MAX_COOLDOWN_SECONDS=3600
@@ -66,6 +68,9 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `LEGACY_CONFIG_API_ENABLED`：正式环境保持 `false`；仅迁移旧客户端时临时启用，响应也不会下发第三方线路或代理地址。
 - `DATABASE_AUTO_CREATE`：正式环境必须为 `false`；表结构只通过 Alembic 迁移变更。
 - `SOURCE_CIRCUIT_*`：连续失败达到阈值后短暂跳过坏源，并以指数冷却自动重试；客户端候选不算硬失败。
+- `PLAYBACK_PROVIDER_IDS`：逗号分隔的服务端 provider ID allowlist。默认留空，留空时搜索、详情、播放解析、首页清单和预热都不会调用任何播放 provider；只启用已经完成合规和网络验证的 ID。
+- `M3U8_SEARCH_ENABLED`：通用 M3U8 搜索回退，正式环境默认 `false`。只有完成独立安全评审并明确批准时才可启用。
+- `PRECACHE_ENABLED`：只有 `PLAYBACK_PROVIDER_IDS` 已显式配置且预热流量已获批准时才可设为 `true`。
 
 ## 数据库升级（启动服务前执行）
 
@@ -149,11 +154,8 @@ curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&tit
 - App 中不存在播放规则、外部源目录或规则导入入口。
 - 后端不可用时 App 明确显示无线路，不回退本地爬虫。
 
-## 部署与验证状态（2026-07-28）
+## 当前工程 Goal 的部署边界
 
-- 正式地址为 `https://api.zeluna.top`，`zeluna.service` 已部署并由 systemd 管理。
-- 当前生产清单包含 18 个逐站接入的 MacCMS 影视源，以及 AGE、706、GiriGiri、西瓜卡通、叽哔、樱花动漫、wedm 7 个独立动漫适配器。
-- 泥视频（影视/动漫）和 PPnix（影视）两个无广告优先适配器已于 2026-07-28 正式上线；它们不调用 AniCh、其镜像或外部通用聚合解析器。
-- 番剧、电视剧和电影都已从正式 HTTPS 地址完成 HLS 清单、AES 密钥（如有）与首媒体分片验证；缓存命中时直接返回。
-- 云端账号 API 已启用，旧兼容账号接口已关闭。SMTP 未完整配置时，验证码接口会明确返回 `503`，不会在日志或响应中泄露验证码，也不会绕过邮箱验证创建账号。
-- 每次替换生产代码前都应保留数据库、上传目录及可恢复的旧版本，部署后重新检查服务状态、三类播放、缓存和资源占用。
+- 本工程 Goal 没有读取生产环境变量、访问生产数据库、探测生产 provider、重启服务或部署代码，因此不声明任何历史地址、源清单或账号服务仍处于已验证上线状态。
+- 新版本默认 `PLAYBACK_PROVIDER_IDS=`、`M3U8_SEARCH_ENABLED=false`、`PRECACHE_ENABLED=false`。未显式配置时，目录元数据可按其独立配置工作，但播放 provider 不会产生出站请求。
+- 正式部署前必须备份数据库、上传目录和可恢复旧版本，显式审核 provider allowlist，并重新检查服务状态、账号安全、三类播放、缓存、资源占用和回滚路径；这些属于 G13/G14 且需要单独授权。
