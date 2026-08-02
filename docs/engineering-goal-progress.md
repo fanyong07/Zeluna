@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `8e334d8` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `f5e70f5` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -450,6 +450,39 @@ Remaining risks:
 
 - A transport that ignores pause may continue beyond the bounded account-quiesce wait, but run/file identities and scope guards prevent it from controlling or publishing into the new account. Native transport cancellation latency remains covered by G11 reliability and G14 platform acceptance.
 - No playback ranking, source inventory, network policy, production environment, signing material, or real user data changed in this slice.
+
+### LibraryController
+
+Audit:
+
+- Favorites, following, history, playback position, image favorites, and local feedback still read, published, and wrote account-scoped Hive keys directly through `AnimeController`.
+- Individual calls captured an account before their write, but the domain had no shared mutation queue and account activation did not await outstanding library writes. Concurrent toggles could compute from the same snapshot, while a slow write or history side effect could complete across an account transition.
+- Cloud product sync is not yet implemented. The existing public-collection history side effect must remain an explicit compatibility port rather than becoming hidden persistence inside the local library owner.
+
+Changes:
+
+- Added an independent `LibraryController` owning immutable favorites/history/following/image-favorite/feedback snapshots, deterministic limits and progress rules, account/context scope, serialized mutations, defensive restore, and local persistence.
+- Account activation now waits for library mutations, loads the complete new-account snapshot before publishing it, and rejects queued old-scope mutations instead of allowing them to read or publish against the new account.
+- History synchronization receives an explicit captured account/context value. The future Sync domain can replace this port without taking ownership of local Hive data or syncing downloads, credentials, headers, tokens, or temporary media URLs.
+- `AnimeController` retains the existing library-facing API as compatibility delegates and fell from 2,788 to 2,675 lines.
+
+Tests:
+
+- Added four direct regressions covering concurrent mutation ordering, account isolation, captured-scope in-flight writes, playback-position persistence/near-complete reset, explicit history-sync context, and non-destructive malformed-row restore.
+- Existing account migration/isolation, cross-source stable-identity deduplication, history UI, and account-context navigation regressions passed.
+- Full `flutter test --reporter compact`: 563 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `f5e70f5 refactor: split library controller`
+
+Remaining domains, in required order: Catalog, PlaybackDiscovery, Sync.
+
+Remaining risks:
+
+- The existing optional public-collection history side effect remains a compatibility integration. General cloud mutation queues, idempotency, tombstones, and two-device conflict handling remain G6 Sync/G10 work and are not claimed complete here.
+- No cloud schema, account credential, production service, playback behavior, source inventory, or signing configuration changed in this slice.
 
 ## G7 Server architecture
 
