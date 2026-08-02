@@ -28,7 +28,11 @@ from .auth import (
     verify_login_password,
     verify_password,
 )
-from .config import ACCOUNT_RATE_LIMIT_MAX_KEYS, ACCOUNT_TRUSTED_PROXY_NETWORKS
+from .config import (
+    ACCOUNT_DELETION_GRACE_SECONDS,
+    ACCOUNT_RATE_LIMIT_MAX_KEYS,
+    ACCOUNT_TRUSTED_PROXY_NETWORKS,
+)
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
@@ -216,6 +220,26 @@ def _user_payload(user: User) -> dict:
     }
 
 
+def _deletion_pending_error(user: User) -> HTTPException:
+    finalizing = user.deletion_due_at <= time.time()
+    return HTTPException(
+        status_code=status.HTTP_410_GONE if finalizing else status.HTTP_423_LOCKED,
+        detail={
+            "code": (
+                "account_deletion_finalizing"
+                if finalizing
+                else "account_deletion_pending"
+            ),
+            "message": (
+                "删除冷静期已经结束，正在完成账号删除"
+                if finalizing
+                else "账号处于删除冷静期，可在截止前撤销"
+            ),
+            "deletion_due_at": user.deletion_due_at,
+        },
+    )
+
+
 async def _issue_token(session: AsyncSession, user: User) -> str:
     try:
         token = await issue_session_token(session, user.id)
@@ -260,6 +284,10 @@ async def _current_account(
         await session.delete(user_token)
         await session.commit()
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+    if user.deletion_due_at > 0:
+        await session.delete(user_token)
+        await session.commit()
+        raise _deletion_pending_error(user)
     return user, user_token
 
 
@@ -385,6 +413,8 @@ async def login(
     )
     if user is None or not password_valid:
         raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    if user.deletion_due_at > 0:
+        raise _deletion_pending_error(user)
     if password_hash_needs_upgrade(user.password_hash):
         user.password_hash = hash_password(payload.password)
     user.updated_at = time.time()
@@ -420,6 +450,64 @@ async def export_account_data(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+@router.post("/privacy/deletion", status_code=202)
+async def request_account_deletion(
+    payload: VerifyPasswordRequest,
+    request: Request,
+    account: tuple[User, UserToken] = Depends(_current_account),
+    session: AsyncSession = Depends(get_session),
+):
+    user = account[0]
+    _rate_limit(f"delete:ip:{_client_key(request)}", limit=5, window_seconds=86400)
+    _rate_limit(f"delete:user:{user.id}", limit=3, window_seconds=86400)
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=400, detail="密码不正确，账号没有进入删除流程")
+    requested_at = time.time()
+    due_at = requested_at + ACCOUNT_DELETION_GRACE_SECONDS
+    user.deletion_requested_at = requested_at
+    user.deletion_due_at = due_at
+    user.updated_at = requested_at
+    await session.execute(delete(UserToken).where(UserToken.user_id == user.id))
+    await session.commit()
+    return JSONResponse(
+        {
+            "status": "pending",
+            "deletion_requested_at": requested_at,
+            "deletion_due_at": due_at,
+        },
+        status_code=202,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/privacy/deletion/cancel", status_code=204)
+async def cancel_account_deletion(
+    payload: LoginRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    email = _normalize_email(str(payload.email))
+    _rate_limit(
+        f"cancel-delete:ip:{_client_key(request)}", limit=10, window_seconds=3600
+    )
+    _rate_limit(f"cancel-delete:email:{email}", limit=5, window_seconds=3600)
+    user = await session.scalar(select(User).where(User.email == email))
+    password_valid = verify_login_password(
+        payload.password,
+        user.password_hash if user is not None else None,
+    )
+    if user is None or not password_valid:
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    if user.deletion_due_at > 0 and user.deletion_due_at <= time.time():
+        raise HTTPException(status_code=410, detail="删除冷静期已经结束，无法撤销")
+    if password_hash_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(payload.password)
+    user.deletion_requested_at = 0
+    user.deletion_due_at = 0
+    user.updated_at = time.time()
+    await session.commit()
 
 
 @router.patch("/profile")

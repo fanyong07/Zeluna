@@ -65,6 +65,10 @@ SQLITE_CONNECT_TIMEOUT_SECONDS = max(
 PRIVACY_CLEANUP_INTERVAL_HOURS = max(
     1, min(168, int(os.getenv("PRIVACY_CLEANUP_INTERVAL_HOURS", "24")))
 )
+ACCOUNT_DELETION_GRACE_SECONDS = 7 * 24 * 3600
+ACCOUNT_DELETION_BATCH_SIZE = max(
+    1, min(1000, int(os.getenv("ACCOUNT_DELETION_BATCH_SIZE", "100")))
+)
 
 
 # Public source quality varies by network location. Keep speculative background

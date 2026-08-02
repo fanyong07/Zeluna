@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import time
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import (
@@ -28,6 +28,13 @@ class AuthArtifactCleanup:
     sessions: int
 
 
+@dataclass(frozen=True)
+class PrivacyCleanup:
+    verification_codes: int
+    sessions: int
+    finalized_accounts: int
+
+
 async def purge_expired_auth_artifacts(
     session: AsyncSession,
     *,
@@ -49,6 +56,128 @@ async def purge_expired_auth_artifacts(
         verification_codes=max(0, codes.rowcount or 0),
         sessions=max(0, sessions.rowcount or 0),
     )
+
+
+async def run_privacy_cleanup(
+    session: AsyncSession,
+    *,
+    now: float | None = None,
+    account_limit: int = 100,
+) -> PrivacyCleanup:
+    """Purge expired auth rows and finalize a bounded due-account batch."""
+
+    auth = await purge_expired_auth_artifacts(session, now=now)
+    finalized = await finalize_due_account_deletions(
+        session,
+        now=now,
+        limit=account_limit,
+    )
+    return PrivacyCleanup(
+        verification_codes=auth.verification_codes,
+        sessions=auth.sessions,
+        finalized_accounts=finalized,
+    )
+
+
+async def finalize_due_account_deletions(
+    session: AsyncSession,
+    *,
+    now: float | None = None,
+    limit: int = 100,
+) -> int:
+    """Anonymize public content and erase private data after the grace period."""
+
+    cutoff = time.time() if now is None else now
+    bounded_limit = max(1, min(1000, limit))
+    users = list(
+        await session.scalars(
+            select(User)
+            .where(
+                User.deletion_due_at > 0,
+                User.deletion_due_at <= cutoff,
+            )
+            .order_by(User.deletion_due_at.asc(), User.id.asc())
+            .limit(bounded_limit)
+            .with_for_update(skip_locked=True)
+        )
+    )
+    for user in users:
+        await _finalize_account_deletion(session, user)
+    return len(users)
+
+
+async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
+    thread_collection_targets = set(
+        await session.scalars(
+            select(ThreadCollection.thread_id).where(
+                ThreadCollection.user_id == user.id
+            )
+        )
+    )
+    thread_like_targets = set(
+        await session.scalars(
+            select(ThreadLike.thread_id).where(ThreadLike.user_id == user.id)
+        )
+    )
+    comment_like_targets = set(
+        await session.scalars(
+            select(CommentLike.comment_id).where(CommentLike.user_id == user.id)
+        )
+    )
+
+    await session.execute(
+        delete(ThreadCollection).where(ThreadCollection.user_id == user.id)
+    )
+    await session.execute(delete(ThreadLike).where(ThreadLike.user_id == user.id))
+    await session.execute(delete(CommentLike).where(CommentLike.user_id == user.id))
+    await session.execute(
+        delete(BangumiCollection).where(BangumiCollection.user_id == user.id)
+    )
+    await session.execute(delete(PlayHistory).where(PlayHistory.user_id == user.id))
+    await session.execute(delete(UserToken).where(UserToken.user_id == user.id))
+    await session.execute(delete(VerifyCode).where(VerifyCode.email == user.email))
+
+    for thread_id in thread_collection_targets:
+        count = (
+            select(func.count(ThreadCollection.id))
+            .where(ThreadCollection.thread_id == thread_id)
+            .scalar_subquery()
+        )
+        await session.execute(
+            update(Thread).where(Thread.id == thread_id).values(collect_count=count)
+        )
+    for thread_id in thread_like_targets:
+        count = (
+            select(func.count(ThreadLike.id))
+            .where(ThreadLike.thread_id == thread_id)
+            .scalar_subquery()
+        )
+        await session.execute(
+            update(Thread).where(Thread.id == thread_id).values(like_count=count)
+        )
+    for comment_id in comment_like_targets:
+        count = (
+            select(func.count(CommentLike.id))
+            .where(CommentLike.comment_id == comment_id)
+            .scalar_subquery()
+        )
+        await session.execute(
+            update(Comment).where(Comment.id == comment_id).values(like_count=count)
+        )
+
+    await session.execute(
+        update(Danmaku).where(Danmaku.user_id == user.id).values(user_id=None)
+    )
+    await session.execute(
+        update(Thread).where(Thread.user_id == user.id).values(user_id=None)
+    )
+    await session.execute(
+        update(Comment).where(Comment.user_id == user.id).values(user_id=None)
+    )
+    await session.execute(
+        update(Comment).where(Comment.reply_to == user.name).values(reply_to="匿名")
+    )
+    await session.execute(delete(User).where(User.id == user.id))
 
 
 async def build_account_data_export(

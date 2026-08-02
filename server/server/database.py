@@ -80,6 +80,12 @@ class User(Base):
     address: Mapped[str] = mapped_column(String(500), default="")
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
     updated_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+    deletion_requested_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    deletion_due_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
 
     tokens: Mapped[list["UserToken"]] = relationship("UserToken", back_populates="user", cascade="all, delete-orphan")
     danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="user", cascade="all, delete-orphan")

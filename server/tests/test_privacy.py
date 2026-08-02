@@ -124,6 +124,7 @@ def test_scheduled_cleanup_exposes_counts_without_identifiers(tmp_path):
     assert stats["privacy_cleanup"] == {
         "verification_codes": 1,
         "sessions": 0,
+        "finalized_accounts": 0,
     }
     assert stats["last_privacy_cleanup"] is not None
     assert "private-address" not in repr(stats)

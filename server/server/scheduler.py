@@ -24,8 +24,9 @@ from .database import async_session
 from .aggregator import aggregator
 from .catalog import catalog_service
 from .playback import playback_service
-from .privacy import AuthArtifactCleanup, purge_expired_auth_artifacts
+from .privacy import PrivacyCleanup, run_privacy_cleanup
 from .config import (
+    ACCOUNT_DELETION_BATCH_SIZE,
     PRECACHE_ENABLED,
     PRECACHE_INTERVAL_HOURS,
     PRECACHE_MAX_SUBJECTS,
@@ -229,14 +230,18 @@ class ContentScheduler:
             except Exception as e:
                 logger.error(f"Health loop error: {e}")
 
-    async def cleanup_privacy_artifacts(self) -> AuthArtifactCleanup:
+    async def cleanup_privacy_artifacts(self) -> PrivacyCleanup:
         async with self._privacy_session_factory() as session:
-            cleanup = await purge_expired_auth_artifacts(session)
+            cleanup = await run_privacy_cleanup(
+                session,
+                account_limit=ACCOUNT_DELETION_BATCH_SIZE,
+            )
             await session.commit()
         self._stats["last_privacy_cleanup"] = datetime.now().isoformat()
         self._stats["privacy_cleanup"] = {
             "verification_codes": cleanup.verification_codes,
             "sessions": cleanup.sessions,
+            "finalized_accounts": cleanup.finalized_accounts,
         }
         return cleanup
 
