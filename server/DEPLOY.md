@@ -71,6 +71,7 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `run_prod.py` 显式关闭 Uvicorn 的隐式代理头处理。若改用 Uvicorn CLI，也必须带 `--no-proxy-headers`，由 Zeluna 仅按上面的直属代理配置读取 `X-Real-IP`。
 - `LEGACY_CONFIG_API_ENABLED`：正式环境保持 `false`；仅迁移旧客户端时临时启用，响应也不会下发第三方线路或代理地址。
 - `DATABASE_AUTO_CREATE`：正式环境必须为 `false`；表结构只通过 Alembic 迁移变更。
+- `PRIVACY_CLEANUP_INTERVAL_HOURS`：过期验证码和已知到期会话的清理周期，默认 `24` 小时，限制在 `1`–`168` 小时；统计只记录数量和时间，不记录邮箱或令牌。
 - `SOURCE_CIRCUIT_*`：连续失败达到阈值后短暂跳过坏源，并以指数冷却自动重试；客户端候选不算硬失败。
 - `PLAYBACK_PROVIDER_IDS`：逗号分隔的服务端 provider ID allowlist。默认留空，留空时搜索、详情、播放解析、首页清单和预热都不会调用任何播放 provider；只启用已经完成合规和网络验证的 ID。
 - `M3U8_SEARCH_ENABLED`：通用 M3U8 搜索回退，正式环境默认 `false`。只有完成独立安全评审并明确批准时才可启用。

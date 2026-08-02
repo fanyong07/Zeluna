@@ -62,6 +62,9 @@ SQLITE_BUSY_TIMEOUT_MS = max(1000, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "1000
 SQLITE_CONNECT_TIMEOUT_SECONDS = max(
     1.0, float(os.getenv("SQLITE_CONNECT_TIMEOUT_SECONDS", "30"))
 )
+PRIVACY_CLEANUP_INTERVAL_HOURS = max(
+    1, min(168, int(os.getenv("PRIVACY_CLEANUP_INTERVAL_HOURS", "24")))
+)
 
 
 # Public source quality varies by network location. Keep speculative background

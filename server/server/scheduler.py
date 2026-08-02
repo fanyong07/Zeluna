@@ -24,10 +24,12 @@ from .database import async_session
 from .aggregator import aggregator
 from .catalog import catalog_service
 from .playback import playback_service
+from .privacy import AuthArtifactCleanup, purge_expired_auth_artifacts
 from .config import (
     PRECACHE_ENABLED,
     PRECACHE_INTERVAL_HOURS,
     PRECACHE_MAX_SUBJECTS,
+    PRIVACY_CLEANUP_INTERVAL_HOURS,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,13 +42,16 @@ class ContentScheduler:
     管理定时爬取、元数据同步和源健康检查。
     """
 
-    def __init__(self):
+    def __init__(self, *, privacy_session_factory=async_session):
         self._tasks: dict[str, asyncio.Task] = {}
         self._running = False
+        self._privacy_session_factory = privacy_session_factory
         self._stats = {
             "last_scan": None,
             "last_sync": None,
             "last_health_check": None,
+            "last_privacy_cleanup": None,
+            "privacy_cleanup": None,
             "total_subjects": 0,
             "total_episodes": 0,
         }
@@ -74,6 +79,7 @@ class ContentScheduler:
         )
         self._tasks["metadata"] = asyncio.create_task(self._metadata_loop())
         self._tasks["health"] = asyncio.create_task(self._health_loop())
+        self._tasks["privacy"] = asyncio.create_task(self._privacy_loop())
 
         logger.info("Scheduler started")
 
@@ -222,6 +228,32 @@ class ContentScheduler:
                 break
             except Exception as e:
                 logger.error(f"Health loop error: {e}")
+
+    async def cleanup_privacy_artifacts(self) -> AuthArtifactCleanup:
+        async with self._privacy_session_factory() as session:
+            cleanup = await purge_expired_auth_artifacts(session)
+            await session.commit()
+        self._stats["last_privacy_cleanup"] = datetime.now().isoformat()
+        self._stats["privacy_cleanup"] = {
+            "verification_codes": cleanup.verification_codes,
+            "sessions": cleanup.sessions,
+        }
+        return cleanup
+
+    async def _privacy_loop(self):
+        while self._running:
+            try:
+                await asyncio.sleep(PRIVACY_CLEANUP_INTERVAL_HOURS * 3600)
+                if self._running:
+                    await self.cleanup_privacy_artifacts()
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                logger.warning(
+                    "Privacy retention cleanup failed: %s",
+                    type(error).__name__,
+                )
+                await asyncio.sleep(3600)
 
 
 # 全局调度器实例
