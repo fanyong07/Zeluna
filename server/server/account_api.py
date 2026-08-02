@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
@@ -31,7 +32,7 @@ from .config import ACCOUNT_RATE_LIMIT_MAX_KEYS, ACCOUNT_TRUSTED_PROXY_NETWORKS
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
-from .privacy import purge_expired_auth_artifacts
+from .privacy import build_account_data_export, purge_expired_auth_artifacts
 
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
 
@@ -403,6 +404,22 @@ async def logout(
 ):
     await session.delete(account[1])
     await session.commit()
+
+
+@router.get("/privacy/export")
+async def export_account_data(
+    account: tuple[User, UserToken] = Depends(_current_account),
+    session: AsyncSession = Depends(get_session),
+):
+    payload = await build_account_data_export(session, account[0])
+    return JSONResponse(
+        payload,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'attachment; filename="zeluna-account-data.json"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.patch("/profile")
