@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `6df6e52` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `98d8ec8` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -517,6 +517,40 @@ Remaining risks:
 
 - Backend repository construction and provider-specific detail enrichment remain compatibility adapters in `AnimeController`; the Catalog owner controls their lifecycle and publication, while later server/provider-interface work remains G7.
 - No live third-party route, production API, account secret, production service, signing material, or release configuration was accessed or changed.
+
+### PlaybackDiscoveryController
+
+Audit:
+
+- Backend route loading, the 900 ms backend/rule hedge, rule route loading, progressive client verification, source merging, single-backup preparation, line-update streams, short-lived backend caching, and detail-page prefetch were still concentrated in `AnimeController`.
+- Account safety relied on scattered aggregate-controller checks. A late shared backend result, rule result, client probe, or prefetch needed one domain-owned account/settings generation before it could publish or populate a reusable cache.
+- The progressive stream checked cancellation inside each probe but could still emit a synthetic `complete` update after a cancelled probe returned.
+
+Changes:
+
+- Added an independent `PlaybackDiscoveryController` owning backend/rule repository orchestration, hedged quick lookup, bounded progressive verification, deterministic source merging, cancellation, scoped single-flight requests, short-lived cache entries, startup ranking, backup preparation, and history-aware prefetch.
+- Account id, account context version, controller epoch, normalized backend endpoint, backend kind, subject, episode, and lookup mode now scope backend reuse. Account, rule, backend-setting, credential, and disposal invalidation reject late results before cache writes or stream publication.
+- `AnimeController` retains the existing player/download/catalog API as compatibility delegates and fell from 2,129 to 1,653 lines. Repository construction and resolver access are explicit typed ports; Riverpod dependencies are captured before disposal rather than read inside lifecycle callbacks.
+- Cancellation now stops the progressive stream before its final completion event, so a late verifier cannot publish after the caller has cancelled.
+
+Tests:
+
+- Added six direct controller regressions covering old-account late backend results, old-account late rule results, same-episode cross-account cache isolation, cancellation after a late probe, progressive completion order, account-switch prefetch invalidation, and backend-setting cache invalidation (the first test covers both late backend publication and scoped cache reuse).
+- Playback/controller/rule/backend/player focused regressions: 163 passed, 23 intentionally skipped, 0 failed.
+- Full `flutter test --reporter expanded`: 574 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Full Dart format check, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `98d8ec8 refactor: split playback discovery controller`
+
+Remaining domain, in required order: Sync.
+
+Remaining risks:
+
+- Backend and rule repository factories remain compatibility ports in `AnimeController`; the PlaybackDiscovery owner now controls their asynchronous lifecycle and publication. Provider-interface restructuring remains G7 work.
+- The four required materials remain `total=4`, `read=4`, `skipped=0`. AniCh reports and the VOD JSON were used only to compare architecture and historical route-shape ideas; no production API, sampled endpoint, private implementation, token, DRM, membership, CAPTCHA, or access-control bypass was used.
+- No production backend, account, secret, signing material, real device, or release configuration changed in this slice.
 
 ## G7 Server architecture
 
