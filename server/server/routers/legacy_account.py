@@ -9,15 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import protobuf_encoder as pb
 from ..auth import (
-    create_jwt,
     generate_verify_code,
     get_current_user,
     hash_password,
+    issue_session_token,
     password_hash_needs_upgrade,
     verify_login_password,
     verify_password,
 )
-from ..database import User, UserToken, VerifyCode
+from ..database import User, VerifyCode
 from ..dependencies import get_session, require_legacy_account_api
 from ..legacy_protocol import parse_account_request, protobuf_bytes, user_to_dict
 
@@ -49,8 +49,7 @@ async def login(
     if password_hash_needs_upgrade(user.password_hash):
         user.password_hash = hash_password(password)
 
-    jwt_token = create_jwt(user.id)
-    session.add(UserToken(user_id=user.id, token=jwt_token))
+    jwt_token = await issue_session_token(session, user.id)
     await session.commit()
     return protobuf_bytes(pb.encode_login_response(user_to_dict(user), jwt_token))
 
@@ -117,8 +116,7 @@ async def register(
     await session.commit()
     await session.refresh(user)
 
-    jwt_token = create_jwt(user.id)
-    session.add(UserToken(user_id=user.id, token=jwt_token))
+    jwt_token = await issue_session_token(session, user.id)
     await session.delete(verification)
     await session.commit()
     return protobuf_bytes(pb.encode_login_response(user_to_dict(user), jwt_token))

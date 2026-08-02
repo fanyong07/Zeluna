@@ -11,7 +11,7 @@ from typing import NamedTuple
 import bcrypt
 import jwt
 from fastapi import Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import (
@@ -130,6 +130,89 @@ def decode_jwt(token: str) -> dict | None:
         return None
 
 
+def token_digest(token: str) -> str:
+    return "v1:" + hashlib.sha256(token.encode()).hexdigest()
+
+
+def validate_session_token(
+    token: str,
+    stored: UserToken,
+    *,
+    now: float | None = None,
+) -> dict | None:
+    current = time.time() if now is None else now
+    if stored.expires_at > 0 and stored.expires_at <= current:
+        return None
+    claims = decode_jwt(token)
+    if claims is None:
+        return None
+    user_id = claims.get("user_id")
+    if isinstance(user_id, bool) or not isinstance(user_id, int):
+        return None
+    if user_id != stored.user_id:
+        return None
+    subject = claims.get("sub")
+    if subject is not None and subject != str(stored.user_id):
+        return None
+    token_id = claims.get("jti")
+    if not isinstance(token_id, str) or not token_id:
+        return None
+    if stored.token_id and not secrets.compare_digest(stored.token_id, token_id):
+        return None
+    try:
+        claim_expiry = float(claims["exp"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if stored.expires_at > 0 and stored.expires_at != claim_expiry:
+        return None
+    return claims
+
+
+def bind_session_claims(stored: UserToken, claims: dict) -> bool:
+    changed = False
+    if stored.expires_at <= 0:
+        stored.expires_at = float(claims["exp"])
+        changed = True
+    if not stored.token_id:
+        stored.token_id = str(claims["jti"])
+        changed = True
+    return changed
+
+
+async def issue_session_token(session: AsyncSession, user_id: int) -> str:
+    token = create_jwt(user_id)
+    claims = decode_jwt(token)
+    if claims is None:
+        raise AuthConfigurationError("newly issued account token could not be decoded")
+    now = time.time()
+    await session.execute(
+        delete(UserToken).where(
+            UserToken.user_id == user_id,
+            UserToken.expires_at > 0,
+            UserToken.expires_at <= now,
+        )
+    )
+    session.add(
+        UserToken(
+            user_id=user_id,
+            token=token_digest(token),
+            token_id=str(claims["jti"]),
+            expires_at=float(claims["exp"]),
+        )
+    )
+    await session.flush()
+    existing = list(
+        await session.scalars(
+            select(UserToken)
+            .where(UserToken.user_id == user_id)
+            .order_by(UserToken.created_at.desc(), UserToken.id.desc())
+        )
+    )
+    for stale_token in existing[4:]:
+        await session.delete(stale_token)
+    return token
+
+
 def generate_verify_code() -> str:
     return str(secrets.randbelow(900000) + 100000)
 
@@ -217,16 +300,26 @@ async def get_current_user(
     # New sessions are stored as SHA-256 digests so a database leak cannot be
     # replayed as a bearer token. Raw legacy tokens are accepted only when the
     # old account API is explicitly enabled.
-    token_digest = "v1:" + hashlib.sha256(parsed.token.encode()).hexdigest()
-    accepted_tokens = [token_digest]
+    accepted_tokens = [token_digest(parsed.token)]
     if LEGACY_ACCOUNT_API_ENABLED:
         accepted_tokens.append(parsed.token)
     stmt = select(UserToken).where(UserToken.token.in_(accepted_tokens))
     result = await session.execute(stmt)
     user_token = result.scalar_one_or_none()
     if user_token:
+        claims = validate_session_token(parsed.token, user_token)
+        if claims is None:
+            await session.delete(user_token)
+            await session.commit()
+            return None
+        if bind_session_claims(user_token, claims):
+            await session.commit()
         stmt = select(User).where(User.id == user_token.user_id)
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user is None:
+            await session.delete(user_token)
+            await session.commit()
+        return user
 
     return None

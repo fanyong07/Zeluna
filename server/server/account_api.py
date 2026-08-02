@@ -16,12 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
     AuthConfigurationError,
-    create_jwt,
-    decode_jwt,
+    bind_session_claims,
     generate_verify_code,
     hash_password,
+    issue_session_token,
     password_hash_needs_upgrade,
     signing_key,
+    token_digest,
+    validate_session_token,
     verify_login_password,
     verify_password,
 )
@@ -201,10 +203,6 @@ def _code_digest(email: str, purpose: str, code: str) -> str:
     return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
 
-def _token_digest(token: str) -> str:
-    return "v1:" + hashlib.sha256(token.encode()).hexdigest()
-
-
 def _user_payload(user: User) -> dict:
     return {
         "id": str(user.id),
@@ -217,22 +215,12 @@ def _user_payload(user: User) -> dict:
 
 async def _issue_token(session: AsyncSession, user: User) -> str:
     try:
-        token = create_jwt(user.id)
+        token = await issue_session_token(session, user.id)
     except AuthConfigurationError as error:
         raise HTTPException(
             status_code=503,
             detail="账号服务安全配置不可用",
         ) from error
-    session.add(UserToken(user_id=user.id, token=_token_digest(token)))
-    existing = list(
-        await session.scalars(
-            select(UserToken)
-            .where(UserToken.user_id == user.id)
-            .order_by(UserToken.created_at.desc())
-        )
-    )
-    for stale_token in existing[4:]:
-        await session.delete(stale_token)
     await session.commit()
     return token
 
@@ -252,18 +240,22 @@ async def _current_account(
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
     result = await session.execute(
-        select(UserToken).where(UserToken.token == _token_digest(token.strip()))
+        select(UserToken).where(UserToken.token == token_digest(token.strip()))
     )
     user_token = result.scalar_one_or_none()
     if user_token is None:
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
-    claims = decode_jwt(token.strip())
-    if claims is None or claims.get("user_id") != user_token.user_id:
+    claims = validate_session_token(token.strip(), user_token)
+    if claims is None:
         await session.delete(user_token)
         await session.commit()
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+    if bind_session_claims(user_token, claims):
+        await session.commit()
     user = await session.get(User, user_token.user_id)
     if user is None:
+        await session.delete(user_token)
+        await session.commit()
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
     return user, user_token
 

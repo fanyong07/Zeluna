@@ -91,6 +91,12 @@ class UserToken(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     token: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    token_id: Mapped[str] = mapped_column(
+        String(100), default="", server_default=""
+    )
+    expires_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
 
     user: Mapped["User"] = relationship("User", back_populates="tokens")

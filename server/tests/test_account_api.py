@@ -20,9 +20,11 @@ from server.auth import (
     create_jwt,
     decode_jwt,
     hash_password,
+    token_digest,
+    validate_session_token,
     verify_password,
 )
-from server.database import Base, User, VerifyCode
+from server.database import Base, User, UserToken, VerifyCode
 
 _TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
 
@@ -211,10 +213,66 @@ def test_email_registration_login_session_and_logout(tmp_path, monkeypatch):
             json={"email": "user@example.com", "password": "password-123"},
         )
         assert response.status_code == 200
-        token = response.json()["access_token"]
-        assert token
+        first_login_token = response.json()["access_token"]
+        assert first_login_token
 
-        monkeypatch.setattr(account_api, "decode_jwt", lambda _token: None)
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "password-123"},
+        )
+        assert response.status_code == 200
+        current_token = response.json()["access_token"]
+        changed = client.post(
+            "/api/v1/auth/password",
+            json={
+                "current_password": "password-123",
+                "new_password": "password-456",
+            },
+            headers={"Authorization": f"Bearer {current_token}"},
+        )
+        assert changed.status_code == 200
+        assert client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {first_login_token}"},
+        ).status_code == 401
+        assert client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {current_token}"},
+        ).status_code == 200
+
+        reset_code = client.post(
+            "/api/v1/auth/code",
+            json={"email": "user@example.com", "purpose": "reset_password"},
+        )
+        assert reset_code.status_code == 202
+        reset = client.post(
+            "/api/v1/auth/password/reset",
+            json={
+                "email": "user@example.com",
+                "code": delivered["code"],
+                "new_password": "password-789",
+            },
+        )
+        assert reset.status_code == 200
+        assert client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {current_token}"},
+        ).status_code == 401
+        assert client.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "password-456"},
+        ).status_code == 401
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": "user@example.com", "password": "password-789"},
+        )
+        token = response.json()["access_token"]
+
+        monkeypatch.setattr(
+            account_api,
+            "validate_session_token",
+            lambda *_args: None,
+        )
         response = client.get(
             "/api/v1/auth/me",
             headers={"Authorization": f"Bearer {token}"},
@@ -451,6 +509,112 @@ def test_successful_login_upgrades_legacy_bcrypt_hash(tmp_path):
     assert upgraded.startswith("$bcrypt-sha256$")
     assert verify_password(password, upgraded)
     asyncio.run(engine.dispose())
+
+
+def test_session_issue_removes_expired_rows_and_keeps_latest_four(tmp_path):
+    database_path = (tmp_path / "session-lifecycle.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def exercise():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            user = User(
+                email="sessions@example.com",
+                name="session-user",
+                password_hash=hash_password("password-123"),
+            )
+            session.add(user)
+            await session.flush()
+            session.add(
+                UserToken(
+                    user_id=user.id,
+                    token=token_digest("expired-token"),
+                    token_id="expired-id",
+                    expires_at=time.time() - 1,
+                )
+            )
+            await session.commit()
+            tokens = []
+            for _ in range(5):
+                tokens.append(await account_api._issue_token(session, user))
+            rows = list(
+                await session.scalars(
+                    select(UserToken).where(UserToken.user_id == user.id)
+                )
+            )
+            return tokens, rows
+
+    tokens, rows = asyncio.run(exercise())
+    assert len(rows) == 4
+    assert all(row.expires_at > time.time() for row in rows)
+    assert all(row.token_id for row in rows)
+    assert token_digest("expired-token") not in {row.token for row in rows}
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+    with TestClient(app) as client:
+        oldest = client.get(
+            "/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {tokens[0]}"},
+        )
+        newest = [
+            client.get(
+                "/api/v1/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+            ).status_code
+            for token in tokens[1:]
+        ]
+
+    assert oldest.status_code == 401
+    assert newest == [200, 200, 200, 200]
+    asyncio.run(engine.dispose())
+
+
+def test_stored_session_binds_subject_and_token_identifier():
+    token = create_jwt(7)
+    claims = decode_jwt(token)
+    stored = UserToken(
+        user_id=7,
+        token=token_digest(token),
+        token_id=claims["jti"],
+        expires_at=float(claims["exp"]),
+    )
+    assert validate_session_token(token, stored) is not None
+
+    stored.token_id = "different-token-id"
+    assert validate_session_token(token, stored) is None
+    stored.token_id = claims["jti"]
+    stored.expires_at = float(claims["exp"]) + 1
+    assert validate_session_token(token, stored) is None
+
+    now = int(time.time())
+    wrong_subject = jwt.encode(
+        {
+            "user_id": 7,
+            "sub": "8",
+            "jti": "wrong-subject",
+            "iss": "zeluna",
+            "aud": "zeluna-clients",
+            "iat": now,
+            "exp": now + 60,
+        },
+        _TEST_SECRET,
+        algorithm="HS256",
+    )
+    wrong_subject_row = UserToken(
+        user_id=7,
+        token=token_digest(wrong_subject),
+        token_id="wrong-subject",
+        expires_at=now + 60,
+    )
+    assert validate_session_token(wrong_subject, wrong_subject_row) is None
 
 
 def test_tokens_are_unique_and_long_unicode_passwords_are_supported():

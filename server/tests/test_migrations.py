@@ -138,6 +138,58 @@ def test_verification_attempt_migration_preserves_legacy_codes(tmp_path):
     assert _revision(database_path) == migration_head_revision()
 
 
+def test_session_metadata_migration_preserves_legacy_token(tmp_path):
+    database_path = tmp_path / "session-metadata.db"
+    config = _config(database_path)
+    command.upgrade(config, "0004_verification_code_attempts")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users (
+                email, name, password_hash, role, sex, avatar, exp, coin,
+                color, address, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "session@example.com",
+                "session-user",
+                "hash",
+                "user",
+                "",
+                "",
+                0,
+                0,
+                "#000000",
+                "",
+                1,
+                1,
+            ),
+        )
+        user_id = connection.execute(
+            "SELECT id FROM users WHERE email = ?", ("session@example.com",)
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO user_tokens (user_id, token, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (user_id, "legacy-token-row", 1.0),
+        )
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT token, token_id, expires_at
+            FROM user_tokens WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    assert row == ("legacy-token-row", "", 0.0)
+    assert _revision(database_path) == migration_head_revision()
+
+
 def test_existing_schema_deduplicates_cache_and_preserves_data(tmp_path):
     database_path = tmp_path / "existing.db"
     url = f"sqlite:///{database_path.as_posix()}"
