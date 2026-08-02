@@ -19,6 +19,7 @@ from .config import (
     JWT_ALGORITHM,
     ACCESS_TOKEN_EXPIRE,
     LEGACY_ACCOUNT_API_ENABLED,
+    LEGACY_JWT_COMPATIBILITY_ENABLED,
 )
 from .database import User, UserToken
 
@@ -111,6 +112,8 @@ def decode_jwt(token: str) -> dict | None:
             },
         )
     except jwt.PyJWTError:
+        if not LEGACY_JWT_COMPATIBILITY_ENABLED:
+            return None
         try:
             legacy = jwt.decode(
                 token,

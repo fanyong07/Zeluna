@@ -322,6 +322,61 @@ def test_registration_code_requires_configured_email_delivery(tmp_path, monkeypa
     asyncio.run(engine.dispose())
 
 
+def test_unverified_email_cannot_enumerate_existing_registration(
+    tmp_path, monkeypatch
+):
+    database_path = (tmp_path / "registration-enumeration.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            session.add(
+                User(
+                    email="existing@example.com",
+                    name="existing-user",
+                    password_hash=hash_password("password-123"),
+                )
+            )
+            await session.commit()
+
+    asyncio.run(prepare())
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    async def reject_email(*_args):
+        raise AssertionError("existing registration must not send a new code")
+
+    monkeypatch.setattr(account_api, "send_verification_email", reject_email)
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+
+    with TestClient(app) as client:
+        code_response = client.post(
+            "/api/v1/auth/code",
+            json={"email": "existing@example.com", "purpose": "register"},
+        )
+        register_response = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "existing@example.com",
+                "nickname": "attacker",
+                "password": "password-456",
+                "code": "000000",
+            },
+        )
+
+    assert code_response.status_code == 202
+    assert code_response.json() == {"message": account_api._CODE_REQUEST_MESSAGE}
+    assert register_response.status_code == 400
+    asyncio.run(engine.dispose())
+
+
 def test_verification_code_locks_after_email_and_purpose_failure_budget(
     tmp_path, monkeypatch
 ):
@@ -661,6 +716,25 @@ def test_legacy_signed_session_without_issuer_remains_temporarily_compatible():
 
     assert decode_jwt(legacy)["user_id"] == 7
     assert decode_jwt(wrong_issuer) is None
+
+
+def test_legacy_signed_session_is_rejected_after_compatibility_gate_closes(
+    monkeypatch,
+):
+    now = int(time.time())
+    legacy = jwt.encode(
+        {
+            "user_id": 7,
+            "jti": "legacy-disabled",
+            "iat": now,
+            "exp": now + 60,
+        },
+        _TEST_SECRET,
+        algorithm="HS256",
+    )
+    monkeypatch.setattr(auth, "LEGACY_JWT_COMPATIBILITY_ENABLED", False)
+
+    assert decode_jwt(legacy) is None
 
 
 @pytest.mark.parametrize(

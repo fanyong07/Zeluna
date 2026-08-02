@@ -35,6 +35,7 @@ from .email_service import EmailDeliveryUnavailable, send_verification_email
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
 
 _MAX_CODE_FAILURES = 5
+_CODE_REQUEST_MESSAGE = "如果该操作可用，验证码将发送到邮箱"
 
 
 class VerificationCodeRequest(BaseModel):
@@ -311,10 +312,10 @@ async def request_code(
 
     existing = await session.scalar(select(User.id).where(User.email == email))
     if payload.purpose == "register" and existing is not None:
-        raise HTTPException(status_code=409, detail="这个邮箱已经注册过了")
+        return {"message": _CODE_REQUEST_MESSAGE}
     if payload.purpose == "reset_password" and existing is None:
         # Do not reveal whether an account exists.
-        return {"message": "如果该邮箱已注册，验证码将发送到邮箱"}
+        return {"message": _CODE_REQUEST_MESSAGE}
 
     code = generate_verify_code()
     await session.execute(delete(VerifyCode).where(VerifyCode.email == email))
@@ -335,7 +336,7 @@ async def request_code(
         await session.rollback()
         raise HTTPException(status_code=502, detail="验证码邮件发送失败，请稍后重试") from error
     await session.commit()
-    return {"message": "验证码已发送，请检查邮箱"}
+    return {"message": _CODE_REQUEST_MESSAGE}
 
 
 @router.post("/register", status_code=201)
@@ -346,9 +347,9 @@ async def register(
 ):
     email = _normalize_email(str(payload.email))
     _rate_limit(f"register:ip:{_client_key(request)}", limit=5, window_seconds=3600)
+    await _consume_code(session, email, "register", payload.code)
     if await session.scalar(select(User.id).where(User.email == email)) is not None:
         raise HTTPException(status_code=409, detail="这个邮箱已经注册过了")
-    await _consume_code(session, email, "register", payload.code)
     user = User(
         email=email,
         name=payload.nickname,
