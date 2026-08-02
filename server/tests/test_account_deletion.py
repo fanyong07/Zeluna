@@ -199,15 +199,26 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                 user_id=owner.id,
                 contents='[{"text":"owner public comment"}]',
             )
+            session.add(owner_comment)
+            await session.flush()
             keeper_comment = Comment(
                 type="thread",
                 target_id=str(keeper_thread.id),
                 user_id=keeper.id,
+                parent_id=str(owner_comment.id),
                 reply_to=owner.name,
                 contents='[{"text":"keeper reply"}]',
                 like_count=2,
             )
-            session.add_all([owner_comment, keeper_comment])
+            unrelated_reply = Comment(
+                type="thread",
+                target_id=str(keeper_thread.id),
+                user_id=keeper.id,
+                parent_id="unrelated-comment",
+                reply_to=owner.name,
+                contents='[{"text":"same nickname, different parent"}]',
+            )
+            session.add_all([keeper_comment, unrelated_reply])
             await session.flush()
             session.add_all(
                 [
@@ -274,6 +285,9 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                     )
                 )
             ).one()
+            unrelated_reply_to = await session.scalar(
+                select(Comment.reply_to).where(Comment.id == unrelated_reply.id)
+            )
             return {
                 "finalized": finalized,
                 "owner": await session.get(User, owner.id),
@@ -316,6 +330,7 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                 ),
                 "keeper_counts": (*keeper_counts, kept_comment.like_count),
                 "reply_to": kept_comment.reply_to,
+                "unrelated_reply_to": unrelated_reply_to,
             }
 
     result = asyncio.run(exercise())
@@ -330,4 +345,5 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
     assert result["private_counts"] == (0, 0, 0, 0)
     assert result["keeper_counts"] == (1, 1, 1)
     assert result["reply_to"] == "匿名"
+    assert result["unrelated_reply_to"] == "owner-delete"
     asyncio.run(engine.dispose())

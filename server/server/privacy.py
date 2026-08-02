@@ -124,6 +124,9 @@ async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
             select(CommentLike.comment_id).where(CommentLike.user_id == user.id)
         )
     )
+    authored_comment_ids = set(
+        await session.scalars(select(Comment.id).where(Comment.user_id == user.id))
+    )
 
     await session.execute(
         delete(ThreadCollection).where(ThreadCollection.user_id == user.id)
@@ -174,9 +177,12 @@ async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
     await session.execute(
         update(Comment).where(Comment.user_id == user.id).values(user_id=None)
     )
-    await session.execute(
-        update(Comment).where(Comment.reply_to == user.name).values(reply_to="匿名")
-    )
+    if authored_comment_ids:
+        await session.execute(
+            update(Comment)
+            .where(Comment.parent_id.in_([str(item) for item in authored_comment_ids]))
+            .values(reply_to="匿名")
+        )
     await session.execute(delete(User).where(User.id == user.id))
 
 
