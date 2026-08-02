@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `760a371` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `98e769e` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -712,6 +712,28 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths, exactly one `/check/api`, and no duplicates.
 
 Commit: `760a371 security: close legacy config endpoint`
+
+### v2 compatibility router isolation
+
+Audit:
+
+- Five retained `/api/v2/*` catalog, episode, playback-cache, home, and resolver routes remained at the end of `server.main`. Current Zeluna catalog/playback clients use v3, while a server regression still exercises the v2 VOD cache contract.
+- Existing tests patch `server.main.aggregator.resolve_verified_lines`; the extraction therefore had to keep the same shared aggregator singleton rather than construct a router-local backend.
+
+Changes:
+
+- Added `server.routers.compat_v2` for `/api/v2/search`, `/api/v2/episodes/{subject_id}`, `/api/v2/vod/{subject_id}`, `/api/v2/home`, and `/api/v2/resolve`.
+- Preserved query defaults, response fields, six-hour cache behavior, cached headers, write-failure isolation, aggregator/resolver singleton ownership, and public compatibility status. No route was enabled, disabled, or redirected in this slice.
+- Removed v2-only cache imports and logging ownership from `server.main`. The main lifecycle still closes the same aggregator and resolver objects, and compatibility patches through `server.main.aggregator` continue to work. `server.main` is now 1,158 lines.
+
+Tests:
+
+- Added explicit router ownership, empty-resolver no-network behavior, and shared-aggregator regressions; the existing two-request v2 VOD cache test remained unchanged.
+- Focused v2/app/playback suite: 9 passed, 0 failed.
+- Full server suite: 109 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths, all five v2 paths, and no duplicates.
+
+Commit: `98e769e refactor: isolate v2 compatibility router`
 
 Remaining G7 work:
 
