@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `98e769e` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `36f462b` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -734,6 +734,29 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths, all five v2 paths, and no duplicates.
 
 Commit: `98e769e refactor: isolate v2 compatibility router`
+
+### Legacy media router and duplicate-route removal
+
+Audit:
+
+- Runtime route enumeration found two `GET /vod/{id}/{episode}` registrations in `server.main`. Starlette matched the earlier database-episode handler; the later scraper handler was unreachable even though OpenAPI collapsed both into one path and hid the duplicate.
+- Other repeated path names (`/danmaku`, `/comment`, and `/comment/like`) use distinct HTTP methods and are valid method/path pairs.
+- The previously reachable VOD behavior returns the stored episode identity/title and decoded local `vod_url`. Removing the dead scraper registration therefore must preserve that exact contract rather than activate the unreachable implementation.
+
+Changes:
+
+- Added `server.routers.legacy_media` for the retained bangumi list/tag/latest/detail/episodes/related endpoints and the one reachable legacy VOD endpoint.
+- Moved the shared bangumi protobuf mapping into `server.legacy_protocol`, preserving remaining compatibility callers through an alias in `main`.
+- Removed the unreachable second VOD registration and its now-unused scraper-registry import. No scraper call, production API, fixed route, or sampled source was substituted for the live database contract. `server.main` is now 903 lines.
+
+Tests:
+
+- Added an in-memory database regression for the previously reachable legacy VOD response, explicit single-registration ownership, and a whole-app method-plus-path uniqueness check that cannot be fooled by OpenAPI path folding.
+- Focused legacy-media/app/playback suite: 10 passed, 0 failed.
+- Full server suite: 112 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. The flattened runtime table contained 75 method/path pairs with no duplicates.
+
+Commit: `36f462b refactor: isolate legacy media routes`
 
 Remaining G7 work:
 
