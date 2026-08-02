@@ -32,7 +32,8 @@ from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
-from .scrapers.base import BaseScraper, SubjectResult
+from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
+from .scrapers.base import SubjectResult
 from .config import SOURCE_MAX_CONCURRENCY
 from .stable_identity import stable_digest
 
@@ -400,7 +401,7 @@ class ContentAggregator:
         self,
         *,
         line_http_transport: httpx.AsyncBaseTransport | None = None,
-        crawler_scrapers: dict[str, BaseScraper] | None = None,
+        crawler_scrapers: dict[str, MediaProvider] | None = None,
     ):
         self._maccms = MacCmsScraper()
         self._tvbox = TvBoxAdapterScraper()
@@ -420,6 +421,32 @@ class ContentAggregator:
             else dict(crawler_scrapers)
         )
         self._line_http_transport = line_http_transport
+        self._providers = ProviderRegistry()
+        self._providers.register(
+            provider_id="aggregate.maccms",
+            family="aggregate",
+            display_name="MacCMS",
+            adapter=self._maccms,
+        )
+        self._providers.register(
+            provider_id="aggregate.tvbox",
+            family="aggregate",
+            display_name="TVBox",
+            adapter=self._tvbox,
+        )
+        self._providers.register(
+            provider_id="aggregate.vod",
+            family="aggregate",
+            display_name="VOD compatibility",
+            adapter=self._vod,
+        )
+        for provider_id, adapter in self._crawler_scrapers.items():
+            self._providers.register(
+                provider_id=f"crawler.{provider_id}",
+                family="crawler",
+                display_name=provider_id,
+                adapter=adapter,
+            )
 
     @property
     def source_inventory(self) -> tuple[tuple[str, str], ...]:
@@ -433,19 +460,18 @@ class ContentAggregator:
     def configured_source_names(self) -> frozenset[str]:
         return frozenset(name for _, name in self.source_inventory)
 
+    @property
+    def provider_metadata(self) -> tuple[ProviderMetadata, ...]:
+        """Return contract metadata without endpoint or request internals."""
+        return self._providers.metadata
+
     async def aclose(self) -> None:
-        await asyncio.gather(
-            self._maccms.aclose(),
-            self._tvbox.aclose(),
-            self._vod.aclose(),
-            *(scraper.aclose() for scraper in self._crawler_scrapers.values()),
-            return_exceptions=True,
-        )
+        await self._providers.aclose()
 
     async def _discover_scraper_matches(
         self,
         provider: str,
-        scraper: BaseScraper,
+        scraper: MediaProvider,
         aliases: list[str],
         *,
         content_type: str,
@@ -581,7 +607,7 @@ class ContentAggregator:
         if not clean_aliases:
             return []
 
-        providers: list[tuple[str, BaseScraper, float]] = [
+        providers: list[tuple[str, MediaProvider, float]] = [
             ("maccms", self._maccms, 8),
             ("tvbox", self._tvbox, 2),
             *(
@@ -648,7 +674,7 @@ class ContentAggregator:
         if not clean_aliases:
             return
 
-        providers: list[tuple[str, BaseScraper, float]] = [
+        providers: list[tuple[str, MediaProvider, float]] = [
             ("tvbox", self._tvbox, 2),
             *(
                 (
@@ -1004,7 +1030,7 @@ class ContentAggregator:
             for provider, scraper in self._crawler_scrapers.items():
                 async def search_crawler(
                     provider_name: str = provider,
-                    provider_scraper: BaseScraper = scraper,
+                    provider_scraper: MediaProvider = scraper,
                 ):
                     try:
                         results = await provider_scraper.search(keyword)
