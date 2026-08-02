@@ -5,27 +5,22 @@ AniCh API 复刻 — FastAPI 后端入口
   cd server && uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
 """
 
-import json
-import time
 from contextlib import asynccontextmanager
-from typing import Optional
 
-from fastapi import Query, Request, Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, func, delete, and_
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import (
     async_session, init_db,
     User,
-    Bangumi, BangumiEpisode, BangumiCollection,
+    Bangumi, BangumiEpisode,
     Character, Person,
-    Danmaku,
     Thread,
     PlayHistory,
 )
-from .auth import get_current_user
 from . import protobuf_encoder as pb
 from .scheduler import scheduler
 from .aggregator import aggregator
@@ -53,183 +48,6 @@ async def lifespan(_app):
 
 
 app = create_app(lifespan=lifespan)
-
-
-# ────────────────────────────────────────────────────────────
-# 弹幕
-# ────────────────────────────────────────────────────────────
-
-@app.get("/danmaku")
-async def get_danmaku(
-    bangumi: int = Query(0),
-    episode: int = Query(0),
-    skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """获取弹幕 — protobuf 响应."""
-    stmt = select(Danmaku).options(selectinload(Danmaku.user)).where(
-        Danmaku.bangumi_id == bangumi,
-        Danmaku.episode_id == episode,
-    ).order_by(Danmaku.time).offset(skip).limit(200)
-    result = await session.execute(stmt)
-    items = result.scalars().all()
-
-    danmaku_list = [
-        {
-            "id": d.danmaku_id or str(d.id),
-            "color": d.color,
-            "date": d.date,
-            "text": d.text,
-            "t": "",
-            "time": d.time,
-            "type": d.type,
-            "from": d.user.name if d.user else "",
-        }
-        for d in items
-    ]
-    return _pb_bytes(pb.encode_danmaku_list(danmaku_list))
-
-
-@app.post("/danmaku")
-async def post_danmaku(
-    request: Request,
-    bangumi: int = Query(0),
-    episode: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """发送弹幕."""
-    token_header = request.headers.get("_", "")
-    user = await get_current_user(token_header, session)
-    if not user:
-        raise HTTPException(401, "请先登录")
-
-    try:
-        body = await request.form()
-    except Exception:
-        body = await request.json()
-
-    danmaku = Danmaku(
-        bangumi_id=bangumi,
-        episode_id=episode,
-        user_id=user.id,
-        type=int(body.get("type", 0)),
-        time=float(body.get("time", 0.0)),
-        text=str(body.get("text", "")),
-        color=str(body.get("color", "#FFFFFF")),
-        danmaku_id=str(int(time.time() * 1000)),
-    )
-    session.add(danmaku)
-    await session.commit()
-
-    return JSONResponse({"error": False, "message": "弹幕已发送"})
-
-
-# ────────────────────────────────────────────────────────────
-# 收藏 (番剧)
-# ────────────────────────────────────────────────────────────
-
-@app.get("/bangumi/{id}/collect/status")
-async def collect_status(
-    id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-):
-    user = await get_current_user(request.headers.get("_", ""), session)
-    if not user:
-        return JSONResponse({"collected": False, "type": ""})
-
-    result = await session.execute(
-        select(BangumiCollection).where(
-            BangumiCollection.user_id == user.id,
-            BangumiCollection.bangumi_id == id,
-        )
-    )
-    col = result.scalar_one_or_none()
-    return JSONResponse({
-        "collected": col is not None,
-        "type": col.type if col else "",
-    })
-
-
-@app.get("/bangumi/{id}/collect/{type}")
-async def change_collect(
-    id: int,
-    type: str,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-):
-    user = await get_current_user(request.headers.get("_", ""), session)
-    if not user:
-        raise HTTPException(401)
-
-    result = await session.execute(
-        select(BangumiCollection).where(
-            BangumiCollection.user_id == user.id,
-            BangumiCollection.bangumi_id == id,
-        )
-    )
-    existing = result.scalar_one_or_none()
-
-    if existing:
-        existing.type = type
-    else:
-        col = BangumiCollection(user_id=user.id, bangumi_id=id, type=type)
-        session.add(col)
-    await session.commit()
-
-    return JSONResponse({"error": False, "message": "收藏成功"})
-
-
-@app.delete("/bangumi/{id}/collect/cancel")
-async def cancel_collect(
-    id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-):
-    user = await get_current_user(request.headers.get("_", ""), session)
-    if not user:
-        raise HTTPException(401)
-
-    await session.execute(
-        delete(BangumiCollection).where(
-            BangumiCollection.user_id == user.id,
-            BangumiCollection.bangumi_id == id,
-        )
-    )
-    await session.commit()
-    return JSONResponse({"error": False, "message": "已取消收藏"})
-
-
-@app.get("/action/collect/{type}")
-async def collect_list(
-    type: str,
-    request: Request,
-    page: int = Query(1),
-    session: AsyncSession = Depends(get_session),
-):
-    user = await get_current_user(request.headers.get("_", ""), session)
-    if not user:
-        raise HTTPException(401)
-
-    stmt = (
-        select(BangumiCollection, Bangumi)
-        .join(Bangumi, BangumiCollection.bangumi_id == Bangumi.id)
-        .options(selectinload(Bangumi.episodes))
-        .where(BangumiCollection.user_id == user.id, BangumiCollection.type == type)
-        .offset((page - 1) * 20)
-        .limit(20)
-    )
-    result = await session.execute(stmt)
-    rows = result.all()
-
-    items = [
-        {
-            **_bangumi_to_dict(row[1]),
-            "collection_type": row[0].type,
-        }
-        for row in rows
-    ]
-    return JSONResponse(items)
 
 
 # ────────────────────────────────────────────────────────────

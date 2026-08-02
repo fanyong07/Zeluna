@@ -16,6 +16,7 @@ from server.routers import (
     legacy_community_router,
     legacy_comments_router,
     legacy_media_router,
+    legacy_library_router,
     playback_router,
 )
 
@@ -49,6 +50,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             legacy_community_router,
             legacy_comments_router,
             legacy_media_router,
+            legacy_library_router,
         )
         for route in router.routes
     }
@@ -68,6 +70,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert endpoint_modules["/vod/{id}/{episode}"] == "server.routers.legacy_media"
     assert endpoint_modules["/latest"] == "server.routers.legacy_community"
     assert endpoint_modules["/comment"] == "server.routers.legacy_comments"
+    assert endpoint_modules["/danmaku"] == "server.routers.legacy_library"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 

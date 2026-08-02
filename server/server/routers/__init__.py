@@ -9,6 +9,7 @@ from .legacy_config import router as legacy_config_router
 from .legacy_community import router as legacy_community_router
 from .legacy_comments import router as legacy_comments_router
 from .legacy_media import router as legacy_media_router
+from .legacy_library import router as legacy_library_router
 from .playback import router as playback_router
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "legacy_community_router",
     "legacy_comments_router",
     "legacy_media_router",
+    "legacy_library_router",
     "playback_router",
 ]
