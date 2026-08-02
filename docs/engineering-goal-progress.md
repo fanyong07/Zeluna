@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `b36a724` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `dc8c4fe` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -993,7 +993,7 @@ Commit: `e51c8c8 refactor: isolate playback health persistence`
 
 ## G8 Account and session security
 
-Status: in_progress
+Status: completed
 
 ### Strong account signing keys and JWT claim binding
 
@@ -1133,6 +1133,38 @@ Remaining risks:
 - Registration and verification-code request responses still require a final account-enumeration review before G8 completion.
 - The narrow issuer-less legacy JWT compatibility window must be documented with an explicit removal gate; it was not broadened by this slice.
 - No production session, account, database, migration, secret, environment, or deployment was accessed or changed.
+
+### Account-enumeration response and legacy-token exit gate
+
+Audit:
+
+- Registration code requests returned `409` immediately for an existing email, and registration checked account existence before consuming a code. An unauthenticated caller could therefore distinguish registered addresses without proving mailbox ownership.
+- Issuer-less legacy JWT acceptance was intentionally narrow but unconditional, with no deployment switch or dated removal condition.
+
+Changes:
+
+- Code requests now return the same `202` message for existing registration addresses, missing reset addresses, and deliverable requests. Existing registration addresses do not receive a new registration code, and registration validates email/purpose/code before exposing an account conflict.
+- Added `LEGACY_JWT_COMPATIBILITY_ENABLED`. It defaults to `true` only for the migration window, rejects legacy tokens immediately when disabled, and deployment guidance requires disabling it after one maximum session lifetime (currently 30 days) from rollout.
+- SMTP delivery remains synchronous, so response duration can differ between a suppressed and delivered message. This residual timing channel is documented; removing it correctly requires a durable asynchronous mail outbox, not a fixed delay or fabricated delivery result.
+
+Tests:
+
+- Focused server account/migration/app suite: 38 passed, 0 failed.
+- Full server suite: 153 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Flutter account repository/controller/page contract suite: 18 passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `dc8c4fe security: close account enumeration paths`
+
+### G8 completion verification
+
+- Full Flutter suite: 579 passed, 26 skipped legacy/platform-conditional cases, 0 failed.
+- Flutter static analysis: 0 issues.
+- Full server suite: 153 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Strong signing-key fail-closed behavior, issuer/audience claims, explicit legacy-token retirement, trusted-proxy boundaries, bounded request limiting, persistent verification failure budgets, timing-resistant login, safe legacy-password upgrade, digest-only sessions, expiry/JTI/subject binding, deterministic four-session enforcement, password-change/reset revocation, migrations, and client contracts all have direct regression evidence.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled route, private implementation/protocol, token, DRM, membership, CAPTCHA, or access-control bypass was used.
+- No real mail was sent and no production account, password, token, database, migration, proxy, secret, environment, or deployment was accessed or changed. Platform release builds and real-device/production-account acceptance remain G13/G14 gates.
+- Residual operational work is explicit rather than hidden: disable legacy JWT compatibility after the 30-day migration window; multi-instance deployments need gateway/shared rate limiting; a future durable mail outbox should remove the synchronous-delivery timing channel.
 
 ## G9 Privacy lifecycle
 
