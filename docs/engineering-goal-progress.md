@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `dc8c4fe` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `4c23810` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1168,7 +1168,34 @@ Commit: `dc8c4fe security: close account enumeration paths`
 
 ## G9 Privacy lifecycle
 
-Status: not_started
+Status: in_progress
+
+### Expired authentication artifact retention
+
+Audit:
+
+- Expired verification codes were replaced only when the same email requested another code. Expired session rows were cleaned for the current user during issuance or when the exact token was presented, leaving unrelated expired authentication artifacts without a shared lifecycle owner.
+- The client action currently labelled as clearing account data intentionally removes only this device's scoped data and signs out; it does not delete the cloud account. A real cloud-erasure flow still needs an explicit policy for authored threads/comments/danmaku versus private library/history data and must not be silently substituted for local cleanup.
+
+Changes:
+
+- Added one privacy lifecycle helper that deletes only verification codes at or beyond expiry and session rows with a known positive expiry at or beyond the same cutoff. Active artifacts, zero-expiry legacy migration rows, and users are outside its deletion predicate.
+- Code requests commit expired-artifact cleanup before any existence-suppressed early response or mail attempt. Session issuance uses the same helper in its existing transaction, replacing its narrower per-user session cleanup.
+- No production cleanup, account deletion, migration, email delivery, or database operation was executed.
+
+Tests:
+
+- Focused privacy/account suite: 20 passed, 0 failed.
+- Full server suite: 154 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `4c23810 privacy: purge expired auth artifacts`
+
+Remaining risks:
+
+- Cleanup is currently activity-driven. A bounded scheduled retention job with observable last-run/count state remains required so an idle service does not retain expired artifacts indefinitely.
+- Privacy export remains unimplemented.
+- Permanent cloud-account erasure is not authorized by the existing local-cleanup UI and requires an explicit deletion/anonymization decision for public authored content before implementation. No real user data was changed.
 
 ## G10 Cloud sync
 
