@@ -9,12 +9,12 @@ import '../accounts/account_controller.dart';
 import '../accounts/local_account_repository.dart';
 import '../accounts/cloud_account_repository.dart';
 import '../core/identity/local_identity_migration.dart';
-import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../downloads/download_controller.dart';
+import '../library/library_controller.dart';
 import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -490,6 +490,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   SettingsController? _settingsController;
   SourceController? _sourceController;
   DownloadController? _downloadController;
+  LibraryController? _libraryController;
   int _homeRefreshVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
@@ -521,6 +522,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   DownloadController get _downloadDomain {
     final controller = _downloadController;
     if (controller == null) throw StateError('下载管理尚未准备好');
+    return controller;
+  }
+
+  LibraryController get _libraryDomain {
+    final controller = _libraryController;
+    if (controller == null) throw StateError('媒体库尚未准备好');
     return controller;
   }
 
@@ -602,6 +609,22 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
+    _libraryController = LibraryController(
+      storage: HiveLibraryStorage(_library),
+      publishSnapshot: _publishLibrarySnapshot,
+      syncHistory: (context, subject, episode) async {
+        if (!_accounts.isContextCurrent(context.contextVersion)) return;
+        final current = state.value;
+        if (current == null) return;
+        await ref
+            .read(externalServiceRepositoryProvider)
+            .syncLocalHistory(subject, episode, current.services);
+      },
+    );
+    final librarySnapshot = await _libraryDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
     final services = settingsSnapshot.services;
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
@@ -610,12 +633,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final initialState = AnimeState(
       homeFeed: feed,
       settings: settingsSnapshot.playback,
-      favorites: _readEntries('favorites'),
-      history: _readEntries('history'),
-      following: _readEntries('following'),
+      favorites: librarySnapshot.favorites,
+      history: librarySnapshot.history,
+      following: librarySnapshot.following,
       offlineTasks: downloadSnapshot.tasks,
-      imageFavorites: _readEntries('imageFavorites'),
-      feedbacks: _readFeedbacks(),
+      imageFavorites: librarySnapshot.imageFavorites,
+      feedbacks: librarySnapshot.feedbacks,
       profile: AccountController.profileFromJson(profileJson, activeAccount),
       accountSession: accountSession,
       homePreferences: settingsSnapshot.homePreferences,
@@ -1770,52 +1793,21 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _sourceController?.repositoryFor(value) ??
       RulePluginRepository(extraRules: value.customRules);
 
-  Future<bool> toggleFavorite(AnimeSubject subject) async {
-    final current = state.value;
-    if (current == null) return false;
-    final next = _toggleSubject(current.favorites, subject);
-    state = AsyncData(current.copyWith(favorites: next));
-    await _writeEntries('favorites', next);
-    return next.any((item) => sameSubjectIdentity(item.subject, subject));
-  }
+  Future<bool> toggleFavorite(AnimeSubject subject) =>
+      _libraryDomain.toggleFavorite(subject);
 
-  Future<bool> toggleFollowing(AnimeSubject subject) async {
-    final current = state.value;
-    if (current == null) return false;
-    final next = _toggleSubject(current.following, subject);
-    state = AsyncData(current.copyWith(following: next));
-    await _writeEntries('following', next);
-    return next.any((item) => sameSubjectIdentity(item.subject, subject));
-  }
+  Future<bool> toggleFollowing(AnimeSubject subject) =>
+      _libraryDomain.toggleFollowing(subject);
 
   Future<bool> addHistory(
     AnimeSubject subject,
     AnimeEpisode? episode, {
     int? expectedAccountContextVersion,
-  }) async {
-    final accountContextVersion =
-        expectedAccountContextVersion ?? _accountContextVersion;
-    if (!isAccountContextCurrent(accountContextVersion)) return false;
-    final current = state.value;
-    if (current == null) return false;
-    final next = [
-      LibraryEntry(
-        subject: subject,
-        episode: episode,
-        updatedAt: DateTime.now(),
-        note: episode == null ? '打开详情' : '播放到 ${episode.displayTitle}',
-      ),
-      ...current.history.where(
-        (item) => !sameSubjectIdentity(item.subject, subject),
-      ),
-    ].take(80).toList();
-    state = AsyncData(current.copyWith(history: next));
-    await _writeEntries('history', next);
-    await ref
-        .read(externalServiceRepositoryProvider)
-        .syncLocalHistory(subject, episode, current.services);
-    return isAccountContextCurrent(accountContextVersion);
-  }
+  }) => _libraryDomain.addHistory(
+    subject,
+    episode,
+    expectedContextVersion: expectedAccountContextVersion,
+  );
 
   /// Persists the in-episode playback position onto the matching history
   /// entry. Near-complete positions (>=98% or within the final 15s) reset to
@@ -1826,39 +1818,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required Duration position,
     required Duration duration,
     int? expectedAccountContextVersion,
-  }) async {
-    final accountContextVersion =
-        expectedAccountContextVersion ?? _accountContextVersion;
-    if (!isAccountContextCurrent(accountContextVersion)) return;
-    final current = state.value;
-    if (current == null) return;
-    var positionSeconds = position.inSeconds;
-    final durationSeconds = duration.inSeconds;
-    if (positionSeconds < 5) return;
-    if (durationSeconds > 0 &&
-        (positionSeconds >= durationSeconds - 15 ||
-            positionSeconds / durationSeconds >= 0.98)) {
-      positionSeconds = 0;
-    }
-    var changed = false;
-    final next = current.history
-        .map((item) {
-          if (!sameSubjectIdentity(item.subject, subject) ||
-              item.episode?.id != episode.id) {
-            return item;
-          }
-          changed = true;
-          return item.copyWith(
-            positionSeconds: positionSeconds,
-            durationSeconds: durationSeconds,
-            updatedAt: DateTime.now(),
-          );
-        })
-        .toList(growable: false);
-    if (!changed) return;
-    state = AsyncData(current.copyWith(history: next));
-    await _writeEntries('history', next);
-  }
+  }) => _libraryDomain.updatePlaybackProgress(
+    subject,
+    episode,
+    position: position,
+    duration: duration,
+    expectedContextVersion: expectedAccountContextVersion,
+  );
 
   Future<String> queueOffline(AnimeSubject subject, AnimeEpisode? episode) =>
       _downloadDomain.queueOffline(subject, episode);
@@ -1879,66 +1845,22 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> removeDownload(String taskId) =>
       _downloadDomain.removeDownload(taskId);
 
-  Future<void> addImageFavorite(AnimeSubject subject) async {
-    final current = state.value;
-    if (current == null) return;
-    final next = [
-      LibraryEntry(subject: subject, updatedAt: DateTime.now(), note: '收藏封面图'),
-      ...current.imageFavorites.where(
-        (item) => !sameSubjectIdentity(item.subject, subject),
-      ),
-    ].take(80).toList();
-    state = AsyncData(current.copyWith(imageFavorites: next));
-    await _writeEntries('imageFavorites', next);
-  }
+  Future<void> addImageFavorite(AnimeSubject subject) =>
+      _libraryDomain.addImageFavorite(subject);
 
-  Future<void> clearLibrary(String key) async {
-    final current = state.value;
-    if (current == null) return;
-    switch (key) {
-      case 'history':
-        state = AsyncData(current.copyWith(history: const []));
-        break;
-      case 'offlineTasks':
-        await _downloadDomain.clearDownloads();
-        return;
-      case 'imageFavorites':
-        state = AsyncData(current.copyWith(imageFavorites: const []));
-        break;
-      case 'feedbacks':
-        state = AsyncData(current.copyWith(feedbacks: const []));
-        break;
-      default:
-        return;
-    }
-    await _library.put(_accountLibraryKey(key), const []);
-  }
+  Future<void> clearLibrary(String key) => key == 'offlineTasks'
+      ? _downloadDomain.clearDownloads()
+      : _libraryDomain.clear(key);
 
   Future<void> submitFeedback({
     required String title,
     required String content,
     AnimeSubject? subject,
-  }) async {
-    final accountId = _activeAccount?.id;
-    final current = state.value;
-    if (current == null) return;
-    final now = DateTime.now();
-    final normalizedTitle = title.trim().isEmpty ? '未命名反馈' : title.trim();
-    final normalizedContent = content.trim();
-    final feedback = LocalFeedback(
-      id: 'feedback:$stableIdentityVersion:${stableDigest('${_activeAccount?.id ?? 'guest'}|${now.toUtc().toIso8601String()}|$normalizedTitle|$normalizedContent')}',
-      title: normalizedTitle,
-      content: normalizedContent,
-      createdAt: now,
-      subject: subject,
-    );
-    final next = [feedback, ...current.feedbacks].take(80).toList();
-    state = AsyncData(current.copyWith(feedbacks: next));
-    await _library.put(
-      _accountLibraryKeyFor(accountId, 'feedbacks'),
-      next.map((item) => item.toJson()).toList(),
-    );
-  }
+  }) => _libraryDomain.submitFeedback(
+    title: title,
+    content: content,
+    subject: subject,
+  );
 
   _HomeFeedCacheSnapshot _readHomeFeedCache(String signature) {
     final value = _library.get(_homeFeedCacheKey);
@@ -2028,6 +1950,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
+    final librarySnapshot = await _libraryDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+    );
     final current = state.value;
     if (current == null ||
         !_accounts.isContextCurrent(activation.contextVersion)) {
@@ -2045,12 +1971,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       current.copyWith(
         selectedSubjects: const {},
         settings: settingsSnapshot.playback,
-        favorites: _readEntriesFor(accountId, 'favorites'),
-        history: _readEntriesFor(accountId, 'history'),
-        following: _readEntriesFor(accountId, 'following'),
+        favorites: librarySnapshot.favorites,
+        history: librarySnapshot.history,
+        following: librarySnapshot.following,
         offlineTasks: downloadSnapshot.tasks,
-        imageFavorites: _readEntriesFor(accountId, 'imageFavorites'),
-        feedbacks: _readFeedbacksFor(accountId),
+        imageFavorites: librarySnapshot.imageFavorites,
+        feedbacks: librarySnapshot.feedbacks,
         profile: AccountController.profileFromJson(profileJson, account),
         accountSession: activation.session,
         homePreferences: settingsSnapshot.homePreferences,
@@ -2126,6 +2052,20 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     state = AsyncData(current.copyWith(offlineTasks: snapshot.tasks));
   }
 
+  void _publishLibrarySnapshot(LibrarySnapshot snapshot) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        favorites: snapshot.favorites,
+        history: snapshot.history,
+        following: snapshot.following,
+        imageFavorites: snapshot.imageFavorites,
+        feedbacks: snapshot.feedbacks,
+      ),
+    );
+  }
+
   Future<void> _handleExternalServicesChanged(
     ExternalServicesChange change,
   ) async {
@@ -2148,6 +2088,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> _quiesceDownloadsForAccountChange() async {
     await _settingsController?.settleWrites();
     await _sourceController?.settleWrites();
+    await _libraryController?.settleWrites();
     await _downloadController?.quiesce();
   }
 
@@ -2158,46 +2099,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   String _accountSettingsKey(String key) =>
       _accountSettingsKeyFor(_activeAccount?.id, key);
 
-  String _accountLibraryKey(String key) =>
-      _accountLibraryKeyFor(_activeAccount?.id, key);
-
   static String _accountSettingsKeyFor(String? accountId, String key) =>
       AccountController.settingsKeyFor(accountId, key);
-
-  static String _accountLibraryKeyFor(String? accountId, String key) =>
-      AccountController.libraryKeyFor(accountId, key);
-
-  List<LibraryEntry> _toggleSubject(
-    List<LibraryEntry> entries,
-    AnimeSubject subject,
-  ) {
-    final exists = entries.any(
-      (item) => sameSubjectIdentity(item.subject, subject),
-    );
-    if (exists) {
-      return entries
-          .where((item) => !sameSubjectIdentity(item.subject, subject))
-          .toList();
-    }
-    return [
-      LibraryEntry(subject: subject, updatedAt: DateTime.now()),
-      ...entries,
-    ];
-  }
-
-  List<LibraryEntry> _readEntries(String key) {
-    return _readEntriesFor(_activeAccount?.id, key);
-  }
-
-  List<LibraryEntry> _readEntriesFor(String? accountId, String key) {
-    final value = _library.get(_accountLibraryKeyFor(accountId, key));
-    if (value is! List) return const [];
-    return value
-        .whereType<Map>()
-        .map((item) => LibraryEntry.fromJson(item.cast<String, dynamic>()))
-        .where((item) => item.subject.title.trim().isNotEmpty)
-        .toList();
-  }
 
   _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {
     final value = _library.get(key);
@@ -2577,28 +2480,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   int _subjectCacheKey(AnimeSubject subject) {
     return Object.hash(subject.source, subject.platform, subject.id);
-  }
-
-  Future<void> _writeEntries(String key, List<LibraryEntry> entries) {
-    final accountId = _activeAccount?.id;
-    return _library.put(
-      _accountLibraryKeyFor(accountId, key),
-      entries.map((item) => item.toJson()).toList(),
-    );
-  }
-
-  List<LocalFeedback> _readFeedbacks() {
-    return _readFeedbacksFor(_activeAccount?.id);
-  }
-
-  List<LocalFeedback> _readFeedbacksFor(String? accountId) {
-    final value = _library.get(_accountLibraryKeyFor(accountId, 'feedbacks'));
-    if (value is! List) return const [];
-    return value
-        .whereType<Map>()
-        .map((item) => LocalFeedback.fromJson(item.cast<String, dynamic>()))
-        .where((item) => item.title.trim().isNotEmpty)
-        .toList();
   }
 }
 
