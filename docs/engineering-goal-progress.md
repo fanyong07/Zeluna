@@ -846,9 +846,31 @@ Tests:
 
 Commit: `f52fabf refactor: isolate legacy lookup routes`
 
+### Startup demo mutation removal
+
+Audit:
+
+- The remaining startup helper inserted a fixed sample catalog and fixed public media URLs into every empty database.
+- The same helper also looked up a historical fixed-email demo identity and deleted it during ordinary startup. That implicit account deletion was an irreversible data mutation and is not an acceptable cleanup or migration boundary.
+
+Changes:
+
+- Removed runtime demo catalog/thread/character seeding and all fixed sample media URLs from application startup.
+- Removed the automatic historical demo-account deletion. Existing databases and accounts are left untouched; any later cleanup must use an explicit, reviewed migration or operator action with the required data authority.
+- `server.main` now contains only lifecycle ordering and application construction. It is 28 lines, owns no business routes, and performs no seed/account mutation after schema verification and scheduler startup.
+
+Tests:
+
+- Updated lifecycle ordering coverage and added a regression that rejects restoration of the removed startup seed hook.
+- Focused app-structure suite: 8 passed, 0 failed.
+- Full server suite: 122 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, the repository security gate, forbidden seed-reference scan, and route uniqueness checks passed. The runtime table remains 75 flattened routes and 79 unique method/path pairs, with 0 duplicates.
+- No database file, production environment, account, secret, or external media endpoint was opened or changed during this slice.
+
+Commit: `3a71f7e refactor: remove startup demo mutations`
+
 Remaining G7 work:
 
-- Move compatibility seed orchestration out of `server.main`, auditing demo-data lifecycle and startup behavior without deleting user or production data.
 - Separate remaining service/repository orchestration and complete independently testable server boundaries.
 - Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
 
