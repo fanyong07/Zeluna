@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `79010fe` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `9eca4cb` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1077,6 +1077,33 @@ Remaining risks:
 - Login still needs timing-resistant handling for nonexistent users and safe upgrade of legacy password hashes.
 - Session expiry cleanup, maximum-session concurrency, and password change/reset revocation semantics still require an explicit G8 audit.
 - No production migration, account, database, secret, email delivery, environment, or deployment was changed.
+
+### Timing-resistant login and password-hash upgrade
+
+Audit:
+
+- Modern and default-disabled legacy login returned immediately when no account row existed, while a real account performed bcrypt verification. That observable work difference could assist email/account enumeration despite the shared error response.
+- Raw legacy bcrypt hashes remained valid for compatibility but were never upgraded after a successful login, leaving migrated accounts on the unversioned format indefinitely.
+
+Changes:
+
+- Added one process-initialized, random dummy `bcrypt-sha256` hash. Both login paths now perform exactly one current-cost bcrypt verification even when the account does not exist, while still returning the same invalid-credentials response.
+- A successful login with a valid raw legacy bcrypt hash immediately rehashes the supplied password into the versioned `bcrypt-sha256` format. Wrong passwords never mutate the stored hash, and current-format accounts are not rehashed unnecessarily.
+- The upgrade commits atomically with token issuance. A signing/configuration failure therefore cannot persist a partial password change.
+
+Tests:
+
+- Focused account/app-structure suite: 23 passed, 0 failed. Direct regressions prove missing-user dummy verification, wrong-password non-mutation, successful legacy-hash upgrade, and post-upgrade password verification.
+- Full server suite: 148 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `9eca4cb security: harden account password login`
+
+Remaining risks:
+
+- Session expiry cleanup, maximum-session concurrency, token-subject binding to stored sessions, and password change/reset revocation semantics remain to be audited before G8 can complete.
+- Registration/code-request account-existence responses also require an enumeration review separate from login timing.
+- No production account, password, hash, token, database, secret, environment, or deployment was accessed or changed.
 
 ## G9 Privacy lifecycle
 
