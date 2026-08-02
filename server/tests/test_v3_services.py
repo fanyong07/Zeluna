@@ -32,6 +32,7 @@ from server.database import (
     SourceHealth,
 )
 from server.playback import PlaybackService
+from server.repositories.catalog import SqlCatalogRepository
 from server.scrapers.maccms_sites import MACCMS_SITES
 
 
@@ -136,7 +137,10 @@ class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(lightweight)
             self.assertNotIn("detail_complete", lightweight)
             async with sessions() as session:
-                await service._persist_many(session, [lightweight])
+                await service._persist_many(
+                    SqlCatalogRepository(session),
+                    [lightweight],
+                )
             async with sessions() as session:
                 first = await service.get_subject("bangumi:123", session)
 

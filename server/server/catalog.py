@@ -10,10 +10,10 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
-from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import (
@@ -21,7 +21,11 @@ from .config import (
     CATALOG_CACHE_HOURS,
     TMDB_READ_ACCESS_TOKEN,
 )
-from .database import CatalogSubject
+from .repositories.catalog import (
+    CatalogRepository,
+    CatalogWrite,
+    SqlCatalogRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +97,15 @@ def _image(path: Any, size: str) -> str:
 
 
 class CatalogService:
-    def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        repository_factory: Callable[[AsyncSession], CatalogRepository] = (
+            SqlCatalogRepository
+        ),
+    ):
+        self._repository_factory = repository_factory
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(12, connect=6),
             follow_redirects=True,
@@ -124,28 +136,12 @@ class CatalogService:
         if not query:
             return []
         fresh_after = time.time() - CATALOG_CACHE_HOURS * 3600
-        cached_rows = (
-            await session.scalars(
-                select(CatalogSubject)
-                .where(
-                    CatalogSubject.updated_at >= fresh_after,
-                    or_(
-                        CatalogSubject.title.contains(query),
-                        CatalogSubject.original_title.contains(query),
-                    ),
-                )
-                .order_by(CatalogSubject.popularity.desc())
-                .limit(max(1, min(limit, 100)))
-            )
-        ).all()
-        cached = []
-        for row in cached_rows:
-            try:
-                item = json.loads(row.metadata_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(item, dict):
-                cached.append(item)
+        repository = self._repository_factory(session)
+        cached = await repository.search_cached(
+            query=query,
+            fresh_after=fresh_after,
+            limit=max(1, min(limit, 100)),
+        )
         if len(cached) >= min(5, limit):
             return cached
         requested = set(media_types or ("anime", "tv", "movie"))
@@ -165,7 +161,7 @@ class CatalogService:
         for item in items:
             unique[item["stable_id"]] = item
         result = list(unique.values())[: max(1, min(limit, 100))]
-        await self._persist_many(session, result)
+        await self._persist_many(repository, result)
         return result
 
     async def home(
@@ -176,25 +172,12 @@ class CatalogService:
         limit: int = 60,
     ) -> list[dict]:
         fresh_after = time.time() - CATALOG_CACHE_HOURS * 3600
-        cached_rows = (
-            await session.scalars(
-                select(CatalogSubject)
-                .where(
-                    CatalogSubject.media_type == media_type,
-                    CatalogSubject.updated_at >= fresh_after,
-                )
-                .order_by(CatalogSubject.popularity.desc())
-                .limit(max(1, min(limit, _HOME_MAX_ITEMS)))
-            )
-        ).all()
-        cached = []
-        for row in cached_rows:
-            try:
-                item = json.loads(row.metadata_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(item, dict):
-                cached.append(item)
+        repository = self._repository_factory(session)
+        cached = await repository.home_cached(
+            media_type=media_type,
+            fresh_after=fresh_after,
+            limit=max(1, min(limit, _HOME_MAX_ITEMS)),
+        )
         requested_limit = max(1, min(limit, _HOME_MAX_ITEMS))
         cache_target = min(requested_limit, _HOME_CACHE_TARGET)
         if len(cached) >= cache_target:
@@ -210,7 +193,7 @@ class CatalogService:
         else:
             items = []
         items = items[:requested_limit]
-        await self._persist_many(session, items)
+        await self._persist_many(repository, items)
         return items or cached
 
     async def get_subject(
@@ -223,23 +206,15 @@ class CatalogService:
         identity = parse_stable_id(stable_id)
         if identity is None:
             return None
-        row = await session.scalar(
-            select(CatalogSubject).where(CatalogSubject.stable_id == stable_id)
-        )
+        repository = self._repository_factory(session)
+        cached = await repository.get_cached(stable_id)
         fresh_after = time.time() - CATALOG_CACHE_HOURS * 3600
-        cached_item: dict | None = None
-        if row is not None:
-            try:
-                parsed = json.loads(row.metadata_json)
-                if isinstance(parsed, dict):
-                    cached_item = parsed
-            except (json.JSONDecodeError, TypeError):
-                pass
+        cached_item = cached.metadata if cached is not None else None
         if (
             cached_item is not None
             and not refresh
-            and row is not None
-            and row.updated_at >= fresh_after
+            and cached is not None
+            and cached.updated_at >= fresh_after
             and _is_complete_detail(cached_item)
         ):
             return cached_item
@@ -251,38 +226,42 @@ class CatalogService:
         else:
             item = None
         if item is not None:
-            await self._persist_many(session, [item])
+            await self._persist_many(repository, [item])
             return item
         return cached_item
 
-    async def _persist_many(self, session: AsyncSession, items: list[dict]) -> None:
+    async def _persist_many(
+        self,
+        repository: CatalogRepository,
+        items: list[dict],
+    ) -> None:
         if not items:
             return
         now = time.time()
+        entries: list[CatalogWrite] = []
         for item in items:
             stable_id = _clean_text(item.get("stable_id"))
             identity = parse_stable_id(stable_id)
             if identity is None:
                 continue
-            row = await session.scalar(
-                select(CatalogSubject).where(CatalogSubject.stable_id == stable_id)
-            )
-            if row is None:
-                row = CatalogSubject(
+            entries.append(
+                CatalogWrite(
                     stable_id=stable_id,
                     provider=identity[0],
                     provider_id=identity[2],
                     media_type=identity[1],
                     title=_clean_text(item.get("title")),
+                    original_title=_clean_text(item.get("original_title")),
+                    aliases_json=json.dumps(
+                        item.get("aliases", []),
+                        ensure_ascii=False,
+                    ),
+                    metadata_json=json.dumps(item, ensure_ascii=False),
+                    popularity=float(item.get("popularity") or 0),
+                    updated_at=now,
                 )
-                session.add(row)
-            row.title = _clean_text(item.get("title"))
-            row.original_title = _clean_text(item.get("original_title"))
-            row.aliases_json = json.dumps(item.get("aliases", []), ensure_ascii=False)
-            row.metadata_json = json.dumps(item, ensure_ascii=False)
-            row.popularity = float(item.get("popularity") or 0)
-            row.updated_at = now
-        await session.commit()
+            )
+        await repository.persist_many(entries)
 
     def _bangumi_headers(self) -> dict[str, str]:
         headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
