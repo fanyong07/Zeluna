@@ -312,7 +312,7 @@ Remaining risks:
 
 ## G6 Client domain architecture
 
-Status: in_progress
+Status: completed
 
 ### AccountController
 
@@ -573,14 +573,18 @@ Tests:
 - Full `flutter test --reporter expanded`: 579 passed, 26 intentionally skipped, 0 failed.
 - `flutter analyze --suppress-analytics`: no issues. Full Dart format check, staged `git diff --check`, and the repository security gate passed.
 
-Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web build gates are the remaining G6 acceptance work.
+Builds: recorded in the G6 final acceptance below.
 
 Commit: `8d15b2a refactor: split sync controller`
 
-Remaining G6 acceptance:
+G6 final acceptance (2026-08-02):
 
-- Run Android, Windows, and Web builds against the fully split client domains.
-- Re-audit `AnimeController` ownership and compatibility adapters against the G6 acceptance criteria before changing G6 to completed.
+- Ownership audit passed for Account, Settings, Sources, Downloads, Library, Catalog, PlaybackDiscovery, and Sync. `AnimeController` retains application composition, compatibility API delegates, repository factories, metadata/external playback ports, and aggregate snapshot publication; it no longer owns those domains' persistence, queues, caches, cancellation state, or mutation generations.
+- Account switching is coordinated through `AccountScopeActivation` with monotonic context versions and explicit per-domain `loadForAccount` calls. Each extracted controller has direct account-scope and late-result regressions, and the fully split client suite passed 579 tests with 26 intentional skips.
+- `flutter build apk --debug --suppress-analytics` passed. Artifact: `build/app/outputs/flutter-apk/app-debug.apk`, 268,924,837 bytes, SHA-256 `F1D7281D654147CD2BE9F867DD91E0785796AE285BF24E7FF2D8BC759F17EE4F`.
+- `flutter build web --release --suppress-analytics` passed, including the Wasm dry run. Artifact: `build/web/main.dart.js`, 4,845,987 bytes, SHA-256 `E997ECEB8B930331A5DEA3844E55724FB8B01AC892221239C56275AA7B880493`.
+- `flutter build windows --release --suppress-analytics` passed. Artifact: `build/windows/x64/runner/Release/Zeluna.exe`, 158,208 bytes, SHA-256 `2814F973D704BE8D76230EF5790EF91D9DE0ECE2F6C7D8A0E17173B29DE9A9FC`; compiled payload `data/app.so`, 13,550,512 bytes, SHA-256 `F16E8C3DB319356A805BADD7EF2D9709904D96B1679546009BFF5A9B6E192B95`.
+- Windows still reports the previously documented upstream WebView CMake `CMP0175` developer warning; it did not fail the Release build. G6 did not access signing material, produce a signed release package, use a real account, or change production.
 
 Remaining risks:
 
