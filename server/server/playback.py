@@ -9,7 +9,6 @@ import time
 from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .aggregator import (
@@ -52,12 +51,15 @@ from .config import (
     SOURCE_CIRCUIT_MAX_COOLDOWN_SECONDS,
     SOURCE_MAX_CONCURRENCY,
 )
-from .database import (
-    SourceBinding,
-    SourceHealth,
-    async_session,
+from .database import async_session
+from .repositories.playback import (
+    PlaybackRepository,
+    SourceBindingEntry,
+    SourceBindingWrite,
+    SourceHealthEntry,
+    SourceHealthObservation,
+    SqlPlaybackRepository,
 )
-from .repositories.playback import PlaybackRepository, SqlPlaybackRepository
 
 
 logger = logging.getLogger(__name__)
@@ -828,19 +830,14 @@ class PlaybackService:
         session: AsyncSession,
         stable_id: str,
         *,
-        source_health: dict[str, SourceHealth] | None = None,
+        source_health: dict[str, SourceHealthEntry] | None = None,
     ) -> list[SourceMatch]:
         now = time.time()
         cutoff = now - SOURCE_BINDING_HOURS * 3600
-        rows = (
-            await session.scalars(
-                select(SourceBinding)
-                .where(
-                    SourceBinding.stable_id == stable_id,
-                    SourceBinding.updated_at >= cutoff,
-                )
-            )
-        ).all()
+        rows = await self._repository_factory(session).load_bindings(
+            stable_id=stable_id,
+            updated_after=cutoff,
+        )
         health = source_health
         if health is None:
             health = await self._load_source_health(session)
@@ -876,9 +873,8 @@ class PlaybackService:
     async def _load_source_health(
         self,
         session: AsyncSession,
-    ) -> dict[str, SourceHealth]:
-        rows = (await session.scalars(select(SourceHealth))).all()
-        return {row.source_name: row for row in rows}
+    ) -> dict[str, SourceHealthEntry]:
+        return await self._repository_factory(session).load_source_health()
 
     @staticmethod
     def _source_circuit_cooldown_seconds(consecutive_failures: int) -> int:
@@ -896,7 +892,7 @@ class PlaybackService:
     @classmethod
     def _source_circuit_is_open(
         cls,
-        health: SourceHealth | None,
+        health: SourceHealthEntry | None,
         now: float,
     ) -> bool:
         if health is None:
@@ -908,8 +904,8 @@ class PlaybackService:
 
     @staticmethod
     def _source_binding_rank(
-        binding: SourceBinding,
-        health: SourceHealth | None,
+        binding: SourceBindingEntry,
+        health: SourceHealthEntry | None,
     ) -> tuple[int, int, int, int, int]:
         if health is None:
             recent_success_rate = 0.5
@@ -986,28 +982,22 @@ class PlaybackService:
         matches: list[SourceMatch],
     ) -> None:
         now = time.time()
-        for match in matches:
-            row = await session.scalar(
-                select(SourceBinding).where(
-                    SourceBinding.stable_id == stable_id,
-                    SourceBinding.source_id == match.source_id,
-                )
-            )
-            if row is None:
-                row = SourceBinding(
-                    stable_id=stable_id,
+        await self._repository_factory(session).upsert_bindings(
+            stable_id=stable_id,
+            bindings=[
+                SourceBindingWrite(
                     source_id=match.source_id,
                     source_name=match.source_name,
+                    matched_title=match.title,
+                    media_type=match.content_type,
+                    year=match.year,
+                    score=match.score,
+                    episode_count=match.episode_count,
                 )
-                session.add(row)
-            row.matched_title = match.title
-            row.media_type = match.content_type
-            row.year = match.year
-            row.score = match.score
-            row.episode_count = match.episode_count
-            row.enabled = True
-            row.updated_at = now
-        await session.commit()
+                for match in matches
+            ],
+            updated_at=now,
+        )
 
     async def _record_health(
         self,
@@ -1018,6 +1008,7 @@ class PlaybackService:
         diagnostics: dict[str, SourceResolutionOutcome] | None = None,
     ) -> None:
         now = time.time()
+        observations: list[SourceHealthObservation] = []
         for source_name, raw_status in health.items():
             status = (
                 SERVER_VERIFIED if raw_status is True
@@ -1029,82 +1020,25 @@ class PlaybackService:
             error_category = str(
                 getattr(diagnostic, "error_category", "") or ""
             )
-            binding_rows = (
-                await session.scalars(
-                    select(SourceBinding).where(
-                        SourceBinding.stable_id == stable_id,
-                        SourceBinding.source_name == source_name,
-                    )
-                )
-            ).all()
-            for row in binding_rows:
-                if status == SERVER_VERIFIED:
-                    row.success_count += 1
-                    row.last_success_at = now
-                elif status == UNAVAILABLE:
-                    row.failure_count += 1
-                    row.last_failure_at = now
-                # Keep the binding recoverable. Recent source health applies a
-                # temporary circuit instead of permanently disabling it from
-                # lifetime counters.
-                row.enabled = True
-            source = await session.scalar(
-                select(SourceHealth).where(SourceHealth.source_name == source_name)
-            )
-            if source is None:
-                source = SourceHealth(
+            observations.append(
+                SourceHealthObservation(
                     source_name=source_name,
-                    success_count=0,
-                    failure_count=0,
-                    consecutive_failures=0,
-                    last_status="unknown",
-                    last_error_category="",
-                    last_checked_at=0.0,
-                    last_success_at=0.0,
-                    last_failure_at=0.0,
-                    latency_ms=0,
-                    recent_success_rate=0.5,
+                    status=status,
+                    latency_ms=latency_ms,
+                    error_category=error_category,
                 )
-                session.add(source)
-            source.last_checked_at = now
-            if latency_ms > 0:
-                source.latency_ms = (
-                    latency_ms
-                    if not source.latency_ms
-                    else round(
-                        source.latency_ms * (1 - _SOURCE_HEALTH_EMA_ALPHA)
-                        + latency_ms * _SOURCE_HEALTH_EMA_ALPHA
-                    )
-                )
-            current_rate = source.recent_success_rate
-            if current_rate is None:
-                current_rate = 0.5
-            if status == SERVER_VERIFIED:
-                source.success_count += 1
-                source.consecutive_failures = 0
-                source.last_status = "healthy"
-                source.last_error_category = ""
-                source.last_success_at = now
-                target_rate = 1.0
-            elif status == CLIENT_PROBE_REQUIRED:
-                source.consecutive_failures = 0
-                source.last_status = CLIENT_PROBE_REQUIRED
-                source.last_error_category = error_category
-                target_rate = 0.65
-            else:
-                source.failure_count += 1
-                source.consecutive_failures += (
-                    2 if error_category in _DETERMINISTIC_SOURCE_FAILURES else 1
-                )
-                source.last_status = "unhealthy"
-                source.last_error_category = error_category or UNKNOWN_EXCEPTION
-                source.last_failure_at = now
-                target_rate = 0.0
-            source.recent_success_rate = (
-                current_rate * (1 - _SOURCE_HEALTH_EMA_ALPHA)
-                + target_rate * _SOURCE_HEALTH_EMA_ALPHA
             )
-        await session.commit()
+        await self._repository_factory(session).record_health(
+            stable_id=stable_id,
+            observations=observations,
+            checked_at=now,
+            ema_alpha=_SOURCE_HEALTH_EMA_ALPHA,
+            deterministic_failures=frozenset(_DETERMINISTIC_SOURCE_FAILURES),
+            server_verified_status=SERVER_VERIFIED,
+            client_probe_status=CLIENT_PROBE_REQUIRED,
+            unavailable_status=UNAVAILABLE,
+            unknown_error_category=UNKNOWN_EXCEPTION,
+        )
 
     async def _store_cache(
         self,

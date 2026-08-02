@@ -9,6 +9,10 @@ from .catalog import (
 from .playback import (
     PlaybackCacheEntry,
     PlaybackRepository,
+    SourceBindingEntry,
+    SourceBindingWrite,
+    SourceHealthEntry,
+    SourceHealthObservation,
     SqlPlaybackRepository,
 )
 
@@ -19,5 +23,9 @@ __all__ = [
     "SqlCatalogRepository",
     "PlaybackCacheEntry",
     "PlaybackRepository",
+    "SourceBindingEntry",
+    "SourceBindingWrite",
+    "SourceHealthEntry",
+    "SourceHealthObservation",
     "SqlPlaybackRepository",
 ]
