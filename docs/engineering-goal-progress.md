@@ -824,10 +824,32 @@ Tests:
 
 Commit: `2c599d7 refactor: isolate legacy library routes`
 
+### Legacy lookup router isolation
+
+Audit:
+
+- Eight retained character, person, picture-search, and bangumi-search operations remained in `server.main`. They preserve a mix of JSON and protobuf compatibility contracts and use only the shared database session dependency.
+- The application factory already owned router composition, so moving these handlers removes the final direct business-route definitions from `server.main` without changing public paths or response formats.
+
+Changes:
+
+- Added `server.routers.legacy_lookup` for character/person lists and details, related bangumi lookup, picture search, and bangumi search.
+- Preserved lookup filters, ordering/pagination limits, protobuf content type, JSON field shapes, 404 behavior, and shared session dependency.
+- Updated playback tests to import the shared dependency from `server.dependencies`. `server.main` now contains lifecycle, application composition, and compatibility seed orchestration only; it is 160 lines and owns no direct business route.
+
+Tests:
+
+- Added in-memory regressions proving character detail and missing-person JSON behavior and the binary bangumi-search contract.
+- Focused lookup/app/playback suite: 11 passed, 0 failed.
+- Full server suite: 121 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and route uniqueness checks passed. The runtime table has 75 flattened routes and 79 unique method/path pairs, with 0 duplicates.
+
+Commit: `f52fabf refactor: isolate legacy lookup routes`
+
 Remaining G7 work:
 
-- Split retained catalog/community/compatibility route groups into explicit routers; administrative and legacy account surfaces are now isolated and fail-closed.
-- Separate remaining route orchestration from services/repositories and complete independently testable server boundaries.
+- Move compatibility seed orchestration out of `server.main`, auditing demo-data lifecycle and startup behavior without deleting user or production data.
+- Separate remaining service/repository orchestration and complete independently testable server boundaries.
 - Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
 
 ## G8 Account and session security
