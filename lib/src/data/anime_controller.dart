@@ -7,12 +7,12 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../accounts/account_controller.dart';
 import '../accounts/local_account_repository.dart';
+import '../catalog/catalog_controller.dart';
 import '../accounts/cloud_account_repository.dart';
 import '../core/identity/local_identity_migration.dart';
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
-import '../domain/subject_content_type.dart';
 import '../downloads/download_controller.dart';
 import '../library/library_controller.dart';
 import '../rules/drpy_runtime.dart';
@@ -30,7 +30,6 @@ import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
 import 'async_single_flight.dart';
 import 'chinese_metadata_repository.dart';
-import 'chinese_text.dart';
 import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
 import 'media_download_service.dart';
@@ -474,16 +473,6 @@ class AnimeState {
 class AnimeController extends AsyncNotifier<AnimeState> {
   static const _settingsBox = 'anime.settings.v2';
   static const _libraryBox = 'anime.library.v2';
-  static const _animeMetadataCacheKey = 'metadata.cache.anime';
-  static const _seriesMetadataCacheKey = 'metadata.cache.series';
-  static const _movieMetadataCacheKey = 'metadata.cache.movie';
-  static const _homeFeedCacheKey = 'metadata.cache.home';
-  static const _homeFeedCacheVersion = 4;
-  static const _homeFeedCacheTtl = Duration(hours: 1);
-  static const _metadataCacheVersion = 11;
-  static const _metadataCacheLimit = 1200;
-  static const _metadataCacheTtl = Duration(hours: 8);
-  static const _sparseMetadataCacheTtl = Duration(minutes: 30);
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
   AccountController? _accountController;
@@ -491,15 +480,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   SourceController? _sourceController;
   DownloadController? _downloadController;
   LibraryController? _libraryController;
-  int _homeRefreshVersion = 0;
-  final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
-  final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
+  CatalogController? _catalogController;
   final _playbackPrefetches = <String, Future<void>>{};
   final _playbackPrefetchCancellationTokens =
       <String, RulePlaybackCancellationToken>{};
   final _backendLineLookups = AsyncSingleFlight<String, List<PlaybackLine>>();
   final _backendPlaybackLineCache = PlaybackPrefetchCache();
-  Future<void> _metadataWriteQueue = Future<void>.value();
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -528,6 +514,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   LibraryController get _libraryDomain {
     final controller = _libraryController;
     if (controller == null) throw StateError('媒体库尚未准备好');
+    return controller;
+  }
+
+  CatalogController get _catalogDomain {
+    final controller = _catalogController;
+    if (controller == null) throw StateError('内容目录尚未准备好');
     return controller;
   }
 
@@ -627,8 +619,33 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     final services = settingsSnapshot.services;
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
-    final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
-    final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
+    _catalogController = CatalogController(
+      storage: HiveCatalogStorage(_library),
+      publishSnapshot: _publishCatalogSnapshot,
+      search: (query, settings) async {
+        final repository = _backendCatalogRepositoryFor(settings);
+        return repository == null ? const [] : repository.search(query);
+      },
+      loadHome: (type, settings) async {
+        final repository = _backendCatalogRepositoryFor(settings);
+        return repository == null ? const [] : repository.home(type);
+      },
+      loadDetail: (subject, settings) async {
+        final repository = _backendCatalogRepositoryFor(settings);
+        return await repository?.detail(subject) ?? _fallbackDetail(subject);
+      },
+      enrichDetail: (bundle, _) => _enrichSparseDetail(bundle),
+      prefetchPlayback: _prefetchPlayback,
+      fallbackSeries: _fallbackExternalSeries,
+      fallbackMovies: _fallbackExternalMovies,
+    );
+    final catalogLoad = await _catalogDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+      services: services,
+      fallbackHomeFeed: bangumiRepository.fallbackHomeFeed(),
+    );
+    final feed = catalogLoad.snapshot.homeFeed;
     unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
     final initialState = AnimeState(
       homeFeed: feed,
@@ -649,27 +666,25 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       rulePlugins: sourceSnapshot.rulePlugins,
       sourceCatalog: sourceSnapshot.sourceCatalog,
     );
-    if (!cachedHomeFeed.fresh) {
+    if (!catalogLoad.homeFresh) {
       unawaited(
         Future<void>.delayed(
           Duration.zero,
-          () => _refreshHomeFeed(services),
+          _catalogDomain.refreshHome,
         ).onError((_, _) {}),
       );
     }
     ref.onDispose(() {
       _downloadController?.dispose();
+      _libraryController?.dispose();
+      _catalogController?.dispose();
       _cancelPlaybackPrefetches();
     });
     return initialState;
   }
 
-  Future<List<AnimeSubject>> search(String keyword) async {
-    if (keyword.trim().isEmpty) return Future.value(const []);
-    final repository = _backendCatalogRepository();
-    if (repository == null) return const [];
-    return repository.search(keyword).onError((_, _) => const []);
-  }
+  Future<List<AnimeSubject>> search(String keyword) =>
+      _catalogDomain.search(keyword);
 
   Future<SourceAdapterBatch<TorrentResource>> searchTorrentResources(
     String keyword,
@@ -685,111 +700,23 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .search(sources: sourceCatalog.sources, query: query, limit: 36);
   }
 
-  Future<List<AnimeSubject>> categorySubjects(String name) async {
-    final subjects = await discoverSubjects(waitForRefresh: true);
-    return subjects
-        .where((item) => item.categories.any((value) => value.name == name))
-        .toList(growable: false);
-  }
+  Future<List<AnimeSubject>> categorySubjects(String name) =>
+      _catalogDomain.categorySubjects(name);
 
-  Future<List<AnimeSubject>> tagSubjects(String name) async {
-    final subjects = await discoverSubjects(waitForRefresh: true);
-    return subjects
-        .where((item) => item.tags.any((value) => value.name == name))
-        .toList(growable: false);
-  }
+  Future<List<AnimeSubject>> tagSubjects(String name) =>
+      _catalogDomain.tagSubjects(name);
 
-  Future<List<AnimeSubject>> discoverSubjects({
-    bool waitForRefresh = false,
-  }) async {
-    final subjects = _homeSubjects
-        .where(
-          (subject) =>
-              subjectMatchesContentType(subject, SubjectContentType.anime),
-        )
-        .toList(growable: false);
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    return _metadataSubjects(
-      key: _animeMetadataCacheKey,
-      signature: _metadataSignature('anime', services),
-      contentType: SubjectContentType.anime,
-      fallback: subjects,
-      waitForRefresh: waitForRefresh,
-      load: () async {
-        final repository = _backendCatalogRepository();
-        return repository == null
-            ? const <AnimeSubject>[]
-            : repository.home(SubjectContentType.anime);
-      },
-    );
-  }
+  Future<List<AnimeSubject>> discoverSubjects({bool waitForRefresh = false}) =>
+      _catalogDomain.discoverSubjects(waitForRefresh: waitForRefresh);
 
-  Future<List<AnimeSubject>> seriesSubjects({
-    bool waitForRefresh = false,
-  }) async {
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    if (!services.mediaMetadataEnabled) {
-      return _subjectsOfType(
-        _fallbackExternalSeries,
-        SubjectContentType.series,
-      );
-    }
-    return _metadataSubjects(
-      key: _seriesMetadataCacheKey,
-      signature: _metadataSignature('series', services),
-      contentType: SubjectContentType.series,
-      fallback: _fallbackExternalSeries,
-      waitForRefresh: waitForRefresh,
-      load: () async {
-        final repository = _backendCatalogRepository();
-        return repository == null
-            ? const <AnimeSubject>[]
-            : repository.home(SubjectContentType.series);
-      },
-    );
-  }
+  Future<List<AnimeSubject>> seriesSubjects({bool waitForRefresh = false}) =>
+      _catalogDomain.seriesSubjects(waitForRefresh: waitForRefresh);
 
-  Future<List<AnimeSubject>> movieSubjects({
-    bool waitForRefresh = false,
-  }) async {
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    if (!services.mediaMetadataEnabled) {
-      return _subjectsOfType(_fallbackExternalMovies, SubjectContentType.movie);
-    }
-    return _metadataSubjects(
-      key: _movieMetadataCacheKey,
-      signature: _metadataSignature('movie', services),
-      contentType: SubjectContentType.movie,
-      fallback: _fallbackExternalMovies,
-      waitForRefresh: waitForRefresh,
-      load: () async {
-        final repository = _backendCatalogRepository();
-        return repository == null
-            ? const <AnimeSubject>[]
-            : repository.home(SubjectContentType.movie);
-      },
-    );
-  }
+  Future<List<AnimeSubject>> movieSubjects({bool waitForRefresh = false}) =>
+      _catalogDomain.movieSubjects(waitForRefresh: waitForRefresh);
 
-  Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
-    final subjects = await discoverSubjects(waitForRefresh: true);
-    return _groupScheduleSubjects(subjects);
-  }
-
-  Map<int, List<AnimeSubject>> _groupScheduleSubjects(
-    Iterable<AnimeSubject> subjects,
-  ) {
-    final schedule = {for (var day = 0; day < 7; day++) day: <AnimeSubject>[]};
-    for (final subject in _uniqueSubjects(subjects)) {
-      final date = DateTime.tryParse(subject.date ?? '');
-      final day = date == null ? subject.id.abs() % 7 : date.weekday % 7;
-      schedule[day]!.add(subject);
-    }
-    return {
-      for (final entry in schedule.entries)
-        entry.key: entry.value.take(36).toList(growable: false),
-    };
-  }
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule() =>
+      _catalogDomain.weeklySchedule();
 
   /// The unified backend only ships subject + episodes today. Characters,
   /// staff, recommendations and tags come straight from the public metadata
@@ -844,31 +771,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
   }
 
-  Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
-    final accountContextVersion = _accountContextVersion;
-    final current = state.value;
-    final cacheKey = _subjectCacheKey(subject);
-    final cached = current?.selectedSubjects[cacheKey];
-    if (cached != null) {
-      _prefetchPlayback(cached.subject, cached.episodes);
-      return cached;
-    }
-    final repository = _backendCatalogRepository();
-    final detail = await _enrichSparseDetail(
-      await repository?.detail(subject) ?? _fallbackDetail(subject),
-    );
-    _ensureAccountContext(accountContextVersion);
-    final previous = state.value;
-    if (previous != null && accountContextVersion == _accountContextVersion) {
-      state = AsyncData(
-        previous.copyWith(
-          selectedSubjects: {...previous.selectedSubjects, cacheKey: detail},
-        ),
-      );
-    }
-    _prefetchPlayback(detail.subject, detail.episodes);
-    return detail;
-  }
+  Future<AnimeDetailBundle> detail(AnimeSubject subject) =>
+      _catalogDomain.detail(subject);
 
   void _prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {
     if (episodes.isEmpty || !_usesBackendPlayback(subject)) return;
@@ -1416,8 +1320,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return result;
   }
 
-  ZelunaBackendCatalogRepository? _backendCatalogRepository() {
-    final services = state.value?.services ?? const ExternalServiceSettings();
+  ZelunaBackendCatalogRepository? _backendCatalogRepositoryFor(
+    ExternalServiceSettings services,
+  ) {
     if (!services.playbackBackendEnabled ||
         ZelunaBackendPlaybackRepository.normalizeBaseUrl(
               services.playbackBackendEndpoint,
@@ -1707,40 +1612,16 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _cancelPlaybackPrefetches();
     ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
     ref.read(chineseMetadataRepositoryProvider).clearMemoryCache();
-    final current = state.value;
-    if (current != null && current.selectedSubjects.isNotEmpty) {
-      state = AsyncData(current.copyWith(selectedSubjects: const {}));
-    }
+    _catalogController?.clearDetailCache();
   }
 
   Future<void> handleTmdbCredentialChanged() async {
     ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
-    _homeRefreshVersion++;
-    _latestMetadataRefreshes.remove(_seriesMetadataCacheKey);
-    _latestMetadataRefreshes.remove(_movieMetadataCacheKey);
-    final current = state.value;
-    if (current != null && current.selectedSubjects.isNotEmpty) {
-      state = AsyncData(current.copyWith(selectedSubjects: const {}));
-    }
-    await Future.wait([
-      _library.delete(_homeFeedCacheKey),
-      _library.delete(_seriesMetadataCacheKey),
-      _library.delete(_movieMetadataCacheKey),
-    ]);
-    final services = state.value?.services;
-    if (services != null && services.mediaMetadataEnabled) {
-      unawaited(_refreshHomeFeed(services).onError((_, _) {}));
-    }
+    await _catalogDomain.invalidateTmdbCredential();
   }
 
-  Future<void> invalidateMetadataCache(String kind) {
-    final key = switch (kind) {
-      'series' => _seriesMetadataCacheKey,
-      'movie' => _movieMetadataCacheKey,
-      _ => _animeMetadataCacheKey,
-    };
-    return _library.delete(key);
-  }
+  Future<void> invalidateMetadataCache(String kind) =>
+      _catalogDomain.invalidateMetadataCache(kind);
 
   Future<void> installRulePlugin(String id) =>
       _sourceDomain.installRulePlugin(id);
@@ -1862,76 +1743,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     subject: subject,
   );
 
-  _HomeFeedCacheSnapshot _readHomeFeedCache(String signature) {
-    final value = _library.get(_homeFeedCacheKey);
-    if (value is! Map) return const _HomeFeedCacheSnapshot();
-    final version = value['version'];
-    if (version != _homeFeedCacheVersion ||
-        value['signature']?.toString() != signature) {
-      return const _HomeFeedCacheSnapshot();
-    }
-    final feedJson = value['feed'];
-    if (feedJson is! Map) return const _HomeFeedCacheSnapshot();
-    try {
-      final feed = AnimeHomeFeed.fromJson(feedJson.cast<String, dynamic>());
-      final fetchedAt = DateTime.tryParse(value['fetchedAt']?.toString() ?? '');
-      final age = fetchedAt == null
-          ? null
-          : DateTime.now().toUtc().difference(fetchedAt.toUtc());
-      final fresh = age != null && !age.isNegative && age <= _homeFeedCacheTtl;
-      return _HomeFeedCacheSnapshot(feed: feed, fresh: fresh);
-    } catch (_) {
-      return const _HomeFeedCacheSnapshot();
-    }
-  }
-
-  Future<void> _refreshHomeFeed(ExternalServiceSettings services) async {
-    final refreshVersion = ++_homeRefreshVersion;
-    final repository = _backendCatalogRepository();
-    if (repository == null) return;
-    final groups =
-        await Future.wait([
-          repository.home(SubjectContentType.anime),
-          repository.home(SubjectContentType.series),
-          repository.home(SubjectContentType.movie),
-        ]).onError(
-          (_, _) => const [
-            <AnimeSubject>[],
-            <AnimeSubject>[],
-            <AnimeSubject>[],
-          ],
-        );
-    final anime = _uniqueSubjects(groups[0]);
-    if (anime.isEmpty || refreshVersion != _homeRefreshVersion) return;
-    final categories = <String, AnimeCategory>{};
-    for (final subject in anime) {
-      for (final category in subject.categories) {
-        categories.putIfAbsent(category.name, () => category);
-      }
-    }
-    final feed = AnimeHomeFeed(
-      hero: anime.first,
-      recent: anime.take(24).toList(growable: false),
-      recommended: anime.skip(8).take(24).toList(growable: false),
-      index: anime,
-      categories: categories.values.toList(growable: false),
-      tags: const [],
-      seriesHighlights: _uniqueSubjects(groups[1]),
-      movieHighlights: _uniqueSubjects(groups[2]),
-    );
-    if (refreshVersion != _homeRefreshVersion) return;
-    await _library.put(_homeFeedCacheKey, {
-      'version': _homeFeedCacheVersion,
-      'signature': _servicesSignature(services),
-      'fetchedAt': DateTime.now().toUtc().toIso8601String(),
-      'feed': feed.toJson(),
-    });
-    final current = state.value;
-    if (current != null) {
-      state = AsyncData(current.copyWith(homeFeed: feed));
-    }
-  }
-
   Future<void> _applyAccountScope(AccountScopeActivation activation) async {
     final account = activation.account;
     final accountId = account?.id;
@@ -1954,6 +1765,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
+    final catalogLoad = await _catalogDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+      services: settingsSnapshot.services,
+      fallbackHomeFeed: ref
+          .read(bangumiMetadataRepositoryProvider)
+          .fallbackHomeFeed(),
+    );
     final current = state.value;
     if (current == null ||
         !_accounts.isContextCurrent(activation.contextVersion)) {
@@ -1965,11 +1784,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ref.read(torrentSourceAdapterProvider).clearCache();
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
     _backendLineLookups.clear();
-    _homeRefreshVersion++;
     _cancelPlaybackPrefetches();
     state = AsyncData(
       current.copyWith(
-        selectedSubjects: const {},
+        homeFeed: catalogLoad.snapshot.homeFeed,
+        selectedSubjects: catalogLoad.snapshot.selectedSubjects,
         settings: settingsSnapshot.playback,
         favorites: librarySnapshot.favorites,
         history: librarySnapshot.history,
@@ -1989,7 +1808,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ),
     );
     await _settingsDomain.applyRuntimeEffects().onError((_, _) {});
-    unawaited(_refreshHomeFeed(settingsSnapshot.services).onError((_, _) {}));
+    if (!catalogLoad.homeFresh) {
+      unawaited(_catalogDomain.refreshHome().onError((_, _) {}));
+    }
   }
 
   void _selectCredentialAccountContext(
@@ -2066,6 +1887,17 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
+  void _publishCatalogSnapshot(CatalogSnapshot snapshot) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(
+      current.copyWith(
+        homeFeed: snapshot.homeFeed,
+        selectedSubjects: snapshot.selectedSubjects,
+      ),
+    );
+  }
+
   Future<void> _handleExternalServicesChanged(
     ExternalServicesChange change,
   ) async {
@@ -2073,27 +1905,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _backendLineLookups.clear();
       _backendPlaybackLineCache.clear();
     }
-    if (!change.metadataChanged) return;
-    await Future.wait([
-      _library.delete(_homeFeedCacheKey),
-      _library.delete(_animeMetadataCacheKey),
-      _library.delete(_seriesMetadataCacheKey),
-      _library.delete(_movieMetadataCacheKey),
-    ]);
-    if (_accounts.isContextCurrent(change.contextVersion)) {
-      unawaited(_refreshHomeFeed(change.current).onError((_, _) {}));
-    }
+    if (!change.metadataChanged && !change.playbackBackendChanged) return;
+    await _catalogDomain.applyServices(
+      change.current,
+      contextVersion: change.contextVersion,
+    );
   }
 
   Future<void> _quiesceDownloadsForAccountChange() async {
     await _settingsController?.settleWrites();
     await _sourceController?.settleWrites();
     await _libraryController?.settleWrites();
+    await _catalogController?.settleWrites();
     await _downloadController?.quiesce();
-  }
-
-  void _ensureAccountContext(int expectedVersion) {
-    _accounts.ensureContext(expectedVersion);
   }
 
   String _accountSettingsKey(String key) =>
@@ -2101,400 +1925,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   static String _accountSettingsKeyFor(String? accountId, String key) =>
       AccountController.settingsKeyFor(accountId, key);
-
-  _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {
-    final value = _library.get(key);
-    if (value is List) return const _SubjectCacheSnapshot();
-    if (value is! Map) return const _SubjectCacheSnapshot();
-    if (value['version'] != _metadataCacheVersion ||
-        value['signature']?.toString() != signature) {
-      return const _SubjectCacheSnapshot();
-    }
-    final rawSubjects = value['subjects'];
-    final subjects = rawSubjects is List
-        ? rawSubjects
-              .whereType<Map>()
-              .map(
-                (item) => AnimeSubject.fromJson(item.cast<String, dynamic>()),
-              )
-              .where((item) => item.title.trim().isNotEmpty)
-              .toList()
-        : const <AnimeSubject>[];
-    final fetchedAt = DateTime.tryParse(value['fetchedAt']?.toString() ?? '');
-    final refreshCount = switch (value['refreshCount']) {
-      final num count => count.toInt(),
-      _ => subjects.length,
-    };
-    final cacheTtl = _isSparseMetadataResult(key, refreshCount)
-        ? _sparseMetadataCacheTtl
-        : _metadataCacheTtl;
-    final fresh =
-        value['version'] == _metadataCacheVersion &&
-        value['signature']?.toString() == signature &&
-        fetchedAt != null &&
-        DateTime.now().difference(fetchedAt) <= cacheTtl;
-    return _SubjectCacheSnapshot(subjects: subjects, fresh: fresh);
-  }
-
-  Future<List<AnimeSubject>> _metadataSubjects({
-    required String key,
-    required String signature,
-    required SubjectContentType contentType,
-    required List<AnimeSubject> fallback,
-    required bool waitForRefresh,
-    required Future<List<AnimeSubject>> Function() load,
-  }) async {
-    final cached = _readSubjectCache(key, signature);
-    final cachedSubjects = _subjectsOfType(cached.subjects, contentType);
-    final fallbackSubjects = _subjectsOfType(fallback, contentType);
-    final initialSubjects = _uniqueSubjects([
-      ...cachedSubjects,
-      ...fallbackSubjects,
-    ]);
-    if (cached.fresh) {
-      return initialSubjects;
-    }
-    final refresh = _refreshSubjectCache(
-      key,
-      signature,
-      load,
-    ).onError((_, _) => const <AnimeSubject>[]);
-    if (!waitForRefresh) {
-      unawaited(refresh);
-      return initialSubjects;
-    }
-    final refreshed = _subjectsOfType(await refresh, contentType);
-    if (refreshed.isNotEmpty) {
-      return _uniqueSubjects([
-        ...refreshed,
-        ...cachedSubjects,
-        ...fallbackSubjects,
-      ]);
-    }
-    return initialSubjects;
-  }
-
-  List<AnimeSubject> _subjectsOfType(
-    Iterable<AnimeSubject> subjects,
-    SubjectContentType contentType,
-  ) {
-    return _uniqueSubjects(
-      subjects.where(
-        (subject) => subjectMatchesContentType(subject, contentType),
-      ),
-    );
-  }
-
-  Future<List<AnimeSubject>> _refreshSubjectCache(
-    String key,
-    String signature,
-    Future<List<AnimeSubject>> Function() load,
-  ) {
-    final operationKey = '$key\u0000$signature';
-    final active = _metadataRefreshes[operationKey];
-    if (active != null && identical(_latestMetadataRefreshes[key], active)) {
-      return active;
-    }
-    late final Future<List<AnimeSubject>> task;
-    task = () async {
-      final refreshed = _uniqueSubjects(await load());
-      if (refreshed.isEmpty) return const <AnimeSubject>[];
-      final subjects = _uniqueSubjects([
-        ...refreshed,
-        ..._compatibleCachedSubjects(key, signature),
-      ]);
-      if (!identical(_latestMetadataRefreshes[key], task)) {
-        return const <AnimeSubject>[];
-      }
-      final payload = {
-        'version': _metadataCacheVersion,
-        'signature': signature,
-        'fetchedAt': DateTime.now().toUtc().toIso8601String(),
-        'refreshCount': refreshed.length,
-        'subjects': subjects
-            .take(_metadataCacheLimit)
-            .map((item) => item.toJson())
-            .toList(growable: false),
-      };
-      final write = _metadataWriteQueue.then((_) async {
-        if (!identical(_latestMetadataRefreshes[key], task)) return;
-        await _library.put(key, payload);
-      });
-      _metadataWriteQueue = write.then<void>((_) {}, onError: (_, _) {});
-      await write;
-      return identical(_latestMetadataRefreshes[key], task)
-          ? subjects
-          : const <AnimeSubject>[];
-    }();
-    _metadataRefreshes[operationKey] = task;
-    _latestMetadataRefreshes[key] = task;
-    return task.whenComplete(() {
-      if (identical(_metadataRefreshes[operationKey], task)) {
-        _metadataRefreshes.remove(operationKey);
-      }
-      if (identical(_latestMetadataRefreshes[key], task)) {
-        _latestMetadataRefreshes.remove(key);
-      }
-    });
-  }
-
-  List<AnimeSubject> _compatibleCachedSubjects(String key, String signature) {
-    final value = _library.get(key);
-    if (value is! Map ||
-        value['version'] != _metadataCacheVersion ||
-        value['signature']?.toString() != signature) {
-      return const [];
-    }
-    final rawSubjects = value['subjects'];
-    if (rawSubjects is! List) return const [];
-    return rawSubjects
-        .whereType<Map>()
-        .map((item) => AnimeSubject.fromJson(item.cast<String, dynamic>()))
-        .where((item) => item.title.trim().isNotEmpty)
-        .toList(growable: false);
-  }
-
-  bool _isSparseMetadataResult(String key, int count) {
-    final expected = switch (key) {
-      _animeMetadataCacheKey => 120,
-      _seriesMetadataCacheKey => 250,
-      _movieMetadataCacheKey => 250,
-      _ => 1,
-    };
-    return count < expected;
-  }
-
-  String _metadataSignature(String kind, ExternalServiceSettings services) {
-    return '$kind:${_servicesSignature(services)}';
-  }
-
-  String _servicesSignature(ExternalServiceSettings services) =>
-      SettingsController.servicesSignature(services);
-
-  List<AnimeSubject> _uniqueSubjects(
-    Iterable<AnimeSubject> subjects, {
-    bool? preferChinese,
-  }) {
-    final shouldPreferChinese =
-        preferChinese ?? state.value?.services.preferBangumiChinese ?? true;
-    final keyToIndex = <String, int>{};
-    final unique = <AnimeSubject>[];
-    for (final subject in subjects) {
-      if (subject.title.trim().isEmpty) continue;
-      final keys = _subjectIdentityKeys(subject);
-      int? existingIndex;
-      for (final key in keys) {
-        final index = keyToIndex[key];
-        if (index != null) {
-          existingIndex = index;
-          break;
-        }
-      }
-      if (existingIndex == null) {
-        final index = unique.length;
-        unique.add(subject);
-        for (final key in keys) {
-          keyToIndex[key] = index;
-        }
-        continue;
-      }
-      final merged = _mergeSubjects(
-        unique[existingIndex],
-        subject,
-        preferChinese: shouldPreferChinese,
-      );
-      unique[existingIndex] = merged;
-      for (final key in _subjectIdentityKeys(merged)) {
-        keyToIndex[key] = existingIndex;
-      }
-    }
-    return unique;
-  }
-
-  Set<String> _subjectIdentityKeys(AnimeSubject subject) {
-    final kind = subjectContentTypeOf(subject).name;
-    final year = subject.year == '未知' ? '' : subject.year;
-    final titles = <String>{subject.title, subject.originalTitle}
-        .map(
-          (item) => item.toLowerCase().replaceAll(
-            RegExp(r'[^\p{L}\p{N}]', unicode: true),
-            '',
-          ),
-        )
-        .where((item) => item.isNotEmpty);
-    final keys = titles.map((title) => '$kind:$year:$title').toSet();
-    if (keys.isEmpty) keys.add('$kind:$year:${subject.id}');
-    return keys;
-  }
-
-  AnimeSubject _mergeSubjects(
-    AnimeSubject first,
-    AnimeSubject second, {
-    required bool preferChinese,
-  }) {
-    final firstDirect = _isDirectPlayable(first);
-    final secondDirect = _isDirectPlayable(second);
-    final firstBangumi = _isBangumiSubject(first);
-    final secondBangumi = _isBangumiSubject(second);
-    final primary = firstDirect != secondDirect
-        ? (firstDirect ? first : second)
-        : _subjectQuality(second) > _subjectQuality(first)
-        ? second
-        : first;
-    final secondary = identical(primary, first) ? second : first;
-    final bangumiMetadata =
-        preferChinese &&
-            !firstDirect &&
-            !secondDirect &&
-            firstBangumi != secondBangumi &&
-            subjectMatchesContentType(first, SubjectContentType.anime) &&
-            subjectMatchesContentType(second, SubjectContentType.anime)
-        ? (firstBangumi ? first : second)
-        : null;
-    final displayPrimary = bangumiMetadata ?? primary;
-    final displaySecondary = identical(displayPrimary, first) ? second : first;
-    final title = !preferChinese
-        ? primary.title
-        : isLikelyChineseTitle(displayPrimary.title)
-        ? displayPrimary.title
-        : isLikelyChineseTitle(displaySecondary.title)
-        ? displaySecondary.title
-        : displayPrimary.title;
-    final keepBangumiLabels = bangumiMetadata != null;
-    final categories = !preferChinese
-        ? primary.categories
-        : keepBangumiLabels
-        ? displayPrimary.categories
-        : <String, AnimeCategory>{
-            for (final item in primary.categories) item.name: item,
-            for (final item in secondary.categories) item.name: item,
-          }.values.take(8).toList(growable: false);
-    final tags = !preferChinese
-        ? primary.tags
-        : keepBangumiLabels
-        ? displayPrimary.tags
-        : <String, AnimeTag>{
-            for (final item in primary.tags) item.name: item,
-            for (final item in secondary.tags) item.name: item,
-          }.values.take(20).toList(growable: false);
-    return AnimeSubject(
-      id: primary.id,
-      title: title,
-      originalTitle: primary.originalTitle.trim().isNotEmpty
-          ? primary.originalTitle
-          : secondary.originalTitle,
-      summary: !preferChinese
-          ? primary.summary
-          : keepBangumiLabels
-          ? _preferredBangumiSummary(
-              displayPrimary.summary,
-              displaySecondary.summary,
-            )
-          : _preferredLocalizedText(primary.summary, secondary.summary),
-      coverUrl:
-          _isDirectPlayable(primary) &&
-              secondary.source.startsWith('cinemeta:') &&
-              secondary.coverUrl != null
-          ? secondary.coverUrl
-          : primary.coverUrl ?? secondary.coverUrl,
-      bannerUrl: primary.bannerUrl ?? secondary.bannerUrl,
-      date: primary.date ?? secondary.date,
-      platform: primary.platform,
-      language: primary.language.trim().isNotEmpty
-          ? primary.language
-          : secondary.language,
-      region: primary.region.trim().isNotEmpty
-          ? primary.region
-          : secondary.region,
-      status: primary.status.trim().isNotEmpty
-          ? primary.status
-          : secondary.status,
-      categories: categories,
-      tags: tags,
-      totalEpisodes: primary.totalEpisodes > secondary.totalEpisodes
-          ? primary.totalEpisodes
-          : secondary.totalEpisodes,
-      ratingScore: primary.ratingScore ?? secondary.ratingScore,
-      ratingRank: primary.ratingRank ?? secondary.ratingRank,
-      ratingTotal: primary.ratingTotal ?? secondary.ratingTotal,
-      source: primary.source,
-      stableKey: primary.identityKey,
-      legacyId: primary.legacyId,
-      legacyIds: primary.legacyIds,
-    );
-  }
-
-  int _subjectQuality(AnimeSubject subject) {
-    var score = 0;
-    if ((subject.bannerUrl ?? '').isNotEmpty) score += 16;
-    if ((subject.coverUrl ?? '').isNotEmpty) score += 8;
-    if (isLikelyChineseTitle(subject.title)) score += 4;
-    if (!isMetadataPlaceholder(subject.summary) &&
-        subject.summary.length >= 80) {
-      score += 3;
-    }
-    if (subject.ratingScore != null) score += 3;
-    if (subject.totalEpisodes > 0) score += 2;
-    return score;
-  }
-
-  bool _isDirectPlayable(AnimeSubject subject) {
-    return subject.source.startsWith('archive:') ||
-        subject.source.startsWith('peertube:') ||
-        subject.source.startsWith('commons:');
-  }
-
-  bool _isBangumiSubject(AnimeSubject subject) {
-    final source = subject.source.trim().toLowerCase();
-    return source == 'bangumi' || source.startsWith('bangumi:');
-  }
-
-  String _preferredLocalizedText(String first, String second) {
-    final firstPlaceholder = isMetadataPlaceholder(first);
-    final secondPlaceholder = isMetadataPlaceholder(second);
-    if (firstPlaceholder != secondPlaceholder) {
-      return firstPlaceholder ? second : first;
-    }
-    final firstChinese = isLikelyChineseText(first);
-    final secondChinese = isLikelyChineseText(second);
-    if (firstChinese != secondChinese) return firstChinese ? first : second;
-    return first.length >= second.length ? first : second;
-  }
-
-  String _preferredBangumiSummary(String bangumi, String fallback) {
-    if (isLikelyChineseText(bangumi)) return bangumi;
-    if (isLikelyChineseText(fallback)) return fallback;
-    return isMetadataPlaceholder(bangumi) ? bangumi : '暂无中文简介。';
-  }
-
-  List<AnimeSubject> get _homeSubjects {
-    final feed = state.value?.homeFeed;
-    if (feed == null) return const [];
-    return _uniqueSubjects([
-      feed.hero,
-      ...feed.index,
-      ...feed.recommended,
-      ...feed.recent,
-    ]);
-  }
-
-  int _subjectCacheKey(AnimeSubject subject) {
-    return Object.hash(subject.source, subject.platform, subject.id);
-  }
-}
-
-class _HomeFeedCacheSnapshot {
-  const _HomeFeedCacheSnapshot({this.feed, this.fresh = false});
-
-  final AnimeHomeFeed? feed;
-  final bool fresh;
-}
-
-class _SubjectCacheSnapshot {
-  const _SubjectCacheSnapshot({this.subjects = const [], this.fresh = false});
-
-  final List<AnimeSubject> subjects;
-  final bool fresh;
 }
 
 const _fallbackExternalSeries = [
