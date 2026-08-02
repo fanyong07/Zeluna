@@ -1,36 +1,23 @@
-"""
-AniCh API 复刻 — FastAPI 后端入口
-
-启动方式:
-  cd server && uvicorn server.main:app --reload --host 0.0.0.0 --port 8000
-"""
+"""Zeluna FastAPI lifecycle and compatibility seed composition."""
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import (
     async_session, init_db,
     User,
     Bangumi, BangumiEpisode,
-    Character, Person,
+    Character,
     Thread,
     PlayHistory,
 )
-from . import protobuf_encoder as pb
 from .scheduler import scheduler
 from .aggregator import aggregator
 from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service
 from .playback import playback_service
 from .app import create_app
-from .dependencies import get_session
-from .legacy_protocol import bangumi_to_dict as _bangumi_to_dict
-from .legacy_protocol import protobuf_bytes as _pb_bytes
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -48,139 +35,6 @@ async def lifespan(_app):
 
 
 app = create_app(lifespan=lifespan)
-
-
-# ────────────────────────────────────────────────────────────
-# 角色 & 人物
-# ────────────────────────────────────────────────────────────
-
-@app.get("/bangumi/characters/{id}")
-async def bangumi_characters(id: int, session: AsyncSession = Depends(get_session)):
-    """角色列表 — protobuf."""
-    result = await session.execute(
-        select(Character).where(Character.bangumi_id == id)
-    )
-    items = [
-        {"id": c.id, "name": c.name, "role": c.role, "avatar": c.avatar_url, "summary": c.summary}
-        for c in result.scalars().all()
-    ]
-    return _pb_bytes(pb.encode_characters_list(items))
-
-
-@app.get("/bangumi/character/{id}")
-async def character_detail(id: int, session: AsyncSession = Depends(get_session)):
-    """角色详情 — JSON."""
-    result = await session.execute(select(Character).where(Character.id == id))
-    c = result.scalar_one_or_none()
-    if not c:
-        raise HTTPException(404)
-    return JSONResponse({
-        "id": c.id, "name": c.name, "role": c.role,
-        "avatar_url": c.avatar_url, "summary": c.summary, "seiyuu": c.seiyuu,
-    })
-
-
-@app.get("/bangumi/character/{id}/bangumi")
-async def character_bangumi(
-    id: int, skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """角色作品列表 — JSON."""
-    result = await session.execute(select(Character).where(Character.id == id))
-    c = result.scalar_one_or_none()
-    if not c:
-        raise HTTPException(404)
-
-    result = await session.execute(
-        select(Bangumi).options(selectinload(Bangumi.episodes)).where(Bangumi.id == c.bangumi_id)
-    )
-    items = [_bangumi_to_dict(b) for b in result.scalars().all()]
-    return JSONResponse(items)
-
-
-@app.get("/bangumi/persons/{id}")
-async def bangumi_persons(id: int, session: AsyncSession = Depends(get_session)):
-    """制作人员 — protobuf."""
-    result = await session.execute(
-        select(Person).where(Person.bangumi_id == id)
-    )
-    items = [
-        {"id": p.id, "name": p.name, "role": p.role, "avatar": p.avatar_url, "summary": p.summary}
-        for p in result.scalars().all()
-    ]
-    return _pb_bytes(pb.encode_persons_list(items))
-
-
-@app.get("/bangumi/person/{id}")
-async def person_detail(id: int, session: AsyncSession = Depends(get_session)):
-    """人物详情 — JSON."""
-    result = await session.execute(select(Person).where(Person.id == id))
-    p = result.scalar_one_or_none()
-    if not p:
-        raise HTTPException(404)
-    return JSONResponse({
-        "id": p.id, "name": p.name, "role": p.role,
-        "avatar_url": p.avatar_url, "summary": p.summary,
-    })
-
-
-@app.get("/bangumi/person/{id}/bangumi")
-async def person_bangumi(
-    id: int, skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """人物作品列表 — JSON."""
-    result = await session.execute(select(Person).where(Person.id == id))
-    p = result.scalar_one_or_none()
-    if not p:
-        raise HTTPException(404)
-
-    result = await session.execute(
-        select(Bangumi).options(selectinload(Bangumi.episodes)).where(Bangumi.id == p.bangumi_id)
-    )
-    items = [_bangumi_to_dict(b) for b in result.scalars().all()]
-    return JSONResponse(items)
-
-
-# ────────────────────────────────────────────────────────────
-# 搜索
-# ────────────────────────────────────────────────────────────
-
-@app.get("/search")
-async def search_picture(
-    keyword: str = Query(""),
-    skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """搜索帖子/图片 — protobuf."""
-    stmt = select(Thread).options(selectinload(Thread.images)).where(
-        Thread.title.contains(keyword) | Thread.tags.contains(keyword)
-    ).offset(skip).limit(30)
-    result = await session.execute(stmt)
-    threads = result.scalars().all()
-
-    items = []
-    for t in threads:
-        for img in t.images:
-            items.append({
-                "color": img.color, "width": img.width, "height": img.height, "image": img.master or img.original,
-            })
-    return _pb_bytes(pb.encode_images_list(items))
-
-
-@app.get("/bangumi/search")
-async def search_bangumi(
-    keyword: str = Query(""),
-    skip: int = Query(0),
-    session: AsyncSession = Depends(get_session),
-):
-    """搜索番剧 — protobuf."""
-    stmt = select(Bangumi).options(selectinload(Bangumi.episodes)).where(
-        Bangumi.title.contains(keyword)
-    ).offset(skip).limit(20)
-    result = await session.execute(stmt)
-    items = [_bangumi_to_dict(b) for b in result.scalars().all()]
-    return _pb_bytes(pb.encode_bangumi_list(items))
 
 
 # ────────────────────────────────────────────────────────────

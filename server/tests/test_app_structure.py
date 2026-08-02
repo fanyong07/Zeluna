@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from server import account_api, dependencies, main
 from server.app import create_app
+from server.routers import legacy_account as legacy_account_module
 from server.routers import (
     admin_router,
     catalog_router,
@@ -17,13 +18,14 @@ from server.routers import (
     legacy_comments_router,
     legacy_media_router,
     legacy_library_router,
+    legacy_lookup_router,
     playback_router,
 )
 
 
 def test_shared_session_dependency_is_used_by_all_account_routes():
-    assert main.get_session is dependencies.get_session
     assert account_api.get_session is dependencies.get_session
+    assert legacy_account_module.get_session is dependencies.get_session
 
 
 def test_application_factory_owns_metadata_cors_and_account_router():
@@ -51,6 +53,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             legacy_comments_router,
             legacy_media_router,
             legacy_library_router,
+            legacy_lookup_router,
         )
         for route in router.routes
     }
@@ -71,6 +74,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert endpoint_modules["/latest"] == "server.routers.legacy_community"
     assert endpoint_modules["/comment"] == "server.routers.legacy_comments"
     assert endpoint_modules["/danmaku"] == "server.routers.legacy_library"
+    assert endpoint_modules["/bangumi/search"] == "server.routers.legacy_lookup"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 
@@ -89,6 +93,18 @@ def test_route_table_has_no_duplicate_method_path_pairs():
     duplicates = [key for key, count in Counter(keys).items() if count > 1]
 
     assert duplicates == []
+
+
+def test_main_module_owns_no_route_implementation():
+    direct_business_paths = [
+        route.path
+        for route in main.app.routes
+        if hasattr(route, "path")
+        and route.path
+        not in {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+    ]
+
+    assert direct_business_paths == []
 
 
 def test_modern_admin_route_is_inaccessible_without_configuration():

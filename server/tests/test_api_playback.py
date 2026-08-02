@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.aggregator import AggregatedVideoLine
 from server.database import Base, PlaybackCache
-from server.main import app, get_session
+from server.dependencies import get_session
+from server.main import app
 
 
 class PlaybackApiTests(unittest.IsolatedAsyncioTestCase):
@@ -67,11 +68,13 @@ class PlaybackApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 1)
 
     async def test_quick_playback_route_is_not_captured_by_full_path_route(self):
-        expected = [{
-            "url": "https://cdn.example/quick.m3u8",
-            "available": True,
-            "quick": True,
-        }]
+        expected = [
+            {
+                "url": "https://cdn.example/quick.m3u8",
+                "available": True,
+                "quick": True,
+            }
+        ]
         with patch(
             "server.main.playback_service.quick_lines",
             new=AsyncMock(return_value=expected),

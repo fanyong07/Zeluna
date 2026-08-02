@@ -19,6 +19,7 @@ from .routers import (
     legacy_comments_router,
     legacy_media_router,
     legacy_library_router,
+    legacy_lookup_router,
     playback_router,
 )
 
@@ -34,6 +35,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(legacy_comments_router)
     app.include_router(legacy_media_router)
     app.include_router(legacy_library_router)
+    app.include_router(legacy_lookup_router)
     app.include_router(compat_v2_router)
     app.include_router(health_router)
     app.include_router(catalog_router)
