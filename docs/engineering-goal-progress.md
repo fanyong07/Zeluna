@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `0a11fd2` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `c2aa973` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1248,6 +1248,35 @@ Remaining risks:
 - Android/Windows/Web client save/share behavior and its platform-specific permissions remain unimplemented; the server contract is complete and read-only.
 - Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before irreversible implementation or execution.
 - No production export, account, database, secret, environment, or deployment was accessed or changed.
+
+### Cross-platform account export save
+
+Audit:
+
+- The server export contract had no client entry point. Android, Windows, and Web therefore could not request and save the authenticated JSON export from the account page.
+- Raising the account transport ceiling for export initially exposed session restore to the same 25 MiB ceiling. The final implementation keeps ordinary account responses at 1 MiB and grants the larger bound only to the export request.
+
+Changes:
+
+- Added the signed-in account-page action `导出我的账号数据`. It requests the authenticated schema-v1 export and saves `zeluna-account-data-YYYY-MM-DD.json` through the platform file picker; Web uses the picker download path, while Android and Windows use their native save path.
+- Export reads are streamed into memory with both declared-length and incremental 25 MiB limits. Ordinary account calls retain a 1 MiB application limit. The existing account network policy still disables credential-bearing redirects and validates HTTPS/public destinations, and export success or failure does not remove the session token.
+- The UI distinguishes a cancelled native save from a completed export, serializes the action through its existing busy state, and reports storage failures without exposing response content.
+
+Tests:
+
+- Focused account repository/page suite: 13 passed, 0 failed. Direct regressions cover authentication, schema validation, token retention, export oversize rejection, the ordinary 1 MiB session-response limit, redirect denial, and the signed-in UI entry point.
+- Full `flutter test --reporter compact`: 582 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, `git diff --check`, and the repository security gate passed.
+- Android Debug, Web Release (including Wasm dry run), and Windows Release builds passed. Artifacts: Android APK 268,932,934 bytes, SHA-256 `9ABE6BB99C573CBCC5424E62F703BBF10CD925C7D91F1CF5524F8F5FCB250E16`; Web `main.dart.js` 4,849,705 bytes, SHA-256 `30C547C7EE570D5E77403F522199B89AAD600BAD2F6B5279DB929E78A5F6E13A`; Windows `Zeluna.exe` 158,208 bytes, SHA-256 `2814F973D704BE8D76230EF5790EF91D9DE0ECE2F6C7D8A0E17173B29DE9A9FC`.
+
+Commit: `c2aa973 privacy: save account exports on clients`
+
+Remaining risks:
+
+- Platform builds prove compile-time integration, not a real-device file-dialog acceptance run. Android, Windows, and browser save-dialog behavior remains a G13/G14 interactive acceptance item.
+- A very large future account may need an asynchronous bounded export job; the current client intentionally rejects exports above 25 MiB.
+- Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before irreversible implementation or execution.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled route, private implementation/protocol, token, DRM, membership, CAPTCHA, or access-control bypass was used. No production export, account, database, secret, environment, deployment, signing material, or release artifact was changed.
 
 ## G10 Cloud sync
 
