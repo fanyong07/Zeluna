@@ -13,14 +13,14 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import Query, Request, Depends, HTTPException
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, func, delete, and_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import (
     async_session, init_db,
-    User, UserToken, VerifyCode,
+    User,
     Bangumi, BangumiEpisode, BangumiCollection,
     Character, Person,
     Danmaku,
@@ -28,10 +28,7 @@ from .database import (
     Comment, CommentLike,
     PlayHistory, PlaybackCache, upsert_playback_cache,
 )
-from .auth import (
-    hash_password, verify_password, create_jwt, decode_jwt,
-    generate_verify_code, parse_protobuf_token, get_current_user,
-)
+from .auth import get_current_user
 from . import protobuf_encoder as pb
 from .scheduler import scheduler
 from .scrapers import registry as scraper_registry
@@ -40,7 +37,8 @@ from .m3u8_resolver import resolver as m3u8_resolver
 from .catalog import catalog_service
 from .playback import playback_service
 from .app import create_app
-from .dependencies import get_session, require_legacy_account_api
+from .dependencies import get_session
+from .legacy_protocol import protobuf_bytes as _pb_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -60,173 +58,6 @@ async def lifespan(_app):
 
 
 app = create_app(lifespan=lifespan)
-
-
-# ────────────────────────────────────────────────────────────
-# 账户
-# ────────────────────────────────────────────────────────────
-
-@app.post("/login", dependencies=[Depends(require_legacy_account_api)])
-async def login(request: Request, session: AsyncSession = Depends(get_session)):
-    """登录 — protobuf 响应."""
-    body = await request.body()
-    decoded = _pb_login_request(body)
-
-    stmt = select(User).where(User.email == decoded.get("user", ""))
-    result = await session.execute(stmt)
-    user = result.scalar_one_or_none()
-
-    if not user or not verify_password(decoded.get("password", ""), user.password_hash):
-        return _pb_bytes(pb.encode_login_response({}, ""))
-
-    jwt_token = create_jwt(user.id)
-    user_token = UserToken(user_id=user.id, token=jwt_token)
-    session.add(user_token)
-    await session.commit()
-
-    user_dict = _user_to_dict(user)
-    return _pb_bytes(pb.encode_login_response(user_dict, jwt_token))
-
-
-@app.post("/code", dependencies=[Depends(require_legacy_account_api)])
-async def send_code(request: Request, session: AsyncSession = Depends(get_session)):
-    """发送验证码."""
-    try:
-        form = await request.form()
-        email = form.get("email", "")
-    except Exception:
-        body = await request.json()
-        email = body.get("email", "")
-
-    if not email:
-        return JSONResponse({"error": True, "message": "邮箱不能为空"})
-
-    code = generate_verify_code()
-    expires = time.time() + 600  # 10 分钟有效
-    vc = VerifyCode(email=email, code=code, expires_at=expires)
-    session.add(vc)
-    await session.commit()
-
-    return JSONResponse({"error": False, "message": "验证码已发送"})
-
-
-@app.post("/register", dependencies=[Depends(require_legacy_account_api)])
-async def register(request: Request, session: AsyncSession = Depends(get_session)):
-    """注册 — protobuf 响应."""
-    body = await request.body()
-    decoded = _pb_login_request(body)  # register_request_ 结构与 login_request_ 类似
-
-    email = decoded.get("email", "")
-    code = decoded.get("code", "")
-    name = decoded.get("name", "")
-    password = decoded.get("password", "")
-
-    if not all([email, code, name, password]):
-        return _pb_bytes(pb.encode_login_response({}, ""))
-
-    # 验证码
-    stmt = select(VerifyCode).where(
-        VerifyCode.email == email,
-        VerifyCode.code == code,
-        VerifyCode.expires_at > time.time(),
-    )
-    result = await session.execute(stmt)
-    vc = result.scalar_one_or_none()
-    if not vc:
-        return _pb_bytes(pb.encode_login_response({}, ""))
-
-    # 检查重复
-    for check_stmt in [
-        select(User).where(User.email == email),
-        select(User).where(User.name == name),
-    ]:
-        result = await session.execute(check_stmt)
-        if result.scalar_one_or_none():
-            return _pb_bytes(pb.encode_login_response({}, ""))
-
-    user = User(
-        email=email,
-        name=name,
-        password_hash=hash_password(password),
-    )
-    session.add(user)
-    await session.commit()
-    await session.refresh(user)
-
-    jwt_token = create_jwt(user.id)
-    user_token = UserToken(user_id=user.id, token=jwt_token)
-    session.add(user_token)
-    await session.delete(vc)
-    await session.commit()
-
-    user_dict = _user_to_dict(user)
-    return _pb_bytes(pb.encode_login_response(user_dict, jwt_token))
-
-
-@app.post("/user/check", dependencies=[Depends(require_legacy_account_api)])
-async def check_user(request: Request, session: AsyncSession = Depends(get_session)):
-    """检查邮箱/用户名可用性."""
-    try:
-        form = await request.form()
-    except Exception:
-        form = await request.json()
-    email = form.get("email", "")
-    name = form.get("name", "")
-
-    if email:
-        result = await session.execute(select(User).where(User.email == email))
-        if result.scalar_one_or_none():
-            return JSONResponse({"error": True, "message": "邮箱已被注册"})
-    if name:
-        result = await session.execute(select(User).where(User.name == name))
-        if result.scalar_one_or_none():
-            return JSONResponse({"error": True, "message": "用户名已被使用"})
-
-    return JSONResponse({"error": False, "message": "可用"})
-
-
-@app.post("/change_password", dependencies=[Depends(require_legacy_account_api)])
-async def change_password(request: Request, session: AsyncSession = Depends(get_session)):
-    """修改密码."""
-    body = await request.body()
-    decoded = _pb_login_request(body)
-    email = decoded.get("email", "")
-    code = decoded.get("code", "")
-    password = decoded.get("password", "")
-
-    stmt = select(VerifyCode).where(
-        VerifyCode.email == email,
-        VerifyCode.code == code,
-        VerifyCode.expires_at > time.time(),
-    )
-    result = await session.execute(stmt)
-    vc = result.scalar_one_or_none()
-    if not vc:
-        return JSONResponse({"error": True, "message": "验证码无效"})
-
-    result = await session.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-    if not user:
-        return JSONResponse({"error": True, "message": "用户不存在"})
-
-    user.password_hash = hash_password(password)
-    user.updated_at = time.time()
-    await session.delete(vc)
-    await session.commit()
-
-    return JSONResponse({"error": False, "message": "密码修改成功"})
-
-
-@app.get("/init", dependencies=[Depends(require_legacy_account_api)])
-async def init_user(request: Request, session: AsyncSession = Depends(get_session)):
-    """获取用户信息 — protobuf 响应."""
-    token_header = request.headers.get("_", "")
-    user = await get_current_user(token_header, session)
-    if not user:
-        return _pb_bytes(pb.encode_init_response({}))
-
-    user_dict = _user_to_dict(user)
-    return _pb_bytes(pb.encode_init_response(user_dict))
 
 
 # ────────────────────────────────────────────────────────────
@@ -1128,27 +959,6 @@ async def cancel_like_comment(
 # 辅助函数
 # ────────────────────────────────────────────────────────────
 
-def _pb_bytes(data: bytes) -> Response:
-    return Response(content=data, media_type="application/octet-stream")
-
-
-def _user_to_dict(user: User) -> dict:
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "role": user.role,
-        "sex": user.sex,
-        "avatar": user.avatar,
-        "exp": user.exp,
-        "coin": user.coin,
-        "color": user.color,
-        "address": user.address,
-        "created_at": user.created_at,
-        "updated_at": user.updated_at,
-    }
-
-
 def _bangumi_to_dict(b: Bangumi) -> dict:
     return {
         "id": b.id,
@@ -1165,50 +975,6 @@ def _bangumi_to_dict(b: Bangumi) -> dict:
         "rating": b.rating,
         "episode_count": len(b.episodes) if b.episodes else 0,
     }
-
-
-def _pb_login_request(data: bytes) -> dict:
-    """解析 login_request_ / register_request_ / change_password_request_ protobuf.
-    字段: user/email(1), password(2), code(3), name(4)
-    """
-    fields = {}
-    pos = 0
-    while pos < len(data):
-        if pos >= len(data):
-            break
-        tag = data[pos]
-        pos += 1
-        field_number = tag >> 3
-        wire_type = tag & 0x07
-        if wire_type == 2:
-            if pos >= len(data):
-                break
-            length = data[pos]
-            pos += 1
-            value = data[pos: pos + length].decode("utf-8", errors="replace")
-            pos += length
-            if field_number == 1:
-                fields["user"] = value
-                fields["email"] = value  # register_request_ 的 email 在字段 1
-            elif field_number == 2:
-                fields["password"] = value
-            elif field_number == 3:
-                fields["code"] = value
-            elif field_number == 4:
-                fields["name"] = value
-        elif wire_type == 0:
-            value = 0
-            shift = 0
-            while pos < len(data):
-                byte = data[pos]
-                pos += 1
-                value |= (byte & 0x7F) << shift
-                if not (byte & 0x80):
-                    break
-                shift += 7
-        else:
-            break
-    return fields
 
 
 async def _seed_data():

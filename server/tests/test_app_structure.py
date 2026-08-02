@@ -5,7 +5,13 @@ from fastapi.testclient import TestClient
 
 from server import account_api, dependencies, main
 from server.app import create_app
-from server.routers import admin_router, catalog_router, health_router, playback_router
+from server.routers import (
+    admin_router,
+    catalog_router,
+    health_router,
+    legacy_account_router,
+    playback_router,
+)
 
 
 def test_shared_session_dependency_is_used_by_all_account_routes():
@@ -31,6 +37,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
             catalog_router,
             playback_router,
             admin_router,
+            legacy_account_router,
         )
         for route in router.routes
     }
@@ -42,6 +49,7 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     )
     assert endpoint_modules["/admin/v3/playback/refresh"] == "server.routers.admin"
     assert endpoint_modules["/admin/scan"] == "server.routers.admin"
+    assert endpoint_modules["/login"] == "server.routers.legacy_account"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
 
@@ -54,16 +62,23 @@ def test_modern_admin_route_is_inaccessible_without_configuration():
     assert response.json() == {"detail": "Not found"}
 
 
-def test_legacy_account_route_is_inaccessible_when_disabled():
+def test_all_legacy_account_routes_are_inaccessible_when_disabled():
     with patch.object(dependencies, "LEGACY_ACCOUNT_API_ENABLED", False):
-        response = TestClient(main.app).post(
-            "/login",
-            content=b"",
-            headers={"content-type": "application/octet-stream"},
-        )
+        client = TestClient(main.app)
+        responses = [
+            client.request(method, path, content=b"")
+            for method, path in (
+                ("POST", "/login"),
+                ("POST", "/code"),
+                ("POST", "/register"),
+                ("POST", "/user/check"),
+                ("POST", "/change_password"),
+                ("GET", "/init"),
+            )
+        ]
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Not found"}
+    assert {response.status_code for response in responses} == {404}
+    assert {response.json()["detail"] for response in responses} == {"Not found"}
 
 
 def test_lifespan_starts_and_closes_resources_in_order():

@@ -100,3 +100,14 @@ def test_retained_admin_scan_uses_the_same_fail_closed_router():
         "types": ["anime", "movie"],
     }
     scan.assert_awaited_once_with(["anime", "movie"])
+
+
+def test_legacy_account_router_runs_only_when_explicitly_enabled():
+    session = object()
+    app = _app_with_session(session)
+
+    with patch.object(dependencies, "LEGACY_ACCOUNT_API_ENABLED", True):
+        response = TestClient(app).post("/user/check", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"error": False, "message": "可用"}
