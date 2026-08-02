@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `b402219` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `2c599d7` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -801,6 +801,28 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and method/path uniqueness regression passed. The runtime table remains 75 unique pairs.
 
 Commit: `b402219 refactor: isolate legacy comment routes`
+
+### Legacy library router isolation
+
+Audit:
+
+- Six retained danmaku and bangumi-collection operations remained in `server.main`. Danmaku lists are public protobuf reads, while posting requires authentication; collection status is anonymously readable, while create/update/cancel/list require authentication.
+- Repeated collection changes update the one existing user/subject row. This local database behavior is not cloud synchronization and must not be presented as G10 work.
+
+Changes:
+
+- Added `server.routers.legacy_library` for GET/POST `/danmaku`, bangumi collection status/change/cancel, and `/action/collect/{type}`.
+- Preserved protobuf fields, ordering/pagination, anonymous status shapes, the existing `_` token header, collection update semantics, and shared session/authentication objects.
+- Removed route-only time/auth/delete/model imports from `server.main`. No cloud queue, remote mutation, account migration, or production data operation was added. `server.main` is now 307 lines.
+
+Tests:
+
+- Added in-memory regressions proving anonymous danmaku reads remain binary and available, anonymous danmaku writes remain 401, and two collection changes for one account/subject leave one row with the latest type.
+- Focused library/app suite: 8 passed, 0 failed.
+- Full server suite: 118 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and method/path uniqueness regression passed. The runtime table remains 75 unique pairs.
+
+Commit: `2c599d7 refactor: isolate legacy library routes`
 
 Remaining G7 work:
 
