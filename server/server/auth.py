@@ -11,7 +11,7 @@ from typing import NamedTuple
 import bcrypt
 import jwt
 from fastapi import Header, HTTPException
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import (
@@ -22,6 +22,7 @@ from .config import (
     LEGACY_JWT_COMPATIBILITY_ENABLED,
 )
 from .database import User, UserToken
+from .privacy import purge_expired_auth_artifacts
 
 
 _BCRYPT_SHA256_PREFIX = "$bcrypt-sha256$"
@@ -187,14 +188,7 @@ async def issue_session_token(session: AsyncSession, user_id: int) -> str:
     claims = decode_jwt(token)
     if claims is None:
         raise AuthConfigurationError("newly issued account token could not be decoded")
-    now = time.time()
-    await session.execute(
-        delete(UserToken).where(
-            UserToken.user_id == user_id,
-            UserToken.expires_at > 0,
-            UserToken.expires_at <= now,
-        )
-    )
+    await purge_expired_auth_artifacts(session)
     session.add(
         UserToken(
             user_id=user_id,

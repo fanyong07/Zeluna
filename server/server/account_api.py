@@ -31,6 +31,7 @@ from .config import ACCOUNT_RATE_LIMIT_MAX_KEYS, ACCOUNT_TRUSTED_PROXY_NETWORKS
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
+from .privacy import purge_expired_auth_artifacts
 
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
 
@@ -309,6 +310,8 @@ async def request_code(
     email = _normalize_email(str(payload.email))
     _rate_limit(f"code:ip:{_client_key(request)}", limit=10, window_seconds=3600)
     _rate_limit(f"code:email:{email}", limit=5, window_seconds=3600)
+    await purge_expired_auth_artifacts(session)
+    await session.commit()
 
     existing = await session.scalar(select(User.id).where(User.email == email))
     if payload.purpose == "register" and existing is not None:
