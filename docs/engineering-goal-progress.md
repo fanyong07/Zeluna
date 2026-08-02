@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `9d068ac` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `8e334d8` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -21,6 +21,17 @@
 | AniCh instant-play analysis | `BC2A28F33590DD398C30904F5EB107FF2272575177267C3C819B87817BEDC370` |
 | AniCh VOD sample | `125198C91FAAF3D52149DF682CAAA6B19E08972F49B0742949E18F8F3BF38855` |
 | AniCh reverse report | `AD1F53877440F85960B7286FB08568639AF1EF12E3E0F0BC7F25ACE045E53B6A` |
+
+### Full-read inventory (2026-08-02)
+
+| Material | Exists | Bytes | Lines | Parse/read result |
+| --- | --- | ---: | ---: | --- |
+| `CODEX_ZELUNA_ENGINEERING_SPEC.md` | yes | 49,249 | 2,339 | strict UTF-8, fully read |
+| `AniCh-1.5.21-reverse-report.md` | yes | 21,367 | 480 | strict UTF-8, fully read |
+| `AniCh-video-sources-and-instant-play.md` | yes | 24,959 | 628 | strict UTF-8, fully read |
+| `vod_sources_sample.json` | yes | 914,486 | 21,343 | strict UTF-8 and JSON parse passed; 15 top-level entries, 79 samples, 1,076 line items |
+
+Inventory result: `total=4`, `read=4`, `skipped=0`. The hashes above were recomputed from the complete byte streams. The AniCh reports and JSON remain historical architecture evidence only: no production API was called, and no sampled endpoint, private implementation, access token, or fixed real route was copied into Zeluna.
 
 ### Initial validation
 
@@ -405,6 +416,40 @@ Remaining risks:
 - Source hydration requests are not forcibly cancelled at the transport layer when an account changes; generation and scope checks prevent their results from publishing or persisting. Transport cancellation remains a possible future optimization, not a correctness dependency.
 - The intentionally empty bundled catalog means legacy catalog sources are not restored by this architecture refactor. User-imported rules remain available through the audited permission path, while live third-party source acceptance still requires deterministic fixtures or separately authorized real-network validation.
 - No production environment, real user database, signing material, private credential, Cookie, or signed media URL was accessed.
+
+### DownloadController
+
+Audit:
+
+- Download queueing, line resolution, retry, progress publication, Hive persistence, pause/resume/cancel, startup recovery, file cleanup, and account ownership were still implemented directly inside `AnimeController`.
+- The stable persisted download ID also acted as the live service-control key and default filesystem name. A timed-out old-account run could therefore collide with a newer run for the same media even when controller state publication was guarded.
+- Resolver, transport, progress, cleanup, and persistence completions all cross asynchronous account-switch boundaries. Each path needed an initiating scope rather than reading the active account after an await.
+
+Changes:
+
+- Added an independent `DownloadController` owning the queue, immutable task snapshot, ordered account-scoped persistence, resume/recovery, live-run registry, and managed-file cleanup. `AnimeController` keeps the existing UI API as a compatibility delegate and fell from 3,566 to 2,788 lines.
+- Stable task IDs remain unchanged for migration and UI identity. Every live run receives separate control and hashed file IDs, preventing pause/cancel/default-path collisions between old and new runs of the same stable task.
+- All resolver, progress, result, retry, cleanup, and write paths validate their captured account/context/epoch. Late old-scope results cannot publish or persist, and cleanup excludes paths currently owned by the selected account.
+- Pause and cancel win over late backend completion. A late completed artifact after pause is removed instead of being silently promoted or left untracked; resolving-time deletion cannot resurrect a task.
+- Account-deletion recovery now cancels downloads by both account ID and stable task ID. Existing persisted paths and startup migrations remain compatible and are never replaced merely by loading the controller.
+
+Tests:
+
+- Added six direct controller regressions covering old-account late results, identical task IDs across accounts, resolving-time deletion, pause/cancel late completion, startup recovery, and account-captured in-flight persistence.
+- Download/account focused suite: 43 passed, 0 failed.
+- Full `flutter test --reporter compact`: 559 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `8e334d8 refactor: split download controller`
+
+Remaining domains, in required order: Library, Catalog, PlaybackDiscovery, Sync.
+
+Remaining risks:
+
+- A transport that ignores pause may continue beyond the bounded account-quiesce wait, but run/file identities and scope guards prevent it from controlling or publishing into the new account. Native transport cancellation latency remains covered by G11 reliability and G14 platform acceptance.
+- No playback ranking, source inventory, network policy, production environment, signing material, or real user data changed in this slice.
 
 ## G7 Server architecture
 
