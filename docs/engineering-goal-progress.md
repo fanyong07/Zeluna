@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `9eca4cb` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `b36a724` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1104,6 +1104,35 @@ Remaining risks:
 - Session expiry cleanup, maximum-session concurrency, token-subject binding to stored sessions, and password change/reset revocation semantics remain to be audited before G8 can complete.
 - Registration/code-request account-existence responses also require an enumeration review separate from login timing.
 - No production account, password, hash, token, database, secret, environment, or deployment was accessed or changed.
+
+### Persistent session lifecycle and revocation
+
+Audit:
+
+- Session rows stored only a token digest and creation time. Expired rows were removed only when that exact token reached the modern endpoint, while the default-disabled compatibility lookup trusted database presence without validating JWT expiry.
+- The four-session cap had no deterministic tie-breaker and counted expired rows. Stored sessions were not explicitly bound to JWT subject/JTI/expiry metadata, and the compatibility login still stored newly issued bearer tokens in replayable plaintext.
+
+Changes:
+
+- Added shared session issuance and validation for modern and compatibility account paths. New rows store only the token digest plus JTI and expiry, reject mismatched user ID, subject, JTI, or expiry, and delete invalid/orphaned rows on access.
+- Issuance removes expired known sessions before enforcing a deterministic newest-four limit using creation time plus row ID. Legacy rows retain zero/empty metadata during migration and are validated from their signed token before metadata is lazily bound.
+- Compatibility login now uses the same digest-only storage and JWT validation. Raw historical rows remain readable only behind the existing default-disabled legacy-account flag and are still subject to signature/expiry checks.
+- Password change keeps only the authenticated current session; password reset revokes every session. Token issuance, password-hash upgrade, session pruning, and account mutations share the caller transaction so partial security state is not committed.
+- Added reversible Alembic revision `0005_account_session_metadata`; it preserves historical token rows with empty metadata for safe validation-on-use. No production migration was executed.
+
+Tests:
+
+- Focused account, migration, and app-structure suite: 36 passed, 0 failed. Regressions cover expired-row cleanup, deterministic latest-four enforcement, evicted-token rejection, stored expiry/JTI/subject binding, password-change current-session retention, password-reset all-session revocation, and historical-row preservation.
+- Full server suite: 151 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, Alembic head/check/downgrade coverage, and final diff scope passed.
+
+Commit: `b36a724 security: enforce account session lifecycle`
+
+Remaining risks:
+
+- Registration and verification-code request responses still require a final account-enumeration review before G8 completion.
+- The narrow issuer-less legacy JWT compatibility window must be documented with an explicit removal gate; it was not broadened by this slice.
+- No production session, account, database, migration, secret, environment, or deployment was accessed or changed.
 
 ## G9 Privacy lifecycle
 
