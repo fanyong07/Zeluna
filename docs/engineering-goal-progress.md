@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `c2aa973` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `cfc7162` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1277,6 +1277,36 @@ Remaining risks:
 - A very large future account may need an asynchronous bounded export job; the current client intentionally rejects exports above 25 MiB.
 - Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before irreversible implementation or execution.
 - The four-material inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled route, private implementation/protocol, token, DRM, membership, CAPTCHA, or access-control bypass was used. No production export, account, database, secret, environment, deployment, signing material, or release artifact was changed.
+
+### Reversible cloud-account erasure
+
+Audit:
+
+- The confirmed product policy is: retain authored threads/comments/danmaku as anonymous public content; erase private library/history/interactions, sessions, verification artifacts, and the account; provide a seven-day cancellation period before finalization.
+- Nine foreign-key paths reference `users.id`; the finalizer has an explicit inventory regression so future account-owned tables cannot be added silently. Verification codes are additionally linked by normalized email rather than a foreign key.
+- Removing a user's likes and thread collections without repairing denormalized counters would leave visible counts inconsistent. The finalizer must recompute affected thread/comment counters in the same transaction.
+
+Changes:
+
+- Added reversible migration `0006_account_deletion_lifecycle` with non-null zero-default request/due timestamps. No production migration was executed.
+- Authenticated password-confirmed deletion requests freeze the account immediately, revoke every session, and set a fixed seven-day deadline. Correct-password login returns a structured frozen-account state; invalid credentials retain the existing generic failure. A separately rate-limited password-confirmed cancellation clears the request only before the deadline.
+- The bounded scheduled privacy job finalizes at most 100 due accounts per run by default (operator-configurable from 1 to 1,000). It deletes private collections/history/interactions, sessions, matching verification codes, and the user; anonymizes public threads/comments/danmaku and exact nickname reply labels; preserves public thread images; and recomputes affected like/collection counters atomically.
+- Scheduler observability adds only an aggregate finalized-account count. No account identifier, email, nickname, content, token, or reason enters cleanup stats or logs.
+
+Tests:
+
+- Account deletion/privacy/account/migration focused suite: 37 passed, 0 failed. Regressions cover password confirmation, seven-day timing, all-session revocation, frozen login, cancellation, complete ownership inventory, bounded batches, before-deadline preservation, public anonymization, private erasure, image preservation, counter repair, and migration upgrade/check/downgrade paths.
+- Full server suite: 160 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `cfc7162 privacy: add reversible cloud account erasure`
+
+Remaining risks:
+
+- Client request/cancellation UI and local session transition remain the final G9 product slice. Real-device acceptance remains a G13/G14 gate.
+- Finalization can occur up to one configured privacy-cleanup interval after the deadline, but cancellation closes at the exact deadline and the account remains frozen throughout that interval.
+- Public user-authored text and images are intentionally retained under the confirmed anonymity policy; only author links and exact reply nickname labels are removed. Arbitrary self-disclosed text cannot be safely inferred and rewritten automatically.
+- No real account, email, password, token, database, migration, scheduler, environment, deployment, signing material, or production data was accessed or changed.
 
 ## G10 Cloud sync
 
