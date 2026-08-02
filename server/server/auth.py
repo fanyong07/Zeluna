@@ -71,6 +71,19 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
+
+def verify_login_password(password: str, hashed: str | None) -> bool:
+    """Always perform one current-cost bcrypt check, including missing users."""
+
+    return verify_password(password, hashed or _DUMMY_PASSWORD_HASH)
+
+
+def password_hash_needs_upgrade(hashed: str) -> bool:
+    return not hashed.startswith(_BCRYPT_SHA256_PREFIX)
+
+
 def create_jwt(user_id: int) -> str:
     now = int(time.time())
     payload = {

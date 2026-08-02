@@ -13,6 +13,8 @@ from ..auth import (
     generate_verify_code,
     get_current_user,
     hash_password,
+    password_hash_needs_upgrade,
+    verify_login_password,
     verify_password,
 )
 from ..database import User, UserToken, VerifyCode
@@ -37,8 +39,15 @@ async def login(
         select(User).where(User.email == decoded.get("user", ""))
     )
     user = result.scalar_one_or_none()
-    if not user or not verify_password(decoded.get("password", ""), user.password_hash):
+    password = decoded.get("password", "")
+    password_valid = verify_login_password(
+        password,
+        user.password_hash if user is not None else None,
+    )
+    if user is None or not password_valid:
         return protobuf_bytes(pb.encode_login_response({}, ""))
+    if password_hash_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(password)
 
     jwt_token = create_jwt(user.id)
     session.add(UserToken(user_id=user.id, token=jwt_token))

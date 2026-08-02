@@ -2,6 +2,7 @@ import asyncio
 import ipaddress
 import time
 
+import bcrypt
 import jwt
 import pytest
 import run_prod
@@ -21,7 +22,7 @@ from server.auth import (
     hash_password,
     verify_password,
 )
-from server.database import Base, VerifyCode
+from server.database import Base, User, VerifyCode
 
 _TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
 
@@ -355,6 +356,100 @@ def test_verification_code_locks_after_email_and_purpose_failure_budget(
             return record.failed_attempts if record else None
 
     assert asyncio.run(stored_attempts()) is None
+    asyncio.run(engine.dispose())
+
+
+def test_login_checks_dummy_hash_for_missing_user(tmp_path, monkeypatch):
+    database_path = (tmp_path / "missing-login.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+    asyncio.run(prepare())
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    checked = []
+    real_verify = account_api.verify_login_password
+
+    def capture_verify(password: str, hashed: str | None) -> bool:
+        checked.append(hashed)
+        return real_verify(password, hashed)
+
+    monkeypatch.setattr(account_api, "verify_login_password", capture_verify)
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": "missing@example.com", "password": "password-123"},
+        )
+
+    assert response.status_code == 401
+    assert checked == [None]
+    asyncio.run(engine.dispose())
+
+
+def test_successful_login_upgrades_legacy_bcrypt_hash(tmp_path):
+    database_path = (tmp_path / "legacy-password.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    password = "legacy-password-123"
+    legacy_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            session.add(
+                User(
+                    email="legacy-login@example.com",
+                    name="legacy-login",
+                    password_hash=legacy_hash,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(prepare())
+
+    async def get_test_session():
+        async with sessions() as session:
+            yield session
+
+    app = FastAPI()
+    app.include_router(account_api.router)
+    app.dependency_overrides[account_api.get_session] = get_test_session
+
+    with TestClient(app) as client:
+        rejected = client.post(
+            "/api/v1/auth/login",
+            json={"email": "legacy-login@example.com", "password": "wrong"},
+        )
+        assert rejected.status_code == 401
+        accepted = client.post(
+            "/api/v1/auth/login",
+            json={"email": "legacy-login@example.com", "password": password},
+        )
+        assert accepted.status_code == 200
+
+    async def stored_hash():
+        async with sessions() as session:
+            user = await session.scalar(
+                select(User).where(User.email == "legacy-login@example.com")
+            )
+            return user.password_hash
+
+    upgraded = asyncio.run(stored_hash())
+    assert upgraded != legacy_hash
+    assert upgraded.startswith("$bcrypt-sha256$")
+    assert verify_password(password, upgraded)
     asyncio.run(engine.dispose())
 
 

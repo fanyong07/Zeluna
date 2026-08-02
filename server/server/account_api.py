@@ -20,7 +20,9 @@ from .auth import (
     decode_jwt,
     generate_verify_code,
     hash_password,
+    password_hash_needs_upgrade,
     signing_key,
+    verify_login_password,
     verify_password,
 )
 from .config import ACCOUNT_RATE_LIMIT_MAX_KEYS, ACCOUNT_TRUSTED_PROXY_NETWORKS
@@ -380,8 +382,14 @@ async def login(
     _rate_limit(f"login:ip:{_client_key(request)}", limit=30, window_seconds=900)
     _rate_limit(f"login:email:{email}", limit=10, window_seconds=900)
     user = await session.scalar(select(User).where(User.email == email))
-    if user is None or not verify_password(payload.password, user.password_hash):
+    password_valid = verify_login_password(
+        payload.password,
+        user.password_hash if user is not None else None,
+    )
+    if user is None or not password_valid:
         raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    if password_hash_needs_upgrade(user.password_hash):
+        user.password_hash = hash_password(payload.password)
     user.updated_at = time.time()
     token = await _issue_token(session, user)
     return {"user": _user_payload(user), "access_token": token, "token_type": "bearer"}
