@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `2c599d7` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `e51c8c8` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -593,7 +593,7 @@ Remaining risks:
 
 ## G7 Server architecture
 
-Status: in_progress
+Status: completed
 
 ### Application lifecycle and shared dependencies
 
@@ -959,9 +959,36 @@ Tests:
 
 Commit: `12cee7b refactor: isolate playback cache persistence`
 
-Remaining G7 work:
+### Playback binding and health repository isolation
 
-- Isolate playback binding and source-health persistence behind the same repository contract while preserving all ranking, single-flight, and circuit-breaker behavior.
+Audit:
+
+- `PlaybackService` still directly selected and mutated `SourceBinding` and `SourceHealth` rows, including binding upserts, long-term counters, consecutive-failure state, latency EMA, and transaction commits.
+- Ranking, TTL, source matching, error classification, circuit thresholds, single-flight refresh, and recovery-probe decisions are service policy and had to remain unchanged while persistence became replaceable.
+
+Changes:
+
+- Extended `PlaybackRepository` with immutable binding/health records, write/observation contracts, and SQL load/upsert/atomic-health operations.
+- `PlaybackService` now maps source matches and normalized outcomes to repository records and performs no direct select/scalar/scalars/add/commit operation. It retains ranking, circuit timing, error-category selection, EMA coefficient, and deterministic-failure policy inputs.
+- Preserved one-row-per-stable/source binding behavior, recoverable enabled state, success/failure counters, client-probe handling, deterministic-failure double increments, half-open cooldown recovery, and latency EMA.
+
+Tests:
+
+- Added repository regressions for binding update idempotency, freshness filtering, success/failure counter updates, deterministic failure weight, last-error state, and latency EMA. Added service-injection regressions proving binding loads/writes and normalized health observations use the repository boundary.
+- Focused playback repository/v3-services suite: 26 passed, 0 failed.
+- Full server suite: 135 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, `git diff --check`, repository security gate, provider fail-closed check, and route uniqueness check passed. `server.playback` direct persistence operations are zero; the route table remains 75 flattened routes and 79 unique method/path pairs with 0 duplicates.
+
+Commit: `e51c8c8 refactor: isolate playback health persistence`
+
+### G7 completion verification
+
+- `flutter analyze --suppress-analytics`: 0 issues.
+- Full Flutter suite: 579 passed, 26 skipped legacy/platform-conditional cases, 0 failed.
+- Full server suite: 135 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Application lifecycle, routers, fail-closed admin/legacy surfaces, provider contracts and activation, catalog/playback repositories, runtime route uniqueness, repository security gate, compile checks, and cross-client v3 catalog/quick/full playback contracts all have direct regression evidence.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled endpoint, private implementation, token, DRM, membership, CAPTCHA, or access-control bypass was used. No production account, database, provider, environment, deployment, signing material, or release artifact was changed.
+- Platform packaging/build and real-device/production-provider acceptance remain G13/G14 release gates; G7 changed only server architecture and cross-platform API compatibility, so no release artifact is claimed here.
 
 ## G8 Account and session security
 
