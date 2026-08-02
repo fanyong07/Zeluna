@@ -12,7 +12,8 @@ typedef AccountScopeActivator =
     Future<void> Function(AccountScopeActivation activation);
 typedef AccountDownloadQuiescer = Future<void> Function();
 typedef AccountOwnedDownloadsReader = List<AccountOwnedDownload> Function();
-typedef AccountDownloadCanceller = void Function(String taskId);
+typedef AccountDownloadCanceller =
+    void Function(String accountId, String taskId);
 typedef AccountDownloadFileDeleter = Future<void> Function(String path);
 typedef AccountContextSelector =
     void Function(String? accountId, {required bool resetCredentialState});
@@ -501,7 +502,7 @@ final class AccountController {
     }
 
     for (final taskId in pending.taskIds) {
-      _cancelDownload(taskId);
+      _cancelDownload(pending.accountId, taskId);
     }
     await attempt(
       () => _localRepository.deleteAccountRecord(pending.accountId),

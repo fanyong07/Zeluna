@@ -54,7 +54,7 @@ void main() {
       },
       quiesceDownloads: () async => quiesceCalls++,
       readOwnedDownloads: () => const <AccountOwnedDownload>[],
-      cancelDownload: (_) {},
+      cancelDownload: (_, _) {},
       deleteDownloadFile: (_) async {},
       selectCredentialContext: (accountId, {required resetCredentialState}) {
         selectedContexts.add((

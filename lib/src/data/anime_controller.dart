@@ -14,6 +14,7 @@ import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
+import '../downloads/download_controller.dart';
 import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -32,8 +33,6 @@ import 'chinese_metadata_repository.dart';
 import 'chinese_text.dart';
 import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
-import 'media_download_line_selector.dart';
-import 'media_download_result.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
 import 'playback_prefetch_cache.dart';
@@ -490,6 +489,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   AccountController? _accountController;
   SettingsController? _settingsController;
   SourceController? _sourceController;
+  DownloadController? _downloadController;
   int _homeRefreshVersion = 0;
   final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
   final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
@@ -498,11 +498,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       <String, RulePlaybackCancellationToken>{};
   final _backendLineLookups = AsyncSingleFlight<String, List<PlaybackLine>>();
   final _backendPlaybackLineCache = PlaybackPrefetchCache();
-  final _downloadRuns = <String, Future<void>>{};
-  final _downloadPersistedAt = <String, DateTime>{};
   Future<void> _metadataWriteQueue = Future<void>.value();
-  Future<void> _downloadWriteQueue = Future<void>.value();
-  Timer? _downloadPersistTimer;
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -519,6 +515,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   SourceController get _sourceDomain {
     final controller = _sourceController;
     if (controller == null) throw StateError('线路与规则尚未准备好');
+    return controller;
+  }
+
+  DownloadController get _downloadDomain {
+    final controller = _downloadController;
+    if (controller == null) throw StateError('下载管理尚未准备好');
     return controller;
   }
 
@@ -549,8 +551,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       activateScope: _applyAccountScope,
       quiesceDownloads: _quiesceDownloadsForAccountChange,
       readOwnedDownloads: _readAccountOwnedDownloads,
-      cancelDownload: (taskId) =>
-          ref.read(mediaDownloadServiceProvider).cancel(taskId),
+      cancelDownload: (accountId, taskId) {
+        final controller = _downloadController;
+        if (controller == null) {
+          ref.read(mediaDownloadServiceProvider).cancel(taskId);
+          return;
+        }
+        controller.cancelOwnedDownload(accountId, taskId);
+      },
       deleteDownloadFile: (path) =>
           ref.read(mediaDownloadServiceProvider).deleteFiles([path]),
       selectCredentialContext: _selectCredentialAccountContext,
@@ -583,19 +591,29 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
+    _downloadController = DownloadController(
+      storage: HiveDownloadStorage(_library),
+      service: ref.read(mediaDownloadServiceProvider),
+      resolveLines: (subject, episode) =>
+          linesForEpisodeMode(subject, episode, expandAll: true),
+      publishSnapshot: _publishDownloadSnapshot,
+    );
+    final downloadSnapshot = await _downloadDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
     final services = settingsSnapshot.services;
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     final cachedHomeFeed = _readHomeFeedCache(_servicesSignature(services));
     final feed = cachedHomeFeed.feed ?? bangumiRepository.fallbackHomeFeed();
     unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
-    final offlineTasks = await _readDownloadTasks();
     final initialState = AnimeState(
       homeFeed: feed,
       settings: settingsSnapshot.playback,
       favorites: _readEntries('favorites'),
       history: _readEntries('history'),
       following: _readEntries('following'),
-      offlineTasks: offlineTasks,
+      offlineTasks: downloadSnapshot.tasks,
       imageFavorites: _readEntries('imageFavorites'),
       feedbacks: _readFeedbacks(),
       profile: AccountController.profileFromJson(profileJson, activeAccount),
@@ -617,7 +635,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       );
     }
     ref.onDispose(() {
-      _downloadPersistTimer?.cancel();
+      _downloadController?.dispose();
       _cancelPlaybackPrefetches();
     });
     return initialState;
@@ -1842,461 +1860,24 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _writeEntries('history', next);
   }
 
-  Future<String> queueOffline(
-    AnimeSubject subject,
-    AnimeEpisode? episode,
-  ) async {
-    final current = state.value;
-    if (current == null) return '应用状态尚未准备好';
-    if (episode == null) return '当前条目没有可下载的集数';
-    if (!supportsOfflineDownloads) {
-      return '网页版暂不支持离线下载，请使用桌面或移动客户端';
-    }
-    final existing = current.offlineTasks
-        .where(
-          (item) =>
-              sameSubjectIdentity(item.subject, subject) &&
-              item.episode.id == episode.id,
-        )
-        .firstOrNull;
-    if (existing != null) {
-      if (existing.isActive) return '该集已经在下载队列中';
-      if (existing.isPlayable &&
-          await ref
-              .read(mediaDownloadServiceProvider)
-              .fileExists(existing.localPath)) {
-        return '该集已经下载完成';
-      }
-      await resumeDownload(existing.id);
-      return '已重新开始下载';
-    }
-    final now = DateTime.now();
-    final subjectKey = subject.identityKey;
-    final episodeKey = episode.identityKey(subjectKey: subjectKey);
-    final task = MediaDownloadTask(
-      id: stableDownloadTaskKey(subjectKey: subjectKey, episodeKey: episodeKey),
-      subject: subject,
-      episode: episode,
-      createdAt: now,
-      updatedAt: now,
-      status: MediaDownloadTaskStatus.resolving,
-      message: '正在查找可下载线路',
-    );
-    final next = [task, ...current.offlineTasks];
-    state = AsyncData(current.copyWith(offlineTasks: next));
-    await _persistDownloadTasksNow();
-    unawaited(_launchDownload(task.id));
-    return '已加入下载队列';
-  }
+  Future<String> queueOffline(AnimeSubject subject, AnimeEpisode? episode) =>
+      _downloadDomain.queueOffline(subject, episode);
 
   bool get supportsOfflineDownloads =>
+      _downloadController?.supportsDownloads ??
       ref.read(mediaDownloadServiceProvider).supportsDownloads;
 
-  Future<void> pauseDownload(String taskId) async {
-    final task = _downloadTask(taskId);
-    if (task == null || !task.isActive) return;
-    ref.read(mediaDownloadServiceProvider).pause(taskId);
-    _replaceDownloadTask(
-      task.copyWith(
-        status: MediaDownloadTaskStatus.paused,
-        updatedAt: DateTime.now(),
-        message: '下载已暂停',
-      ),
-    );
-    await _persistDownloadTasksNow();
-  }
+  Future<void> pauseDownload(String taskId) =>
+      _downloadDomain.pauseDownload(taskId);
 
-  Future<void> resumeDownload(String taskId) async {
-    if (!supportsOfflineDownloads) return;
-    var task = _downloadTask(taskId);
-    if (task == null || task.isActive) return;
-    final finishingRun = _downloadRuns[taskId];
-    if (finishingRun != null) {
-      await finishingRun;
-      task = _downloadTask(taskId);
-      if (task == null || task.isActive) return;
-    }
-    final service = ref.read(mediaDownloadServiceProvider);
-    if (task.isPlayable && await service.fileExists(task.localPath)) return;
-    if (task.status == MediaDownloadTaskStatus.cancelled ||
-        (task.status == MediaDownloadTaskStatus.completed &&
-            !await service.fileExists(task.localPath))) {
-      await service.deleteFiles([task.temporaryPath, task.localPath]);
-      task = task.copyWith(
-        downloadedBytes: 0,
-        totalBytes: 0,
-        completedUnits: 0,
-        totalUnits: 0,
-        temporaryPath: null,
-        localPath: null,
-        etag: null,
-        lastModified: null,
-        url: null,
-        lineId: null,
-        providerName: null,
-        format: null,
-        headers: const {},
-      );
-    }
-    task = task.copyWith(
-      status: MediaDownloadTaskStatus.queued,
-      updatedAt: DateTime.now(),
-      message: task.downloadedBytes > 0 ? '等待继续下载' : '等待下载',
-    );
-    _replaceDownloadTask(task);
-    await _persistDownloadTasksNow();
-    unawaited(_launchDownload(taskId, preferStoredLine: task.url != null));
-  }
+  Future<void> resumeDownload(String taskId) =>
+      _downloadDomain.resumeDownload(taskId);
 
-  Future<void> cancelDownload(String taskId) async {
-    final task = _downloadTask(taskId);
-    if (task == null || task.status == MediaDownloadTaskStatus.completed) {
-      return;
-    }
-    final service = ref.read(mediaDownloadServiceProvider);
-    final stoppedActiveDownload = service.cancel(taskId);
-    if (!stoppedActiveDownload) {
-      await service.deleteFiles([task.temporaryPath]);
-    }
-    _replaceDownloadTask(
-      task.copyWith(
-        status: MediaDownloadTaskStatus.cancelled,
-        updatedAt: DateTime.now(),
-        downloadedBytes: 0,
-        totalBytes: 0,
-        completedUnits: 0,
-        totalUnits: 0,
-        temporaryPath: null,
-        localPath: null,
-        etag: null,
-        lastModified: null,
-        message: '下载已取消',
-      ),
-    );
-    await _persistDownloadTasksNow();
-  }
+  Future<void> cancelDownload(String taskId) =>
+      _downloadDomain.cancelDownload(taskId);
 
-  Future<void> removeDownload(String taskId) async {
-    var task = _downloadTask(taskId);
-    if (task == null) return;
-    final service = ref.read(mediaDownloadServiceProvider);
-    final paths = <String?>[task.temporaryPath, task.localPath];
-    if (task.status != MediaDownloadTaskStatus.completed) {
-      await cancelDownload(taskId);
-      task = _downloadTask(taskId) ?? task;
-      paths.addAll([task.temporaryPath, task.localPath]);
-    }
-    final run = _downloadRuns[taskId];
-    final current = state.value;
-    if (current == null) return;
-    state = AsyncData(
-      current.copyWith(
-        offlineTasks: current.offlineTasks
-            .where((item) => item.id != taskId)
-            .toList(growable: false),
-      ),
-    );
-    await _persistDownloadTasksNow();
-    Future<void> cleanup() async {
-      if (run != null) await run;
-      await service.deleteFiles(paths);
-    }
-
-    if (run == null) {
-      await cleanup();
-    } else {
-      unawaited(cleanup().onError((_, _) {}));
-    }
-  }
-
-  Future<void> _launchDownload(String taskId, {bool preferStoredLine = false}) {
-    final active = _downloadRuns[taskId];
-    if (active != null) return active;
-    final run = () async {
-      try {
-        await _performDownload(taskId, preferStoredLine: preferStoredLine);
-      } catch (_) {
-        final task = _downloadTask(taskId);
-        if (task != null &&
-            task.status != MediaDownloadTaskStatus.cancelled &&
-            task.status != MediaDownloadTaskStatus.paused) {
-          _replaceDownloadTask(
-            task.copyWith(
-              status: MediaDownloadTaskStatus.failed,
-              updatedAt: DateTime.now(),
-              message: '下载失败，可稍后重试',
-            ),
-          );
-          await _persistDownloadTasksNow();
-        }
-      } finally {
-        _downloadRuns.remove(taskId);
-      }
-    }();
-    _downloadRuns[taskId] = run;
-    return run;
-  }
-
-  Future<void> _performDownload(
-    String taskId, {
-    required bool preferStoredLine,
-  }) async {
-    var task = _downloadTask(taskId);
-    if (task == null ||
-        task.status == MediaDownloadTaskStatus.paused ||
-        task.status == MediaDownloadTaskStatus.cancelled) {
-      return;
-    }
-
-    MediaDownloadResult? lastResult;
-    if (preferStoredLine && task.url?.trim().isNotEmpty == true) {
-      final storedLine = PlaybackLine(
-        id: task.lineId ?? 'download:${task.id}',
-        episodeId: task.episode.id,
-        providerId: task.lineId ?? 'download',
-        providerName: task.providerName ?? '已保存线路',
-        title: task.providerName ?? '已保存线路',
-        quality: '离线下载',
-        format: task.format ?? 'MP4',
-        url: task.url,
-        headers: task.headers,
-        available: true,
-      );
-      lastResult = await _downloadLine(taskId, storedLine);
-      if (lastResult.success || lastResult.paused || lastResult.cancelled) {
-        return;
-      }
-    }
-
-    task = _downloadTask(taskId);
-    if (task == null ||
-        task.status == MediaDownloadTaskStatus.paused ||
-        task.status == MediaDownloadTaskStatus.cancelled) {
-      return;
-    }
-    _replaceDownloadTask(
-      task.copyWith(
-        status: MediaDownloadTaskStatus.resolving,
-        updatedAt: DateTime.now(),
-        message: lastResult == null ? '正在查找可下载线路' : '当前线路失败，正在换线',
-      ),
-    );
-    await _persistDownloadTasksNow();
-
-    List<PlaybackLine> lines;
-    try {
-      lines = await linesForEpisodeMode(
-        task.subject,
-        task.episode,
-        expandAll: true,
-      );
-    } catch (_) {
-      final latest = _downloadTask(taskId);
-      if (latest == null ||
-          latest.status == MediaDownloadTaskStatus.paused ||
-          latest.status == MediaDownloadTaskStatus.cancelled) {
-        return;
-      }
-      _replaceDownloadTask(
-        latest.copyWith(
-          status: MediaDownloadTaskStatus.failed,
-          updatedAt: DateTime.now(),
-          message: '查找下载线路失败，请稍后重试',
-        ),
-      );
-      await _persistDownloadTasksNow();
-      return;
-    }
-
-    final candidates = [
-      ...singleFileDownloadCandidates(lines),
-      ...hlsDownloadCandidates(lines),
-    ].where((line) => line.url != task!.url).toList(growable: false);
-    if (candidates.isEmpty) {
-      final latest = _downloadTask(taskId);
-      if (latest == null ||
-          latest.status == MediaDownloadTaskStatus.paused ||
-          latest.status == MediaDownloadTaskStatus.cancelled) {
-        return;
-      }
-      final onlySegmented = lines.any(
-        (line) => line.available && isSegmentedDownloadLine(line),
-      );
-      _replaceDownloadTask(
-        latest.copyWith(
-          status: MediaDownloadTaskStatus.failed,
-          updatedAt: DateTime.now(),
-          message: onlySegmented
-              ? '当前只找到 DASH 或不受支持的分片线路'
-              : (lastResult?.message ?? '没有找到可直接下载的单文件线路'),
-        ),
-      );
-      await _persistDownloadTasksNow();
-      return;
-    }
-
-    for (var index = 0; index < candidates.length; index++) {
-      final latest = _downloadTask(taskId);
-      if (latest == null ||
-          latest.status == MediaDownloadTaskStatus.paused ||
-          latest.status == MediaDownloadTaskStatus.cancelled) {
-        return;
-      }
-      if (lastResult != null ||
-          (latest.url != null && latest.url != candidates[index].url)) {
-        await _discardPartialDownload(latest);
-      }
-      lastResult = await _downloadLine(taskId, candidates[index]);
-      if (lastResult.success || lastResult.paused || lastResult.cancelled) {
-        return;
-      }
-      if (index + 1 < candidates.length) {
-        final failed = _downloadTask(taskId);
-        if (failed != null) {
-          _replaceDownloadTask(
-            failed.copyWith(
-              status: MediaDownloadTaskStatus.resolving,
-              updatedAt: DateTime.now(),
-              message: '${failed.providerName ?? '当前线路'}失败，正在尝试下一条',
-            ),
-          );
-          await _persistDownloadTasksNow();
-        }
-      }
-    }
-
-    final failed = _downloadTask(taskId);
-    if (failed != null &&
-        failed.status != MediaDownloadTaskStatus.paused &&
-        failed.status != MediaDownloadTaskStatus.cancelled) {
-      _replaceDownloadTask(
-        failed.copyWith(
-          status: MediaDownloadTaskStatus.failed,
-          updatedAt: DateTime.now(),
-          message: lastResult?.message ?? '所有单文件线路都下载失败',
-        ),
-      );
-      await _persistDownloadTasksNow();
-    }
-  }
-
-  Future<MediaDownloadResult> _downloadLine(
-    String taskId,
-    PlaybackLine line,
-  ) async {
-    var task = _downloadTask(taskId)!;
-    task = task.copyWith(
-      status: MediaDownloadTaskStatus.downloading,
-      updatedAt: DateTime.now(),
-      lineId: line.id,
-      providerName: line.providerName,
-      format: line.format,
-      url: line.url,
-      headers: line.headers,
-      message: '正在通过 ${line.providerName} 下载',
-    );
-    _replaceDownloadTask(task);
-    await _persistDownloadTasksNow();
-
-    final service = ref.read(mediaDownloadServiceProvider);
-    final producedPaths = <String?>{task.temporaryPath, task.localPath};
-    final result = await service.download(
-      taskId: taskId,
-      url: line.url!,
-      title: '${task.subject.title}_EP${task.episode.number}',
-      headers: line.headers,
-      format: line.format,
-      temporaryPath: task.temporaryPath,
-      targetPath: task.localPath,
-      etag: task.etag,
-      lastModified: task.lastModified,
-      onProgress: (progress) {
-        producedPaths
-          ..add(progress.temporaryPath)
-          ..add(progress.targetPath);
-        _updateDownloadProgress(taskId, progress);
-      },
-    );
-    final latest = _downloadTask(taskId);
-    if (latest == null || latest.status == MediaDownloadTaskStatus.cancelled) {
-      await service.deleteFiles({
-        ...producedPaths,
-        result.temporaryPath,
-        result.path,
-      });
-      return result;
-    }
-    if (latest.status == MediaDownloadTaskStatus.paused) return result;
-    final nextStatus = switch (result.outcome) {
-      MediaDownloadOutcome.completed => MediaDownloadTaskStatus.completed,
-      MediaDownloadOutcome.paused => MediaDownloadTaskStatus.paused,
-      MediaDownloadOutcome.cancelled => MediaDownloadTaskStatus.cancelled,
-      MediaDownloadOutcome.failed ||
-      MediaDownloadOutcome.unsupported => MediaDownloadTaskStatus.failed,
-    };
-    _replaceDownloadTask(
-      latest.copyWith(
-        status: nextStatus,
-        updatedAt: DateTime.now(),
-        downloadedBytes: result.cancelled ? 0 : result.bytes,
-        totalBytes: result.cancelled ? 0 : result.totalBytes,
-        completedUnits: result.cancelled ? 0 : result.completedUnits,
-        totalUnits: result.cancelled ? 0 : result.totalUnits,
-        temporaryPath: result.cancelled ? null : result.temporaryPath,
-        localPath: result.success ? result.path : latest.localPath,
-        etag: result.cancelled ? null : result.etag,
-        lastModified: result.cancelled ? null : result.lastModified,
-        message: result.message,
-      ),
-    );
-    await _persistDownloadTasksNow();
-    return result;
-  }
-
-  void _updateDownloadProgress(String taskId, MediaDownloadProgress progress) {
-    final task = _downloadTask(taskId);
-    if (task == null || task.status != MediaDownloadTaskStatus.downloading) {
-      return;
-    }
-    _replaceDownloadTask(
-      task.copyWith(
-        updatedAt: DateTime.now(),
-        downloadedBytes: progress.downloadedBytes,
-        totalBytes: progress.totalBytes,
-        completedUnits: progress.completedUnits,
-        totalUnits: progress.totalUnits,
-        temporaryPath: progress.temporaryPath,
-        localPath: progress.targetPath.trim().isEmpty
-            ? task.localPath
-            : progress.targetPath,
-        etag: progress.etag,
-        lastModified: progress.lastModified,
-      ),
-    );
-    _scheduleDownloadPersist(taskId);
-  }
-
-  Future<void> _discardPartialDownload(MediaDownloadTask task) async {
-    await ref.read(mediaDownloadServiceProvider).deleteFiles([
-      task.temporaryPath,
-      task.localPath,
-    ]);
-    final latest = _downloadTask(task.id);
-    if (latest == null) return;
-    _replaceDownloadTask(
-      latest.copyWith(
-        downloadedBytes: 0,
-        totalBytes: 0,
-        completedUnits: 0,
-        totalUnits: 0,
-        temporaryPath: null,
-        localPath: null,
-        etag: null,
-        lastModified: null,
-      ),
-    );
-    await _persistDownloadTasksNow();
-  }
+  Future<void> removeDownload(String taskId) =>
+      _downloadDomain.removeDownload(taskId);
 
   Future<void> addImageFavorite(AnimeSubject subject) async {
     final current = state.value;
@@ -2319,8 +1900,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         state = AsyncData(current.copyWith(history: const []));
         break;
       case 'offlineTasks':
-        state = AsyncData(current.copyWith(offlineTasks: const []));
-        break;
+        await _downloadDomain.clearDownloads();
+        return;
       case 'imageFavorites':
         state = AsyncData(current.copyWith(imageFavorites: const []));
         break;
@@ -2443,7 +2024,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
-    final offlineTasks = await _readDownloadTasksFor(accountId);
+    final downloadSnapshot = await _downloadDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+    );
     final current = state.value;
     if (current == null ||
         !_accounts.isContextCurrent(activation.contextVersion)) {
@@ -2464,7 +2048,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         favorites: _readEntriesFor(accountId, 'favorites'),
         history: _readEntriesFor(accountId, 'history'),
         following: _readEntriesFor(accountId, 'following'),
-        offlineTasks: offlineTasks,
+        offlineTasks: downloadSnapshot.tasks,
         imageFavorites: _readEntriesFor(accountId, 'imageFavorites'),
         feedbacks: _readFeedbacksFor(accountId),
         profile: AccountController.profileFromJson(profileJson, account),
@@ -2493,15 +2077,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ref.read(externalServiceRepositoryProvider).resetTmdbAccessTokenState();
   }
 
-  List<AccountOwnedDownload> _readAccountOwnedDownloads() => List.unmodifiable(
-    (state.value?.offlineTasks ?? const <MediaDownloadTask>[]).map(
-      (task) => AccountOwnedDownload(
-        id: task.id,
-        temporaryPath: task.temporaryPath,
-        localPath: task.localPath,
-      ),
-    ),
-  );
+  List<AccountOwnedDownload> _readAccountOwnedDownloads() =>
+      _downloadController?.ownedDownloads() ?? const [];
 
   void _publishAccountSession(LocalAccountSession session) {
     final current = state.value;
@@ -2543,6 +2120,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
+  void _publishDownloadSnapshot(DownloadSnapshot snapshot) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(offlineTasks: snapshot.tasks));
+  }
+
   Future<void> _handleExternalServicesChanged(
     ExternalServicesChange change,
   ) async {
@@ -2565,22 +2148,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> _quiesceDownloadsForAccountChange() async {
     await _settingsController?.settleWrites();
     await _sourceController?.settleWrites();
-    final activeIds = state.value?.offlineTasks
-        .where((task) => task.isActive)
-        .map((task) => task.id)
-        .toList(growable: false);
-    if (activeIds != null) {
-      for (final taskId in activeIds) {
-        await pauseDownload(taskId);
-      }
-    }
-    await _persistDownloadTasksNow();
-    final runs = List<Future<void>>.from(_downloadRuns.values);
-    if (runs.isNotEmpty) {
-      await Future.wait(
-        runs,
-      ).timeout(const Duration(seconds: 3), onTimeout: () => const <void>[]);
-    }
+    await _downloadController?.quiesce();
   }
 
   void _ensureAccountContext(int expectedVersion) {
@@ -2629,150 +2197,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .map((item) => LibraryEntry.fromJson(item.cast<String, dynamic>()))
         .where((item) => item.subject.title.trim().isNotEmpty)
         .toList();
-  }
-
-  Future<List<MediaDownloadTask>> _readDownloadTasks() async {
-    return _readDownloadTasksFor(_activeAccount?.id);
-  }
-
-  Future<List<MediaDownloadTask>> _readDownloadTasksFor(
-    String? accountId,
-  ) async {
-    final storageKey = _accountLibraryKeyFor(accountId, 'offlineTasks');
-    final value = _library.get(storageKey);
-    if (value is! List) return const [];
-    final tasks = <MediaDownloadTask>[];
-    var migrated = false;
-    for (final raw in value.whereType<Map>()) {
-      final json = raw.cast<String, dynamic>();
-      MediaDownloadTask task;
-      if (json.containsKey('status') && json.containsKey('id')) {
-        task = MediaDownloadTask.fromJson(json);
-        final rawHeaders = json['headers'];
-        final storedHeaders = rawHeaders is Map
-            ? {
-                for (final entry in rawHeaders.entries)
-                  entry.key.toString(): entry.value.toString(),
-              }
-            : const <String, String>{};
-        final storedUrl = json['url']?.toString().trim() ?? '';
-        final storedMessage = json['message']?.toString() ?? '';
-        if (json['version'] != 3 ||
-            !_sameStringMap(storedHeaders, task.headers) ||
-            storedUrl != (task.url ?? '') ||
-            storedMessage != task.message) {
-          migrated = true;
-        }
-      } else {
-        task = MediaDownloadTask.fromLegacy(LibraryEntry.fromJson(json));
-        migrated = true;
-      }
-      if (task.id.trim().isEmpty ||
-          task.subject.title.trim().isEmpty ||
-          task.episode.id == 0) {
-        migrated = true;
-        continue;
-      }
-      if (task.isActive) {
-        task = task.copyWith(
-          status: MediaDownloadTaskStatus.paused,
-          updatedAt: DateTime.now(),
-          message: '上次下载已中断，可以继续下载',
-        );
-        migrated = true;
-      }
-      if (task.status == MediaDownloadTaskStatus.completed &&
-          !await ref
-              .read(mediaDownloadServiceProvider)
-              .fileExists(task.localPath)) {
-        task = task.copyWith(
-          status: MediaDownloadTaskStatus.failed,
-          updatedAt: DateTime.now(),
-          localPath: null,
-          message: '本地文件已不存在，请重新下载',
-        );
-        migrated = true;
-      }
-      if (task.downloadedBytes > 0 &&
-          task.status != MediaDownloadTaskStatus.completed &&
-          !await ref
-              .read(mediaDownloadServiceProvider)
-              .fileExists(task.temporaryPath)) {
-        task = task.copyWith(
-          downloadedBytes: 0,
-          totalBytes: 0,
-          completedUnits: 0,
-          totalUnits: 0,
-          temporaryPath: null,
-          etag: null,
-          lastModified: null,
-          message: task.status == MediaDownloadTaskStatus.paused
-              ? '临时文件已不存在，将重新下载'
-              : task.message,
-        );
-        migrated = true;
-      }
-      tasks.add(task);
-    }
-    if (migrated) {
-      await _library.put(
-        storageKey,
-        tasks.map((item) => item.toJson()).toList(),
-      );
-    }
-    return tasks;
-  }
-
-  MediaDownloadTask? _downloadTask(String taskId) {
-    return state.value?.offlineTasks
-        .where((item) => item.id == taskId)
-        .firstOrNull;
-  }
-
-  void _replaceDownloadTask(MediaDownloadTask task) {
-    final current = state.value;
-    if (current == null) return;
-    final next = current.offlineTasks
-        .map((item) => item.id == task.id ? task : item)
-        .toList(growable: false);
-    state = AsyncData(current.copyWith(offlineTasks: next));
-  }
-
-  void _scheduleDownloadPersist(String taskId) {
-    final now = DateTime.now();
-    final last = _downloadPersistedAt[taskId];
-    if (last == null || now.difference(last) >= const Duration(seconds: 1)) {
-      _downloadPersistedAt[taskId] = now;
-      unawaited(_persistDownloadTasks());
-      return;
-    }
-    if (_downloadPersistTimer?.isActive ?? false) return;
-    _downloadPersistTimer = Timer(const Duration(seconds: 1), () {
-      _downloadPersistTimer = null;
-      unawaited(_persistDownloadTasks());
-    });
-  }
-
-  Future<void> _persistDownloadTasksNow() {
-    _downloadPersistTimer?.cancel();
-    _downloadPersistTimer = null;
-    return _persistDownloadTasks();
-  }
-
-  Future<void> _persistDownloadTasks() {
-    final storageKey = _accountLibraryKeyFor(
-      _activeAccount?.id,
-      'offlineTasks',
-    );
-    final snapshot = state.value?.offlineTasks
-        .map((item) => item.toJson())
-        .toList(growable: false);
-    if (snapshot == null) return Future<void>.value();
-    final operation = _downloadWriteQueue.then(
-      (_) => _library.put(storageKey, snapshot),
-    );
-    _downloadWriteQueue = operation.then<void>((_) {}, onError: (_, _) {});
-    return operation;
   }
 
   _SubjectCacheSnapshot _readSubjectCache(String key, String signature) {
@@ -3176,14 +2600,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         .where((item) => item.title.trim().isNotEmpty)
         .toList();
   }
-}
-
-bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
-  if (left.length != right.length) return false;
-  for (final entry in left.entries) {
-    if (right[entry.key] != entry.value) return false;
-  }
-  return true;
 }
 
 class _HomeFeedCacheSnapshot {

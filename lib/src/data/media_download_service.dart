@@ -15,6 +15,7 @@ class MediaDownloadService {
 
   Future<MediaDownloadResult> download({
     required String taskId,
+    String? controlId,
     required String url,
     required String title,
     required Map<String, String> headers,
@@ -25,7 +26,8 @@ class MediaDownloadService {
     String? lastModified,
     void Function(MediaDownloadProgress progress)? onProgress,
   }) {
-    if (_active.containsKey(taskId)) {
+    final activeId = controlId ?? taskId;
+    if (_active.containsKey(activeId)) {
       return Future.value(
         const MediaDownloadResult(
           outcome: MediaDownloadOutcome.failed,
@@ -34,7 +36,7 @@ class MediaDownloadService {
       );
     }
     final control = MediaDownloadControl();
-    _active[taskId] = control;
+    _active[activeId] = control;
     return _backend
         .download(
           request: MediaDownloadRequest(
@@ -52,27 +54,28 @@ class MediaDownloadService {
           onProgress: onProgress ?? (_) {},
         )
         .whenComplete(() {
-          if (identical(_active[taskId], control)) {
-            _active.remove(taskId);
+          if (identical(_active[activeId], control)) {
+            _active.remove(activeId);
           }
         });
   }
 
-  bool pause(String taskId) {
-    final control = _active[taskId];
+  bool pause(String taskId, {String? controlId}) {
+    final control = _active[controlId ?? taskId];
     if (control == null) return false;
     control.pause();
     return true;
   }
 
-  bool cancel(String taskId) {
-    final control = _active[taskId];
+  bool cancel(String taskId, {String? controlId}) {
+    final control = _active[controlId ?? taskId];
     if (control == null) return false;
     control.cancel();
     return true;
   }
 
-  bool isActive(String taskId) => _active.containsKey(taskId);
+  bool isActive(String taskId, {String? controlId}) =>
+      _active.containsKey(controlId ?? taskId);
 
   Future<bool> fileExists(String? path) {
     if (path == null || path.trim().isEmpty) return Future.value(false);
