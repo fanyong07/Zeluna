@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `98d8ec8` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `8d15b2a` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -551,6 +551,41 @@ Remaining risks:
 - Backend and rule repository factories remain compatibility ports in `AnimeController`; the PlaybackDiscovery owner now controls their asynchronous lifecycle and publication. Provider-interface restructuring remains G7 work.
 - The four required materials remain `total=4`, `read=4`, `skipped=0`. AniCh reports and the VOD JSON were used only to compare architecture and historical route-shape ideas; no production API, sampled endpoint, private implementation, token, DRM, membership, CAPTCHA, or access-control bypass was used.
 - No production backend, account, secret, signing material, real device, or release configuration changed in this slice.
+
+### SyncController
+
+Audit:
+
+- `LibraryController` already exposed an explicit history-sync port, but `AnimeController` still owned its account check, current settings lookup, external repository access, and lifecycle. The compatibility repository currently returns only the public-collection setting and does not implement durable cloud synchronization.
+- An independent Sync owner was still needed before G10 can safely add persistent offline mutations. The G6 extraction must not mislabel the current placeholder as server push/pull, idempotency, tombstones, or conflict resolution.
+
+Changes:
+
+- Added an independent `SyncController` owning account/context scope, ordered compatibility history uploads, a bounded 10-second operation timeout, optional-failure isolation, settings enablement, queue settlement, and late-result rejection.
+- Account activation now configures Sync from the explicit account session event before loading the new Library scope. Account quiescence waits both local Library writes and Sync work; setting changes update Sync without giving it ownership of settings persistence.
+- `LibraryController` keeps local favorites/history/following persistence and hands only a typed captured mutation context to Sync. `AnimeController` no longer reads account state, current aggregate state, or the external repository inside the history callback.
+- Durable mutations, stable client mutation IDs, schemas, acknowledgements, pull revisions, tombstones, two-device conflict policy, migration, and the server API remain explicitly unimplemented until G10.
+
+Tests:
+
+- Added five direct regressions covering disabled sync, serialized upload order, queued/late old-account rejection, setting invalidation, and bounded timeout/failure isolation.
+- Sync, Library, Account, Settings, and credential-provider focused regressions: 28 passed, 0 failed.
+- Full `flutter test --reporter expanded`: 579 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Full Dart format check, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web build gates are the remaining G6 acceptance work.
+
+Commit: `8d15b2a refactor: split sync controller`
+
+Remaining G6 acceptance:
+
+- Run Android, Windows, and Web builds against the fully split client domains.
+- Re-audit `AnimeController` ownership and compatibility adapters against the G6 acceptance criteria before changing G6 to completed.
+
+Remaining risks:
+
+- Current history sync remains a no-op compatibility adapter controlled by `publicCollectionSyncEnabled`; it is not evidence of cloud synchronization. G10 must implement and verify the complete client/server lifecycle without syncing downloads, cookies, headers, API keys, bearer tokens, temporary media URLs, or untrusted-rule secrets.
+- No production account, external collection, cloud mutation, server schema, production service, secret, signing material, or release configuration changed in this slice.
 
 ## G7 Server architecture
 
