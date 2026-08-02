@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `36f462b` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `aa261c0` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -757,6 +757,28 @@ Tests:
 - `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. The flattened runtime table contained 75 method/path pairs with no duplicates.
 
 Commit: `36f462b refactor: isolate legacy media routes`
+
+### Legacy community thread router isolation
+
+Audit:
+
+- Twelve retained thread feed/tag/detail/collection/like routes were interleaved with media, search, and comment implementations in `server.main`.
+- Public feed/detail responses use the historical protobuf shape, while collection/like status is readable without login but all mutations and personal lists require the existing `_` token header. The extraction could not weaken that split.
+
+Changes:
+
+- Added `server.routers.legacy_community` for `/latest`, `/tags`, `/t/*`, `/r/*` thread/detail/collection/like routes, and `/action/collects/{type}`.
+- Consolidated the repeated thread-card mapping inside the router while preserving image selection, count fields, pagination, tag filtering, response formats, shared session dependency, and existing authentication behavior.
+- Removed thread-only collection/like model imports from `server.main`. Comment routes and search remain separate follow-up slices. `server.main` is now 670 lines.
+
+Tests:
+
+- Added an in-memory public feed regression for the binary response contract and an unauthenticated boundary regression proving status remains `false` while collection mutation remains 401.
+- Focused community/app suite: 8 passed, 0 failed.
+- Full server suite: 114 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, the repository security gate, and the whole-app method/path uniqueness regression passed. The runtime table remains 75 unique method/path pairs.
+
+Commit: `aa261c0 refactor: isolate legacy community routes`
 
 Remaining G7 work:
 
