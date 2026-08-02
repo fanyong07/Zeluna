@@ -342,6 +342,37 @@ void main() {
     },
   );
 
+  test('finalizing deletion login is not offered as cancellable', () async {
+    final dueAt = DateTime.utc(2026, 8, 2, 12);
+    final client = MockClient(
+      (request) async => http.Response(
+        jsonEncode({
+          'detail': {
+            'code': 'account_deletion_finalizing',
+            'message': '删除冷静期已经结束，正在完成账号删除',
+            'deletion_due_at': dueAt.millisecondsSinceEpoch / 1000,
+          },
+        }),
+        410,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      ),
+    );
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: _MemoryTokenStore(),
+    );
+
+    await expectLater(
+      repository.login(email: 'user@example.com', password: 'password-123'),
+      throwsA(
+        isA<AccountDeletionPendingException>()
+            .having((error) => error.canCancel, 'canCancel', isFalse)
+            .having((error) => error.dueAt, 'dueAt', dueAt),
+      ),
+    );
+  });
   test(
     'deletion request is authenticated, timed, and clears the token',
     () async {

@@ -152,6 +152,52 @@ def test_deletion_request_freezes_sessions_and_valid_password_can_cancel(
     asyncio.run(engine.dispose())
 
 
+def test_expired_deletion_window_rejects_login_and_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "SECRET_KEY", _TEST_SECRET)
+    account_api._attempts.clear()
+    database_path = (tmp_path / "account-deletion-expired.db").as_posix()
+    engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            session.add(
+                User(
+                    email="expired-delete@example.com",
+                    name="expired-delete",
+                    password_hash=auth.hash_password("correct-password"),
+                    deletion_requested_at=1,
+                    deletion_due_at=2,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(prepare())
+    app = _test_app(sessions)
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "expired-delete@example.com",
+                "password": "correct-password",
+            },
+        )
+        cancellation = client.post(
+            "/api/v1/auth/privacy/deletion/cancel",
+            json={
+                "email": "expired-delete@example.com",
+                "password": "correct-password",
+            },
+        )
+
+    assert login.status_code == 410
+    assert login.json()["detail"]["code"] == "account_deletion_finalizing"
+    assert cancellation.status_code == 410
+    asyncio.run(engine.dispose())
+
+
 def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path):
     database_path = (tmp_path / "account-deletion-finalize.db").as_posix()
     engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
