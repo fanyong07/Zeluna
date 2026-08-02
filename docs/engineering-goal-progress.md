@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `18fbc8e` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `1cea5ee` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -618,9 +618,36 @@ Tests:
 
 Commit: `18fbc8e refactor: own server app lifecycle`
 
+### Modern v3 router isolation
+
+Audit:
+
+- The modern status, catalog, playback, and administrative refresh routes were still implemented at the end of `server.main`. That kept public route composition coupled to the retained 1.x/2.x compatibility surface and made route-level authorization or contract testing depend on the 1,765-line module.
+- Baseline focused app/playback validation was 6 passed and 0 failed. The existing quick-playback test patches `server.main.playback_service.quick_lines`, so the extraction had to preserve the shared singleton rather than construct a router-local service.
+
+Changes:
+
+- Added explicit `server.routers.health`, `catalog`, `playback`, and `admin` modules and registered them through `server.app.create_app`. Existing v3 URLs, query constraints, response shapes, stable-ID checks, and the shared database dependency remain unchanged.
+- The modern admin router applies the existing fail-closed `require_admin` dependency to the entire route group. Direct regression proves the refresh endpoint is undiscoverable without configuration, rejects an incorrect token, and accepts the configured header.
+- Router modules reference the existing catalog and playback singleton objects. The compatibility patch through `server.main.playback_service` still controls the same object, and no duplicate v3 route remains in `main`.
+- `server.main` is now 1,648 lines. Retained legacy/community/compatibility routes remain isolated follow-up work; none was enabled, removed, or behaviorally changed in this slice.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`. This slice used only the recorded architecture and security constraints: it did not call an AniCh production API, copy private code or protocols, import sampled routes, retain tokens, or bypass DRM, membership, CAPTCHA, or access controls.
+
+Tests:
+
+- Added route-composition regressions for module ownership/OpenAPI registration, catalog content-type normalization and validation, and fail-closed/authorized-with-correct-token administrative behavior.
+- Focused modern route/app/playback suite: 10 passed, 0 failed.
+- Full server suite: 101 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI contained 68 paths with no duplicates.
+
+Commits:
+
+- `8669047 refactor: split modern server routers`
+- `1cea5ee test: reject invalid modern admin token`
+
 Remaining G7 work:
 
-- Split modern and retained legacy route groups into explicit routers, leaving legacy/community/admin surfaces fail-closed or isolated.
+- Split retained legacy/community/compatibility route groups into explicit routers, leaving all administrative and legacy account surfaces fail-closed or isolated.
 - Separate remaining route orchestration from services/repositories and complete independently testable server boundaries.
 - Formalize provider metadata/interfaces and contract tests without exposing private URLs, headers, tokens, or source internals.
 
