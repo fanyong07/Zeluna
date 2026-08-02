@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `f5e70f5` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `6df6e52` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -483,6 +483,40 @@ Remaining risks:
 
 - The existing optional public-collection history side effect remains a compatibility integration. General cloud mutation queues, idempotency, tombstones, and two-device conflict handling remain G6 Sync/G10 work and are not claimed complete here.
 - No cloud schema, account credential, production service, playback behavior, source inventory, or signing configuration changed in this slice.
+
+### CatalogController
+
+Audit:
+
+- Home feed restore/refresh, search, anime/series/movie discovery, category/tag filtering, weekly schedule grouping, detail loading/enrichment, selected-detail memory state, metadata deduplication, and four global Hive caches were still owned by `AnimeController`.
+- Home and metadata refreshes used separate generation maps and a shared write queue, but account activation did not own those generations. Detail and refresh results therefore depended on scattered account checks rather than one domain scope.
+- The old catalog cache signature covered metadata switches but omitted the unified playback/catalog backend endpoint. Changing backend hosts could leave the previous server's home/metadata cache eligible until another metadata setting changed.
+
+Changes:
+
+- Added an independent `CatalogController` owning home/detail snapshots, search/discovery orchestration, category/tag/schedule views, metadata enrichment flow, deterministic deduplication, cache TTL/sparsity policy, single-flight refreshes, ordered cache writes, and account/context/settings generations.
+- Repository construction, public metadata enrichment, and playback prefetch remain explicit typed ports. Late search/detail/home/cache results from an old account or settings generation cannot publish into the selected account.
+- Catalog cache signatures now bind both metadata settings and the normalized backend configuration. Settings invalidation waits for older cache writes before deletion, preventing an old slow write from recreating stale cache data after a backend change.
+- Detail caching still hands episodes to the existing playback-prefetch compatibility port without moving ranking, probing, or cancellation into Catalog. Those responsibilities remain isolated for the next PlaybackDiscovery slice.
+- `AnimeController` retains the existing catalog-facing API as delegates and fell from 2,675 to 2,129 lines.
+
+Tests:
+
+- Added five direct regressions covering old-account late detail, old-account late home refresh, backend-only cache invalidation, ordered slow-write invalidation, and stable direct-route identity with preferred Chinese metadata.
+- Catalog/page/detail, backend repository, Bangumi/TMDB/Chinese metadata, search ranking, settings, and account-scope focused regressions: 83 passed, 2 intentionally skipped, 0 failed.
+- Full `flutter test --reporter compact`: 568 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, staged `git diff --check`, and the repository security gate passed.
+
+Builds: not run for this behavior-preserving domain slice. Android, Windows, and Web builds remain mandatory before G6 is marked completed.
+
+Commit: `6df6e52 refactor: split catalog controller`
+
+Remaining domains, in required order: PlaybackDiscovery, Sync.
+
+Remaining risks:
+
+- Backend repository construction and provider-specific detail enrichment remain compatibility adapters in `AnimeController`; the Catalog owner controls their lifecycle and publication, while later server/provider-interface work remains G7.
+- No live third-party route, production API, account secret, production service, signing material, or release configuration was accessed or changed.
 
 ## G7 Server architecture
 
