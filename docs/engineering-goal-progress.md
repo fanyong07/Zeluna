@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `1cea5ee` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `ec6fbb7` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -644,6 +644,28 @@ Commits:
 
 - `8669047 refactor: split modern server routers`
 - `1cea5ee test: reject invalid modern admin token`
+
+### Retained admin route isolation
+
+Audit:
+
+- Five retained scraper/scheduler/metadata management endpoints were still declared in `server.main`, each repeating the admin dependency. They had no direct route regressions even though they can trigger scans and metadata synchronization.
+- The retained endpoints already used the same fail-closed dependency as the modern refresh route. This slice preserves their paths and operations while moving authorization ownership to one router-level boundary.
+
+Changes:
+
+- Moved `/admin/scrapers`, `/admin/scrapers/search`, `/admin/scan`, `/admin/sync/metadata`, and `/admin/stats` into `server.routers.admin` alongside `/admin/v3/playback/refresh`.
+- The unified admin router applies `require_admin` to all six endpoints. `server.main` now defines no `/admin/*` path and no longer imports the admin dependency or the unused metadata-sync service alias.
+- Preserved response fields, query parsing, scheduler/scraper/metadata singleton ownership, and endpoint documentation. `server.main` is now 1,563 lines.
+
+Tests:
+
+- Added route ownership plus retained scan regressions proving an incorrect token returns 404 and the configured token forwards the normalized content-type list exactly once.
+- Focused app/admin/playback suite: 11 passed, 0 failed.
+- Full server suite: 102 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- `uv run ruff check server tests`, Python `compileall`, staged `git diff --check`, and the repository security gate passed. OpenAPI still contained 68 paths, including all six admin paths, with no duplicates.
+
+Commit: `ec6fbb7 refactor: isolate server admin routes`
 
 Remaining G7 work:
 
