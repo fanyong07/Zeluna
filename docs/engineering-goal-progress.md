@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `1a985f7` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `0a11fd2` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1222,6 +1222,32 @@ Remaining risks:
 - Privacy export remains the next non-destructive G9 slice.
 - Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before an irreversible flow is implemented or exercised.
 - No production scheduler, cleanup, account, database, environment, or deployment was changed.
+
+### Authenticated account data export
+
+Audit:
+
+- The server had no data-subject export endpoint. Account data was split across profile fields, private collection/history rows, authored danmaku/threads/images/comments, and interaction tables, making a complete user-readable inventory impossible from the client.
+
+Changes:
+
+- Added authenticated `GET /api/v1/auth/privacy/export` with schema version 1 and deterministic ID ordering. Its explicit field allowlist covers every non-secret account profile field, private collections/history, authored danmaku/threads/images/comments, and thread/comment interactions belonging to the current user.
+- The response is attachment-shaped JSON with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. It excludes password hashes, bearer/token digests, JTIs, verification codes, signing/configuration secrets, other users' profiles, and other users' authored content.
+- The export is read-only and performs no database mutation. It is currently a synchronous authenticated API; a client-side save/share experience remains the next product slice, and very large future accounts may require an asynchronous bounded export job.
+
+Tests:
+
+- Focused privacy/account/app suite: 31 passed, 0 failed. Direct regression builds two isolated users and proves authentication, ownership filtering, complete profile/private/authored categories, attachment/no-cache headers, deterministic content, and absence of both users' hashes, bearer token, and every sampled other-user value.
+- Full server suite: 157 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
+
+Commit: `0a11fd2 privacy: export account data safely`
+
+Remaining risks:
+
+- Android/Windows/Web client save/share behavior and its platform-specific permissions remain unimplemented; the server contract is complete and read-only.
+- Permanent cloud deletion/anonymous-public-content policy still requires explicit user direction before irreversible implementation or execution.
+- No production export, account, database, secret, environment, or deployment was accessed or changed.
 
 ## G10 Cloud sync
 
