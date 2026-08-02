@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `cfc7162` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `eec126e` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1168,7 +1168,7 @@ Commit: `dc8c4fe security: close account enumeration paths`
 
 ## G9 Privacy lifecycle
 
-Status: in_progress
+Status: completed
 
 ### Expired authentication artifact retention
 
@@ -1290,23 +1290,55 @@ Changes:
 
 - Added reversible migration `0006_account_deletion_lifecycle` with non-null zero-default request/due timestamps. No production migration was executed.
 - Authenticated password-confirmed deletion requests freeze the account immediately, revoke every session, and set a fixed seven-day deadline. Correct-password login returns a structured frozen-account state; invalid credentials retain the existing generic failure. A separately rate-limited password-confirmed cancellation clears the request only before the deadline.
-- The bounded scheduled privacy job finalizes at most 100 due accounts per run by default (operator-configurable from 1 to 1,000). It deletes private collections/history/interactions, sessions, matching verification codes, and the user; anonymizes public threads/comments/danmaku and exact nickname reply labels; preserves public thread images; and recomputes affected like/collection counters atomically.
+- The bounded scheduled privacy job finalizes at most 100 due accounts per run by default (operator-configurable from 1 to 1,000). It deletes private collections/history/interactions, sessions, matching verification codes, and the user; anonymizes public threads/comments/danmaku and only direct-reply nickname labels identified by stable parent comment IDs; preserves public thread images; and recomputes affected like/collection counters atomically.
 - Scheduler observability adds only an aggregate finalized-account count. No account identifier, email, nickname, content, token, or reason enters cleanup stats or logs.
 
 Tests:
 
-- Account deletion/privacy/account/migration focused suite: 37 passed, 0 failed. Regressions cover password confirmation, seven-day timing, all-session revocation, frozen login, cancellation, complete ownership inventory, bounded batches, before-deadline preservation, public anonymization, private erasure, image preservation, counter repair, and migration upgrade/check/downgrade paths.
-- Full server suite: 160 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+- Account deletion/privacy/account/migration focused suite: 38 passed, 0 failed. Regressions cover password confirmation, seven-day timing, all-session revocation, frozen login, exact-deadline cancellation closure, complete ownership inventory, bounded batches, before-deadline preservation, public anonymization, private erasure, image preservation, counter repair, and migration upgrade/check/downgrade paths.
+- Full server suite: 161 passed, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
 - Ruff, Python `compileall`, repository security gate, staged `git diff --check`, and final diff scope passed.
 
 Commit: `cfc7162 privacy: add reversible cloud account erasure`
 
 Remaining risks:
 
-- Client request/cancellation UI and local session transition remain the final G9 product slice. Real-device acceptance remains a G13/G14 gate.
+- Client request/cancellation UI and local session transition are completed below. Real-device acceptance remains a G13/G14 gate.
 - Finalization can occur up to one configured privacy-cleanup interval after the deadline, but cancellation closes at the exact deadline and the account remains frozen throughout that interval.
-- Public user-authored text and images are intentionally retained under the confirmed anonymity policy; only author links and exact reply nickname labels are removed. Arbitrary self-disclosed text cannot be safely inferred and rewritten automatically.
+- Public user-authored text and images are intentionally retained under the confirmed anonymity policy; author links and direct-reply nickname labels are removed without rewriting unrelated same-nickname replies. Arbitrary self-disclosed text cannot be safely inferred and rewritten automatically.
 - No real account, email, password, token, database, migration, scheduler, environment, deployment, signing material, or production data was accessed or changed.
+
+
+### Client cloud-account deletion and cancellation
+
+Changes:
+
+- The signed-in account page now separates `永久删除云端账号` from `清除此设备的账号数据`. The destructive dialog states the seven-day grace period, public-content anonymization, private-cloud-data erasure, all-device logout, and the fact that local device data is not silently deleted.
+- A confirmed request uses the authenticated bounded account client, clears the revoked secure token, quiesces account-scoped downloads, and transitions the app to the guest scope while retaining the known local account entry for cancellation login.
+- Login recognizes structured pending/finalizing states. Before the deadline it shows the exact local-time deadline and offers password-confirmed cancellation followed by a fresh login; after the deadline it does not offer a false cancellation path. Startup session restore treats frozen/finalizing responses as signed out and removes the inert local token instead of publishing a cached authenticated account.
+- Cancellation sends email/password without a bearer token, remains subject to the account HTTPS/public-network/redirect policy, and never logs or persists the password. Password controllers are cleared after destructive dialogs.
+- Reply-label anonymization was narrowed from nickname-wide replacement to stable parent-comment ownership, proving that unrelated same-nickname replies remain unchanged.
+
+Tests and builds:
+
+- Client account repository/controller/page focused suite: 21 passed, 0 failed. Regressions cover request authentication and timing, secure-token removal, frozen restore, structured deadlines, explicit non-cancellable finalizing state, cancellation without bearer credentials, controller scope transition, permanent/local action separation, confirmation copy, cancellation login, and request success UI.
+- Full `flutter test --reporter compact`: 589 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues. Dart format, repository security gate, staged `git diff --check`, and final diff scope passed.
+- Android Debug, Web Release (including Wasm dry run), and Windows Release builds passed. Artifacts: Android APK 268,938,086 bytes, SHA-256 `163A5F597B9671BA2493C0ED4F3F4FFEB4D9F67CD30194ADECFD86A70203CA8C`; Web `main.dart.js` 4,859,972 bytes, SHA-256 `B55A12B4641B6075AF0353F95774D6734867A6E3505D0EADDEA715811BF76D01`; Windows `Zeluna.exe` 158,208 bytes, SHA-256 `2814F973D704BE8D76230EF5790EF91D9DE0ECE2F6C7D8A0E17173B29DE9A9FC`.
+- After the reply-scope and deadline-boundary regressions, the focused privacy suite passed 8 tests and the full server suite passed 161 tests, 1 third-party TestClient warning, 3 subtests passed, 0 failed.
+
+Commits:
+
+- `dc6d765 privacy: scope anonymized reply labels`
+- `0d536c2 privacy: add client cloud account deletion flow`
+- `eec126e test: lock account deletion deadline boundary`
+
+G9 completion boundary:
+
+- Expired authentication retention, scheduled cleanup, authenticated export, cross-platform client save, reversible account deletion, account freeze, deadline cancellation, final private-data erasure, public-content anonymization, counter repair, and aggregate-only cleanup observability are implemented and regression-tested.
+- Real production migration/deletion and physical-device dialog acceptance were intentionally not performed. Those are G13/G14 gates and require separate authorization.
+- The four-material inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled route, private implementation/protocol, token, DRM, membership, CAPTCHA, or access-control bypass was used.
+- No real account, email, password, token, production database, migration, scheduler, environment, deployment, signing material, or irreversible external operation was accessed or changed.
 
 ## G10 Cloud sync
 
