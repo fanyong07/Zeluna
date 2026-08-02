@@ -15,6 +15,7 @@ import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../downloads/download_controller.dart';
 import '../library/library_controller.dart';
+import '../playback/playback_discovery_controller.dart';
 import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -28,124 +29,22 @@ import '../sources/source_rule_bridge.dart';
 import '../settings/settings_controller.dart';
 import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
-import 'async_single_flight.dart';
 import 'chinese_metadata_repository.dart';
 import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
-import 'playback_prefetch_cache.dart';
 import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
 import 'zeluna_backend_playback_repository.dart';
 
 export '../sources/source_controller.dart' show RuleRepositoryRefreshResult;
-
-/// Runs every supplied playback probe with a small concurrency window and
-/// emits each result as soon as it finishes. This keeps a large route
-/// inventory responsive without creating a request burst.
-Stream<PlaybackLine> probePlaybackLinesProgressively(
-  List<PlaybackLine> lines, {
-  int maxConcurrent = 4,
-  RulePlaybackCancellationToken? cancellationToken,
-  required Future<PlaybackLine> Function(PlaybackLine line) verify,
-}) async* {
-  if (lines.isEmpty ||
-      maxConcurrent <= 0 ||
-      cancellationToken?.isCancelled == true) {
-    return;
-  }
-  var nextIndex = 0;
-  final pending = <int, Future<({int index, PlaybackLine line})>>{};
-
-  void fillWindow() {
-    while (nextIndex < lines.length &&
-        pending.length < maxConcurrent &&
-        cancellationToken?.isCancelled != true) {
-      final index = nextIndex++;
-      pending[index] = verify(
-        lines[index],
-      ).then((line) => (index: index, line: line));
-    }
-  }
-
-  fillWindow();
-  while (pending.isNotEmpty && cancellationToken?.isCancelled != true) {
-    final completed = await Future.any(pending.values);
-    pending.remove(completed.index);
-    if (cancellationToken?.isCancelled == true) return;
-    yield completed.line;
-    fillWindow();
-  }
-}
-
-Future<List<PlaybackLine>> probeSinglePlaybackBackupSequentially(
-  Iterable<PlaybackLine> candidates, {
-  int maxCandidates = 3,
-  RulePlaybackCancellationToken? cancellationToken,
-  required Future<PlaybackLine> Function(PlaybackLine line) verify,
-}) async {
-  if (maxCandidates <= 0 || cancellationToken?.isCancelled == true) {
-    return const <PlaybackLine>[];
-  }
-  final checked = <PlaybackLine>[];
-  for (final candidate in candidates.take(maxCandidates)) {
-    if (cancellationToken?.isCancelled == true) break;
-    final verified = await verify(candidate);
-    checked.add(verified);
-    if (verified.available) break;
-  }
-  return List<PlaybackLine>.unmodifiable(checked);
-}
-
-List<PlaybackLine> rankPlaybackLinesForStartup(Iterable<PlaybackLine> lines) {
-  final indexed = lines.indexed.toList(growable: false);
-  final sorted = [...indexed]
-    ..sort((left, right) {
-      final availability = _startupAvailabilityRank(
-        left.$2,
-      ).compareTo(_startupAvailabilityRank(right.$2));
-      if (availability != 0) return availability;
-      final profile = _startupProfileRank(
-        left.$2,
-      ).compareTo(_startupProfileRank(right.$2));
-      if (profile != 0) return profile;
-      final latency = (left.$2.latency ?? const Duration(days: 1)).compareTo(
-        right.$2.latency ?? const Duration(days: 1),
-      );
-      if (latency != 0) return latency;
-      return left.$1.compareTo(right.$1);
-    });
-  return List<PlaybackLine>.unmodifiable(sorted.map((entry) => entry.$2));
-}
-
-int _startupAvailabilityRank(PlaybackLine line) {
-  if (line.available && line.clientVerified) return 0;
-  if (line.available && line.serverVerified) return 1;
-  if (line.available) return 2;
-  if (line.requiresClientProbe) return 3;
-  return 4;
-}
-
-int _startupProfileRank(PlaybackLine line) {
-  switch (line.startupProfile) {
-    case PlaybackStartupProfile.mp4FastStart:
-      return 0;
-    case PlaybackStartupProfile.hls:
-      return 1;
-    case PlaybackStartupProfile.mp4TailMoov:
-      return 3;
-  }
-  final format = line.format.trim().toLowerCase();
-  if (format == 'hls' ||
-      format == 'dash' ||
-      format.contains('m3u8') ||
-      format.contains('mpeg-dash')) {
-    return 1;
-  }
-  return 2;
-}
+export '../playback/playback_discovery_controller.dart'
+    show
+        probePlaybackLinesProgressively,
+        probeSinglePlaybackBackupSequentially,
+        rankPlaybackLinesForStartup;
 
 class _CredentialAccountContext {
   String? _accountId;
@@ -481,11 +380,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   DownloadController? _downloadController;
   LibraryController? _libraryController;
   CatalogController? _catalogController;
-  final _playbackPrefetches = <String, Future<void>>{};
-  final _playbackPrefetchCancellationTokens =
-      <String, RulePlaybackCancellationToken>{};
-  final _backendLineLookups = AsyncSingleFlight<String, List<PlaybackLine>>();
-  final _backendPlaybackLineCache = PlaybackPrefetchCache();
+  PlaybackDiscoveryController? _playbackDiscoveryController;
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -520,6 +415,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   CatalogController get _catalogDomain {
     final controller = _catalogController;
     if (controller == null) throw StateError('内容目录尚未准备好');
+    return controller;
+  }
+
+  PlaybackDiscoveryController get _playbackDiscoveryDomain {
+    final controller = _playbackDiscoveryController;
+    if (controller == null) {
+      throw StateError('播放发现尚未准备好');
+    }
     return controller;
   }
 
@@ -618,6 +521,35 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       contextVersion: _accounts.contextVersion,
     );
     final services = settingsSnapshot.services;
+    final playbackResolver = ref.read(rulePlaybackResolverProvider);
+    _playbackDiscoveryController = PlaybackDiscoveryController(
+      backendRepository: _backendPlaybackRepositoryFor,
+      ruleRepository: _rulePlaybackRepositoryFor,
+      verifyLine:
+          (
+            line, {
+            enrichMetadata = true,
+            forceRefresh = false,
+            cancellationToken,
+          }) => playbackResolver.verifyPlaybackLine(
+            line: line,
+            enrichMetadata: enrichMetadata,
+            forceRefresh: forceRefresh,
+            cancellationToken: cancellationToken,
+          ),
+      isContextCurrent: _accounts.isContextCurrent,
+      clearRuleRuntimeCaches: () {
+        RulePlaybackSourceRepository.clearRuntimeCaches();
+        playbackResolver.clearCaches();
+      },
+    );
+    _playbackDiscoveryDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+      services: services,
+      ruleState: sourceSnapshot.rulePlugins,
+      history: librarySnapshot.history,
+    );
     final bangumiRepository = ref.read(bangumiMetadataRepositoryProvider);
     _catalogController = CatalogController(
       storage: HiveCatalogStorage(_library),
@@ -635,7 +567,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         return await repository?.detail(subject) ?? _fallbackDetail(subject);
       },
       enrichDetail: (bundle, _) => _enrichSparseDetail(bundle),
-      prefetchPlayback: _prefetchPlayback,
+      prefetchPlayback: _playbackDiscoveryDomain.prefetchPlayback,
       fallbackSeries: _fallbackExternalSeries,
       fallbackMovies: _fallbackExternalMovies,
     );
@@ -678,7 +610,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       _downloadController?.dispose();
       _libraryController?.dispose();
       _catalogController?.dispose();
-      _cancelPlaybackPrefetches();
+      _playbackDiscoveryController?.dispose();
     });
     return initialState;
   }
@@ -774,552 +706,56 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<AnimeDetailBundle> detail(AnimeSubject subject) =>
       _catalogDomain.detail(subject);
 
-  void _prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {
-    if (episodes.isEmpty || !_usesBackendPlayback(subject)) return;
-    final historyEpisode = state.value?.history
-        .where((item) => sameSubjectIdentity(item.subject, subject))
-        .map((item) => item.episode)
-        .whereType<AnimeEpisode>()
-        .firstOrNull;
-    final episode =
-        historyEpisode != null &&
-            episodes.any((item) => item.id == historyEpisode.id)
-        ? historyEpisode
-        : episodes.first;
-    final key =
-        '${subject.source}|${subject.id}|'
-        '${subject.title}|${episode.id}|${episode.number}';
-    if (_playbackPrefetches.containsKey(key)) return;
-
-    final cancellationToken = RulePlaybackCancellationToken();
-    late final Future<void> prefetch;
-    prefetch =
-        _prefetchAndRankPlayback(
-          subject,
-          episode,
-          cancellationToken: cancellationToken,
-        ).onError((_, _) {}).whenComplete(() {
-          if (identical(_playbackPrefetches[key], prefetch)) {
-            _playbackPrefetches.remove(key);
-            _playbackPrefetchCancellationTokens.remove(key);
-          }
-        });
-    _playbackPrefetches[key] = prefetch;
-    _playbackPrefetchCancellationTokens[key] = cancellationToken;
-  }
-
-  Future<void> _prefetchAndRankPlayback(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    required RulePlaybackCancellationToken cancellationToken,
-  }) async {
-    final accountContextVersion = _accountContextVersion;
-    final lines = await linesForEpisode(
-      subject,
-      episode,
-      cancellationToken: cancellationToken,
-    );
-    if (accountContextVersion != _accountContextVersion ||
-        cancellationToken.isCancelled) {
-      return;
-    }
-    var backendLines = lines
-        .where((line) => line.providerId.startsWith('zeluna:'))
-        .toList(growable: false);
-    if (backendLines.isEmpty) return;
-
-    final refreshThreshold = DateTime.now().add(const Duration(seconds: 15));
-    final candidates = backendLines
-        .where(
-          (line) =>
-              !line.clientVerified &&
-              (line.serverVerified || line.requiresClientProbe) &&
-              (line.url?.trim().isNotEmpty ?? false) &&
-              (line.expiresAt == null ||
-                  line.expiresAt!.isAfter(refreshThreshold)),
-        )
-        .take(3)
-        .toList(growable: false);
-    await for (final verified in probePlaybackLinesProgressively(
-      candidates,
-      maxConcurrent: 3,
-      cancellationToken: cancellationToken,
-      verify: (line) => verifyPlaybackLine(
-        line,
-        enrichMetadata: false,
-        cancellationToken: cancellationToken,
-      ),
-    )) {
-      backendLines = _replacePlaybackLine(backendLines, verified);
-    }
-    if (accountContextVersion != _accountContextVersion ||
-        cancellationToken.isCancelled) {
-      return;
-    }
-    _cacheBackendPlaybackLines(
-      subject,
-      episode,
-      rankPlaybackLinesForStartup(backendLines),
-    );
-  }
-
-  void _cancelPlaybackPrefetches() {
-    for (final token in _playbackPrefetchCancellationTokens.values) {
-      token.cancel();
-    }
-    _playbackPrefetchCancellationTokens.clear();
-    _playbackPrefetches.clear();
-    _backendPlaybackLineCache.clear();
-  }
-
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) {
-    return linesForEpisodeMode(
-      subject,
-      episode,
-      cancellationToken: cancellationToken,
-    );
-  }
+  }) => _playbackDiscoveryDomain.linesForEpisode(
+    subject,
+    episode,
+    cancellationToken: cancellationToken,
+  );
 
   Future<PlaybackLine> verifyPlaybackLine(
     PlaybackLine line, {
     bool enrichMetadata = true,
     bool forceRefresh = false,
     RulePlaybackCancellationToken? cancellationToken,
-  }) {
-    return ref
-        .read(rulePlaybackResolverProvider)
-        .verifyPlaybackLine(
-          line: line,
-          enrichMetadata: enrichMetadata,
-          forceRefresh: forceRefresh,
-          cancellationToken: cancellationToken,
-        );
-  }
+  }) => _playbackDiscoveryDomain.verifyPlaybackLine(
+    line,
+    enrichMetadata: enrichMetadata,
+    forceRefresh: forceRefresh,
+    cancellationToken: cancellationToken,
+  );
 
   Future<List<PlaybackLine>> linesForEpisodeMode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
     RulePlaybackCancellationToken? cancellationToken,
-  }) async {
-    if (cancellationToken?.isCancelled ?? false) return const [];
-    final accountContextVersion = _accountContextVersion;
-    var backendLines = const <PlaybackLine>[];
-    var probedBackendLines = const <PlaybackLine>[];
-    var ruleLines = const <PlaybackLine>[];
-
-    bool isCurrentRequest() =>
-        accountContextVersion == _accountContextVersion &&
-        !(cancellationToken?.isCancelled ?? false);
-
-    bool hasPlayableLine(Iterable<PlaybackLine> lines) => lines.any(
-      (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
-    );
-
-    Future<({String kind, List<PlaybackLine> lines})> tagged(
-      String kind,
-      Future<List<PlaybackLine>> future,
-    ) async => (kind: kind, lines: await future);
-
-    // A warm Zeluna cache normally responds in well under a second. Give it a
-    // short uncontested head start, then race it against custom rules. This is
-    // a real hedge: a fast empty backend result starts fallback immediately,
-    // while a slow backend can no longer hold a ready rule line for six seconds.
-    final backendEvent = tagged(
-      'backend',
-      _backendLinesForEpisode(
-        subject,
-        episode,
-        cancellationToken: cancellationToken,
-      ).timeout(
-        const Duration(seconds: 6),
-        onTimeout: () => const <PlaybackLine>[],
-      ),
-    );
-    final firstEvent = await Future.any([
-      backendEvent,
-      Future<({String kind, List<PlaybackLine> lines})>.delayed(
-        const Duration(milliseconds: 900),
-        () => (kind: 'hedge', lines: const <PlaybackLine>[]),
-      ),
-    ]);
-    if (!isCurrentRequest()) return const <PlaybackLine>[];
-
-    final pending =
-        <String, Future<({String kind, List<PlaybackLine> lines})>>{};
-
-    void startRules() {
-      pending.putIfAbsent(
-        'rules',
-        () => tagged(
-          'rules',
-          _ruleLinesForEpisode(
-            subject,
-            episode,
-            expandAll: expandAll,
-            cancellationToken: cancellationToken,
-          ),
-        ),
-      );
-    }
-
-    void startBackendCandidateProbe() {
-      if (backendLines.isEmpty || pending.containsKey('probe')) return;
-      pending['probe'] = tagged(
-        'probe',
-        _probeBackendClientCandidates(
-          backendLines,
-          cancellationToken: cancellationToken,
-        ).onError((_, _) => const <PlaybackLine>[]),
-      );
-    }
-
-    if (firstEvent.kind == 'backend') {
-      backendLines = firstEvent.lines;
-      if (hasPlayableLine(backendLines)) {
-        return _mergePlaybackLines(backendLines);
-      }
-      startBackendCandidateProbe();
-      startRules();
-    } else {
-      pending['backend'] = backendEvent;
-      startRules();
-    }
-
-    while (pending.isNotEmpty) {
-      final event = await Future.any(pending.values);
-      pending.remove(event.kind);
-      if (!isCurrentRequest()) return const <PlaybackLine>[];
-      switch (event.kind) {
-        case 'backend':
-          backendLines = event.lines;
-          startBackendCandidateProbe();
-        case 'probe':
-          probedBackendLines = event.lines;
-          if (hasPlayableLine(probedBackendLines)) {
-            _cacheBackendPlaybackLines(
-              subject,
-              episode,
-              _mergePlaybackLines(<PlaybackLine>[
-                ...backendLines,
-                ...probedBackendLines,
-              ]),
-              expandAll: expandAll,
-            );
-          }
-        case 'rules':
-          ruleLines = event.lines;
-      }
-      final merged = _mergePlaybackLines(<PlaybackLine>[
-        ...backendLines,
-        ...probedBackendLines,
-        ...ruleLines,
-      ]);
-      if (hasPlayableLine(merged)) return merged;
-    }
-
-    return isCurrentRequest()
-        ? _mergePlaybackLines(<PlaybackLine>[
-            ...backendLines,
-            ...probedBackendLines,
-            ...ruleLines,
-          ])
-        : const <PlaybackLine>[];
-  }
-
-  String? _backendPlaybackLookupKey(
-    ExternalServiceSettings services,
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    bool expandAll = false,
-  }) {
-    final service = _playbackBackendService(services);
-    final endpoint = ZelunaBackendPlaybackRepository.normalizeBaseUrl(
-      services.playbackBackendEndpoint,
-      service: service,
-      allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
-    );
-    if (!services.playbackBackendEnabled ||
-        !_usesBackendPlayback(subject) ||
-        endpoint == null) {
-      return null;
-    }
-    return <Object>[
-      _accountContextVersion,
-      endpoint,
-      service.name,
-      services.allowInsecurePlaybackBackend,
-      subject.source,
-      subject.id,
-      episode.id,
-      episode.number,
-      expandAll,
-    ].join('|');
-  }
-
-  void _cacheBackendPlaybackLines(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-    Iterable<PlaybackLine> lines, {
-    bool expandAll = false,
-  }) {
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    final lookupKey = _backendPlaybackLookupKey(
-      services,
-      subject,
-      episode,
-      expandAll: expandAll,
-    );
-    if (lookupKey == null) return;
-    _backendPlaybackLineCache.write(lookupKey, lines);
-  }
-
-  Future<List<PlaybackLine>> _backendLinesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    bool expandAll = false,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) {
-    if (cancellationToken?.isCancelled == true) {
-      return Future.value(const <PlaybackLine>[]);
-    }
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    final lookupKey = _backendPlaybackLookupKey(
-      services,
-      subject,
-      episode,
-      expandAll: expandAll,
-    );
-    if (lookupKey == null) {
-      return Future.value(const <PlaybackLine>[]);
-    }
-    final accountContextVersion = _accountContextVersion;
-    final cached = _backendPlaybackLineCache.read(lookupKey);
-    if (cached != null) return Future.value(cached);
-    final pending = _backendLineLookups.run(lookupKey, () {
-      final repository = ZelunaBackendPlaybackRepository(
-        baseUrl: services.playbackBackendEndpoint,
-        client: _playbackBackendClient(services),
-        service: _playbackBackendService(services),
-        allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
-        requestTimeout: const Duration(seconds: 18),
-      );
-      // Caller cancellation must not cancel the shared request for another
-      // listener. Each caller applies its own cancellation check below.
-      return repository
-          .linesForEpisodeMode(subject, episode, expandAll: expandAll)
-          .timeout(
-            const Duration(seconds: 20),
-            onTimeout: () => const <PlaybackLine>[],
-          )
-          .onError((_, _) => const <PlaybackLine>[]);
-    });
-    return pending.then((lines) {
-      if (accountContextVersion != _accountContextVersion ||
-          cancellationToken?.isCancelled == true) {
-        return const <PlaybackLine>[];
-      }
-      _backendPlaybackLineCache.write(lookupKey, lines);
-      return lines;
-    });
-  }
+  }) => _playbackDiscoveryDomain.linesForEpisodeMode(
+    subject,
+    episode,
+    expandAll: expandAll,
+    cancellationToken: cancellationToken,
+  );
 
   PlaybackLine? prefetchedLineForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-  ) {
-    final services = state.value?.services ?? const ExternalServiceSettings();
-    final lookupKey = _backendPlaybackLookupKey(services, subject, episode);
-    if (lookupKey == null) return null;
-    final lines = _backendPlaybackLineCache.read(lookupKey);
-    if (lines == null) return null;
-    for (final line in lines) {
-      if (line.available &&
-          (line.serverVerified || line.clientVerified) &&
-          (line.url?.trim().isNotEmpty ?? false)) {
-        return line;
-      }
-    }
-    return null;
-  }
-
-  // 客户端 web-selector 规则线路：独立于后端路径，不受 _usesBackendPlayback
-  // 的 bangumi/tmdb 门禁限制。仅当用户导入过订阅(customRules 非空)时才发起，
-  // 保证默认行为仍是纯后端。空规则时仓库内部直接返回空。
-  Future<List<PlaybackLine>> _ruleLinesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    bool expandAll = false,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) {
-    final ruleState = state.value?.rulePlugins;
-    if (ruleState == null) {
-      return Future.value(const <PlaybackLine>[]);
-    }
-    final repository = RulePlaybackSourceRepository(
-      repository: _ruleRepositoryFor(ruleState),
-      ruleState: ruleState,
-      resolver: ref.read(rulePlaybackResolverProvider),
-    );
-    return repository
-        .linesForEpisodeMode(
-          subject,
-          episode,
-          expandAll: expandAll,
-          cancellationToken: cancellationToken,
-        )
-        .timeout(
-          const Duration(seconds: 12),
-          onTimeout: () => const <PlaybackLine>[],
-        )
-        .onError((_, _) => const <PlaybackLine>[]);
-  }
-
-  List<PlaybackLine> _mergePlaybackLines(List<PlaybackLine> lines) {
-    final merged = <PlaybackLine>[];
-    final indexes = <String, int>{};
-    for (final line in lines) {
-      final url = line.url ?? '';
-      final key = url.isNotEmpty ? url : '${line.providerId}:${line.id}';
-      final previousIndex = indexes[key];
-      if (previousIndex == null) {
-        indexes[key] = merged.length;
-        merged.add(line);
-      } else if (!merged[previousIndex].available && line.available) {
-        merged[previousIndex] = line;
-      }
-    }
-    return merged;
-  }
-
-  Future<List<PlaybackLine>> _probeBackendClientCandidates(
-    List<PlaybackLine> lines, {
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async {
-    final now = DateTime.now();
-    final candidates = lines
-        .where(
-          (line) =>
-              line.requiresClientProbe &&
-              (line.url?.trim().isNotEmpty ?? false) &&
-              (line.expiresAt == null ||
-                  line.expiresAt!.isAfter(
-                    now.add(const Duration(seconds: 15)),
-                  )),
-        )
-        .take(4)
-        .toList(growable: false);
-    if (candidates.isEmpty || cancellationToken?.isCancelled == true) {
-      return const <PlaybackLine>[];
-    }
-    final checked = <PlaybackLine>[];
-    await for (final line in probePlaybackLinesProgressively(
-      candidates,
-      maxConcurrent: 4,
-      cancellationToken: cancellationToken,
-      verify: (line) => verifyPlaybackLine(
-        line,
-        enrichMetadata: false,
-        cancellationToken: cancellationToken,
-      ),
-    )) {
-      checked.add(line);
-      // Candidate-only inventories should open on the first proven route;
-      // the remaining inventory is checked by lineUpdatesForEpisode after the
-      // first frame instead of waiting for the slowest probe in this batch.
-      if (line.available) return <PlaybackLine>[line];
-    }
-    return checked;
-  }
+  ) => _playbackDiscoveryDomain.prefetchedLineForEpisode(subject, episode);
 
   Future<List<PlaybackLine>> prepareSingleBackupForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     required PlaybackLine currentLine,
     RulePlaybackCancellationToken? cancellationToken,
-  }) async {
-    final accountContextVersion = _accountContextVersion;
-    final backendLines = await _backendLinesForEpisode(
-      subject,
-      episode,
-      expandAll: true,
-      cancellationToken: cancellationToken,
-    );
-    if (accountContextVersion != _accountContextVersion ||
-        cancellationToken?.isCancelled == true) {
-      return const <PlaybackLine>[];
-    }
-
-    var checked = _mergePlaybackLines(backendLines);
-    final currentUrl = currentLine.url?.trim() ?? '';
-    bool isCurrent(PlaybackLine line) {
-      final url = line.url?.trim() ?? '';
-      return line.id == currentLine.id ||
-          (currentUrl.isNotEmpty && url == currentUrl);
-    }
-
-    if (checked.any((line) => line.available && !isCurrent(line))) {
-      return checked;
-    }
-
-    final candidates = _backendLinesNeedingBackgroundProbe(
-      checked,
-    ).where((line) => line.requiresClientProbe && !isCurrent(line));
-    final probed = await probeSinglePlaybackBackupSequentially(
-      candidates,
-      cancellationToken: cancellationToken,
-      verify: (candidate) => verifyPlaybackLine(
-        candidate,
-        enrichMetadata: false,
-        cancellationToken: cancellationToken,
-      ),
-    );
-    for (final verified in probed) {
-      checked = _replacePlaybackLine(checked, verified);
-    }
-    return checked;
-  }
-
-  List<PlaybackLine> _backendLinesNeedingBackgroundProbe(
-    List<PlaybackLine> lines,
-  ) {
-    final refreshThreshold = DateTime.now().add(const Duration(seconds: 15));
-    return lines
-        .where(
-          (line) =>
-              (line.url?.trim().isNotEmpty ?? false) &&
-              (line.requiresClientProbe ||
-                  (line.serverVerified &&
-                      !line.clientVerified &&
-                      line.latency == null)) &&
-              (line.expiresAt == null ||
-                  line.expiresAt!.isAfter(refreshThreshold)),
-        )
-        .toList(growable: false);
-  }
-
-  List<PlaybackLine> _replacePlaybackLine(
-    List<PlaybackLine> lines,
-    PlaybackLine replacement,
-  ) {
-    var replaced = false;
-    final result = <PlaybackLine>[];
-    for (final line in lines) {
-      if (line.id == replacement.id) {
-        if (!replaced) result.add(replacement);
-        replaced = true;
-      } else {
-        result.add(line);
-      }
-    }
-    if (!replaced) result.add(replacement);
-    return result;
-  }
-
+  }) => _playbackDiscoveryDomain.prepareSingleBackupForEpisode(
+    subject,
+    episode,
+    currentLine: currentLine,
+    cancellationToken: cancellationToken,
+  );
   ZelunaBackendCatalogRepository? _backendCatalogRepositoryFor(
     ExternalServiceSettings services,
   ) {
@@ -1337,6 +773,27 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       client: _playbackBackendClient(services),
       service: _playbackBackendService(services),
       allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
+    );
+  }
+
+  PlaybackSourceRepository? _backendPlaybackRepositoryFor(
+    ExternalServiceSettings services,
+  ) {
+    if (!services.playbackBackendEnabled ||
+        ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+              services.playbackBackendEndpoint,
+              service: _playbackBackendService(services),
+              allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
+            ) ==
+            null) {
+      return null;
+    }
+    return ZelunaBackendPlaybackRepository(
+      baseUrl: services.playbackBackendEndpoint,
+      client: _playbackBackendClient(services),
+      service: _playbackBackendService(services),
+      allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
+      requestTimeout: const Duration(seconds: 18),
     );
   }
 
@@ -1362,132 +819,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
   }
 
-  bool _usesBackendPlayback(AnimeSubject subject) {
-    final source = subject.source.toLowerCase();
-    return source == 'bangumi' || source.startsWith('tmdb:');
-  }
-
   Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) async* {
-    final accountContextVersion = _accountContextVersion;
-    final token = cancellationToken ?? RulePlaybackCancellationToken();
-    final backendLines = await _backendLinesForEpisode(
-      subject,
-      episode,
-      cancellationToken: token,
-    );
-    if (accountContextVersion != _accountContextVersion || token.isCancelled) {
-      return;
-    }
-    var baseLines = _mergePlaybackLines(backendLines);
-    yield PlaybackLineLookupUpdate(
-      lines: baseLines,
-      completedRules: 0,
-      totalRules: 1,
-      phase: PlaybackLineLookupPhase.discovery,
-    );
-    final expandedBackendLines = await _backendLinesForEpisode(
-      subject,
-      episode,
-      expandAll: true,
-      cancellationToken: token,
-    );
-    if (accountContextVersion != _accountContextVersion || token.isCancelled) {
-      return;
-    }
-    baseLines = _mergePlaybackLines(<PlaybackLine>[
-      ...baseLines,
-      ...expandedBackendLines,
-    ]);
-    final backendProbeCandidates = _backendLinesNeedingBackgroundProbe(
-      baseLines,
-    );
-    final backendProbeTotal = backendProbeCandidates.isEmpty
-        ? 1
-        : backendProbeCandidates.length;
-    yield PlaybackLineLookupUpdate(
-      lines: baseLines,
-      completedRules: 0,
-      totalRules: backendProbeTotal,
-      phase: PlaybackLineLookupPhase.discovery,
-    );
-    var clientCheckedBaseLines = baseLines;
-    var completedBackendProbes = 0;
-    await for (final probedLine in probePlaybackLinesProgressively(
-      backendProbeCandidates,
-      maxConcurrent: 4,
-      cancellationToken: token,
-      verify: (line) => verifyPlaybackLine(
-        line,
-        enrichMetadata: false,
-        cancellationToken: token,
-      ),
-    )) {
-      if (accountContextVersion != _accountContextVersion ||
-          token.isCancelled) {
-        return;
-      }
-      clientCheckedBaseLines = _replacePlaybackLine(
-        clientCheckedBaseLines,
-        probedLine,
-      );
-      completedBackendProbes++;
-      yield PlaybackLineLookupUpdate(
-        lines: clientCheckedBaseLines,
-        completedRules: completedBackendProbes,
-        totalRules: backendProbeTotal,
-        phase: PlaybackLineLookupPhase.discovery,
-      );
-    }
-    final ruleState = state.value?.rulePlugins;
-    final hasRules = ruleState != null && ruleState.customRules.isNotEmpty;
-    if (!hasRules) {
-      yield PlaybackLineLookupUpdate(
-        lines: clientCheckedBaseLines,
-        completedRules: backendProbeTotal,
-        totalRules: backendProbeTotal,
-        phase: PlaybackLineLookupPhase.complete,
-      );
-      return;
-    }
-    // 后端线路先返回，再叠加用户规则仓库的渐进发现/验证流。
-    yield PlaybackLineLookupUpdate(
-      lines: clientCheckedBaseLines,
-      completedRules: backendProbeTotal,
-      totalRules: backendProbeTotal,
-      phase: PlaybackLineLookupPhase.discovery,
-    );
-    final repository = RulePlaybackSourceRepository(
-      repository: _ruleRepositoryFor(ruleState),
-      ruleState: ruleState,
-      resolver: ref.read(rulePlaybackResolverProvider),
-    );
-    await for (final update in repository.lineUpdatesForEpisode(
-      subject,
-      episode,
-      cancellationToken: token,
-    )) {
-      if (accountContextVersion != _accountContextVersion ||
-          token.isCancelled) {
-        return;
-      }
-      yield PlaybackLineLookupUpdate(
-        lines: _mergePlaybackLines(<PlaybackLine>[
-          ...clientCheckedBaseLines,
-          ...update.lines,
-        ]),
-        completedRules: update.completedRules + backendProbeTotal,
-        totalRules: update.totalRules + backendProbeTotal,
-        phase: update.phase,
-        timedOut: update.timedOut,
-        resolvedProviderId: update.resolvedProviderId,
-      );
-    }
-  }
-
+  }) => _playbackDiscoveryDomain.lineUpdatesForEpisode(
+    subject,
+    episode,
+    cancellationToken: cancellationToken,
+  );
   Future<List<SubtitleCandidate>> subtitlesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
@@ -1609,7 +949,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }
 
   void handleBangumiCredentialChanged() {
-    _cancelPlaybackPrefetches();
+    _playbackDiscoveryController?.clearCaches();
     ref.read(bangumiMetadataRepositoryProvider).resetAccessTokenState();
     ref.read(chineseMetadataRepositoryProvider).clearMemoryCache();
     _catalogController?.clearDetailCache();
@@ -1673,6 +1013,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   RulePluginRepository _ruleRepositoryFor(RulePluginState value) =>
       _sourceController?.repositoryFor(value) ??
       RulePluginRepository(extraRules: value.customRules);
+
+  PlaybackSourceRepository _rulePlaybackRepositoryFor(RulePluginState value) =>
+      RulePlaybackSourceRepository(
+        repository: _ruleRepositoryFor(value),
+        ruleState: value,
+        resolver: ref.read(rulePlaybackResolverProvider),
+      );
 
   Future<bool> toggleFavorite(AnimeSubject subject) =>
       _libraryDomain.toggleFavorite(subject);
@@ -1765,6 +1112,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
+    _playbackDiscoveryDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+      services: settingsSnapshot.services,
+      ruleState: sourceSnapshot.rulePlugins,
+      history: librarySnapshot.history,
+    );
     final catalogLoad = await _catalogDomain.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,
@@ -1778,13 +1132,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         !_accounts.isContextCurrent(activation.contextVersion)) {
       return;
     }
-    RulePlaybackSourceRepository.clearRuntimeCaches();
-    ref.read(rulePlaybackResolverProvider).clearCaches();
     ref.read(m3uSourceAdapterProvider).clearCache();
     ref.read(torrentSourceAdapterProvider).clearCache();
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
-    _backendLineLookups.clear();
-    _cancelPlaybackPrefetches();
     state = AsyncData(
       current.copyWith(
         homeFeed: catalogLoad.snapshot.homeFeed,
@@ -1859,6 +1209,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   void _publishSourceSnapshot(SourceSnapshot snapshot) {
     final current = state.value;
     if (current == null) return;
+    _playbackDiscoveryController?.applyRuleState(
+      snapshot.rulePlugins,
+      contextVersion: _accountContextVersion,
+    );
     state = AsyncData(
       current.copyWith(
         rulePlugins: snapshot.rulePlugins,
@@ -1876,6 +1230,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   void _publishLibrarySnapshot(LibrarySnapshot snapshot) {
     final current = state.value;
     if (current == null) return;
+    _playbackDiscoveryController?.updateHistory(
+      snapshot.history,
+      contextVersion: _accountContextVersion,
+    );
     state = AsyncData(
       current.copyWith(
         favorites: snapshot.favorites,
@@ -1902,8 +1260,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ExternalServicesChange change,
   ) async {
     if (change.playbackBackendChanged) {
-      _backendLineLookups.clear();
-      _backendPlaybackLineCache.clear();
+      _playbackDiscoveryDomain.applyServices(
+        change.current,
+        contextVersion: change.contextVersion,
+      );
     }
     if (!change.metadataChanged && !change.playbackBackendChanged) return;
     await _catalogDomain.applyServices(
