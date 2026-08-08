@@ -1738,7 +1738,7 @@ Starting branch: `codex/media-player-overhaul`
 Working tree at freeze: only the pre-existing untracked `.diff_namestat.txt`
 and `_branch_log.txt`; no tracked changes.
 
-Status: in_progress
+Status: completed
 
 ### F0 — Freeze G14 Baseline
 
@@ -2069,6 +2069,14 @@ Main post-merge Quality Gates:
 - SHA: `f424d0064263e652c16deb128d20c7f4a33e6ec1`
 - Result: success; Flutter, Android, Windows, Web, Python, and Supply Chain
   jobs all completed successfully.
+
+Final main post-merge Quality Gates after the final documentation fast-forward:
+
+- Run ID: `31265951681`
+- SHA: `ccb509e99d84e93b7c9fc6539b81b09568ce554d`
+- Result: success; all six required jobs completed successfully.
+
+Final repository state: `MERGED TO MAIN`.
 
 No production deployment, public/store upload, AAB publication, or private
 signing-key access was performed.
