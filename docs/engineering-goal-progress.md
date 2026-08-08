@@ -2046,7 +2046,29 @@ private signing-key access is authorized.
 
 ### F9 - Automatic safe merge to main
 
-Status: not_started
+Status: completed
 
-Main merge status: not_started. Main must remain untouched until F8's exact-HEAD
-CI is green and the fast-forward checks succeed.
+Main merge status: completed.
+
+Pre-merge correction-branch Quality Gates:
+
+- Run ID: `31264103673`
+- SHA: `f424d0064263e652c16deb128d20c7f4a33e6ec1`
+- Result: success; all six required jobs completed successfully.
+
+Fast-forward merge:
+
+- Starting `origin/main`: `53872d3cb167e068c37069502b97f06cad414d05`
+- Correction HEAD: `f424d0064263e652c16deb128d20c7f4a33e6ec1`
+- Strategy: `git merge --ff-only origin/codex/media-player-overhaul`
+- Push: `git push origin main` succeeded; no force push or history rewrite.
+
+Main post-merge Quality Gates:
+
+- Run ID: `31264665060`
+- SHA: `f424d0064263e652c16deb128d20c7f4a33e6ec1`
+- Result: success; Flutter, Android, Windows, Web, Python, and Supply Chain
+  jobs all completed successfully.
+
+No production deployment, public/store upload, AAB publication, or private
+signing-key access was performed.
