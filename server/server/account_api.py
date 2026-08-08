@@ -4,8 +4,6 @@ import hashlib
 import hmac
 import ipaddress
 import time
-from collections import deque
-from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -36,6 +34,7 @@ from .auth import (
 )
 from .config import (
     ACCOUNT_DELETION_GRACE_SECONDS,
+    ACCOUNT_RATE_LIMIT_BACKEND,
     ACCOUNT_RATE_LIMIT_MAX_KEYS,
     ACCOUNT_TRUSTED_PROXY_NETWORKS,
 )
@@ -43,6 +42,14 @@ from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
 from .privacy import build_account_data_export, purge_expired_auth_artifacts
+from .rate_limit import (
+    InMemoryRateLimiter,
+    RateLimitExceeded,
+    RateLimiter,
+    RateLimiterUnavailable,
+    UnavailableRateLimiter,
+    maybe_await,
+)
 
 router = APIRouter(prefix="/api/v1/auth", tags=["account"])
 
@@ -112,65 +119,6 @@ class ProfileRequest(BaseModel):
         return normalized
 
 
-@dataclass
-class _AttemptBucket:
-    events: deque[float]
-    window_seconds: int
-
-
-class _AttemptStore:
-    """Bound the process-local fallback limiter without evicting active keys."""
-
-    def __init__(self, max_keys: int):
-        self._max_keys = max_keys
-        self._buckets: dict[str, _AttemptBucket] = {}
-
-    def clear(self) -> None:
-        self._buckets.clear()
-
-    def __len__(self) -> int:
-        return len(self._buckets)
-
-    def _purge_expired(self, now: float) -> None:
-        expired: list[str] = []
-        for key, bucket in self._buckets.items():
-            cutoff = now - bucket.window_seconds
-            while bucket.events and bucket.events[0] <= cutoff:
-                bucket.events.popleft()
-            if not bucket.events:
-                expired.append(key)
-        for key in expired:
-            self._buckets.pop(key, None)
-
-    def check(
-        self,
-        key: str,
-        *,
-        limit: int,
-        window_seconds: int,
-        now: float | None = None,
-    ) -> None:
-        current = time.monotonic() if now is None else now
-        bucket = self._buckets.get(key)
-        if bucket is None:
-            if len(self._buckets) >= self._max_keys:
-                self._purge_expired(current)
-            if len(self._buckets) >= self._max_keys:
-                raise _too_many_requests(window_seconds)
-            bucket = _AttemptBucket(deque(), window_seconds)
-            self._buckets[key] = bucket
-        else:
-            bucket.window_seconds = window_seconds
-
-        cutoff = current - window_seconds
-        while bucket.events and bucket.events[0] <= cutoff:
-            bucket.events.popleft()
-        if len(bucket.events) >= limit:
-            retry_after = max(1, int(window_seconds - (current - bucket.events[0])))
-            raise _too_many_requests(retry_after)
-        bucket.events.append(current)
-
-
 def _too_many_requests(retry_after: int) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -179,7 +127,29 @@ def _too_many_requests(retry_after: int) -> HTTPException:
     )
 
 
+class _AttemptStore(InMemoryRateLimiter):
+    """Compatibility wrapper for existing process-local limiter tests."""
+
+    def check(self, *args, **kwargs):
+        try:
+            return super().check(*args, **kwargs)
+        except RateLimitExceeded as error:
+            raise _too_many_requests(error.retry_after) from error
+
+
 _attempts = _AttemptStore(ACCOUNT_RATE_LIMIT_MAX_KEYS)
+_rate_limiter: RateLimiter = (
+    _attempts
+    if ACCOUNT_RATE_LIMIT_BACKEND == "memory"
+    else UnavailableRateLimiter()
+)
+
+
+def configure_rate_limiter(limiter: RateLimiter) -> None:
+    """Inject the shared backend at application startup or in tests."""
+
+    global _rate_limiter
+    _rate_limiter = limiter
 
 
 def _client_key(request: Request) -> str:
@@ -206,8 +176,33 @@ def _client_key(request: Request) -> str:
     return peer_address.compressed
 
 
-def _rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
-    _attempts.check(key, limit=limit, window_seconds=window_seconds)
+def _privacy_rate_key(key: str) -> str:
+    try:
+        secret = signing_key().encode()
+    except AuthConfigurationError:
+        # Authentication is already fail-closed without a valid signing key;
+        # keep local development usable while never retaining the raw identity.
+        secret = b"zeluna-local-rate-limit-key"
+    digest = hmac.new(secret, key.encode(), hashlib.sha256).hexdigest()
+    return f"v1:{digest}"
+
+
+async def _rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
+    try:
+        await maybe_await(
+            _rate_limiter.check(
+                _privacy_rate_key(key),
+                limit=limit,
+                window_seconds=window_seconds,
+            )
+        )
+    except RateLimitExceeded as error:
+        raise _too_many_requests(error.retry_after) from error
+    except RateLimiterUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="共享限流服务暂不可用，请稍后再试",
+        ) from error
 
 
 def _normalize_email(value: str) -> str:
@@ -407,8 +402,8 @@ async def request_code(
     session: AsyncSession = Depends(get_session),
 ):
     email = _normalize_email(str(payload.email))
-    _rate_limit(f"code:ip:{_client_key(request)}", limit=10, window_seconds=3600)
-    _rate_limit(f"code:email:{email}", limit=5, window_seconds=3600)
+    await _rate_limit(f"code:ip:{_client_key(request)}", limit=10, window_seconds=3600)
+    await _rate_limit(f"code:email:{email}", limit=5, window_seconds=3600)
     await purge_expired_auth_artifacts(session)
     await session.commit()
 
@@ -448,7 +443,9 @@ async def register(
     session: AsyncSession = Depends(get_session),
 ):
     email = _normalize_email(str(payload.email))
-    _rate_limit(f"register:ip:{_client_key(request)}", limit=5, window_seconds=3600)
+    await _rate_limit(
+        f"register:ip:{_client_key(request)}", limit=5, window_seconds=3600
+    )
     await _consume_code(session, email, "register", payload.code)
     if await session.scalar(select(User.id).where(User.email == email)) is not None:
         raise HTTPException(status_code=409, detail="这个邮箱已经注册过了")
@@ -480,8 +477,8 @@ async def login(
     session: AsyncSession = Depends(get_session),
 ):
     email = _normalize_email(str(payload.email))
-    _rate_limit(f"login:ip:{_client_key(request)}", limit=30, window_seconds=900)
-    _rate_limit(f"login:email:{email}", limit=10, window_seconds=900)
+    await _rate_limit(f"login:ip:{_client_key(request)}", limit=30, window_seconds=900)
+    await _rate_limit(f"login:email:{email}", limit=10, window_seconds=900)
     user = await session.scalar(select(User).where(User.email == email))
     password_valid = verify_login_password(
         payload.password,
@@ -507,8 +504,17 @@ async def login(
 @router.post("/refresh")
 async def refresh(
     payload: RefreshRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
+    await _rate_limit(
+        f"refresh:ip:{_client_key(request)}", limit=30, window_seconds=900
+    )
+    await _rate_limit(
+        f"refresh:digest:{token_digest(payload.refresh_token)}",
+        limit=20,
+        window_seconds=900,
+    )
     try:
         credentials = await rotate_refresh_token(session, payload.refresh_token)
     except RefreshTokenReuseDetected as error:
@@ -645,8 +651,10 @@ async def request_account_deletion(
     session: AsyncSession = Depends(get_session),
 ):
     user = account[0]
-    _rate_limit(f"delete:ip:{_client_key(request)}", limit=5, window_seconds=86400)
-    _rate_limit(f"delete:user:{user.id}", limit=3, window_seconds=86400)
+    await _rate_limit(
+        f"delete:ip:{_client_key(request)}", limit=5, window_seconds=86400
+    )
+    await _rate_limit(f"delete:user:{user.id}", limit=3, window_seconds=86400)
     if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=400, detail="密码不正确，账号没有进入删除流程")
     requested_at = time.time()
@@ -674,10 +682,10 @@ async def cancel_account_deletion(
     session: AsyncSession = Depends(get_session),
 ):
     email = _normalize_email(str(payload.email))
-    _rate_limit(
+    await _rate_limit(
         f"cancel-delete:ip:{_client_key(request)}", limit=10, window_seconds=3600
     )
-    _rate_limit(f"cancel-delete:email:{email}", limit=5, window_seconds=3600)
+    await _rate_limit(f"cancel-delete:email:{email}", limit=5, window_seconds=3600)
     user = await session.scalar(select(User).where(User.email == email))
     password_valid = verify_login_password(
         payload.password,
@@ -751,7 +759,7 @@ async def reset_password(
     session: AsyncSession = Depends(get_session),
 ):
     email = _normalize_email(str(payload.email))
-    _rate_limit(f"reset:ip:{_client_key(request)}", limit=10, window_seconds=3600)
+    await _rate_limit(f"reset:ip:{_client_key(request)}", limit=10, window_seconds=3600)
     await _consume_code(session, email, "reset_password", payload.code)
     user = await session.scalar(select(User).where(User.email == email))
     if user is None:

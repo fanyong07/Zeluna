@@ -1,11 +1,11 @@
 """Authenticated incremental synchronization endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..account_api import current_account
+from ..account_api import _client_key, _rate_limit, current_account
 from ..database import User, UserToken
 from ..dependencies import get_session
 from ..sync_contracts import SyncPushRequest
@@ -19,9 +19,16 @@ router = APIRouter(prefix="/api/v1/sync", tags=["sync"])
 @router.post("/push")
 async def push_sync(
     payload: SyncPushRequest,
+    request: Request,
     account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
+    await _rate_limit(
+        f"sync-push:ip:{_client_key(request)}", limit=60, window_seconds=900
+    )
+    await _rate_limit(
+        f"sync-push:user:{account[0].id}", limit=120, window_seconds=900
+    )
     service = SyncService(SyncRepository(session))
     try:
         try:

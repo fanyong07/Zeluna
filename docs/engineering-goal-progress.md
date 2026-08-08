@@ -1836,7 +1836,32 @@ Tests and gates:
 
 Commit: pending (`security: add rotating account sessions`)
 
-F3: not_started
+### F3.1 - Shared rate limiting
+
+Status: completed
+
+Implementation:
+
+- Added `RateLimiter`, bounded `InMemoryRateLimiter`, and atomic
+  `RedisRateLimiter` primitives. Redis keys are HMAC-derived under a namespace
+  and never contain email, token, or raw IP values.
+- Account login, registration, code request/consume, password reset, deletion
+  request/cancel, refresh, and sync push flows now consume the shared limiter.
+- Redis errors fail closed with an explicit 503 rather than silently falling
+  back to a process-local budget. The in-memory implementation remains the
+  explicit local/test backend.
+
+Tests:
+
+- Limiter tests passed for shared budgets, TTL/reset behavior, capacity,
+  `Retry-After`, privacy-safe keys, and Redis-unavailable fail-closed behavior.
+- Existing account, sync, and full server regressions remained green after the
+  async limiter integration; Ruff passed.
+
+Commit: pending (`security: add shared account rate limiting`)
+
+F3.2: not_started
+F3.3: not_started
 F4: not_started
 F5: not_started
 F6: not_started

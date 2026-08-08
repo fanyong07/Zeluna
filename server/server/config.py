@@ -151,6 +151,13 @@ ACCOUNT_TRUSTED_PROXY_NETWORKS = _env_networks("ACCOUNT_TRUSTED_PROXY_CIDRS")
 ACCOUNT_RATE_LIMIT_MAX_KEYS = max(
     100, min(100_000, int(os.getenv("ACCOUNT_RATE_LIMIT_MAX_KEYS", "10000")))
 )
+ACCOUNT_RATE_LIMIT_BACKEND = (
+    os.getenv("ACCOUNT_RATE_LIMIT_BACKEND", "memory").strip().lower()
+)
+ACCOUNT_RATE_LIMIT_NAMESPACE = (
+    os.getenv("ACCOUNT_RATE_LIMIT_NAMESPACE", "zeluna:rate:v1").strip()
+    or "zeluna:rate:v1"
+)
 PUBLIC_BASE_URL = (
     os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 )
