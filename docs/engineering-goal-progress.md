@@ -1463,7 +1463,7 @@ Acceptance:
 
 ## G11 Offline downloads
 
-Status: in_progress
+Status: completed
 
 ### Reliability foundation
 
@@ -1485,11 +1485,20 @@ Tests and builds for this slice:
 - Download controller: 9 passed, including late account isolation, startup missing-file state, concurrency release, retry backoff, and storage reporting.
 - Single-file service: 14 passed, including space preflight, atomic replacement, valid/missing/corrupt verification, managed entry listing, Range resume, cancellation, validator change, and 416 recovery.
 - HLS service: 13 passed, including atomic package verification, segment resume, playlist/segment validators, cancellation, HTML rejection, encrypted/live rejection, and network scope guards.
-- `flutter analyze --suppress-analytics`: no issues. Windows Release and Android Debug builds compile the new native storage channels; the existing WebView CMake `CMP0175` developer warning remains non-fatal.
+- `flutter test --reporter compact`: 611 passed, 26 intentionally skipped, 0 failed.
+- `flutter analyze --suppress-analytics`: no issues; Dart format check covered 216 files with 0 changes; `git diff --check` passed.
+- Windows WebView lifecycle integration: 2 passed, 0 failed. The existing WebView CMake `CMP0175` developer warning remains non-fatal.
+- Server compileall, pytest, Ruff, and pip-audit passed: 165 tests passed, 1 third-party deprecation warning, 3 subtests passed; no known Python vulnerabilities.
+- Repository security gate and dependency policy gate passed (159 Dart, 69 Python packages).
+- Android Debug APK built successfully: 269,021,104 bytes, SHA-256 `445DB30D0D7A586B94E43D324228A9EAE7D6788F620CAFFCE49C9F583C0B6279`.
+- Windows Release built successfully: `Zeluna.exe` 197,120 bytes, SHA-256 `E98BF0CD67D85FC02B0A69DB816C7E0F9A3D1B7D575BE769B3108130BCA5D589`.
+- Web Release and Wasm dry run built successfully: `main.dart.js` 4,904,643 bytes, SHA-256 `00F72ADD9320248DA86709A56EC5147D6F32E0F45FC59B10B02A02D174508F6E`.
 
-Remaining G11 acceptance work:
+Acceptance:
 
-- Run the final applicable full Flutter suite and repeat Android/Windows/Web build evidence after the complete G11 slice. Add the final G11 commit and push only after the storage UI/cleanup review and security/diff gates are recorded.
+- G11 is complete: downloads perform bounded space preflight, atomic replacement, integrity verification, startup missing/corrupt classification, bounded concurrency and retry, account-scoped storage reporting, and confirmation-gated orphan cleanup with direct regression and cross-platform build evidence.
+- Implementation commit: `02a4ead feat: harden offline download reliability`; this progress checkpoint records the final validation and acceptance evidence.
+- No downloaded media, production account, secret, signing material, deployment, or irreversible external operation was accessed or changed.
 
 ## G12 Observability and policy documentation
 
