@@ -41,6 +41,9 @@ $outputPrefix = $releaseRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySepa
 if (-not $resolvedOutput.StartsWith($outputPrefix, $pathComparison)) {
     throw "OutputPath must stay inside the release directory."
 }
+if (Test-Path -LiteralPath $resolvedOutput) {
+    throw "Refusing to overwrite immutable release manifest: $resolvedOutput"
+}
 
 $resolvedArtifacts = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 $seen = [System.Collections.Generic.HashSet[string]]::new(

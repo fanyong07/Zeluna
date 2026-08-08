@@ -30,6 +30,13 @@ if ($null -eq $versionLine) {
 $version = $versionLine.Matches[0].Groups[1].Value
 $archivePath = Join-Path $deliveryDirectory "Zeluna-Windows-$version.zip"
 $checksumPath = "$archivePath.sha256"
+
+foreach ($outputPath in @($archivePath, $checksumPath)) {
+    if (Test-Path -LiteralPath $outputPath) {
+        throw "Refusing to overwrite immutable release output: $outputPath"
+    }
+}
+
 $commit = (& git -C $projectRootFull rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{7,64}$') {
     throw 'Unable to resolve the current Git commit for release provenance.'
@@ -78,7 +85,7 @@ try {
     )
 
     Compress-Archive -Path (Join-Path $stagingDirectory '*') `
-        -DestinationPath $archivePath -CompressionLevel Optimal -Force
+        -DestinationPath $archivePath -CompressionLevel Optimal
 }
 finally {
     if (Test-Path -LiteralPath $stagingDirectory) {
