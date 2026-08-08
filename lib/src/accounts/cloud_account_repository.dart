@@ -421,7 +421,7 @@ class CloudAccountRepository
     }
     if (response.statusCode >= 200 && response.statusCode < 300) return body;
     if (response.statusCode == 401) {
-      unawaited(_tokenStore.delete());
+      unawaited(_tokenStore.delete().onError((_, _) {}));
     }
     final detail = body['detail'];
     if (detail is Map) {
@@ -567,7 +567,7 @@ class CloudAccountRepository
 
   Map<String, dynamic> _decodeSyncSuccess(http.Response response) {
     if (response.statusCode == 401) {
-      unawaited(_tokenStore.delete());
+      unawaited(_tokenStore.delete().onError((_, _) {}));
       throw const CloudSyncAuthenticationException();
     }
     if (response.statusCode == 408 ||

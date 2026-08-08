@@ -25,6 +25,23 @@ void main() {
     expect(transport.pullCalls, 0);
   });
 
+  test(
+    'sync storage failure is surfaced without breaking local startup',
+    () async {
+      final storage = _MemorySyncStorage()..failWrites = true;
+      final controller = _controller(
+        storage: storage,
+        transport: _FakeSyncTransport(),
+      );
+      addTearDown(controller.dispose);
+
+      _load(controller, 'account-a', 1);
+      await controller.settle();
+
+      expect(controller.status.phase, SyncPhase.error);
+    },
+  );
+
   test('offline mutation survives restart with the same mutation id', () async {
     final storage = _MemorySyncStorage()
       ..values['sync.device.v1'] = _deviceId
@@ -351,12 +368,16 @@ void _load(SyncController controller, String accountId, int contextVersion) {
 
 class _MemorySyncStorage implements SyncStorage {
   final values = <String, Object?>{};
+  bool failWrites = false;
 
   @override
   Object? get(String key) => values[key];
 
   @override
-  Future<void> put(String key, Object? value) async => values[key] = value;
+  Future<void> put(String key, Object? value) async {
+    if (failWrites) throw StateError('storage unavailable');
+    values[key] = value;
+  }
 }
 
 class _FakeSyncTransport implements CloudSyncTransport {

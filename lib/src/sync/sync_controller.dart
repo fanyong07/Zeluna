@@ -190,6 +190,14 @@ final class SyncController {
               lastSyncedAt: _persistentState.lastSyncedAt,
             ),
           );
+        } on Object {
+          _setStatus(
+            scope,
+            SyncStatus(
+              phase: SyncPhase.error,
+              lastSyncedAt: _persistentState.lastSyncedAt,
+            ),
+          );
         }
       }),
     );
