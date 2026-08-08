@@ -1891,7 +1891,28 @@ Tests:
 
 Commit: pending (`feat: deliver verification mail through durable outbox`)
 
-F3.3: in_progress
+### F3.3 - Atomic verification-code consumption
+
+Status: completed
+
+Implementation:
+
+- Replaced `SELECT ... FOR UPDATE`-only semantics with a database compare-and-
+  consume `DELETE ... WHERE id/code/expiry/attempt-budget` path. Exactly one
+  concurrent correct consumer can succeed across independent sessions.
+- Wrong-code increments remain an atomic `failed_attempts = failed_attempts + 1`
+  update; the fifth failure locks the code and a later correct code cannot
+  bypass the budget.
+
+Tests:
+
+- Independent-session concurrency regression passed with exactly one success.
+- Wrong-attempt, fifth-lock, locked-correct, expiry, purpose isolation, register,
+  and reset regressions passed; full account and migration suites remained
+  green.
+
+Commit: pending (`security: consume verification codes atomically`)
+
 F4: not_started
 F5: not_started
 F6: not_started

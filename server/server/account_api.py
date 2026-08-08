@@ -365,39 +365,59 @@ async def _consume_code(
     session: AsyncSession, email: str, purpose: str, code: str
 ) -> VerifyCode:
     digest = _code_digest(email, purpose, code)
+    now = time.time()
     result = await session.execute(
-        select(VerifyCode).where(
+        select(VerifyCode)
+        .where(
             VerifyCode.email == email,
             VerifyCode.purpose == purpose,
-            VerifyCode.expires_at > time.time(),
+            VerifyCode.expires_at > now,
         )
         .order_by(VerifyCode.created_at.desc(), VerifyCode.id.desc())
         .limit(1)
-        .with_for_update()
     )
     record = result.scalar_one_or_none()
     if record is None:
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
-    retry_after = max(1, int(record.expires_at - time.time()))
+    retry_after = max(1, int(record.expires_at - now))
     if record.failed_attempts >= _MAX_CODE_FAILURES:
         raise _too_many_requests(retry_after)
-    if not hmac.compare_digest(record.code, digest):
-        updated = await session.execute(
-            update(VerifyCode)
+
+    if hmac.compare_digest(record.code, digest):
+        consumed = await session.execute(
+            delete(VerifyCode)
             .where(
                 VerifyCode.id == record.id,
+                VerifyCode.code == digest,
+                VerifyCode.expires_at > now,
                 VerifyCode.failed_attempts < _MAX_CODE_FAILURES,
             )
-            .values(failed_attempts=VerifyCode.failed_attempts + 1)
-            .returning(VerifyCode.failed_attempts)
+            .returning(VerifyCode.id)
         )
-        failed_attempts = updated.scalar_one_or_none()
+        if consumed.scalar_one_or_none() is None:
+            await session.rollback()
+            raise HTTPException(status_code=400, detail="验证码错误或已过期")
         await session.commit()
-        if failed_attempts is None or failed_attempts >= _MAX_CODE_FAILURES:
-            raise _too_many_requests(retry_after)
+        return record
+
+    updated = await session.execute(
+        update(VerifyCode)
+        .where(
+            VerifyCode.id == record.id,
+            VerifyCode.expires_at > now,
+            VerifyCode.failed_attempts < _MAX_CODE_FAILURES,
+        )
+        .values(failed_attempts=VerifyCode.failed_attempts + 1)
+        .returning(VerifyCode.failed_attempts)
+    )
+    failed_attempts = updated.scalar_one_or_none()
+    if failed_attempts is None:
+        await session.rollback()
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
-    await session.delete(record)
-    return record
+    await session.commit()
+    if failed_attempts >= _MAX_CODE_FAILURES:
+        raise _too_many_requests(retry_after)
+    raise HTTPException(status_code=400, detail="验证码错误或已过期")
 
 
 @router.post("/code", status_code=202)
