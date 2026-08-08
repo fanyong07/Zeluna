@@ -1613,7 +1613,7 @@ Status: in_progress
   `git diff --check` passed.
 - Full server suite: 168 passed, 1 existing third-party TestClient deprecation
   warning, 3 subtests passed; compileall, Ruff, and strict pip-audit passed.
-- Repository security gate and dependency policy gate passed (159 Dart, 69
+- Repository security gate and dependency policy gate passed (159 Dart, 56
   Python packages); the four-material inventory remains `total=4`, `read=4`,
   `skipped=0`.
 - Android Debug APK rebuilt successfully: 269,020,397 bytes, SHA-256
@@ -1646,9 +1646,9 @@ Status: in_progress
   and is not treated as release acceptance evidence.
 - No real account, email, production database, deployment, public upload,
   irreversible operation, or production playback provider was accessed.
-- The current environment could not read the remote Actions result for
-  `617f528` (the GitHub API returned 403); no remote CI green check is claimed
-  from that failed read.
+- The current environment could not read the remote Actions result for the
+  latest pushed commits (the GitHub API returned 403); no remote CI green check
+  is claimed from that failed read.
 - The project license is still an explicit governance decision. Until the
   owner confirms a license and the release identity, G14 must remain
   `in_progress`.
