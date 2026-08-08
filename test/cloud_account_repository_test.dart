@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/core/network/network_security.dart';
+import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/sync/cloud_sync_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:http/http.dart' as http;
@@ -470,6 +472,125 @@ void main() {
     expect(await repository.restoreSession(cached), isNull);
     expect(tokens.value, isNull);
   });
+
+  test('cloud sync push reuses secure account authentication', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final mutation = CloudSyncMutation.appearance(
+      mutationId: 'sync:v1:device-a:00000001',
+      settings: const AppearanceSettings(compactMode: true),
+    );
+    final client = MockClient((request) async {
+      expect(request.method, 'POST');
+      expect(request.url.path, '/api/v1/sync/push');
+      expect(request.headers['Authorization'], 'Bearer session-token');
+      expect(jsonDecode(request.body), {
+        'mutations': [mutation.toJson()],
+      });
+      return http.Response(
+        jsonEncode({
+          'acknowledged': [
+            {
+              'type': 'settings_appearance',
+              'record_id': 'settings:appearance',
+              'schema_version': 1,
+              'payload': const AppearanceSettings(compactMode: true).toJson(),
+              'deleted': false,
+              'client_mutation_id': mutation.mutationId,
+              'server_revision': 7,
+            },
+          ],
+          'next_revision': 7,
+        }),
+        200,
+      );
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+
+    final result = await repository.push([mutation]);
+
+    expect(result.nextRevision, 7);
+    expect(
+      result.acknowledged.single.type,
+      CloudSyncRecordType.appearanceSettings,
+    );
+    expect(result.acknowledged.single.payload['compactMode'], isTrue);
+    expect(tokens.value, 'session-token');
+  });
+
+  test(
+    'cloud sync pull uses an incremental cursor and strips unknown data',
+    () async {
+      final tokens = _MemoryTokenStore()..value = 'session-token';
+      final client = MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.path, '/api/v1/sync/pull');
+        expect(request.url.queryParameters, {
+          'after_revision': '11',
+          'limit': '200',
+        });
+        return http.Response(
+          jsonEncode({
+            'records': [
+              {
+                'type': 'settings_appearance',
+                'record_id': 'settings:appearance',
+                'schema_version': 1,
+                'payload': {
+                  ...const AppearanceSettings(reduceMotion: true).toJson(),
+                  'cookie': 'must-not-enter-client-state',
+                },
+                'deleted': false,
+                'client_mutation_id': 'sync:v1:device-b:00000001',
+                'server_revision': 12,
+              },
+            ],
+            'next_revision': 12,
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      final result = await repository.pull(afterRevision: 11);
+
+      expect(result.nextRevision, 12);
+      expect(result.records.single.payload['reduceMotion'], isTrue);
+      expect(result.records.single.payload, isNot(contains('cookie')));
+    },
+  );
+
+  test(
+    'cloud sync expiration clears the shared secure token and stops auth',
+    () async {
+      final tokens = _MemoryTokenStore()..value = 'expired-token';
+      final client = MockClient(
+        (_) async => http.Response(jsonEncode({'detail': 'expired'}), 401),
+      );
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      await expectLater(
+        repository.pull(afterRevision: 0),
+        throwsA(isA<CloudSyncAuthenticationException>()),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(tokens.value, isNull);
+    },
+  );
 }
 
 class _MemoryTokenStore implements CloudAccountTokenStore {

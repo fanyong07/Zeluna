@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
+import '../sync/cloud_sync_transport.dart';
 import 'local_account_repository.dart';
 
 const _defaultZelunaBackendUrl = String.fromEnvironment(
@@ -107,7 +108,8 @@ class AccountDeletionPendingException extends AccountException {
   final bool canCancel;
 }
 
-class CloudAccountRepository implements CloudAccountService {
+class CloudAccountRepository
+    implements CloudAccountService, CloudSyncTransport {
   CloudAccountRepository({
     String baseUrl = defaultCloudAccountBaseUrl,
     http.Client? client,
@@ -369,10 +371,11 @@ class CloudAccountRepository implements CloudAccountService {
     String path, {
     Map<String, Object?>? body,
     String? token,
+    Uri? uri,
     int maxResponseBytes = accountBackendDefaultMaxResponseBytes,
   }) async {
     try {
-      final request = http.Request(method, _endpoint(path));
+      final request = http.Request(method, uri ?? _endpoint(path));
       request.headers.addAll({
         'Accept': 'application/json',
         if (body != null) 'Content-Type': 'application/json; charset=utf-8',
@@ -508,6 +511,91 @@ class CloudAccountRepository implements CloudAccountService {
       'api',
       'v1',
       'auth',
+      ...path.split('/').where((segment) => segment.isNotEmpty),
+    ],
+  );
+
+  @override
+  Future<CloudSyncPushResult> push(List<CloudSyncMutation> mutations) async {
+    if (mutations.isEmpty || mutations.length > 100) {
+      throw const CloudSyncProtocolException();
+    }
+    final response = await _sendSync(
+      'POST',
+      _syncEndpoint('push'),
+      body: {'mutations': mutations.map((item) => item.toJson()).toList()},
+    );
+    try {
+      return CloudSyncPushResult.fromJson(_decodeSyncSuccess(response));
+    } on FormatException {
+      throw const CloudSyncProtocolException();
+    }
+  }
+
+  @override
+  Future<CloudSyncPullResult> pull({
+    required int afterRevision,
+    int limit = 200,
+  }) async {
+    if (afterRevision < 0 || limit < 1 || limit > 500) {
+      throw const CloudSyncProtocolException();
+    }
+    final endpoint = _syncEndpoint('pull').replace(
+      queryParameters: {'after_revision': '$afterRevision', 'limit': '$limit'},
+    );
+    final response = await _sendSync('GET', endpoint);
+    try {
+      return CloudSyncPullResult.fromJson(_decodeSyncSuccess(response));
+    } on FormatException {
+      throw const CloudSyncProtocolException();
+    }
+  }
+
+  Future<http.Response> _sendSync(
+    String method,
+    Uri uri, {
+    Map<String, Object?>? body,
+  }) async {
+    final token = await _readToken();
+    if (token == null) throw const CloudSyncAuthenticationException();
+    try {
+      return await _send(method, '', body: body, token: token, uri: uri);
+    } on AccountException {
+      throw const CloudSyncUnavailableException();
+    }
+  }
+
+  Map<String, dynamic> _decodeSyncSuccess(http.Response response) {
+    if (response.statusCode == 401) {
+      unawaited(_tokenStore.delete());
+      throw const CloudSyncAuthenticationException();
+    }
+    if (response.statusCode == 408 ||
+        response.statusCode == 429 ||
+        response.statusCode >= 500) {
+      throw const CloudSyncUnavailableException();
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw const CloudSyncProtocolException();
+    }
+    if (response.bodyBytes.isEmpty) {
+      throw const CloudSyncProtocolException();
+    }
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map) throw const FormatException();
+      return decoded.cast<String, dynamic>();
+    } catch (_) {
+      throw const CloudSyncProtocolException();
+    }
+  }
+
+  Uri _syncEndpoint(String path) => _baseUri.replace(
+    pathSegments: [
+      ..._baseUri.pathSegments.where((segment) => segment.isNotEmpty),
+      'api',
+      'v1',
+      'sync',
       ...path.split('/').where((segment) => segment.isNotEmpty),
     ],
   );
