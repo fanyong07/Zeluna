@@ -13,6 +13,7 @@ from ..aggregator import aggregator
 from ..database import PlaybackCache, upsert_playback_cache
 from ..dependencies import get_session
 from ..m3u8_resolver import resolver as m3u8_resolver
+from ..config import M3U8_SEARCH_ENABLED, PLAYBACK_PROVIDER_IDS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2", tags=["compat-v2"])
@@ -150,7 +151,9 @@ async def resolve_m3u8(
     url: str = Query(""),
     keyword: str = Query(""),
 ) -> JSONResponse:
-    if url:
+    if not PLAYBACK_PROVIDER_IDS or not M3U8_SEARCH_ENABLED:
+        results = []
+    elif url:
         results = await m3u8_resolver.resolve_via_parse_services(url)
     elif keyword:
         results = await m3u8_resolver.search_and_resolve(keyword)

@@ -1772,8 +1772,33 @@ Tests and gates:
 Builds: current G14 Android, Windows, Web, and platform acceptance evidence
 remain the frozen baseline; F1–F7 changes have not started.
 
-F1: not_started
-F2: not_started
+The provider-boundary implementation below supersedes the frozen-baseline
+sentence above; F1 is now completed and F2-F7 remain unstarted.
+
+### F1 - Provider activation boundary
+
+Status: completed
+
+Implementation:
+
+- Added a shared fail-closed `ProviderActivationPolicy` and historical scraper
+  name mapping. The global `ScraperRegistry` now uses the explicit
+  `PLAYBACK_PROVIDER_IDS` allowlist; disabled adapters remain available only
+  as local metadata and are never returned by active-operation methods.
+- `ProviderRegistry.get()` now refuses disabled registrations. Aggregator M3U8
+  fallback and the retained `/api/v2/resolve` route both require an explicit
+  provider allowlist plus the existing resolver opt-in.
+- Scheduler scan, precache refresh, metadata cache, and health paths all stop
+  before provider/catalog outbound work when no playback provider is active.
+  Shutdown still closes every registered adapter, including disabled ones.
+
+Focused regressions cover fail-on-call legacy scrapers, empty and explicit
+activation, scheduler startup/scan, admin search, and the compat resolver.
+The focused set passed (18 tests); the full server suite passed (174 tests,
+3 subtests, 0 failures), with the existing Starlette deprecation warning only.
+Ruff, compileall, and `git diff --check` passed.
+
+F2: in_progress
 F3: not_started
 F4: not_started
 F5: not_started

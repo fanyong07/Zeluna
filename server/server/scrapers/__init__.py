@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .base import BaseScraper, SubjectResult, SubjectDetail, VideoLine
+from ..config import PLAYBACK_PROVIDER_IDS
+from ..provider_activation import ProviderActivationPolicy, provider_id_for_scraper
 
 logger = logging.getLogger(__name__)
 
@@ -32,28 +34,70 @@ class ScraperRunStats:
 class ScraperRegistry:
     """爬虫注册表 — 管理所有已注册的爬虫"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        enabled_provider_ids: frozenset[str] | None = None,
+        activation_policy: ProviderActivationPolicy | None = None,
+    ):
         self._scrapers: dict[str, BaseScraper] = {}
         self._stats: dict[str, ScraperRunStats] = {}
+        if activation_policy is not None and enabled_provider_ids is not None:
+            raise ValueError("Choose activation_policy or enabled_provider_ids")
+        self._activation_policy = activation_policy or (
+            ProviderActivationPolicy.all()
+            if enabled_provider_ids is None
+            else ProviderActivationPolicy.from_ids(enabled_provider_ids)
+        )
 
     def register(self, scraper: BaseScraper) -> None:
         """注册一个爬虫"""
         self._scrapers[scraper.name] = scraper
-        logger.info(f"Registered scraper: {scraper.name} ({scraper.content_types})")
+        logger.info(
+            "Registered scraper: %s (%s, enabled=%s)",
+            scraper.name,
+            scraper.content_types,
+            self.is_enabled(scraper.name),
+        )
+
+    def provider_id(self, scraper_or_name: BaseScraper | str) -> str:
+        name = (
+            scraper_or_name
+            if isinstance(scraper_or_name, str)
+            else scraper_or_name.name
+        )
+        return provider_id_for_scraper(name)
+
+    def is_enabled(self, scraper_or_name: BaseScraper | str) -> bool:
+        return self._activation_policy.is_enabled(self.provider_id(scraper_or_name))
+
+    @property
+    def activation_policy(self) -> ProviderActivationPolicy:
+        return self._activation_policy
+
+    @property
+    def registered_scrapers(self) -> list[BaseScraper]:
+        """All locally registered adapters, including disabled metadata."""
+        return list(self._scrapers.values())
 
     def get(self, name: str) -> Optional[BaseScraper]:
-        return self._scrapers.get(name)
+        scraper = self._scrapers.get(name)
+        return scraper if scraper is not None and self.is_enabled(scraper) else None
 
     def get_by_content_type(self, content_type: str) -> list[BaseScraper]:
         """按内容类型获取爬虫"""
         return [
             s for s in self._scrapers.values()
-            if content_type in s.content_types
+            if self.is_enabled(s) and content_type in s.content_types
         ]
 
     @property
     def all_scrapers(self) -> list[BaseScraper]:
-        return list(self._scrapers.values())
+        return [
+            scraper
+            for scraper in self._scrapers.values()
+            if self.is_enabled(scraper)
+        ]
 
     @property
     def stats(self) -> dict[str, ScraperRunStats]:
@@ -163,4 +207,4 @@ class ScraperRegistry:
 
 
 # 全局注册表实例
-registry = ScraperRegistry()
+registry = ScraperRegistry(enabled_provider_ids=PLAYBACK_PROVIDER_IDS)

@@ -1302,6 +1302,7 @@ class ContentAggregator:
         # M3U8 fallback for under-served results
         if (
             self._resolver_search_enabled
+            and self._enabled_provider_ids
             and len(all_lines) < 3
             and title_hint
         ):

@@ -149,7 +149,9 @@ class ProviderRegistry:
 
     def get(self, provider_id: str) -> MediaProvider | None:
         registration = self._registrations.get(provider_id)
-        return registration.adapter if registration is not None else None
+        if registration is None or not registration.metadata.enabled:
+            return None
+        return registration.adapter
 
     async def aclose(self) -> None:
         await asyncio.gather(

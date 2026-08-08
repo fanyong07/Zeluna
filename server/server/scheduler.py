@@ -61,6 +61,10 @@ class ContentScheduler:
     def stats(self) -> dict:
         return dict(self._stats)
 
+    @staticmethod
+    def _has_active_playback_provider() -> bool:
+        return any(item.enabled for item in aggregator.provider_metadata)
+
     async def start(self):
         """启动调度器"""
         if self._running:
@@ -95,7 +99,7 @@ class ContentScheduler:
                 pass
         self._tasks.clear()
         await asyncio.gather(
-            *(scraper.aclose() for scraper in registry.all_scrapers),
+            *(scraper.aclose() for scraper in registry.registered_scrapers),
             return_exceptions=True,
         )
         logger.info("Scheduler stopped")
@@ -113,6 +117,9 @@ class ContentScheduler:
 
     async def scan_new_content(self, content_types: list[str] = None):
         """按稳定作品 ID 预爬热门/近期内容的首集线路。"""
+        if not self._has_active_playback_provider():
+            logger.info("Content scan skipped: no active playback provider")
+            return
         start = datetime.now()
         cached = 0
         requested = content_types or ["anime", "tv", "movie"]
@@ -185,6 +192,8 @@ class ContentScheduler:
             try:
                 await asyncio.sleep(300)
                 if self._running:
+                    if not self._has_active_playback_provider():
+                        continue
                     result = await playback_service.refresh_due(limit=12)
                     self._stats["last_scan"] = datetime.now().isoformat()
                     self._stats["cache_refresh"] = result
@@ -198,6 +207,9 @@ class ContentScheduler:
         """把三类热门目录保持在本地，客户端无需持有个人 API Token。"""
         while self._running:
             try:
+                if not self._has_active_playback_provider():
+                    await asyncio.sleep(300)
+                    continue
                 async with async_session() as session:
                     for media_type in ("anime", "tv", "movie"):
                         await catalog_service.home(media_type, session, limit=240)
@@ -215,6 +227,8 @@ class ContentScheduler:
             try:
                 await asyncio.sleep(3600)
                 if self._running:
+                    if not self._has_active_playback_provider():
+                        continue
                     self._stats["last_health_check"] = datetime.now().isoformat()
                     for scraper in registry.all_scrapers:
                         try:
