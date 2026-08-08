@@ -29,20 +29,31 @@ class _PlayerHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final compact = _isMobilePlayerLayout(context);
     if (compact) {
+      final densePortrait =
+          MediaQuery.sizeOf(context).height > MediaQuery.sizeOf(context).width;
+      final iconButtonStyle = densePortrait
+          ? IconButton.styleFrom(
+              minimumSize: const Size(34, 34),
+              fixedSize: const Size(34, 34),
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+            )
+          : null;
       return SizedBox(
-        height: 58,
+        height: densePortrait ? 46 : 58,
         child: Row(
           children: [
             IconButton(
               tooltip: '返回',
               onPressed: onBack,
+              style: iconButtonStyle,
               icon: const Icon(
                 Icons.arrow_back_rounded,
                 color: AppColors.theaterInk,
-                size: 30,
+                size: 26,
               ),
             ),
-            const SizedBox(width: 6),
+            SizedBox(width: densePortrait ? 2 : 6),
             Expanded(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -55,6 +66,7 @@ class _PlayerHeader extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       color: AppColors.theaterInk,
                       fontWeight: FontWeight.w700,
+                      fontSize: densePortrait ? 14 : null,
                     ),
                   ),
                   const SizedBox(height: 1),
@@ -68,6 +80,7 @@ class _PlayerHeader extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: AppColors.theaterMuted,
+                      fontSize: densePortrait ? 11 : null,
                     ),
                   ),
                 ],
@@ -76,25 +89,31 @@ class _PlayerHeader extends StatelessWidget {
             IconButton(
               tooltip: '刷新线路',
               onPressed: onReload,
+              style: iconButtonStyle,
               icon: const Icon(
                 Icons.refresh_rounded,
                 color: AppColors.theaterInk,
+                size: 23,
               ),
             ),
             IconButton(
               tooltip: '截图',
               onPressed: onScreenshot,
+              style: iconButtonStyle,
               icon: const Icon(
                 Icons.camera_alt_outlined,
                 color: AppColors.theaterInk,
+                size: 23,
               ),
             ),
             IconButton(
               tooltip: '播放设置',
               onPressed: onSettings,
+              style: iconButtonStyle,
               icon: const Icon(
                 Icons.more_vert_rounded,
                 color: AppColors.theaterInk,
+                size: 23,
               ),
             ),
           ],
@@ -225,6 +244,7 @@ class _PlayerBottomBar extends StatelessWidget {
     final safePadding = MediaQuery.paddingOf(context);
     final compact = _isMobilePlayerLayout(context);
     final mobileLandscape = compact && size.width > size.height;
+    final portraitMobile = compact && !mobileLandscape;
     final progress = _progress(position, duration);
     final bufferProgress = _progress(
       buffer > position ? buffer : position,
@@ -256,6 +276,7 @@ class _PlayerBottomBar extends StatelessWidget {
               buffered: bufferProgress,
               enabled: canSeek,
               duration: duration,
+              height: portraitMobile ? 20 : 28,
               onSeek: (value) => onSeek(
                 Duration(
                   milliseconds: (duration.inMilliseconds * value).round(),
@@ -264,7 +285,9 @@ class _PlayerBottomBar extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: compact ? (mobileLandscape ? 42 : 88) : 52,
+            height: portraitMobile
+                ? 36
+                : (compact ? (mobileLandscape ? 42 : 88) : 52),
             child: compact
                 ? _MobilePlayerControls(
                     line: line,
@@ -723,91 +746,45 @@ class _MobilePlayerControls extends StatelessWidget {
       );
     }
     return SizedBox(
-      height: 36,
+      height: 34,
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
           _ControlIconButton(
             icon: Icons.skip_previous_rounded,
             tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
             onPressed: onPreviousEpisode,
-            size: 21,
+            size: 22,
             compact: true,
-            compactSize: 34,
+            compactSize: 32,
           ),
           _ControlIconButton(
             icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
             tooltip: playing ? '暂停' : '播放',
-            size: 28,
+            size: 29,
             busy: loadingLine || buffering,
             onPressed: onPlayPause,
             compact: true,
-            compactSize: 34,
+            compactSize: 32,
           ),
           _ControlIconButton(
             icon: Icons.skip_next_rounded,
             tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
             onPressed: onNextEpisode,
-            size: 21,
+            size: 22,
             compact: true,
-            compactSize: 34,
+            compactSize: 32,
           ),
-          _ControlIconButton(
-            icon: muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-            tooltip: muted ? '取消静音' : '静音',
-            onPressed: onMute,
-            size: 21,
-            compact: true,
-            compactSize: 34,
-          ),
+          const SizedBox(width: 8),
           _ControlIconButton(
             icon: fullscreen
                 ? Icons.fullscreen_exit_rounded
                 : Icons.fullscreen_rounded,
             tooltip: fullscreen ? '退出全屏' : '全屏',
             onPressed: onFullscreen,
-            size: 22,
+            size: 23,
             compact: true,
-            compactSize: 34,
-          ),
-          const SizedBox(width: 1),
-          SmallBadge(label: _speedLabel(settings.speed), compact: true),
-          const SizedBox(width: 1),
-          Expanded(
-            flex: 4,
-            child: TextButton(
-              onPressed: onLinePanel,
-              style: compactTextButtonStyle,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.alt_route_rounded, size: 14),
-                  const SizedBox(width: 2),
-                  Flexible(
-                    child: Text(
-                      line == null ? '线路' : playbackLineProviderLabel(line!),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 1),
-          Expanded(
-            flex: 2,
-            child: TextButton(
-              onPressed: onEpisodePanel,
-              style: compactTextButtonStyle,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.video_library_outlined, size: 14),
-                  const SizedBox(width: 2),
-                  const Flexible(child: Text('选集')),
-                ],
-              ),
-            ),
+            compactSize: 32,
           ),
         ],
       ),
@@ -821,6 +798,7 @@ class _BufferedSeekBar extends StatefulWidget {
     required this.buffered,
     required this.enabled,
     required this.duration,
+    this.height = 28,
     required this.onSeek,
   });
 
@@ -828,6 +806,7 @@ class _BufferedSeekBar extends StatefulWidget {
   final double buffered;
   final bool enabled;
   final Duration duration;
+  final double height;
   final ValueChanged<double> onSeek;
 
   @override
@@ -884,7 +863,7 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
             onHover: (event) => _updateHover(event.localPosition.dx, width),
             onExit: (_) => setState(() => _hoverX = null),
             child: SizedBox(
-              height: 28,
+              height: widget.height,
               child: Stack(
                 alignment: Alignment.centerLeft,
                 clipBehavior: Clip.none,
