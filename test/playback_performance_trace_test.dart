@@ -78,6 +78,8 @@ void main() {
         'media_url': 'https://signed.example/video.m3u8?token=secret',
         'headers': {'Cookie': 'secret'},
         'access_token': 'secret',
+        'authorization': 'Bearer secret',
+        'referer': 'https://signed.example/private',
         'message': 'https://signed.example/private',
         'attempt_id': 'spoofed',
         'event': 'spoofed',
@@ -89,9 +91,32 @@ void main() {
     expect(events.single, isNot(contains('media_url')));
     expect(events.single, isNot(contains('headers')));
     expect(events.single, isNot(contains('access_token')));
+    expect(events.single, isNot(contains('authorization')));
+    expect(events.single, isNot(contains('referer')));
     expect(events.single, isNot(contains('message')));
     expect(events.single['attempt_id'], 'attempt-redaction');
     expect(events.single['event'], 'failure');
     expect(events.single['elapsed_ms'], 0);
+  });
+
+  test('playback trace can be disabled and is bounded per attempt', () {
+    final events = <Map<String, Object?>>[];
+    final trace = PlaybackPerformanceTrace(
+      attemptId: 'attempt-bounded',
+      sink: events.add,
+      maxEvents: 2,
+    );
+    trace.record('one');
+    trace.record('two');
+    trace.record('three');
+    expect(events, hasLength(2));
+
+    final disabled = PlaybackPerformanceTrace(
+      attemptId: 'attempt-disabled',
+      sink: events.add,
+      enabled: false,
+    );
+    disabled.record('ignored');
+    expect(events, hasLength(2));
   });
 }

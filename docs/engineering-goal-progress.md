@@ -1502,7 +1502,54 @@ Acceptance:
 
 ## G12 Observability and policy documentation
 
-Status: not_started
+Status: completed
+
+### Audit
+
+- Client playback already had an anonymous attempt timeline, but its sink had
+  no per-attempt cap and did not reject several credential-like header names.
+- The FastAPI service had cache counters but no request correlation ID, bounded
+  request/error/latency aggregates, or documented redaction and retention
+  boundary. Repository security, privacy, contribution, and dependency notices
+  were not present as auditable policy files.
+
+### Changes
+
+- Added `ObservabilityMiddleware` and `ObservabilityMetrics`. Every HTTP
+  response receives a generated `X-Request-ID`; logs contain only the matched
+  route template, method, status, duration, and that ID. Process-local metrics
+  use fixed method/status/latency buckets and never store query strings, route
+  parameters, account data, or content.
+- Exposed aggregate observability counters through the existing `/api/v3/status`
+  response without adding a telemetry upload or persistent metrics table.
+- Bounded client `PlaybackPerformanceTrace` to 128 events per attempt and
+  expanded redaction for authorization, referer/origin, signature, secret, and
+  private fields. Traces remain anonymous and local-only in the current build.
+- Added `docs/observability-policy.md`, `SECURITY.md`, `PRIVACY.md`,
+  `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `THIRD_PARTY_NOTICES.md`.
+  These documents record the G9 deletion/export policy, G10 sync exclusions,
+  G11 download boundaries, four-material restrictions, report handling, and
+  release-time dependency/license verification.
+
+### Tests and gates
+
+- Observability server regression: 11 passed, including request-ID headers,
+  handler context isolation, error response correlation, fixed metric buckets,
+  redaction boundaries, and bounded duration values.
+- Playback trace regression: 4 passed, including credential-like field
+  filtering, opt-out behavior, and the 128-event cap.
+- `flutter analyze --suppress-analytics`, Dart format, repository security
+  gate, dependency policy gate, and `git diff --check` passed.
+
+### Acceptance
+
+- G12 is complete: maintainers can correlate a request or playback attempt and
+  distinguish aggregate latency/error classes without receiving user content,
+  credentials, signed routes, or unbounded high-cardinality telemetry.
+- The current build has no remote telemetry vendor or automatic crash upload;
+  any future opt-in transport requires a policy and retention review.
+- A legal project license has not been selected; release publication remains a
+  G13 governance decision and no license is implied by these policy files.
 
 ## G13 Release governance
 

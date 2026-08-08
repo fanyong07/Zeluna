@@ -11,6 +11,8 @@ class PlaybackPerformanceTrace {
     PlaybackTraceSink? sink,
     DateTime Function()? clock,
     String? attemptId,
+    this.enabled = true,
+    this.maxEvents = 128,
   }) : _sink = sink ?? _debugSink,
        _clock = clock ?? DateTime.now,
        attemptId = attemptId ?? _nextAttemptId(clock ?? DateTime.now) {
@@ -22,8 +24,11 @@ class PlaybackPerformanceTrace {
   final PlaybackTraceSink _sink;
   final DateTime Function() _clock;
   final String attemptId;
+  final bool enabled;
+  final int maxEvents;
   late final DateTime _startedAt;
   DateTime? _bufferingStartedAt;
+  var _eventCount = 0;
 
   void record(String event, {Map<String, Object?> fields = const {}}) {
     final now = _clock();
@@ -51,6 +56,8 @@ class PlaybackPerformanceTrace {
   }
 
   void _emit(String event, DateTime now, Map<String, Object?> fields) {
+    if (!enabled || _eventCount >= maxEvents) return;
+    _eventCount++;
     _sink(<String, Object?>{
       ..._safeFields(fields),
       'attempt_id': attemptId,
@@ -65,9 +72,16 @@ class PlaybackPerformanceTrace {
       'header',
       'cookie',
       'token',
+      'authorization',
       'account',
       'email',
       'password',
+      'referer',
+      'origin',
+      'user-agent',
+      'signature',
+      'secret',
+      'private',
       'title',
     };
     final safe = <String, Object?>{};
