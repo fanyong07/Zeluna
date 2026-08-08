@@ -1943,17 +1943,103 @@ Tests:
 
 Commit: pending (`privacy: isolate account deletion failures`)
 
-F5: not_started
-F6: not_started
-F7: not_started
-F8: not_started
-F9: not_started
+Current implementation HEAD: `a17f810`
 
-Remaining risks: provider activation bypass, long-lived bearer sessions,
-shared rate-limit/outbox/atomic verification semantics, poison-account
-deletion isolation, playback lifecycle/inventory correctness, and the
-production verification-code default are the next audit targets from the
-attached Post-G14 Goal.
+### F5 - Playback pause/lifecycle correctness
 
-Main merge status: not_started. No production deployment or public/store
-release is authorized by this correction Goal.
+Status: completed
+
+Implementation:
+
+- Separated the user's explicit `PlaybackIntent` from player-engine state and
+  kept the phase active before an application background transition.
+- Foreground recovery no longer overwrites an explicit user pause. Watchdog and
+  backup-line probes are blocked while the user pause intent is active.
+- Added late player-state, playing/buffering lifecycle, and blocked-recovery
+  regressions.
+
+Tests: focused playback session/recovery/line suites passed; Flutter analyze
+reported 0 issues and Dart formatting is clean.
+
+Commit: `afe7f5a fix: preserve user playback pause intent`
+
+### F6 - Playback line inventory preservation
+
+Status: completed
+
+Implementation:
+
+- Quick discovery failures preserve an active playable inventory and are
+  reported as non-fatal discovery degradation; a lookup with no active line
+  retains the existing fatal behavior.
+- Verification snapshots and expanded-scan errors preserve the loaded line;
+  stale quick results/errors remain rejected by the existing serial and
+  cancellation guards.
+- Added regressions for active-line quick failure, all-candidate verification
+  rejection, expanded-scan failure, stale error, and normal fatal lookup.
+
+Tests: playback line repository/controller/display/session focused suites passed
+(56 tests in the combined run); Flutter analyze and format passed.
+
+Commit: `2fc626d fix: preserve playable lines on discovery failure`
+
+### F7 - Registration verification-code API cleanup
+
+Status: completed
+
+Implementation:
+
+- `AccountController.register` and `AnimeController.registerAccount` now
+  require an explicit verification code; the production `000000` fallback was
+  removed. Test fixtures pass an explicit synthetic `123456` code.
+
+Audit: no verification-code default remains under `lib/src`.
+
+Commit: `cc84b80 fix: require registration verification code`
+
+### F8 - Final regression and release acceptance
+
+Status: in_progress
+
+Current audit correction:
+
+- OSV audit found seven advisories on the locked `cryptography 46.0.7`; the
+  server constraint and lock were upgraded to `cryptography 50.0.0`. PyPI and
+  OSV strict audits both now report no known vulnerabilities.
+- Formatting-only CI corrections are recorded separately so the exact final
+  CI SHA is reproducible.
+
+Local validation on the current implementation HEAD:
+
+- Flutter: `flutter pub get --enforce-lockfile`, scoped format, analyze (0
+  issues), and full suite passed: 621 passed, 26 existing intentional skips,
+  0 failed.
+- Server: frozen uv sync, 187 pytest tests, 3 subtests, Ruff, compileall, and
+  strict pip-audit passed; the existing Starlette deprecation warning remains.
+- Supply chain: repository security gate, dependency/license gate (159 Dart,
+  72 Python packages), and Python CycloneDX SBOM generation passed.
+- Web proxy/security suite: 21 Node tests passed. Release immutability passed.
+- Android: Debug build passed; internal Release build passed with the explicit
+  legacy compatibility flag, is non-debuggable, denies global and per-host
+  cleartext, and preserves the existing internal certificate SHA-256
+  `530e355dcf891bb3b69507a053b0fab3931b24450bab5bb01407834462624d14`.
+  MuMu Flutter network integration passed (1 test) and release native
+  instrumentation passed.
+- Windows Release build and WebView integration passed (2 tests); Web JS and
+  Wasm Release builds passed. The known upstream CMake `CMP0175` warning is
+  non-fatal.
+
+Commits since F4: `5ff1595 style: align correction sources with format gate`;
+`a17f810 security: upgrade cryptography vulnerability baseline`.
+
+Remaining F8 work: update this evidence after the documentation commit, push
+the final correction HEAD, verify the latest six-job GitHub Quality Gates run
+belongs to that exact SHA, then enter F9. No production deployment, public/store
+upload, AAB publication, or private signing-key access is authorized.
+
+### F9 - Automatic safe merge to main
+
+Status: not_started
+
+Main merge status: not_started. Main must remain untouched until F8's exact-HEAD
+CI is green and the fast-forward checks succeed.
