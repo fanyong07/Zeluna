@@ -43,8 +43,9 @@ PlaybackSessionState reducePlaybackSession(
   var lineId = current.lineId;
   var position = current.position;
   var failureReason = current.failureReason;
-  var phaseBeforePause = current.phaseBeforePause;
+  var applicationPhaseBeforePause = current.applicationPhaseBeforePause;
   var appInForeground = current.appInForeground;
+  var userIntent = current.userIntent;
 
   switch (event.type) {
     case PlaybackSessionEventType.lookupStarted:
@@ -64,23 +65,30 @@ PlaybackSessionState reducePlaybackSession(
       position = event.position ?? position;
       failureReason = null;
     case PlaybackSessionEventType.firstFrame:
-      phase = PlaybackSessionPhase.playing;
+      phase = userIntent == PlaybackIntent.paused
+          ? PlaybackSessionPhase.paused
+          : PlaybackSessionPhase.playing;
       lineId = event.lineId ?? lineId;
       failureReason = null;
     case PlaybackSessionEventType.bufferingStarted:
-      if (phase != PlaybackSessionPhase.failed &&
+      if (userIntent != PlaybackIntent.paused &&
+          phase != PlaybackSessionPhase.failed &&
           phase != PlaybackSessionPhase.ended) {
         phase = PlaybackSessionPhase.buffering;
       }
     case PlaybackSessionEventType.bufferingEnded:
       if (phase == PlaybackSessionPhase.buffering) {
-        phase = PlaybackSessionPhase.playing;
+        phase = userIntent == PlaybackIntent.paused
+            ? PlaybackSessionPhase.paused
+            : PlaybackSessionPhase.playing;
       }
     case PlaybackSessionEventType.mediaError:
     case PlaybackSessionEventType.softTimeout:
     case PlaybackSessionEventType.hardTimeout:
     case PlaybackSessionEventType.lineFailed:
-      phase = event.hasAlternative
+      phase = userIntent == PlaybackIntent.paused
+          ? PlaybackSessionPhase.paused
+          : event.hasAlternative
           ? PlaybackSessionPhase.recovering
           : PlaybackSessionPhase.failed;
       lineId = event.lineId ?? lineId;
@@ -95,27 +103,42 @@ PlaybackSessionState reducePlaybackSession(
       lineId = null;
       position = Duration.zero;
       failureReason = null;
-      phaseBeforePause = null;
+      applicationPhaseBeforePause = null;
+      userIntent = PlaybackIntent.playing;
     case PlaybackSessionEventType.userSeek:
       position = event.position ?? position;
     case PlaybackSessionEventType.applicationPaused:
-      if (phase != PlaybackSessionPhase.paused) phaseBeforePause = phase;
+      if (userIntent == PlaybackIntent.playing &&
+          phase != PlaybackSessionPhase.paused) {
+        applicationPhaseBeforePause = phase;
+      }
       phase = PlaybackSessionPhase.paused;
       appInForeground = false;
     case PlaybackSessionEventType.applicationResumed:
-      phase =
-          phaseBeforePause == null ||
-              phaseBeforePause == PlaybackSessionPhase.paused
-          ? PlaybackSessionPhase.idle
-          : phaseBeforePause;
-      phaseBeforePause = null;
       appInForeground = true;
+      if (userIntent == PlaybackIntent.playing &&
+          applicationPhaseBeforePause != null) {
+        phase = applicationPhaseBeforePause;
+      } else if (userIntent == PlaybackIntent.paused) {
+        phase = PlaybackSessionPhase.paused;
+      }
+      applicationPhaseBeforePause = null;
     case PlaybackSessionEventType.playbackPaused:
-      if (phase != PlaybackSessionPhase.paused) phaseBeforePause = phase;
+      userIntent = PlaybackIntent.paused;
       phase = PlaybackSessionPhase.paused;
+      applicationPhaseBeforePause = null;
     case PlaybackSessionEventType.playbackResumed:
+      userIntent = PlaybackIntent.playing;
       phase = PlaybackSessionPhase.playing;
-      phaseBeforePause = null;
+      applicationPhaseBeforePause = null;
+    case PlaybackSessionEventType.playbackStateChanged:
+      if (event.playing == true) {
+        phase = userIntent == PlaybackIntent.paused
+            ? PlaybackSessionPhase.paused
+            : PlaybackSessionPhase.playing;
+      } else if (userIntent == PlaybackIntent.paused || !appInForeground) {
+        phase = PlaybackSessionPhase.paused;
+      }
     case PlaybackSessionEventType.playbackEnded:
       phase = PlaybackSessionPhase.ended;
     case PlaybackSessionEventType.dispose:
@@ -129,8 +152,9 @@ PlaybackSessionState reducePlaybackSession(
     position: position,
     failureReason: failureReason,
     lastEvent: event.type,
-    phaseBeforePause: phaseBeforePause,
+    applicationPhaseBeforePause: applicationPhaseBeforePause,
     eventSequence: current.eventSequence + 1,
     appInForeground: appInForeground,
+    userIntent: userIntent,
   );
 }

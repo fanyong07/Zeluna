@@ -111,6 +111,29 @@ void main() {
     );
   });
 
+  test('a blocked recovery never triggers while the user pause is active', () {
+    var now = DateTime.utc(2026, 1, 1);
+    final controller = PlaybackRecoveryController(now: () => now);
+    addTearDown(controller.dispose);
+    controller.resetStallWatchdog(position: const Duration(minutes: 2));
+    now = now.add(const Duration(minutes: 1));
+
+    expect(
+      controller.shouldRecoverFromStall(
+        recoveryBlocked: true,
+        appInForeground: true,
+        playing: true,
+        buffering: true,
+        loading: false,
+        playbackFailed: false,
+        position: const Duration(minutes: 2),
+        duration: const Duration(minutes: 20),
+        buffer: const Duration(minutes: 2),
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'concurrent auto switches retry once at the furthest position',
     () async {

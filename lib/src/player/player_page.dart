@@ -31,6 +31,7 @@ import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
+import 'session/playback_session_state.dart';
 import 'subtitles/subtitle_controller.dart';
 import 'video/native_video_controller.dart';
 import 'video/web_video_controller.dart';
@@ -407,7 +408,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _resetPlaybackStallWatchdog(
       grace: inForeground ? const Duration(seconds: 3) : Duration.zero,
     );
-    if (inForeground && _playing) {
+    if (inForeground &&
+        _playing &&
+        _sessionController.state.userIntent != PlaybackIntent.paused) {
       _scheduleSingleBackupLookup();
     } else {
       _backupLookupDelayTimer?.cancel();
@@ -779,9 +782,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _player.stream.playing.listen((value) {
           if (!mounted || _usesWebPlayer) return;
           _sessionController.dispatch(
-            value
-                ? PlaybackSessionEvent.playbackResumed()
-                : PlaybackSessionEvent.playbackPaused(),
+            PlaybackSessionEvent.playbackStateChanged(value),
           );
           setState(() => _playing = value);
           _anime4kController.updatePlaybackState(
@@ -1070,6 +1071,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       recoveryBlocked:
           !mounted ||
           _leaving ||
+          _sessionController.state.userIntent == PlaybackIntent.paused ||
           !_isPlayableLine(_line) ||
           _nativeVideo.resumeSeek.isPending ||
           _nativeVideo.resumeSeek.isSeeking,
@@ -1105,6 +1107,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }) {
     if (!mounted ||
         widget.request.offlineOnly ||
+        _sessionController.state.userIntent == PlaybackIntent.paused ||
         !_usesProgressiveRuleLookup(widget.request.subject) ||
         _line == null ||
         _nextPlayableLine() != null ||
@@ -1652,6 +1655,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     if (_playbackFailed) {
+      _sessionController.dispatch(PlaybackSessionEvent.playbackResumed());
       await _openLine(
         _line!,
         force: true,
@@ -1659,6 +1663,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
       return;
     }
+    _sessionController.dispatch(
+      _playing
+          ? PlaybackSessionEvent.playbackPaused()
+          : PlaybackSessionEvent.playbackResumed(),
+    );
     if (_usesWebPlayer) {
       if (_playing) {
         _webPlayerController.pause();
@@ -2279,9 +2288,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     _sessionController.dispatch(
-      value
-          ? PlaybackSessionEvent.playbackResumed()
-          : PlaybackSessionEvent.playbackPaused(),
+      PlaybackSessionEvent.playbackStateChanged(value),
     );
     setState(() => _playing = value);
     _resetPlaybackStallWatchdog(

@@ -13,6 +13,8 @@ enum PlaybackSessionPhase {
   disposed,
 }
 
+enum PlaybackIntent { playing, paused }
+
 final class PlaybackSessionState {
   const PlaybackSessionState({
     required this.phase,
@@ -21,9 +23,10 @@ final class PlaybackSessionState {
     this.position = Duration.zero,
     this.failureReason,
     this.lastEvent,
-    this.phaseBeforePause,
+    this.applicationPhaseBeforePause,
     this.eventSequence = 0,
     this.appInForeground = true,
+    this.userIntent = PlaybackIntent.playing,
   });
 
   factory PlaybackSessionState.idle({required int episodeId}) =>
@@ -38,9 +41,13 @@ final class PlaybackSessionState {
   final Duration position;
   final String? failureReason;
   final PlaybackSessionEventType? lastEvent;
-  final PlaybackSessionPhase? phaseBeforePause;
+  final PlaybackSessionPhase? applicationPhaseBeforePause;
   final int eventSequence;
   final bool appInForeground;
+  final PlaybackIntent userIntent;
+
+  @Deprecated('Use applicationPhaseBeforePause')
+  PlaybackSessionPhase? get phaseBeforePause => applicationPhaseBeforePause;
 
   bool get isTerminal =>
       phase == PlaybackSessionPhase.failed ||

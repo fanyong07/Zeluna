@@ -17,6 +17,7 @@ enum PlaybackSessionEventType {
   applicationResumed,
   playbackPaused,
   playbackResumed,
+  playbackStateChanged,
   playbackEnded,
   dispose,
 }
@@ -27,6 +28,7 @@ final class PlaybackSessionEvent {
     this.episodeId,
     this.lineId,
     this.position,
+    this.playing,
     this.reason,
     this.hasAlternative = false,
   });
@@ -129,6 +131,12 @@ final class PlaybackSessionEvent {
   factory PlaybackSessionEvent.playbackResumed() =>
       const PlaybackSessionEvent._(PlaybackSessionEventType.playbackResumed);
 
+  factory PlaybackSessionEvent.playbackStateChanged(bool playing) =>
+      PlaybackSessionEvent._(
+        PlaybackSessionEventType.playbackStateChanged,
+        playing: playing,
+      );
+
   factory PlaybackSessionEvent.playbackEnded() =>
       const PlaybackSessionEvent._(PlaybackSessionEventType.playbackEnded);
 
@@ -139,6 +147,7 @@ final class PlaybackSessionEvent {
   final int? episodeId;
   final String? lineId;
   final Duration? position;
+  final bool? playing;
   final String? reason;
   final bool hasAlternative;
 }

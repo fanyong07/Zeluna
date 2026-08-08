@@ -79,6 +79,41 @@ void main() {
     expect(controller.state.position, Duration.zero);
   });
 
+  test('a user pause survives lifecycle and late player state callbacks', () {
+    final controller = PlaybackSessionController(episodeId: 101);
+    addTearDown(controller.dispose);
+
+    controller.dispatch(PlaybackSessionEvent.openRequested('line-a'));
+    controller.dispatch(PlaybackSessionEvent.firstFrame('line-a'));
+    controller.dispatch(PlaybackSessionEvent.playbackPaused());
+    controller.dispatch(PlaybackSessionEvent.applicationPaused());
+    controller.dispatch(PlaybackSessionEvent.playbackStateChanged(true));
+    controller.dispatch(PlaybackSessionEvent.applicationResumed());
+
+    expect(controller.state.userIntent, PlaybackIntent.paused);
+    expect(controller.state.phase, PlaybackSessionPhase.paused);
+    expect(controller.state.appInForeground, isTrue);
+  });
+
+  test('foreground recovery restores the phase that was active before pause', () {
+    final playing = PlaybackSessionController(episodeId: 101);
+    addTearDown(playing.dispose);
+    playing.dispatch(PlaybackSessionEvent.openRequested('line-a'));
+    playing.dispatch(PlaybackSessionEvent.firstFrame('line-a'));
+    playing.dispatch(PlaybackSessionEvent.applicationPaused());
+    expect(playing.state.phase, PlaybackSessionPhase.paused);
+    playing.dispatch(PlaybackSessionEvent.applicationResumed());
+    expect(playing.state.phase, PlaybackSessionPhase.playing);
+
+    final buffering = PlaybackSessionController(episodeId: 102);
+    addTearDown(buffering.dispose);
+    buffering.dispatch(PlaybackSessionEvent.openRequested('line-b'));
+    buffering.dispatch(PlaybackSessionEvent.bufferingStarted());
+    buffering.dispatch(PlaybackSessionEvent.applicationPaused());
+    buffering.dispatch(PlaybackSessionEvent.applicationResumed());
+    expect(buffering.state.phase, PlaybackSessionPhase.buffering);
+  });
+
   test('dispose owns the terminal state and rejects late callbacks', () {
     final controller = PlaybackSessionController(episodeId: 101);
     var callbacks = 0;
