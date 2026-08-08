@@ -1413,10 +1413,29 @@ Builds: not run for this domain-only checkpoint. Controller wiring, remote merge
 
 Commit: `bc1c21c feat: persist account scoped sync queue`
 
+### Local-first client integration
+
+Changes:
+
+- Wired favorites, following, history, playback position, appearance, and playback settings into the durable Sync domain. Each local action publishes the new UI state immediately, appends its write-ahead mutation, then persists the ordinary account snapshot; removal and history clearing create tombstones.
+- Added typed remote merge entry points to Library and Settings. Pulls and merged acknowledgements update Hive and aggregate Riverpod state without calling mutation writers, so remote records never create echo uploads.
+- The production `CloudAccountRepository` instance is detected as the shared transport; tests and alternate account services that do not implement the transport remain local-only. Initial startup is lifecycle-cancelled if its provider is disposed before the deferred sync bootstrap.
+- Added honest sync state to account/profile surfaces: guest local-only, checking, pending count, synced, offline-cached, expired login, and retry-needed. Removed stale copy claiming that cloud sync was a future feature and disclosed the exact local-only exclusions.
+- Local account erasure now includes the account-scoped durable queue/cursor/receipts. The install-scoped non-secret random device ID remains reusable and contains no account or credential data.
+
+Tests and gates:
+
+- Focused controller, account lifecycle, and account UI integration suite: 29 passed, 0 failed.
+- Coverage now proves write-ahead ordering, favorite tombstones, remote no-echo merges, selected-setting merges, two-device merged acknowledgements, guest exclusion, restart recovery with the same mutation ID, reconnect, expiration stop, late account rejection, logout isolation, first migration, local sync-state erasure, and visible offline pending status.
+- Full `lib/src` plus changed-test Flutter analysis and `git diff --check` passed. Secret-marker review found no credential-bearing sync field; downloaded files, task headers, cookies, API keys, bearer tokens, temporary media URLs, external-service credentials, and rule secrets remain excluded.
+
+Builds: not yet run for this integration checkpoint. Full Flutter tests, repository analysis, server regression, and applicable Android/Windows/Web release builds remain required before G10 completion.
+
+Commit: `8de1d23 feat: integrate local first cloud sync`
+
 Remaining G10 work:
 
-- Wire local library and selected settings writes to update the UI immediately, append write-ahead mutations before ordinary persistence, and merge pulled records without generating echo mutations.
-- Expose honest synchronization/offline/expired states, keep guest data local-only, and prove reconnect, retry, account switching, logout isolation, two-device conflicts, and restart behavior across Flutter tests before completing G10.
+- Run the full client/server regression, repository-wide analysis/security gates, and applicable Android/Windows/Web release builds; resolve any failures before marking G10 completed.
 
 ## G11 Offline downloads
 
