@@ -1913,7 +1913,36 @@ Tests:
 
 Commit: pending (`security: consume verification codes atomically`)
 
-F4: not_started
+### F4 - Privacy deletion failure isolation
+
+Status: completed
+
+Implementation:
+
+- Added reversible migration `0010_account_deletion_retry_state` with bounded
+  deletion attempts, last-attempt timestamp, and low-cardinality error code.
+- Scheduler cleanup now selects a batch of due accounts but finalizes each in
+  an independent session/transaction. A poison account remains frozen and
+  retryable; successful neighboring accounts commit in the same run.
+- Failure metadata records only `constraint_error`, `dependency_error`,
+  `transient_database_error`, or `unknown_internal`; no email, nickname,
+  content, token, or raw exception is stored or logged.
+- Successful deletion now removes refresh-token history as well as sessions,
+  verification artifacts, sync/private rows, and the existing public-content
+  anonymization set.
+- Scheduler stats expose only processed/finalized/failed counts and the
+  low-cardinality error histogram.
+
+Tests:
+
+- Poison-account regression passed: A remains frozen/retryable while B and C
+  finalize, aggregate stats stay correct, and A succeeds after the injected
+  fault is removed.
+- Existing account-erasure inventory, public anonymization, refresh-history
+  cleanup, privacy stats, and migration regressions passed.
+
+Commit: pending (`privacy: isolate account deletion failures`)
+
 F5: not_started
 F6: not_started
 F7: not_started

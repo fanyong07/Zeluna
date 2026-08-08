@@ -5,6 +5,7 @@ import json
 import time
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import (
@@ -13,6 +14,7 @@ from .database import (
     CommentLike,
     Danmaku,
     PlayHistory,
+    RefreshTokenHistory,
     SyncMutation,
     SyncRecord,
     SyncRevision,
@@ -37,6 +39,9 @@ class PrivacyCleanup:
     verification_codes: int
     sessions: int
     finalized_accounts: int
+    processed_accounts: int = 0
+    failed_accounts: int = 0
+    deletion_errors: dict[str, int] | None = None
 
 
 async def purge_expired_auth_artifacts(
@@ -67,19 +72,26 @@ async def run_privacy_cleanup(
     *,
     now: float | None = None,
     account_limit: int = 100,
+    session_factory=None,
 ) -> PrivacyCleanup:
     """Purge expired auth rows and finalize a bounded due-account batch."""
 
     auth = await purge_expired_auth_artifacts(session, now=now)
+    deletion_stats: dict[str, object] = {}
     finalized = await finalize_due_account_deletions(
         session,
         now=now,
         limit=account_limit,
+        session_factory=session_factory,
+        stats=deletion_stats,
     )
     return PrivacyCleanup(
         verification_codes=auth.verification_codes,
         sessions=auth.sessions,
         finalized_accounts=finalized,
+        processed_accounts=int(deletion_stats.get("processed", finalized)),
+        failed_accounts=int(deletion_stats.get("failed", 0)),
+        deletion_errors=dict(deletion_stats.get("errors", {})),
     )
 
 
@@ -88,6 +100,8 @@ async def finalize_due_account_deletions(
     *,
     now: float | None = None,
     limit: int = 100,
+    session_factory=None,
+    stats: dict[str, object] | None = None,
 ) -> int:
     """Anonymize public content and erase private data after the grace period."""
 
@@ -105,9 +119,83 @@ async def finalize_due_account_deletions(
             .with_for_update(skip_locked=True)
         )
     )
+    counters: dict[str, int] = {"processed": 0, "finalized": 0, "failed": 0}
+    errors: dict[str, int] = {}
+    if session_factory is not None:
+        for user in users:
+            counters["processed"] += 1
+            async with session_factory() as account_session:
+                try:
+                    account = await account_session.get(User, user.id)
+                    if account is None:
+                        continue
+                    await _finalize_account_deletion(account_session, account)
+                    await account_session.commit()
+                    counters["finalized"] += 1
+                except Exception as error:
+                    await account_session.rollback()
+                    error_code = _deletion_error_code(error)
+                    errors[error_code] = errors.get(error_code, 0) + 1
+                    await _record_deletion_failure(
+                        account_session, user.id, now=now, error_code=error_code
+                    )
+                    counters["failed"] += 1
+        if stats is not None:
+            stats.update(counters)
+            stats["errors"] = errors
+        return counters["finalized"]
+
+    # Direct callers/tests that already own a session still receive isolated
+    # savepoints. The scheduler path above uses a fresh transaction per account.
     for user in users:
-        await _finalize_account_deletion(session, user)
-    return len(users)
+        counters["processed"] += 1
+        try:
+            async with session.begin_nested():
+                await _finalize_account_deletion(session, user)
+            counters["finalized"] += 1
+        except Exception as error:
+            error_code = _deletion_error_code(error)
+            errors[error_code] = errors.get(error_code, 0) + 1
+            await _record_deletion_failure(session, user.id, now=now, error_code=error_code)
+            counters["failed"] += 1
+    if stats is not None:
+        stats.update(counters)
+        stats["errors"] = errors
+    return counters["finalized"]
+
+
+def _deletion_error_code(error: Exception) -> str:
+    if isinstance(error, IntegrityError):
+        return "constraint_error"
+    if isinstance(error, DBAPIError):
+        return "transient_database_error" if error.connection_invalidated else "dependency_error"
+    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
+        return "transient_database_error"
+    return "unknown_internal"
+
+
+async def _record_deletion_failure(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    now: float | None,
+    error_code: str,
+) -> None:
+    """Keep a poison account frozen and retryable without storing PII/errors."""
+
+    try:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(
+                deletion_attempts=User.deletion_attempts + 1,
+                deletion_last_attempt_at=time.time() if now is None else now,
+                deletion_last_error_code=error_code,
+            )
+        )
+        await session.commit()
+    except Exception:
+        await session.rollback()
 
 
 async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
@@ -145,6 +233,9 @@ async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
     await session.execute(delete(SyncRecord).where(SyncRecord.user_id == user.id))
     await session.execute(delete(SyncRevision).where(SyncRevision.user_id == user.id))
     await session.execute(delete(UserToken).where(UserToken.user_id == user.id))
+    await session.execute(
+        delete(RefreshTokenHistory).where(RefreshTokenHistory.user_id == user.id)
+    )
     await session.execute(delete(VerifyCode).where(VerifyCode.email == user.email))
 
     for thread_id in thread_collection_targets:

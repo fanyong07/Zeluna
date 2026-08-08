@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from server import account_api, auth
+from server import account_api, auth, privacy
 from server.database import (
     Bangumi,
     BangumiCollection,
@@ -15,6 +15,7 @@ from server.database import (
     CommentLike,
     Danmaku,
     PlayHistory,
+    RefreshTokenHistory,
     SyncMutation,
     SyncRecord,
     SyncRevision,
@@ -29,6 +30,99 @@ from server.database import (
 from server.privacy import finalize_due_account_deletions
 
 _TEST_SECRET = "zeluna-account-deletion-test-key-over-32-bytes"
+
+
+def test_poison_account_does_not_block_other_deletions(tmp_path, monkeypatch):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'poison-deletion.db').as_posix()}"
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            session.add_all(
+                [
+                    User(
+                        email="poison@example.com",
+                        name="poison",
+                        password_hash="hash",
+                        deletion_requested_at=1,
+                        deletion_due_at=99,
+                    ),
+                    User(
+                        email="normal-a@example.com",
+                        name="normal-a",
+                        password_hash="hash",
+                        deletion_requested_at=1,
+                        deletion_due_at=99,
+                    ),
+                    User(
+                        email="normal-b@example.com",
+                        name="normal-b",
+                        password_hash="hash",
+                        deletion_requested_at=1,
+                        deletion_due_at=99,
+                    ),
+                ]
+            )
+            await session.commit()
+
+    asyncio.run(prepare())
+    original = privacy._finalize_account_deletion
+
+    async def poison_once(session, user):
+        if user.email == "poison@example.com":
+            raise RuntimeError("fixture poison")
+        await original(session, user)
+
+    monkeypatch.setattr(privacy, "_finalize_account_deletion", poison_once)
+
+    async def first_cleanup():
+        stats = {}
+        async with sessions() as session:
+            finalized = await finalize_due_account_deletions(
+                session,
+                now=100,
+                limit=10,
+                session_factory=sessions,
+                stats=stats,
+            )
+        async with sessions() as session:
+            poison = await session.scalar(
+                select(User).where(User.email == "poison@example.com")
+            )
+            remaining = list(await session.scalars(select(User)))
+        return finalized, stats, poison, remaining
+
+    finalized, stats, poison, remaining = asyncio.run(first_cleanup())
+    assert finalized == 2
+    assert stats == {
+        "processed": 3,
+        "finalized": 2,
+        "failed": 1,
+        "errors": {"unknown_internal": 1},
+    }
+    assert poison.deletion_due_at == 99
+    assert poison.deletion_attempts == 1
+    assert poison.deletion_last_error_code == "unknown_internal"
+    assert [user.email for user in remaining] == ["poison@example.com"]
+
+    monkeypatch.setattr(privacy, "_finalize_account_deletion", original)
+    async def second_cleanup():
+        async with sessions() as session:
+            return await finalize_due_account_deletions(
+                session, now=100, limit=10, session_factory=sessions
+            )
+
+    assert asyncio.run(second_cleanup()) == 1
+    async def count_users():
+        async with sessions() as session:
+            return await session.scalar(select(func.count(User.id)))
+
+    assert asyncio.run(count_users()) == 0
+    asyncio.run(engine.dispose())
 
 
 def test_account_erasure_inventory_covers_every_user_foreign_key():
@@ -311,6 +405,12 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                         token_id="owner-jti",
                         expires_at=1000,
                     ),
+                    RefreshTokenHistory(
+                        user_id=owner.id,
+                        session_id="owner-session-id",
+                        token_family_id="owner-family",
+                        digest="owner-refresh-digest",
+                    ),
                     SyncRecord(
                         user_id=owner.id,
                         record_id="bangumi:1",
@@ -402,6 +502,11 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                         )
                     ),
                     await session.scalar(
+                        select(func.count(RefreshTokenHistory.id)).where(
+                            RefreshTokenHistory.user_id == owner.id
+                        )
+                    ),
+                    await session.scalar(
                         select(func.count(VerifyCode.id)).where(
                             VerifyCode.email == owner.email
                         )
@@ -436,7 +541,7 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
     assert "owner public comment" in result["public_comment"][1]
     assert result["public_danmaku"] == (None, "owner public danmaku")
     assert result["image_count"] == 1
-    assert result["private_counts"] == (0, 0, 0, 0, 0, 0, 0)
+    assert result["private_counts"] == (0, 0, 0, 0, 0, 0, 0, 0)
     assert result["keeper_counts"] == (1, 1, 1)
     assert result["reply_to"] == "匿名"
     assert result["unrelated_reply_to"] == "owner-delete"

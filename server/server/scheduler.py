@@ -249,6 +249,7 @@ class ContentScheduler:
             cleanup = await run_privacy_cleanup(
                 session,
                 account_limit=ACCOUNT_DELETION_BATCH_SIZE,
+                session_factory=self._privacy_session_factory,
             )
             await session.commit()
         self._stats["last_privacy_cleanup"] = datetime.now().isoformat()
@@ -256,6 +257,9 @@ class ContentScheduler:
             "verification_codes": cleanup.verification_codes,
             "sessions": cleanup.sessions,
             "finalized_accounts": cleanup.finalized_accounts,
+            "processed_accounts": cleanup.processed_accounts,
+            "failed_accounts": cleanup.failed_accounts,
+            "deletion_errors": cleanup.deletion_errors or {},
         }
         return cleanup
 

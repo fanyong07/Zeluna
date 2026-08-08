@@ -86,6 +86,15 @@ class User(Base):
     deletion_due_at: Mapped[float] = mapped_column(
         Float, default=0.0, server_default="0"
     )
+    deletion_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    deletion_last_attempt_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    deletion_last_error_code: Mapped[str] = mapped_column(
+        String(64), default="", server_default=""
+    )
 
     tokens: Mapped[list["UserToken"]] = relationship("UserToken", back_populates="user", cascade="all, delete-orphan")
     danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="user", cascade="all, delete-orphan")
