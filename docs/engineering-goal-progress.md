@@ -8,7 +8,7 @@
 
 - Branch: `codex/media-player-overhaul`
 - Starting HEAD: `53872d3cb167e068c37069502b97f06cad414d05`
-- Current HEAD: latest completed implementation slice `eec126e` (use `git rev-parse HEAD` for the progress-only commit that follows)
+- Current HEAD: latest completed implementation slice `1ddf8c2` (use `git rev-parse HEAD` for the progress-only commit that follows)
 - Started at: `2026-08-01T16:37:02+08:00`
 - Production baseline reported at start: `53872d3`（本 Goal 不自动部署生产环境）
 
@@ -1602,6 +1602,23 @@ Status: completed
   approval boundaries, and rollback procedure are now explicit and executable
   without touching production state.
 
+### Post-completion immutability correction
+
+- A G14 re-audit found that all three release helpers documented immutable
+  outputs but still overwrote an existing same-version APK, ZIP, checksum, or
+  manifest. This contradicted the rollback policy and could destroy the only
+  retained copy of a known-good artifact.
+- Android and Windows packaging plus manifest generation now fail before a
+  build or write when the destination already exists. Android delivery paths
+  gained the same inside-project boundary already enforced for Windows.
+- Added a Windows CI regression that creates unique sentinels under the
+  repository, proves all three helpers refuse the collision, verifies the
+  sentinel hashes remain unchanged, and removes only its verified temporary
+  paths. Local parser and behavior checks passed; the pre-existing `+34`
+  Android and Windows artifacts retained their original hashes.
+
+Commit: `7422b1f fix: preserve immutable release artifacts`
+
 ## G14 Final acceptance
 
 Status: in_progress
@@ -1642,28 +1659,55 @@ Status: in_progress
 - GitHub Actions Quality Gates run `31250394208` (#122) completed successfully
   on `1bdac3a` in 12m 53s: Flutter analyze/test, Android Debug, Windows/WebView,
   Web, Python/Alembic/Ruff/pip-audit, and supply-chain jobs all passed.
-- `flutter doctor --verbose` reports no toolchain issues; Windows, Chrome, and
-  Edge are available, but no Android device or emulator is connected and no
-  Android virtual device is configured.
+- The owner selected Apache License 2.0. The complete license text is now in
+  `LICENSE`; README, third-party notices, and release governance distinguish
+  Zeluna's license from independent dependency and asset licenses. Dependency
+  policy and repository security gates remain passing.
+- The owner selected the certificate shared by the existing internal APKs for
+  overwrite-install compatibility. The `+13` through `+34` Release APKs use
+  the same v2-valid Android Debug certificate with SHA-256
+  `530e355dcf891bb3b69507a053b0fab3931b24450bab5bb01407834462624d14`.
+  The compatibility build uses that same certificate without reading or
+  printing private key material.
+- MuMu was connected at `127.0.0.1:7555` on Android 12 / API 32. The
+  `1.0.0+34` Release APK installed with `adb install -r`, proving package and
+  signing continuity. The final rebuilt APK is 138,361,364 bytes, SHA-256
+  `7C238CA81B83C79CAFAEEECDFE498760AF1143AAD8E8ABD037663DE3A3FEB9E9`,
+  v2-valid, non-debuggable, and signed by the selected compatibility identity.
+- Device-side validation passed at both layers. The Flutter integration test
+  proved Android DNS resolves `localtest.me` to a loopback target and the
+  untrusted-source client rejects it; 11 focused network-policy regressions
+  passed. A Release-targeted native instrumentation then proved the installed
+  app is non-debuggable and Android globally and per-host denies cleartext.
+- After these changes, Dart format and full analyze passed; the full Flutter
+  suite passed with 612 tests, 26 intentional skips, and 0 failures. The
+  release-immutability regression, repository security gate, dependency policy
+  gate (159 Dart and 69 Python packages), and `git diff --check` passed.
+
+Commits:
+
+- `70c3b91 test: verify Android release network policy`
+- `1ddf8c2 docs: license Zeluna under Apache-2.0`
 
 ### Acceptance blockers
 
-- No Android device or emulator is connected in this environment; Android
-  cleartext/DNS-rebinding and signed-install acceptance are not verified.
-- Both the Android SDK and Oppo Connect ADB binaries returned only the device
-  list header, and the SDK has no local `system-images` directory; no hidden
-  phone or emulator was treated as available.
-- No signed Android AAB/APK was produced. The private keystore and
-  `android/key.properties` were not read or used by this Goal.
+- The selected compatibility identity is explicitly an Android Debug
+  certificate. It satisfies internal overwrite-install migration but not a
+  secure public/store release. `tool/check_release.ps1` correctly remains
+  blocked by the missing production keystore/AAB, unconfirmed final public
+  application ID, debug-signing compatibility path, and APK certificate. No
+  safety check was disabled or weakened to accept it.
+- A production signing identity was not supplied, read, or used. G14 therefore
+  remains `in_progress` for public Android release even though internal APK
+  signing continuity and device network policy are now accepted.
 - During a validation mistake before the packaging helpers were hardened, the
   pre-existing ignored `release/Zeluna-Windows-1.0.0+34.zip` was regenerated by
   the Windows helper. A same-name backup was not found; this is disclosed here
   and is not treated as release acceptance evidence.
 - No real account, email, production database, deployment, public upload,
   irreversible operation, or production playback provider was accessed.
-- The project license is still an explicit governance decision. Until the
-  owner confirms a license and the release identity, G14 must remain
-  `in_progress`.
+- No public release, tag, branch-protection change, production deployment, or
+  real-account irreversible operation was performed.
 
 ## Acceptance principle
 
