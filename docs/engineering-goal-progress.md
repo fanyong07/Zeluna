@@ -1553,7 +1553,46 @@ Status: completed
 
 ## G13 Release governance
 
-Status: not_started
+Status: completed
+
+### Audit
+
+- Existing Android/Windows packaging helpers and `check_release.ps1` already
+  enforced parts of branding, freshness, manifest, and non-debug signing
+  policy, but there was no reproducible artifact manifest, release-note
+  template, or documented immutable rollback/provenance process.
+- The checkout has a private local Android signing configuration and historical
+  ignored release artifacts. They were not read, copied, signed, uploaded, or
+  deleted during this stage.
+
+### Changes
+
+- Added `tool/create_release_manifest.ps1`, which accepts explicit artifacts,
+  validates that inputs stay inside the repository, records the single
+  `pubspec.yaml` version, current Git commit, optional CI run ID, byte counts,
+  and SHA-256 values, and writes only under `release/`. It never signs,
+  uploads, deploys, or deletes artifacts.
+- Added `docs/release-governance.md` covering CI provenance, Android key
+  isolation, Windows/Web packaging, checksums, branch/tag protection,
+  immutable rollback, and the approvals that remain outside this Goal.
+- Added `docs/release-notes-template.md` with platform hashes, compatibility,
+  privacy, real-device, and rollback evidence fields.
+
+### Acceptance
+
+- The manifest generator was executed against the existing Web Release bundle
+  without reading or printing credentials; it produced the expected schema,
+  version `1.0.0+34`, current commit, byte count, and SHA-256, then the exact
+  temporary manifest was removed.
+- PowerShell parser/help check, Dart/Flutter and server suites from G12, the
+  repository security gate, dependency policy gate, and `git diff --check`
+  remain passing.
+- A signed Android release, legal license selection, branch-protection change,
+  public upload, real-device acceptance, and production rollback were not
+  performed. Those require explicit authorization and are G14 gates.
+- G13 is complete as a governance stage: release inputs, provenance, checksums,
+  approval boundaries, and rollback procedure are now explicit and executable
+  without touching production state.
 
 ## G14 Final acceptance
 
