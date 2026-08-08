@@ -1726,3 +1726,67 @@ separate future release decision rather than an unverified completion claim.
 ## Acceptance principle
 
 Only mark a stage complete when its implementation, tests, build evidence, commit, and remaining risks are recorded here. A passing HTTP status alone is not playback evidence; media validation must reach a valid manifest/container and a readable first media segment where applicable.
+
+## Post-G14 Final Correction
+
+Starting correction HEAD: `f9d6c2e`
+
+Starting origin/main: `53872d3`
+
+Starting branch: `codex/media-player-overhaul`
+
+Working tree at freeze: only the pre-existing untracked `.diff_namestat.txt`
+and `_branch_log.txt`; no tracked changes.
+
+Status: in_progress
+
+### F0 — Freeze G14 Baseline
+
+Status: completed
+
+Audit:
+
+- Correction branch and origin match at `f9d6c2e`; `origin/main` remains
+  `53872d3`. No reset, force push, main checkout, production operation, or
+  private signing-key access was performed.
+- Flutter dependency resolution with `--enforce-lockfile` passed. The exact
+  all-file format probe reports six vendored/example files as needing format,
+  but `--output=none` did not modify them; the CI-scoped directories
+  (`lib`, `test`, `integration_test`, `tool`) are clean.
+
+Tests and gates:
+
+- Flutter analyze: 0 issues. Full Flutter suite: 612 passed, 26 intentional
+  skips, 0 failed.
+- Server: 168 passed, 3 subtests passed, 1 existing Starlette TestClient
+  deprecation warning; Ruff, compileall, and strict pip-audit passed.
+- Repository security gate and dependency/license gate passed (159 Dart and
+  69 Python packages). Web security proxy suite: 21 passed.
+- Windows WebView lifecycle integration: 2 passed, 0 failed. The known
+  upstream CMake `CMP0175` developer warning remains non-fatal.
+- MuMu Android network integration passed, followed by Release native
+  instrumentation proving non-debuggable and global/per-host cleartext denial.
+- Release immutability regression passed locally and had already passed in the
+  latest correction CI. `git diff --check` passed.
+
+Builds: current G14 Android, Windows, Web, and platform acceptance evidence
+remain the frozen baseline; F1–F7 changes have not started.
+
+F1: not_started
+F2: not_started
+F3: not_started
+F4: not_started
+F5: not_started
+F6: not_started
+F7: not_started
+F8: not_started
+F9: not_started
+
+Remaining risks: provider activation bypass, long-lived bearer sessions,
+shared rate-limit/outbox/atomic verification semantics, poison-account
+deletion isolation, playback lifecycle/inventory correctness, and the
+production verification-code default are the next audit targets from the
+attached Post-G14 Goal.
+
+Main merge status: not_started. No production deployment or public/store
+release is authorized by this correction Goal.
