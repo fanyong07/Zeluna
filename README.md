@@ -205,3 +205,11 @@ flutter test
 ```
 
 较大改动请先说明动机与影响面（客户端 / 服务端 / 两者）。
+
+---
+
+## 许可证
+
+Zeluna 项目代码采用 [Apache License 2.0](LICENSE) 许可。第三方依赖、字体、
+着色器和其他外部素材继续适用各自的许可证与声明，详见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

@@ -54,12 +54,17 @@ user database or clearing cloud data.
 
 - Production account operations, migration, deployment, email, irreversible
   deletion, and public release require separate authorization.
-- A legal project license has not been selected. No public release may imply an
-  open-source license until the repository owner chooses and records one.
-- No production signing key was read or used by this Goal. A signed Android
-  artifact and real-device acceptance therefore remain explicit G14 gates.
-- The historical debug-signed compatibility path is for internal migration
-  testing only and is never a release artifact.
+- The repository owner selected Apache License 2.0. Release artifacts must
+  include `LICENSE` and preserve the independent notices and licenses recorded
+  in `THIRD_PARTY_NOTICES.md`.
+- The repository owner selected the historical Android Debug certificate only
+  to preserve the signing identity of existing internal APKs. It is permitted
+  for internal sideload and overwrite-install acceptance, but it is not a
+  production/store signing identity and must never be presented as one.
+- A public Android release remains blocked until a separately protected
+  production signing identity is approved. The release checker continues to
+  reject the historical compatibility certificate; this gate must not be
+  disabled for publication.
 
 ## Branch and tag policy
 
