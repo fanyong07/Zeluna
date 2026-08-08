@@ -1625,6 +1625,11 @@ Status: in_progress
 - Windows WebView lifecycle integration: 2 passed, 0 failed. Only the known
   upstream WebView CMake `CMP0175` developer warning remains.
 - Web development proxy/security suite: 21 Node tests passed, 0 failed.
+- Post-`617f528` local acceptance rerun: the locked `uv run pytest -q`
+  environment passed 168 tests, 1 known third-party TestClient warning, and 3
+  subtests; locked Ruff, compileall, strict pip-audit, repository security,
+  dependency policy, and `git diff --check` also passed. Flutter full tests
+  passed again with 612 passed, 26 intentionally skipped, and 0 failed.
 - `flutter doctor --verbose` reports no toolchain issues; Windows, Chrome, and
   Edge are available, but no Android device or emulator is connected and no
   Android virtual device is configured.
@@ -1641,6 +1646,9 @@ Status: in_progress
   and is not treated as release acceptance evidence.
 - No real account, email, production database, deployment, public upload,
   irreversible operation, or production playback provider was accessed.
+- The current environment could not read the remote Actions result for
+  `617f528` (the GitHub API returned 403); no remote CI green check is claimed
+  from that failed read.
 - The project license is still an explicit governance decision. Until the
   owner confirms a license and the release identity, G14 must remain
   `in_progress`.
