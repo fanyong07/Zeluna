@@ -1162,6 +1162,30 @@ class _FileDeleteBackend implements MediaDownloadBackend {
 
   @override
   Future<bool> fileExists(String path) => File(path).exists();
+
+  @override
+  Future<MediaDownloadVerification> verifyFile(
+    String path, {
+    int? expectedBytes,
+  }) async {
+    final file = File(path);
+    if (!await file.exists()) {
+      return const MediaDownloadVerification(
+        status: MediaDownloadFileStatus.missing,
+      );
+    }
+    final bytes = await file.length();
+    return MediaDownloadVerification(
+      status: expectedBytes == null || expectedBytes == bytes
+          ? MediaDownloadFileStatus.valid
+          : MediaDownloadFileStatus.corrupt,
+      bytes: bytes,
+    );
+  }
+
+  @override
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries() async =>
+      const [];
 }
 
 const _offlineServices = ExternalServiceSettings(

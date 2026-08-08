@@ -1166,6 +1166,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> removeDownload(String taskId) =>
       _downloadDomain.removeDownload(taskId);
 
+  Future<DownloadStorageSnapshot> downloadStorageSnapshot() =>
+      _downloadDomain.storageSnapshot();
+
+  bool get isDownloadDomainReady => _downloadController != null;
+
+  Future<void> deleteConfirmedDownloadStorageEntries(Iterable<String> paths) =>
+      _downloadDomain.deleteConfirmedStorageEntries(paths);
+
   Future<void> addImageFavorite(AnimeSubject subject) =>
       _libraryDomain.addImageFavorite(subject);
 

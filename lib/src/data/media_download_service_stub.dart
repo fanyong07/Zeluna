@@ -23,4 +23,15 @@ class _StubDownloadBackend implements MediaDownloadBackend {
 
   @override
   Future<bool> fileExists(String path) async => false;
+
+  @override
+  Future<MediaDownloadVerification> verifyFile(
+    String path, {
+    int? expectedBytes,
+  }) async =>
+      const MediaDownloadVerification(status: MediaDownloadFileStatus.missing);
+
+  @override
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries() async =>
+      const [];
 }

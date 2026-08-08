@@ -42,6 +42,26 @@ final class DownloadSnapshot {
   final List<MediaDownloadTask> tasks;
 }
 
+final class DownloadStorageSnapshot {
+  const DownloadStorageSnapshot({
+    required this.totalBytes,
+    required this.accountBytes,
+    required this.byWorkBytes,
+    required this.orphanedPaths,
+    required this.failedPaths,
+    required this.expiredTemporaryPaths,
+    required this.entries,
+  });
+
+  final int totalBytes;
+  final int accountBytes;
+  final Map<String, int> byWorkBytes;
+  final List<String> orphanedPaths;
+  final List<String> failedPaths;
+  final List<String> expiredTemporaryPaths;
+  final List<MediaDownloadStorageEntry> entries;
+}
+
 /// Owns account-scoped download state, file lifecycle, ordered persistence,
 /// and guarded asynchronous runs.
 ///
@@ -58,7 +78,12 @@ final class DownloadController {
     DateTime Function()? now,
     this.progressPersistInterval = const Duration(seconds: 1),
     this.quiesceTimeout = const Duration(seconds: 3),
-  }) : _storage = storage,
+    this.maxConcurrentDownloads = 2,
+    this.retryAttemptsPerLine = 2,
+    this.retryBaseDelay = const Duration(milliseconds: 250),
+  }) : assert(maxConcurrentDownloads > 0),
+       assert(retryAttemptsPerLine > 0),
+       _storage = storage,
        _service = service,
        _resolveLines = resolveLines,
        _publishSnapshot = publishSnapshot,
@@ -71,6 +96,9 @@ final class DownloadController {
   final DateTime Function() _now;
   final Duration progressPersistInterval;
   final Duration quiesceTimeout;
+  final int maxConcurrentDownloads;
+  final int retryAttemptsPerLine;
+  final Duration retryBaseDelay;
 
   DownloadSnapshot _snapshot = const DownloadSnapshot();
   String? _accountId;
@@ -79,7 +107,9 @@ final class DownloadController {
   var _runSequence = 0;
   var _loaded = false;
   var _disposed = false;
+  var _activeSlots = 0;
   final _runs = <String, _DownloadRun>{};
+  final _slotWaiters = <Completer<void>>[];
   final _persistedAt = <String, DateTime>{};
   Future<void> _writeQueue = Future<void>.value();
   Timer? _persistTimer;
@@ -108,6 +138,7 @@ final class DownloadController {
     _accountId = accountId;
     _contextVersion = contextVersion;
     _loaded = false;
+    _wakeSlotWaiters(force: true);
 
     if (hadPendingProgress && previousScope != null) {
       await _persistSnapshot(previousScope, previousTasks);
@@ -194,6 +225,75 @@ final class DownloadController {
     }
   }
 
+  Future<DownloadStorageSnapshot> storageSnapshot() async {
+    final scope = _scope();
+    final entries = await _service.listStorageEntries();
+    _ensureScope(scope);
+    final bytesByPath = <String, int>{
+      for (final entry in entries) entry.path.trim(): entry.bytes,
+    };
+    final ownedPaths = <String>{};
+    final failedPaths = <String>{};
+    final byWork = <String, int>{};
+    for (final task in _snapshot.tasks) {
+      final taskPaths = <String>{
+        if (task.temporaryPath?.trim().isNotEmpty == true)
+          task.temporaryPath!.trim(),
+        if (task.localPath?.trim().isNotEmpty == true) task.localPath!.trim(),
+      };
+      ownedPaths.addAll(taskPaths);
+      if (task.status == MediaDownloadTaskStatus.failed ||
+          task.status == MediaDownloadTaskStatus.corrupt) {
+        failedPaths.addAll(taskPaths);
+      }
+      final workKey = task.subject.identityKey;
+      byWork[workKey] =
+          (byWork[workKey] ?? 0) +
+          taskPaths.fold<int>(
+            0,
+            (total, path) => total + (bytesByPath[path] ?? 0),
+          );
+    }
+    final totalBytes = entries.fold<int>(
+      0,
+      (total, entry) => total + entry.bytes,
+    );
+    final accountBytes = ownedPaths.fold<int>(
+      0,
+      (total, path) => total + (bytesByPath[path] ?? 0),
+    );
+    final orphanedPaths = entries
+        .map((entry) => entry.path)
+        .where((path) => !ownedPaths.contains(path.trim()))
+        .toList(growable: false);
+    final expiry = _now().subtract(const Duration(days: 7));
+    final expiredTemporaryPaths = entries
+        .where(
+          (entry) =>
+              entry.modifiedAt.isBefore(expiry) &&
+              _isTemporaryStoragePath(entry.path),
+        )
+        .map((entry) => entry.path)
+        .toList(growable: false);
+    return DownloadStorageSnapshot(
+      totalBytes: totalBytes,
+      accountBytes: accountBytes,
+      byWorkBytes: Map.unmodifiable(byWork),
+      orphanedPaths: List.unmodifiable(orphanedPaths),
+      failedPaths: List.unmodifiable(failedPaths),
+      expiredTemporaryPaths: List.unmodifiable(expiredTemporaryPaths),
+      entries: List.unmodifiable(entries),
+    );
+  }
+
+  /// Deletes only paths explicitly selected by the user after reviewing
+  /// [storageSnapshot]. No automatic orphan cleanup is performed.
+  Future<void> deleteConfirmedStorageEntries(Iterable<String> paths) async {
+    final scope = _scope();
+    await _service.deleteFiles(paths);
+    _ensureScope(scope);
+  }
+
   List<AccountOwnedDownload> ownedDownloads() => List.unmodifiable(
     _snapshot.tasks.map(
       (task) => AccountOwnedDownload(
@@ -260,8 +360,10 @@ final class DownloadController {
     _disposed = true;
     _loaded = false;
     _scopeEpoch++;
+    _wakeSlotWaiters();
     _cancelPersistTimer();
     for (final run in _runs.values.toList(growable: false)) {
+      run.stop();
       _service.pause(run.taskId, controlId: run.controlId);
     }
     _runs.clear();
@@ -274,6 +376,7 @@ final class DownloadController {
     final run = _run(scope, taskId);
     if (run != null) {
       _service.pause(taskId, controlId: run.controlId);
+      run.stop();
     }
     _replaceTask(
       scope,
@@ -306,6 +409,8 @@ final class DownloadController {
     }
     _ensureScope(scope);
     if (task.status == MediaDownloadTaskStatus.cancelled ||
+        task.status == MediaDownloadTaskStatus.missing ||
+        task.status == MediaDownloadTaskStatus.corrupt ||
         (task.status == MediaDownloadTaskStatus.completed &&
             !await _service.fileExists(task.localPath))) {
       _ensureScope(scope);
@@ -353,6 +458,7 @@ final class DownloadController {
     final run = _run(scope, taskId);
     final stopped =
         run != null && _service.cancel(taskId, controlId: run.controlId);
+    run?.stop();
     if (!stopped) {
       await _service.deleteFiles([task.temporaryPath]);
       _ensureScope(scope);
@@ -434,7 +540,10 @@ final class DownloadController {
     _DownloadRun run, {
     required bool preferStoredLine,
   }) async {
+    var acquired = false;
     try {
+      acquired = await _acquireSlot(run);
+      if (!acquired) return;
       await _performDownload(run, preferStoredLine: preferStoredLine);
     } catch (_) {
       final task = _taskForRun(run);
@@ -452,6 +561,7 @@ final class DownloadController {
         await _persistNow(run.scope);
       }
     } finally {
+      if (acquired) _releaseSlot();
       final key = _runKey(run.scope, run.taskId);
       if (identical(_runs[key], run)) _runs.remove(key);
     }
@@ -550,9 +660,28 @@ final class DownloadController {
         await _discardPartialDownload(run, activeTask);
         if (!_canContinue(_taskForRun(run))) return;
       }
-      lastResult = await _downloadLine(run, candidates[index]);
-      if (lastResult.success || lastResult.paused || lastResult.cancelled) {
-        return;
+      var attempt = 0;
+      while (true) {
+        lastResult = await _downloadLine(run, candidates[index]);
+        if (lastResult.success || lastResult.paused || lastResult.cancelled) {
+          return;
+        }
+        attempt++;
+        if (attempt >= retryAttemptsPerLine) break;
+        final retryTask = _taskForRun(run);
+        if (!_canContinue(retryTask)) return;
+        await _discardPartialDownload(run, retryTask!);
+        final delay = _retryDelay(attempt);
+        _replaceTask(
+          run.scope,
+          retryTask.copyWith(
+            status: MediaDownloadTaskStatus.resolving,
+            updatedAt: _now(),
+            message: '线路暂时失败，${delay.inMilliseconds}ms 后重试',
+          ),
+        );
+        await _persistNow(run.scope);
+        if (!await _waitForRetry(run, delay)) return;
       }
       if (index + 1 < candidates.length) {
         final failed = _taskForRun(run);
@@ -636,7 +765,7 @@ final class DownloadController {
       rethrow;
     }
 
-    final latest = _taskForRun(run);
+    var latest = _taskForRun(run);
     if (latest == null || latest.status == MediaDownloadTaskStatus.cancelled) {
       await _deleteFilesNotOwnedByCurrentSnapshot({
         ...producedPaths,
@@ -653,6 +782,59 @@ final class DownloadController {
         await _service.deleteFiles([result.path]);
       }
       return result;
+    }
+    if (result.success) {
+      _replaceTask(
+        run.scope,
+        latest.copyWith(
+          status: MediaDownloadTaskStatus.verifying,
+          updatedAt: _now(),
+          message: '正在校验下载文件',
+        ),
+      );
+      await _persistNow(run.scope);
+      final verification = await _service.verifyFile(
+        result.path,
+        expectedBytes: result.bytes > 0 ? result.bytes : null,
+      );
+      final verifiedTask = _taskForRun(run);
+      if (verifiedTask == null ||
+          verifiedTask.status == MediaDownloadTaskStatus.cancelled) {
+        await _deleteFilesNotOwnedByCurrentSnapshot({result.path});
+        return result;
+      }
+      if (verifiedTask.status == MediaDownloadTaskStatus.paused) {
+        await _service.deleteFiles([result.path]);
+        return result;
+      }
+      if (!verification.isValid) {
+        final status = verification.status == MediaDownloadFileStatus.missing
+            ? MediaDownloadTaskStatus.missing
+            : MediaDownloadTaskStatus.corrupt;
+        _replaceTask(
+          run.scope,
+          verifiedTask.copyWith(
+            status: status,
+            updatedAt: _now(),
+            message: status == MediaDownloadTaskStatus.missing
+                ? '下载完成后找不到本地文件'
+                : '下载文件完整性校验失败，请重新下载',
+          ),
+        );
+        await _persistNow(run.scope);
+        return MediaDownloadResult(
+          outcome: MediaDownloadOutcome.failed,
+          message: status == MediaDownloadTaskStatus.missing
+              ? '下载完成后找不到本地文件'
+              : '下载文件完整性校验失败，请重新下载',
+          path: result.path,
+          bytes: verification.bytes,
+          totalBytes: result.totalBytes,
+          etag: result.etag,
+          lastModified: result.lastModified,
+        );
+      }
+      latest = verifiedTask;
     }
     final nextStatus = switch (result.outcome) {
       MediaDownloadOutcome.completed => MediaDownloadTaskStatus.completed,
@@ -793,15 +975,28 @@ final class DownloadController {
         );
         migrated = true;
       }
-      if (task.status == MediaDownloadTaskStatus.completed &&
-          !await _service.fileExists(task.localPath)) {
-        task = task.copyWith(
-          status: MediaDownloadTaskStatus.failed,
-          updatedAt: _now(),
-          localPath: null,
-          message: '本地文件已不存在，请重新下载',
+      if (task.status == MediaDownloadTaskStatus.completed) {
+        final verification = await _service.verifyFile(
+          task.localPath,
+          expectedBytes: task.totalBytes > 0 ? task.totalBytes : null,
         );
-        migrated = true;
+        final nextStatus = switch (verification.status) {
+          MediaDownloadFileStatus.valid => MediaDownloadTaskStatus.completed,
+          MediaDownloadFileStatus.missing => MediaDownloadTaskStatus.missing,
+          MediaDownloadFileStatus.corrupt => MediaDownloadTaskStatus.corrupt,
+        };
+        if (nextStatus != task.status) {
+          task = task.copyWith(
+            status: nextStatus,
+            updatedAt: _now(),
+            message: switch (nextStatus) {
+              MediaDownloadTaskStatus.missing => '本地文件已不存在，请重新下载',
+              MediaDownloadTaskStatus.corrupt => '本地文件大小异常，请重新下载',
+              _ => task.message,
+            },
+          );
+          migrated = true;
+        }
       }
       if (task.downloadedBytes > 0 &&
           task.status != MediaDownloadTaskStatus.completed &&
@@ -912,6 +1107,46 @@ final class DownloadController {
     return operation;
   }
 
+  Future<bool> _acquireSlot(_DownloadRun run) async {
+    while (_activeSlots >= maxConcurrentDownloads) {
+      if (!_canContinue(_taskForRun(run))) return false;
+      final waiter = Completer<void>();
+      _slotWaiters.add(waiter);
+      await waiter.future;
+    }
+    if (!_canContinue(_taskForRun(run))) return false;
+    _activeSlots++;
+    return true;
+  }
+
+  void _releaseSlot() {
+    if (_activeSlots > 0) _activeSlots--;
+    _wakeSlotWaiters();
+  }
+
+  void _wakeSlotWaiters({bool force = false}) {
+    while (_slotWaiters.isNotEmpty &&
+        (force || _activeSlots < maxConcurrentDownloads || _disposed)) {
+      _slotWaiters.removeAt(0).complete();
+    }
+  }
+
+  Duration _retryDelay(int attempt) {
+    final shift = (attempt - 1).clamp(0, 5).toInt();
+    final multiplier = 1 << shift;
+    final milliseconds = retryBaseDelay.inMilliseconds * multiplier;
+    return Duration(milliseconds: milliseconds.clamp(0, 8000).toInt());
+  }
+
+  Future<bool> _waitForRetry(_DownloadRun run, Duration delay) async {
+    final winner = await Future.any<Object?>([
+      Future<Object?>.delayed(delay),
+      run.stopSignal.future.then<Object?>((_) => true),
+    ]);
+    if (winner != null) return false;
+    return _canContinue(_taskForRun(run));
+  }
+
   bool _cancelPersistTimer() {
     final hadPending = _persistTimer?.isActive ?? false;
     _persistTimer?.cancel();
@@ -976,7 +1211,12 @@ final class _DownloadRun {
   final _DownloadScope scope;
   final String taskId;
   final String controlId;
+  final Completer<void> stopSignal = Completer<void>();
   late final Future<void> future;
+
+  void stop() {
+    if (!stopSignal.isCompleted) stopSignal.complete();
+  }
 }
 
 final class _DownloadScope {
@@ -1012,4 +1252,11 @@ bool _sameStringMap(Map<String, String> left, Map<String, String> right) {
     if (right[entry.key] != entry.value) return false;
   }
   return true;
+}
+
+bool _isTemporaryStoragePath(String path) {
+  final lower = path.trim().toLowerCase();
+  return lower.endsWith('.part') ||
+      lower.endsWith('.hls.part') ||
+      lower.endsWith('.zeluna-replace');
 }

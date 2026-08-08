@@ -1463,7 +1463,33 @@ Acceptance:
 
 ## G11 Offline downloads
 
-Status: not_started
+Status: in_progress
+
+### Reliability foundation
+
+Audit:
+
+- The existing IO backend already had HTTP Range/If-Range resume, HLS segment recovery, safe managed paths, and final size checks, but it had no platform-backed free-space preflight, no protected replacement when a completed target was overwritten, and no explicit post-startup distinction between missing and corrupt files.
+- Download runs were launched without a bounded concurrency policy or retry backoff. Storage management had no report of total, current-account, per-work, or untracked managed entries.
+
+Changes in the current slice:
+
+- Added an Android `StatFs` and Windows `GetDiskFreeSpaceExW` storage channel. The IO backend performs a bounded 64 MiB headroom check before writing a known-size single-file response or HLS segment; a channel failure fails narrow to an unknown-capacity path rather than exposing a secret or writing outside the managed root.
+- Added protected file and directory replacement. Existing completed targets are moved to a scoped `.zeluna-replace` backup before the temporary artifact is committed; interrupted replacement can restore the backup, and stale backups are removed best-effort after a successful commit.
+- Added explicit `verifying`, `missing`, and `corrupt` task states. Completion and startup recovery verify the final file/package against the recorded byte count; HLS verifies every completed segment, manifests, and package byte total before commit.
+- Added a default two-run concurrency limit, bounded two-attempt per-line retry with capped exponential backoff, and explicit account/work/total storage reports. Orphan, failed, and expired temporary paths are reported but are never deleted automatically; deletion requires an explicit caller confirmation.
+- The offline-management page now shows current-account and device-wide usage and exposes a confirmation dialog before removing untracked managed entries. Missing/corrupt tasks are actionable as re-downloads and are never treated as playable files.
+
+Tests and builds for this slice:
+
+- Download controller: 9 passed, including late account isolation, startup missing-file state, concurrency release, retry backoff, and storage reporting.
+- Single-file service: 14 passed, including space preflight, atomic replacement, valid/missing/corrupt verification, managed entry listing, Range resume, cancellation, validator change, and 416 recovery.
+- HLS service: 13 passed, including atomic package verification, segment resume, playlist/segment validators, cancellation, HTML rejection, encrypted/live rejection, and network scope guards.
+- `flutter analyze --suppress-analytics`: no issues. Windows Release and Android Debug builds compile the new native storage channels; the existing WebView CMake `CMP0175` developer warning remains non-fatal.
+
+Remaining G11 acceptance work:
+
+- Run the final applicable full Flutter suite and repeat Android/Windows/Web build evidence after the complete G11 slice. Add the final G11 commit and push only after the storage UI/cleanup review and security/diff gates are recorded.
 
 ## G12 Observability and policy documentation
 

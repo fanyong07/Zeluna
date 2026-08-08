@@ -1,5 +1,28 @@
 enum MediaDownloadOutcome { completed, paused, cancelled, failed, unsupported }
 
+enum MediaDownloadFileStatus { valid, missing, corrupt }
+
+class MediaDownloadVerification {
+  const MediaDownloadVerification({required this.status, this.bytes = 0});
+
+  final MediaDownloadFileStatus status;
+  final int bytes;
+
+  bool get isValid => status == MediaDownloadFileStatus.valid;
+}
+
+class MediaDownloadStorageEntry {
+  const MediaDownloadStorageEntry({
+    required this.path,
+    required this.bytes,
+    required this.modifiedAt,
+  });
+
+  final String path;
+  final int bytes;
+  final DateTime modifiedAt;
+}
+
 class MediaDownloadProgress {
   const MediaDownloadProgress({
     required this.downloadedBytes,

@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import '../core/network/network_security.dart';
 import 'media_download_backend.dart';
 import 'media_download_result.dart';
+import 'media_download_storage_io.dart';
 
 Future<MediaDownloadResult> downloadHlsMedia({
   required MediaDownloadRequest request,
@@ -15,6 +16,7 @@ Future<MediaDownloadResult> downloadHlsMedia({
   required void Function(MediaDownloadProgress progress) onProgress,
   required http.Client Function() clientFactory,
   required Future<Directory> Function() directoryProvider,
+  required DownloadAvailableBytesProvider availableBytesProvider,
 }) async {
   final sourceUri = Uri.tryParse(request.url.trim());
   if (sourceUri == null ||
@@ -247,6 +249,7 @@ Future<MediaDownloadResult> downloadHlsMedia({
         ),
         control: control,
         clientFactory: clientFactory,
+        availableBytesProvider: availableBytesProvider,
         validator: validator,
         onValidator: (next) async {
           activeMetadata = activeMetadata.withValidator(item.key, next);
@@ -285,14 +288,20 @@ Future<MediaDownloadResult> downloadHlsMedia({
       flush: true,
     );
     throwIfStopped();
-    if (await finalDirectory.exists()) {
-      await finalDirectory.delete(recursive: true);
-    }
+    final packageBytesBeforeCommit = await _verifyHlsPackage(
+      temporary,
+      itemFiles,
+    );
+    await recoverInterruptedDirectoryCommit(finalDirectory);
     throwIfStopped();
-    await temporary.rename(finalDirectory.path);
+    await atomicReplaceDirectory(temporary, finalDirectory);
     finalized = true;
     throwIfStopped();
     downloadedBytes = await _packageBytes(finalDirectory);
+    if (downloadedBytes != packageBytesBeforeCommit ||
+        !await targetManifest.exists()) {
+      throw const _HlsFailure('HLS 离线包完整性校验失败');
+    }
     throwIfStopped();
     totalBytes = downloadedBytes;
     completedUnits = totalUnits;
@@ -339,7 +348,24 @@ Future<MediaDownloadResult> downloadHlsMedia({
       etag: sourceEtag,
       lastModified: sourceLastModified,
     );
+  } on InsufficientDownloadSpace catch (error) {
+    return MediaDownloadResult(
+      outcome: MediaDownloadOutcome.failed,
+      message: '磁盘空间不足，至少需要 ${_hlsSizeLabel(error.requiredBytes)} 可用空间',
+      path: targetManifest.path,
+      temporaryPath: temporary.path,
+      bytes: downloadedBytes,
+      totalBytes: totalBytes,
+      etag: sourceEtag,
+      lastModified: sourceLastModified,
+      completedUnits: completedUnits,
+      totalUnits: totalUnits,
+    );
   } on _HlsFailure catch (error) {
+    if (finalized && await finalDirectory.exists()) {
+      await finalDirectory.delete(recursive: true);
+      finalized = false;
+    }
     return MediaDownloadResult(
       outcome: MediaDownloadOutcome.failed,
       message: error.message,
@@ -353,6 +379,10 @@ Future<MediaDownloadResult> downloadHlsMedia({
       totalUnits: totalUnits,
     );
   } catch (_) {
+    if (finalized && await finalDirectory.exists()) {
+      await finalDirectory.delete(recursive: true);
+      finalized = false;
+    }
     return MediaDownloadResult(
       outcome: MediaDownloadOutcome.failed,
       message: 'HLS 下载失败，可稍后重试',
@@ -674,6 +704,7 @@ Future<_HlsItemResult> _downloadHlsItem({
   required Map<String, String> headers,
   required MediaDownloadControl control,
   required http.Client Function() clientFactory,
+  required DownloadAvailableBytesProvider availableBytesProvider,
   required _HlsValidator? validator,
   required Future<void> Function(_HlsValidator validator) onValidator,
   required void Function(int bytes) onBytes,
@@ -682,8 +713,7 @@ Future<_HlsItemResult> _downloadHlsItem({
   await partialFile.parent.create(recursive: true);
   var existing = await partialFile.exists() ? await partialFile.length() : 0;
   if (item.rangeLength != null && existing == item.rangeLength) {
-    if (await finalFile.exists()) await finalFile.delete();
-    await partialFile.rename(finalFile.path);
+    await atomicReplaceFile(partialFile, finalFile);
     return _HlsItemResult(bytes: existing);
   }
   if (item.rangeLength != null && existing > item.rangeLength!) {
@@ -729,8 +759,7 @@ Future<_HlsItemResult> _downloadHlsItem({
       if (expected == existing) {
         onBytes(existing);
         if (control.isStopped) throw _HlsStopped(control.reason!);
-        if (await finalFile.exists()) await finalFile.delete();
-        await partialFile.rename(finalFile.path);
+        await atomicReplaceFile(partialFile, finalFile);
         return _HlsItemResult(bytes: existing);
       }
       if (item.rangeLength == null &&
@@ -748,6 +777,7 @@ Future<_HlsItemResult> _downloadHlsItem({
           headers: headers,
           control: control,
           clientFactory: clientFactory,
+          availableBytesProvider: availableBytesProvider,
           validator: responseValidator,
           onValidator: onValidator,
           onBytes: onBytes,
@@ -772,6 +802,7 @@ Future<_HlsItemResult> _downloadHlsItem({
           headers: headers,
           control: control,
           clientFactory: clientFactory,
+          availableBytesProvider: availableBytesProvider,
           validator: responseValidator,
           onValidator: onValidator,
           onBytes: onBytes,
@@ -793,6 +824,14 @@ Future<_HlsItemResult> _downloadHlsItem({
     await onValidator(responseValidator);
     final append =
         existing > 0 && response.statusCode == HttpStatus.partialContent;
+    final expected = item.rangeLength ?? _responseTotal(response, existing);
+    await ensureDownloadCapacity(
+      directory: finalFile.parent,
+      requiredBytes: expected == null
+          ? 0
+          : (expected - existing).clamp(0, expected).toInt(),
+      availableBytesProvider: availableBytesProvider,
+    );
     final output = partialFile.openWrite(
       mode: append ? FileMode.append : FileMode.write,
     );
@@ -828,19 +867,63 @@ Future<_HlsItemResult> _downloadHlsItem({
     await output.close();
     sink = null;
     if (control.isStopped) throw _HlsStopped(control.reason!);
-    final expected = item.rangeLength ?? _responseTotal(response, existing);
     if (expected != null && downloaded != expected) {
       throw const _HlsFailure('HLS 分片大小不完整，可稍后继续');
     }
-    if (await finalFile.exists()) await finalFile.delete();
     if (control.isStopped) throw _HlsStopped(control.reason!);
-    await partialFile.rename(finalFile.path);
+    await atomicReplaceFile(partialFile, finalFile);
     return _HlsItemResult(bytes: downloaded);
   } finally {
     await iterator?.cancel();
     await sink?.close();
     client.close();
   }
+}
+
+Future<int> _verifyHlsPackage(
+  Directory temporary,
+  Map<_HlsItem, ({File finalFile, File partialFile})> itemFiles,
+) async {
+  var total = 0;
+  for (final entry in itemFiles.entries) {
+    final files = entry.value;
+    if (!await files.finalFile.exists() || await files.partialFile.exists()) {
+      throw const _HlsFailure('HLS 离线包存在未完成分片');
+    }
+    final length = await files.finalFile.length();
+    if (entry.key.rangeLength != null && length != entry.key.rangeLength) {
+      throw const _HlsFailure('HLS 离线包分片大小校验失败');
+    }
+    total += length;
+  }
+  for (final track in const ['video', 'audio']) {
+    final manifest = File(
+      '${temporary.path}${Platform.pathSeparator}$track${Platform.pathSeparator}index.m3u8',
+    );
+    if (await manifest.exists()) total += await manifest.length();
+  }
+  final rootManifest = File(
+    '${temporary.path}${Platform.pathSeparator}index.m3u8',
+  );
+  if (!await rootManifest.exists()) {
+    throw const _HlsFailure('HLS 离线包缺少主清单');
+  }
+  total += await rootManifest.length();
+  final metadata = File(
+    '${temporary.path}${Platform.pathSeparator}download.json',
+  );
+  if (await metadata.exists()) total += await metadata.length();
+  return total;
+}
+
+String _hlsSizeLabel(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).ceil()} KB';
 }
 
 String _localMasterPlaylist(_HlsSelection selection, {required bool hasAudio}) {

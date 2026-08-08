@@ -52,6 +52,7 @@ void main() {
       expect(newCall.control.reason, isNull);
 
       oldCall.completeSuccess('old-account-final.mp4');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
       await _waitUntil(
         () => backend.deletedPaths.contains('old-account-final.mp4'),
       );
@@ -312,12 +313,131 @@ void main() {
       final byId = {for (final task in snapshot.tasks) task.id: task};
       expect(byId['active']!.status, MediaDownloadTaskStatus.paused);
       expect(byId['active']!.message, contains('上次下载已中断'));
-      expect(byId['missing-complete']!.status, MediaDownloadTaskStatus.failed);
-      expect(byId['missing-complete']!.localPath, isNull);
+      expect(byId['missing-complete']!.status, MediaDownloadTaskStatus.missing);
+      expect(byId['missing-complete']!.localPath, 'missing-final.mp4');
       expect(byId['partial']!.status, MediaDownloadTaskStatus.paused);
       expect(byId['partial']!.temporaryPath, 'partial-ok');
       expect(byId['partial']!.downloadedBytes, 128);
       expect(storage.writeKeys, everyElement('account.account-a.offlineTasks'));
+    },
+  );
+
+  test(
+    'limits concurrent downloads and releases the slot after verification',
+    () async {
+      final storage = _MemoryDownloadStorage();
+      final backend = _ControlledDownloadBackend();
+      final service = MediaDownloadService(backend: backend);
+      final controller = DownloadController(
+        storage: storage,
+        service: service,
+        resolveLines: (_, _) async => const [_line],
+        publishSnapshot: (_) {},
+        maxConcurrentDownloads: 1,
+      );
+      addTearDown(() {
+        controller.dispose();
+        service.dispose();
+      });
+
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      await controller.queueOffline(_subject, _episode);
+      await controller.queueOffline(_subject, _episode2);
+      await _waitUntil(() => backend.calls.length == 1);
+      backend.calls.first.completeSuccess('first.mp4');
+      await _waitUntil(() => backend.calls.length == 2);
+      expect(backend.calls[1].request.url, _line.url);
+      backend.calls[1].completeSuccess('second.mp4');
+      await _waitUntil(
+        () => controller.snapshot.tasks.every(
+          (task) => task.status == MediaDownloadTaskStatus.completed,
+        ),
+      );
+    },
+  );
+
+  test('retries a failed line with bounded exponential backoff', () async {
+    final storage = _MemoryDownloadStorage();
+    final backend = _ControlledDownloadBackend();
+    final service = MediaDownloadService(backend: backend);
+    final controller = DownloadController(
+      storage: storage,
+      service: service,
+      resolveLines: (_, _) async => const [_line],
+      publishSnapshot: (_) {},
+      retryBaseDelay: const Duration(milliseconds: 1),
+    );
+    addTearDown(() {
+      controller.dispose();
+      service.dispose();
+    });
+
+    await controller.loadForAccount(accountId: 'account-a', contextVersion: 1);
+    await controller.queueOffline(_subject, _episode);
+    await _waitUntil(() => backend.calls.length == 1);
+    backend.calls.first.completeFailure();
+    await _waitUntil(() => backend.calls.length == 2);
+    backend.calls[1].completeSuccess('retried.mp4');
+    await _waitUntil(
+      () =>
+          controller.snapshot.tasks.single.status ==
+          MediaDownloadTaskStatus.completed,
+    );
+  });
+
+  test(
+    'reports account/work usage and leaves orphan deletion explicit',
+    () async {
+      final storage = _MemoryDownloadStorage();
+      final backend = _ControlledDownloadBackend(existingPaths: {'owned.mp4'});
+      backend.storageEntries.addAll([
+        MediaDownloadStorageEntry(
+          path: 'owned.mp4',
+          bytes: 4,
+          modifiedAt: DateTime.utc(2000, 1, 1),
+        ),
+        MediaDownloadStorageEntry(
+          path: 'orphan.part',
+          bytes: 3,
+          modifiedAt: DateTime.utc(2000, 1, 1),
+        ),
+      ]);
+      storage.seed('account-a', [
+        _task(
+          'owned',
+          MediaDownloadTaskStatus.completed,
+          localPath: 'owned.mp4',
+          downloadedBytes: 4,
+          totalBytes: 4,
+        ),
+      ]);
+      final service = MediaDownloadService(backend: backend);
+      final controller = DownloadController(
+        storage: storage,
+        service: service,
+        resolveLines: (_, _) async => const [_line],
+        publishSnapshot: (_) {},
+      );
+      addTearDown(() {
+        controller.dispose();
+        service.dispose();
+      });
+
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      final report = await controller.storageSnapshot();
+      expect(report.totalBytes, 7);
+      expect(report.accountBytes, 4);
+      expect(report.byWorkBytes[_subject.identityKey], 4);
+      expect(report.orphanedPaths, ['orphan.part']);
+      expect(report.failedPaths, isEmpty);
+      expect(report.expiredTemporaryPaths, ['orphan.part']);
+      expect(backend.deletedPaths, isEmpty);
     },
   );
 }
@@ -381,6 +501,7 @@ final class _ControlledDownloadBackend implements MediaDownloadBackend {
   final Set<String> existingPaths;
   final List<String> deletedPaths = [];
   final List<_DownloadCall> calls = [];
+  final List<MediaDownloadStorageEntry> storageEntries = [];
 
   @override
   Future<MediaDownloadResult> download({
@@ -388,13 +509,30 @@ final class _ControlledDownloadBackend implements MediaDownloadBackend {
     required MediaDownloadControl control,
     required void Function(MediaDownloadProgress progress) onProgress,
   }) {
-    final call = _DownloadCall(request, control, onProgress);
+    final call = _DownloadCall(this, request, control, onProgress);
     calls.add(call);
     return call.result.future;
   }
 
   @override
   Future<bool> fileExists(String path) async => existingPaths.contains(path);
+
+  @override
+  Future<MediaDownloadVerification> verifyFile(
+    String path, {
+    int? expectedBytes,
+  }) async => existingPaths.contains(path)
+      ? MediaDownloadVerification(
+          status: MediaDownloadFileStatus.valid,
+          bytes: expectedBytes ?? 1024,
+        )
+      : const MediaDownloadVerification(
+          status: MediaDownloadFileStatus.missing,
+        );
+
+  @override
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries() async =>
+      List.unmodifiable(storageEntries);
 
   @override
   Future<void> deleteFile(String path) async {
@@ -404,8 +542,9 @@ final class _ControlledDownloadBackend implements MediaDownloadBackend {
 }
 
 final class _DownloadCall {
-  _DownloadCall(this.request, this.control, this.onProgress);
+  _DownloadCall(this.backend, this.request, this.control, this.onProgress);
 
+  final _ControlledDownloadBackend backend;
   final MediaDownloadRequest request;
   final MediaDownloadControl control;
   final void Function(MediaDownloadProgress progress) onProgress;
@@ -413,6 +552,7 @@ final class _DownloadCall {
       Completer<MediaDownloadResult>();
 
   void completeSuccess(String path) {
+    backend.existingPaths.add(path);
     result.complete(
       MediaDownloadResult(
         outcome: MediaDownloadOutcome.completed,
@@ -420,6 +560,15 @@ final class _DownloadCall {
         path: path,
         bytes: 1024,
         totalBytes: 1024,
+      ),
+    );
+  }
+
+  void completeFailure() {
+    result.complete(
+      const MediaDownloadResult(
+        outcome: MediaDownloadOutcome.failed,
+        message: 'temporary failure',
       ),
     );
   }
@@ -485,6 +634,16 @@ const _episode = AnimeEpisode(
   number: 1,
   title: '第一集',
   airdate: '2026-01-01',
+  duration: '24:00',
+  description: '',
+);
+
+const _episode2 = AnimeEpisode(
+  id: 102,
+  subjectId: 1,
+  number: 2,
+  title: '第二集',
+  airdate: '2026-01-08',
   duration: '24:00',
   description: '',
 );

@@ -5,10 +5,13 @@ enum MediaDownloadTaskStatus {
   queued,
   resolving,
   downloading,
+  verifying,
   paused,
   completed,
   failed,
   cancelled,
+  missing,
+  corrupt,
 }
 
 class MediaDownloadTask {
@@ -67,7 +70,8 @@ class MediaDownloadTask {
   bool get isActive =>
       status == MediaDownloadTaskStatus.queued ||
       status == MediaDownloadTaskStatus.resolving ||
-      status == MediaDownloadTaskStatus.downloading;
+      status == MediaDownloadTaskStatus.downloading ||
+      status == MediaDownloadTaskStatus.verifying;
 
   bool get isPlayable =>
       status == MediaDownloadTaskStatus.completed &&
@@ -86,10 +90,13 @@ class MediaDownloadTask {
     MediaDownloadTaskStatus.queued => '等待下载',
     MediaDownloadTaskStatus.resolving => '正在查找线路',
     MediaDownloadTaskStatus.downloading => '正在下载',
+    MediaDownloadTaskStatus.verifying => '正在校验文件',
     MediaDownloadTaskStatus.paused => '已暂停',
     MediaDownloadTaskStatus.completed => '已完成',
     MediaDownloadTaskStatus.failed => '下载失败',
     MediaDownloadTaskStatus.cancelled => '已取消',
+    MediaDownloadTaskStatus.missing => '本地文件缺失',
+    MediaDownloadTaskStatus.corrupt => '本地文件损坏',
   };
 
   PlaybackLine? get localPlaybackLine {
@@ -318,10 +325,13 @@ extension on MediaDownloadTaskStatus {
     MediaDownloadTaskStatus.queued => '等待下载',
     MediaDownloadTaskStatus.resolving => '正在查找线路',
     MediaDownloadTaskStatus.downloading => '正在下载',
+    MediaDownloadTaskStatus.verifying => '正在校验文件',
     MediaDownloadTaskStatus.paused => '下载已暂停',
     MediaDownloadTaskStatus.completed => '下载完成',
     MediaDownloadTaskStatus.failed => '下载失败，可稍后重试',
     MediaDownloadTaskStatus.cancelled => '下载已取消',
+    MediaDownloadTaskStatus.missing => '本地文件缺失，请重新下载',
+    MediaDownloadTaskStatus.corrupt => '本地文件损坏，请重新下载',
   };
 }
 

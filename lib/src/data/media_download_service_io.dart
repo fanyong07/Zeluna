@@ -8,6 +8,7 @@ import '../core/network/network_http_client.dart';
 import 'media_download_backend.dart';
 import 'media_download_hls_io.dart';
 import 'media_download_result.dart';
+import 'media_download_storage_io.dart';
 
 bool get mediaDownloadsSupported => true;
 
@@ -17,11 +18,15 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
   IoMediaDownloadBackend({
     http.Client Function()? clientFactory,
     Future<Directory> Function()? directoryProvider,
+    DownloadAvailableBytesProvider? availableBytesProvider,
   }) : _clientFactory = clientFactory ?? createMediaDownloadHttpClient,
-       _directoryProvider = directoryProvider ?? _defaultDirectory;
+       _directoryProvider = directoryProvider ?? _defaultDirectory,
+       _availableBytesProvider =
+           availableBytesProvider ?? platformAvailableDownloadBytes;
 
   final http.Client Function() _clientFactory;
   final Future<Directory> Function() _directoryProvider;
+  final DownloadAvailableBytesProvider _availableBytesProvider;
 
   @override
   Future<MediaDownloadResult> download({
@@ -49,6 +54,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         onProgress: onProgress,
         clientFactory: _clientFactory,
         directoryProvider: _directoryProvider,
+        availableBytesProvider: _availableBytesProvider,
       );
     }
     final progressDispatcher = _DownloadProgressDispatcher(onProgress);
@@ -185,12 +191,24 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         );
         if (remoteLength == existingBytes) {
           target ??= _targetFile(directory, request, uri, response.headers);
+          await recoverInterruptedFileCommit(target);
+          if (await temporary.length() != existingBytes) {
+            return MediaDownloadResult(
+              outcome: MediaDownloadOutcome.failed,
+              message: '临时文件大小不一致，请重新下载',
+              path: target.path,
+              temporaryPath: temporary.path,
+              bytes: existingBytes,
+              totalBytes: existingBytes,
+              etag: etag,
+              lastModified: lastModified,
+            );
+          }
           final stoppedBeforeFinalize = await stoppedIfRequested();
           if (stoppedBeforeFinalize != null) return stoppedBeforeFinalize;
-          if (await target.exists()) await target.delete();
           final stoppedBeforeRename = await stoppedIfRequested();
           if (stoppedBeforeRename != null) return stoppedBeforeRename;
-          await temporary.rename(target.path);
+          await atomicReplaceFile(temporary, target);
           emitProgress(force: true);
           final stoppedAfterFinalize = await stoppedIfRequested(
             finalizedFile: target,
@@ -282,6 +300,14 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
 
       totalBytes = _responseTotalBytes(response, existingBytes);
       target ??= _targetFile(directory, request, uri, response.headers);
+      await recoverInterruptedFileCommit(target);
+      await ensureDownloadCapacity(
+        directory: directory,
+        requiredBytes: totalBytes > 0
+            ? (totalBytes - existingBytes).clamp(0, totalBytes).toInt()
+            : 0,
+        availableBytesProvider: _availableBytesProvider,
+      );
       final outputSink = temporary.openWrite(
         mode: append ? FileMode.append : FileMode.write,
       );
@@ -317,6 +343,19 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
       await outputSink.flush();
       await outputSink.close();
       sink = null;
+      final storedLength = await temporary.length();
+      if (storedLength != existingBytes) {
+        return MediaDownloadResult(
+          outcome: MediaDownloadOutcome.failed,
+          message: '下载结果大小不一致，可稍后继续下载',
+          path: target.path,
+          temporaryPath: temporary.path,
+          bytes: storedLength,
+          totalBytes: totalBytes,
+          etag: etag,
+          lastModified: lastModified,
+        );
+      }
       emitProgress(force: true);
       final stoppedAfterStream = await stoppedIfRequested();
       if (stoppedAfterStream != null) return stoppedAfterStream;
@@ -335,10 +374,9 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
       }
       final stoppedBeforeFinalize = await stoppedIfRequested();
       if (stoppedBeforeFinalize != null) return stoppedBeforeFinalize;
-      if (await target.exists()) await target.delete();
       final stoppedBeforeRename = await stoppedIfRequested();
       if (stoppedBeforeRename != null) return stoppedBeforeRename;
-      await temporary.rename(target.path);
+      await atomicReplaceFile(temporary, target);
       final stoppedAfterFinalize = await stoppedIfRequested(
         finalizedFile: target,
       );
@@ -350,6 +388,17 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
         temporaryPath: null,
         bytes: existingBytes,
         totalBytes: totalBytes > 0 ? totalBytes : existingBytes,
+        etag: etag,
+        lastModified: lastModified,
+      );
+    } on InsufficientDownloadSpace catch (error) {
+      return MediaDownloadResult(
+        outcome: MediaDownloadOutcome.failed,
+        message: '磁盘空间不足，至少需要 ${_sizeLabel(error.requiredBytes)} 可用空间',
+        path: target?.path,
+        temporaryPath: temporary.path,
+        bytes: existingBytes,
+        totalBytes: totalBytes,
         etag: etag,
         lastModified: lastModified,
       );
@@ -398,6 +447,70 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
     if (file == null) return false;
     return await File(file.path).exists() ||
         await Directory(file.path).exists();
+  }
+
+  @override
+  Future<MediaDownloadVerification> verifyFile(
+    String path, {
+    int? expectedBytes,
+  }) async {
+    final directory = await _directoryProvider();
+    final file = await _managedFile(directory, path);
+    if (file == null) {
+      return const MediaDownloadVerification(
+        status: MediaDownloadFileStatus.missing,
+      );
+    }
+    final type = await FileSystemEntity.type(file.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) {
+      return const MediaDownloadVerification(
+        status: MediaDownloadFileStatus.missing,
+      );
+    }
+    final bytes = type == FileSystemEntityType.directory
+        ? await _directoryBytes(Directory(file.path))
+        : type == FileSystemEntityType.file
+        ? await file.length()
+        : 0;
+    final valid = expectedBytes == null || expectedBytes <= 0
+        ? bytes > 0
+        : bytes == expectedBytes;
+    return MediaDownloadVerification(
+      status: valid
+          ? MediaDownloadFileStatus.valid
+          : MediaDownloadFileStatus.corrupt,
+      bytes: bytes,
+    );
+  }
+
+  @override
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries() async {
+    final directory = await _directoryProvider();
+    if (!await directory.exists()) return const [];
+    final entries = <MediaDownloadStorageEntry>[];
+    await for (final entity in directory.list(
+      recursive: false,
+      followLinks: false,
+    )) {
+      final type = await FileSystemEntity.type(entity.path, followLinks: false);
+      if (type != FileSystemEntityType.file &&
+          type != FileSystemEntityType.directory) {
+        continue;
+      }
+      final bytes = type == FileSystemEntityType.directory
+          ? await _directoryBytes(Directory(entity.path))
+          : await File(entity.path).length();
+      final modifiedAt = (await FileStat.stat(entity.path)).modified;
+      entries.add(
+        MediaDownloadStorageEntry(
+          path: entity.path,
+          bytes: bytes,
+          modifiedAt: modifiedAt,
+        ),
+      );
+    }
+    entries.sort((left, right) => left.path.compareTo(right.path));
+    return entries;
   }
 
   @override
@@ -574,10 +687,31 @@ File _targetFile(
   );
 }
 
+Future<int> _directoryBytes(Directory directory) async {
+  var total = 0;
+  await for (final entity in directory.list(
+    recursive: true,
+    followLinks: false,
+  )) {
+    if (entity is File) total += await entity.length();
+  }
+  return total;
+}
+
 String _safeFileName(String value, {required int maxLength}) {
   final cleaned = value.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
   final safe = cleaned.isEmpty ? 'video' : cleaned;
   return safe.length <= maxLength ? safe : safe.substring(0, maxLength);
+}
+
+String _sizeLabel(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).ceil()} KB';
 }
 
 String _extensionOf(String path, String? contentType, String format) {

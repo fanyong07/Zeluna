@@ -82,6 +82,23 @@ class MediaDownloadService {
     return _backend.fileExists(path);
   }
 
+  Future<MediaDownloadVerification> verifyFile(
+    String? path, {
+    int? expectedBytes,
+  }) {
+    if (path == null || path.trim().isEmpty) {
+      return Future.value(
+        const MediaDownloadVerification(
+          status: MediaDownloadFileStatus.missing,
+        ),
+      );
+    }
+    return _backend.verifyFile(path, expectedBytes: expectedBytes);
+  }
+
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries() =>
+      _backend.listStorageEntries();
+
   Future<void> deleteFiles(Iterable<String?> paths) async {
     for (final path in paths) {
       if (path == null || path.trim().isEmpty) continue;

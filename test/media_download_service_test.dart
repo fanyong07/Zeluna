@@ -4,10 +4,125 @@ import 'dart:io';
 import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_service_io.dart';
+import 'package:anime/src/data/media_download_storage_io.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 void main() {
+  test('preflights required disk space before writing media bytes', () async {
+    final root = await Directory.systemTemp.createTemp('anime-space-test-');
+    final bytes = List<int>.filled(32 * 1024, 7);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final subscription = server.listen((request) async {
+      request.response.headers.contentType = ContentType('video', 'mp4');
+      request.response.headers.contentLength = bytes.length;
+      request.response.add(bytes);
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await subscription.cancel();
+      await server.close(force: true);
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+
+    final service = MediaDownloadService(
+      backend: IoMediaDownloadBackend(
+        clientFactory: http.Client.new,
+        directoryProvider: () async => root,
+        availableBytesProvider: (_) async => 1,
+      ),
+    );
+    addTearDown(service.dispose);
+    final result = await service.download(
+      taskId: 'space',
+      url: 'http://${server.address.host}:${server.port}/video.mp4',
+      title: 'Space',
+      headers: const {},
+      format: 'MP4',
+    );
+
+    expect(result.outcome, MediaDownloadOutcome.failed);
+    expect(result.message, contains('磁盘空间不足'));
+    expect(await root.list().toList(), isEmpty);
+  });
+
+  test('replaces a completed file atomically and removes the backup', () async {
+    final root = await Directory.systemTemp.createTemp('anime-atomic-test-');
+    addTearDown(() async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
+    final target = File('${root.path}${Platform.pathSeparator}video.mp4');
+    final temporary = File(
+      '${root.path}${Platform.pathSeparator}video.mp4.part',
+    );
+    await target.writeAsString('old');
+    await temporary.writeAsString('new');
+
+    await atomicReplaceFile(temporary, target);
+
+    expect(await target.readAsString(), 'new');
+    expect(await temporary.exists(), isFalse);
+    expect(await File('${target.path}.zeluna-replace').exists(), isFalse);
+  });
+
+  test(
+    'reports missing and corrupt managed files without deleting them',
+    () async {
+      final root = await Directory.systemTemp.createTemp('anime-verify-test-');
+      final target = File('${root.path}${Platform.pathSeparator}video.mp4');
+      await target.writeAsBytes(List<int>.filled(4, 1));
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final service = MediaDownloadService(backend: _loopbackBackend(root));
+      addTearDown(service.dispose);
+
+      final valid = await service.verifyFile(target.path, expectedBytes: 4);
+      final corrupt = await service.verifyFile(target.path, expectedBytes: 5);
+      final missing = await service.verifyFile(
+        '${root.path}${Platform.pathSeparator}missing.mp4',
+        expectedBytes: 1,
+      );
+
+      expect(valid.status, MediaDownloadFileStatus.valid);
+      expect(corrupt.status, MediaDownloadFileStatus.corrupt);
+      expect(missing.status, MediaDownloadFileStatus.missing);
+      expect(await target.exists(), isTrue);
+    },
+  );
+
+  test(
+    'lists only direct managed storage entries for cleanup review',
+    () async {
+      final root = await Directory.systemTemp.createTemp('anime-storage-list-');
+      await File(
+        '${root.path}${Platform.pathSeparator}video.mp4',
+      ).writeAsBytes([1, 2, 3]);
+      final package = Directory(
+        '${root.path}${Platform.pathSeparator}episode.hls',
+      );
+      await package.create();
+      await File(
+        '${package.path}${Platform.pathSeparator}index.m3u8',
+      ).writeAsString('#EXTM3U');
+      addTearDown(() async {
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final backend = _loopbackBackend(root);
+      final entries = await backend.listStorageEntries();
+
+      expect(
+        entries.map((entry) => entry.path),
+        contains('${root.path}${Platform.pathSeparator}video.mp4'),
+      );
+      expect(entries.map((entry) => entry.path), contains(package.path));
+      expect(
+        entries.firstWhere((entry) => entry.path == package.path).bytes,
+        7,
+      );
+    },
+  );
+
   test('single-file download pauses and resumes with HTTP Range', () async {
     final root = await Directory.systemTemp.createTemp('anime-download-test-');
     final bytes = List<int>.generate(192 * 1024, (index) => index % 251);

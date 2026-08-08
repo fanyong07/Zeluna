@@ -9,6 +9,7 @@ import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
 import '../data/media_download_task.dart';
 import '../domain/anime_models.dart';
+import '../downloads/download_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
@@ -801,12 +802,41 @@ class DownloadManagementPage extends ConsumerWidget {
                         const SizedBox(height: 10),
                     itemBuilder: (context, index) {
                       if (index == 0) {
-                        return AppPanel(
-                          child: SectionTitle(
-                            title: '全部下载',
-                            subtitle: '${tasks.length} 个离线任务，可在这里暂停、继续或删除',
-                            icon: Icons.download_for_offline_outlined,
-                          ),
+                        final controller = ref.read(
+                          animeControllerProvider.notifier,
+                        );
+                        return Column(
+                          children: [
+                            AppPanel(
+                              child: SectionTitle(
+                                title: '全部下载',
+                                subtitle: '${tasks.length} 个离线任务，可在这里暂停、继续或删除',
+                                icon: Icons.download_for_offline_outlined,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            FutureBuilder<DownloadStorageSnapshot>(
+                              future: controller.isDownloadDomainReady
+                                  ? controller.downloadStorageSnapshot()
+                                  : null,
+                              builder: (context, snapshot) {
+                                final usage = snapshot.data;
+                                if (usage == null) {
+                                  return const SizedBox.shrink();
+                                }
+                                return _DownloadStoragePanel(
+                                  usage: usage,
+                                  onCleanup: usage.orphanedPaths.isEmpty
+                                      ? null
+                                      : () => _confirmCleanupStorage(
+                                          context,
+                                          controller,
+                                          usage.orphanedPaths,
+                                        ),
+                                );
+                              },
+                            ),
+                          ],
                         );
                       }
                       return _DownloadTaskCard(task: tasks[index - 1]);
@@ -816,6 +846,65 @@ class DownloadManagementPage extends ConsumerWidget {
         );
       },
     );
+  }
+}
+
+class _DownloadStoragePanel extends StatelessWidget {
+  const _DownloadStoragePanel({required this.usage, this.onCleanup});
+
+  final DownloadStorageSnapshot usage;
+  final VoidCallback? onCleanup;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppPanel(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Row(
+        children: [
+          Icon(Icons.storage_outlined, color: context.inkMuted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '当前账号 ${_downloadBytesLabel(usage.accountBytes)} · 本机总占用 ${_downloadBytesLabel(usage.totalBytes)}'
+              '${usage.orphanedPaths.isEmpty ? '' : ' · 未关联 ${usage.orphanedPaths.length} 项'}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: context.inkMuted,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (onCleanup != null)
+            TextButton(onPressed: onCleanup, child: const Text('清理未关联')),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _confirmCleanupStorage(
+  BuildContext context,
+  AnimeController controller,
+  List<String> paths,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('清理未关联文件？'),
+      content: Text('将删除 ${paths.length} 个未关联的本地缓存项。旧版迁移文件也可能在其中，请确认后继续。'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('保留'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认清理'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed == true && context.mounted) {
+    await controller.deleteConfirmedDownloadStorageEntries(paths);
   }
 }
 
@@ -832,6 +921,8 @@ class _DownloadTaskCard extends ConsumerWidget {
     final statusColor = switch (task.status) {
       MediaDownloadTaskStatus.completed => AppStatusColors.available,
       MediaDownloadTaskStatus.failed => AppStatusColors.failed,
+      MediaDownloadTaskStatus.corrupt => AppStatusColors.failed,
+      MediaDownloadTaskStatus.missing => AppStatusColors.failed,
       MediaDownloadTaskStatus.cancelled => context.inkMuted,
       MediaDownloadTaskStatus.paused => AppStatusColors.probing,
       _ => AppColors.primary,
@@ -942,7 +1033,9 @@ class _DownloadTaskActions extends ConsumerWidget {
           ),
         if (task.status == MediaDownloadTaskStatus.paused ||
             task.status == MediaDownloadTaskStatus.failed ||
-            task.status == MediaDownloadTaskStatus.cancelled)
+            task.status == MediaDownloadTaskStatus.cancelled ||
+            task.status == MediaDownloadTaskStatus.missing ||
+            task.status == MediaDownloadTaskStatus.corrupt)
           IconButton(
             tooltip: task.downloadedBytes > 0 ? '继续下载' : '重新下载',
             onPressed: () => controller.resumeDownload(task.id),

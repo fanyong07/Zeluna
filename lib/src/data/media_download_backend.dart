@@ -58,5 +58,12 @@ abstract interface class MediaDownloadBackend {
 
   Future<bool> fileExists(String path);
 
+  Future<MediaDownloadVerification> verifyFile(
+    String path, {
+    int? expectedBytes,
+  });
+
+  Future<List<MediaDownloadStorageEntry>> listStorageEntries();
+
   Future<void> deleteFile(String path);
 }
