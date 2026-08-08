@@ -1596,7 +1596,38 @@ Status: completed
 
 ## G14 Final acceptance
 
-Status: not_started
+Status: in_progress
+
+### Final validation completed
+
+- Full Flutter suite after G12/G13: 612 passed, 26 intentionally skipped, 0
+  failed; `flutter analyze --suppress-analytics`, Dart format, and
+  `git diff --check` passed.
+- Full server suite: 168 passed, 1 existing third-party TestClient deprecation
+  warning, 3 subtests passed; compileall, Ruff, and strict pip-audit passed.
+- Repository security gate and dependency policy gate passed (159 Dart, 69
+  Python packages); the four-material inventory remains `total=4`, `read=4`,
+  `skipped=0`.
+- Android Debug APK rebuilt successfully: 269,020,397 bytes, SHA-256
+  `6D42F91E9B4A47818A9447B51798E6523B93710170AFDB68C4179B94F7E96826`.
+- Windows Release rebuilt successfully: `Zeluna.exe` 197,120 bytes, SHA-256
+  `E98BF0CD67D85FC02B0A69DB816C7E0F9A3D1B7D575BE769B3108130BCA5D589`.
+- Web Release/Wasm dry run rebuilt successfully: `main.dart.js` 4,904,765
+  bytes, SHA-256 `73EF158FC44B35E95EBED595C5C825E68E5E7300552D1A5750C3958D53949291`.
+- Windows WebView lifecycle integration: 2 passed, 0 failed. Only the known
+  upstream WebView CMake `CMP0175` developer warning remains.
+
+### Acceptance blockers
+
+- No Android device or emulator is connected in this environment; Android
+  cleartext/DNS-rebinding and signed-install acceptance are not verified.
+- No signed Android AAB/APK was produced. The private keystore and
+  `android/key.properties` were not read or used by this Goal.
+- No real account, email, production database, deployment, public upload,
+  irreversible operation, or production playback provider was accessed.
+- The project license is still an explicit governance decision. Until the
+  owner confirms a license and the release identity, G14 must remain
+  `in_progress`.
 
 ## Acceptance principle
 
