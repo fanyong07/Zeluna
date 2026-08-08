@@ -374,6 +374,7 @@ void main() {
       email: 'prefetch-switch@example.com',
       nickname: 'Prefetch switch',
       password: 'test-pass',
+      verificationCode: '123456',
     );
     verificationGate.complete();
     await _waitUntil(() => harness.resolver.activeVerifications == 0);

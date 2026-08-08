@@ -945,7 +945,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required String email,
     required String nickname,
     required String password,
-    String verificationCode = '000000',
+    required String verificationCode,
   }) => _accounts.register(
     email: email,
     nickname: nickname,

@@ -229,7 +229,7 @@ final class AccountController {
     required String email,
     required String nickname,
     required String password,
-    String verificationCode = '000000',
+    required String verificationCode,
   }) => _runOperation(() async {
     _requireInitialized();
     final account = await _cloudService.register(
