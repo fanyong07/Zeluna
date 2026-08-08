@@ -984,7 +984,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
-    _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
+    final preserveActivePlayback = _isPlayableLine(_line) && !_playbackFailed;
+    if (!preserveActivePlayback) {
+      _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
+    }
     _cancelSingleBackupLookup();
     final usesProgressiveLookup = _usesProgressiveRuleLookup(
       widget.request.subject,
@@ -993,6 +996,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       subject: widget.request.subject,
       episode: _episode,
       progressive: usesProgressiveLookup,
+      hasActivePlayableLine: preserveActivePlayback,
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
     );
     setState(() {
       _lineLookupMessage = null;
@@ -1040,6 +1045,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       }
     } catch (error) {
       if (!mounted) return;
+      if (preserveActivePlayback && _isPlayableLine(_line)) {
+        _playbackTrace.record(
+          'line_lookup_degraded',
+          fields: <String, Object?>{
+            'error_type': error.runtimeType.toString(),
+          },
+        );
+        setState(() {
+          _lineLookupMessage = '备用线路加载失败，当前线路继续播放';
+          _playbackFailed = false;
+        });
+        return;
+      }
       _playbackTrace.record(
         'line_lookup_failed',
         fields: <String, Object?>{'error_type': error.runtimeType.toString()},

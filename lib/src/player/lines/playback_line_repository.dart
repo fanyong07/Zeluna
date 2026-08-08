@@ -134,6 +134,8 @@ final class PlaybackLineRepository {
     required AnimeSubject subject,
     required AnimeEpisode episode,
     required bool progressive,
+    bool hasActivePlayableLine = false,
+    PreserveLoadedPlaybackLine? preserveLoadedLine,
   }) async {
     if (_disposed) return null;
     final serial = ++_lookupSerial;
@@ -162,13 +164,18 @@ final class PlaybackLineRepository {
         verify: (line) => _verifyLine(line, token),
       );
       if (!_isCurrentLookup(serial, episodeId, token)) return null;
-      replaceLines(verified);
+      final published = hasActivePlayableLine && preserveLoadedLine != null
+          ? preserveLoadedLine(verified)
+          : verified;
+      replaceLines(published);
       final inventory = _inventory();
       _lookupInProgress = inventory.playableLines.isEmpty && progressive;
       return inventory;
     } catch (_) {
       if (!_isCurrentLookup(serial, episodeId, token)) return null;
-      replaceLines(const <PlaybackLine>[]);
+      if (!hasActivePlayableLine) {
+        replaceLines(const <PlaybackLine>[]);
+      }
       _lookupInProgress = false;
       rethrow;
     }
