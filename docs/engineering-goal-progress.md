@@ -1394,10 +1394,28 @@ Builds: not run for this transport-only checkpoint. It changes no platform or pa
 
 Commit: `67d5e6c feat: add authenticated cloud sync transport`
 
+### Durable client sync state machine
+
+Changes:
+
+- Expanded the G6 `SyncController` into an account-scoped durable state machine while retaining the isolated optional public-collection compatibility port. Each cloud account stores a versioned Hive state containing a stable random device ID reference, monotonic mutation counter, compacted write-ahead queue, pull cursor, bounded acknowledgement receipts, migration marker, and last successful sync time.
+- Guest scopes never open or write cloud-sync state. Cloud scopes restore pending work across restarts, reuse the same mutation ID on ambiguous retries, serialize network work, reject late old-account results, and retain independent queues during account switches and logout.
+- Added bounded push/pull batching, cursor monotonicity checks, initial pull-before-baseline migration, acknowledgement application before queue removal, remote-record callbacks that do not create echo mutations, 30-second bounded reconnect retry, and explicit local/checking/pending/synced/offline/expired/error states. Expired authentication stops retries without deleting pending local work.
+- Initial migration lets existing remote settings win on a new device and uploads only locally present records absent from the remote snapshot. User mutations already queued while offline are pushed before migration pull, so an intentional local change is not silently replaced by an older remote value.
+
+Tests and gates:
+
+- Direct Sync domain suite: 12 passed, 0 failed, including the five retained G6 compatibility regressions.
+- New regressions cover guest local-only behavior, offline persistence and restart acknowledgement, monotonic mutation IDs with compaction, pull-before-baseline migration, late old-account acknowledgement rejection, expired-session stop, and timed reconnect recovery.
+- Focused Flutter analysis and `git diff --check` passed. No credential, download payload, private header, temporary media URL, or untrusted-rule data is represented in the persisted sync model.
+
+Builds: not run for this domain-only checkpoint. Controller wiring, remote merge integration, UI state, full Flutter validation, and applicable platform builds remain required before G10 completion.
+
+Commit: `bc1c21c feat: persist account scoped sync queue`
+
 Remaining G10 work:
 
-- Add a durable account-scoped Hive mutation queue with deterministic mutation IDs, acknowledgement retention, pull cursors, restart recovery, and migration from existing account-scoped library/settings data.
-- Wire local library and selected settings writes to update the UI immediately, append mutations atomically, upload only while authenticated, and merge pulled records without generating echo mutations.
+- Wire local library and selected settings writes to update the UI immediately, append write-ahead mutations before ordinary persistence, and merge pulled records without generating echo mutations.
 - Expose honest synchronization/offline/expired states, keep guest data local-only, and prove reconnect, retry, account switching, logout isolation, two-device conflicts, and restart behavior across Flutter tests before completing G10.
 
 ## G11 Offline downloads
