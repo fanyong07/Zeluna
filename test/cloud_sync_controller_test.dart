@@ -272,6 +272,54 @@ void main() {
       expect(controller.status.phase, SyncPhase.synced);
     },
   );
+
+  test(
+    'two-device merged acknowledgement replaces the local pending value',
+    () async {
+      final storage = _MemorySyncStorage()
+        ..values['sync.device.v1'] = _deviceId
+        ..values[_stateKey('account-a')] = _state(migrated: true);
+      final mergedEntry = _entry.copyWith(
+        positionSeconds: 360,
+        durationSeconds: 1440,
+        updatedAt: DateTime.utc(2026, 8, 8, 1),
+      );
+      final mergedMutation = CloudSyncMutation.library(
+        mutationId: 'sync:v1:$_deviceId:000000000001',
+        type: CloudSyncRecordType.history,
+        entry: mergedEntry,
+      );
+      final transport = _FakeSyncTransport()
+        ..pushResults.add(
+          CloudSyncPushResult(
+            acknowledged: [_recordFromMutation(mergedMutation, 9)],
+            nextRevision: 9,
+          ),
+        );
+      final applied = <CloudSyncRecord>[];
+      final controller = _controller(
+        storage: storage,
+        transport: transport,
+        applyRecord: (record) async => applied.add(record),
+      );
+      addTearDown(controller.dispose);
+      _load(controller, 'account-a', 1);
+      await controller.settle();
+
+      await controller.enqueueLibrary(
+        accountId: 'account-a',
+        contextVersion: 1,
+        type: CloudSyncRecordType.history,
+        entry: _entry,
+      );
+      await controller.settle();
+
+      expect(applied, hasLength(1));
+      expect(applied.single.payload['positionSeconds'], 360);
+      expect(_queue(storage, 'account-a'), isEmpty);
+      expect(_stateJson(storage, 'account-a')['cursor'], 9);
+    },
+  );
 }
 
 SyncController _controller({
@@ -314,6 +362,7 @@ class _MemorySyncStorage implements SyncStorage {
 class _FakeSyncTransport implements CloudSyncTransport {
   final pushed = <List<CloudSyncMutation>>[];
   final pullResults = <CloudSyncPullResult>[];
+  final pushResults = <CloudSyncPushResult>[];
   bool unavailable = false;
   bool expired = false;
   Completer<void>? pushGate;
@@ -329,6 +378,7 @@ class _FakeSyncTransport implements CloudSyncTransport {
     final gate = pushGate;
     if (gate != null) await gate.future;
     pushed.add(List<CloudSyncMutation>.from(mutations));
+    if (pushResults.isNotEmpty) return pushResults.removeAt(0);
     final records = mutations
         .map((item) => _recordFromMutation(item, ++_revision))
         .toList(growable: false);

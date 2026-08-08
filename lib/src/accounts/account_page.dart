@@ -7,6 +7,7 @@ import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
+import '../sync/sync_controller.dart';
 import 'cloud_account_repository.dart';
 import 'local_account_repository.dart';
 
@@ -84,7 +85,10 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                       120,
                     ),
                     children: [
-                      _AccountStatusCard(session: state.accountSession),
+                      _AccountStatusCard(
+                        session: state.accountSession,
+                        syncStatus: state.syncStatus,
+                      ),
                       if (state.accountSession.hasPendingCleanup) ...[
                         const SizedBox(height: 14),
                         _PendingCleanupNotice(
@@ -1225,10 +1229,25 @@ String _formatDeletionDeadline(DateTime value) {
       '${twoDigits(local.hour)}:${twoDigits(local.minute)}（本地时间）';
 }
 
+String _syncStatusLabel(SyncStatus status) => switch (status.phase) {
+  SyncPhase.localOnly => '仅保存在本机',
+  SyncPhase.checking => '正在检查同步',
+  SyncPhase.pending =>
+    status.pendingMutations == 0 ? '等待同步' : '${status.pendingMutations} 项等待同步',
+  SyncPhase.synced => '已安全同步',
+  SyncPhase.offline =>
+    status.pendingMutations == 0
+        ? '离线使用本机缓存'
+        : '离线，${status.pendingMutations} 项待同步',
+  SyncPhase.expired => '登录已失效，待重新登录同步',
+  SyncPhase.error => '同步需要重试',
+};
+
 class _AccountStatusCard extends StatelessWidget {
-  const _AccountStatusCard({required this.session});
+  const _AccountStatusCard({required this.session, required this.syncStatus});
 
   final LocalAccountSession session;
+  final SyncStatus syncStatus;
 
   @override
   Widget build(BuildContext context) {
@@ -1265,6 +1284,19 @@ class _AccountStatusCard extends StatelessWidget {
                     fontWeight: FontWeight.w900,
                   ),
                 ),
+                if (account != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    _syncStatusLabel(syncStatus),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color:
+                          syncStatus.phase == SyncPhase.expired ||
+                              syncStatus.phase == SyncPhase.error
+                          ? Colors.orangeAccent
+                          : context.inkMuted,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 4),
                 Text(
                   account == null
@@ -1283,8 +1315,8 @@ class _AccountStatusCard extends StatelessWidget {
           if (!veryCompact) ...[
             const SizedBox(width: 10),
             SmallBadge(
-              label: account == null ? '未登录' : '云端账号',
-              active: account != null,
+              label: account == null ? '未登录' : _syncStatusLabel(syncStatus),
+              active: syncStatus.phase == SyncPhase.synced,
             ),
           ],
         ],
@@ -1389,7 +1421,7 @@ class _CloudAccountNotice extends StatelessWidget {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              '账号由 Zeluna 云端统一验证，可在安卓和 Windows 使用同一邮箱登录。登录令牌保存在系统安全凭据中；收藏和历史目前仍保存在当前设备，云端同步会在后续版本接入。',
+              '账号由 Zeluna 云端统一验证，可在安卓和 Windows 使用同一邮箱登录。登录令牌只保存在系统安全凭据中；收藏、追番、历史、播放位置和选定偏好会先保存在本机，再通过账号安全同步。下载文件、Cookie、私密 Header、API Key 和临时播放地址不会上传。',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: context.inkMuted,
                 height: 1.45,

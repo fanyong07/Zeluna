@@ -27,6 +27,18 @@ typedef SettingsSnapshotPublisher = void Function(SettingsSnapshot snapshot);
 typedef KeepScreenOnApplier = Future<void> Function(bool enabled);
 typedef ExternalServicesChangeHandler =
     Future<void> Function(ExternalServicesChange change);
+typedef PlaybackSettingsSynchronizer =
+    Future<bool> Function(
+      String? accountId,
+      int contextVersion,
+      PlaybackSettings settings,
+    );
+typedef AppearanceSettingsSynchronizer =
+    Future<bool> Function(
+      String? accountId,
+      int contextVersion,
+      AppearanceSettings settings,
+    );
 
 final class SettingsSnapshot {
   const SettingsSnapshot({
@@ -94,15 +106,21 @@ final class SettingsController {
     required SettingsSnapshotPublisher publishSnapshot,
     required KeepScreenOnApplier applyKeepScreenOn,
     required ExternalServicesChangeHandler onExternalServicesChanged,
+    PlaybackSettingsSynchronizer? syncPlayback,
+    AppearanceSettingsSynchronizer? syncAppearance,
   }) : _storage = storage,
        _publishSnapshot = publishSnapshot,
        _applyKeepScreenOn = applyKeepScreenOn,
-       _onExternalServicesChanged = onExternalServicesChanged;
+       _onExternalServicesChanged = onExternalServicesChanged,
+       _syncPlayback = syncPlayback,
+       _syncAppearance = syncAppearance;
 
   final SettingsStorage _storage;
   final SettingsSnapshotPublisher _publishSnapshot;
   final KeepScreenOnApplier _applyKeepScreenOn;
   final ExternalServicesChangeHandler _onExternalServicesChanged;
+  final PlaybackSettingsSynchronizer? _syncPlayback;
+  final AppearanceSettingsSynchronizer? _syncAppearance;
 
   SettingsSnapshot _snapshot = const SettingsSnapshot();
   String? _accountId;
@@ -185,6 +203,7 @@ final class SettingsController {
   Future<void> updatePlayback(PlaybackSettings value) async {
     final scope = _scope();
     _publish(_snapshot.copyWith(playback: value));
+    await _recordPlayback(scope.accountId, scope.contextVersion, value);
     await _write(scope.accountId, 'playback', value.toJson());
   }
 
@@ -195,6 +214,19 @@ final class SettingsController {
   }
 
   Future<void> updateAppearance(AppearanceSettings value) async {
+    final scope = _scope();
+    _publish(_snapshot.copyWith(appearance: value));
+    await _recordAppearance(scope.accountId, scope.contextVersion, value);
+    await _write(scope.accountId, 'appearance', value.toJson());
+  }
+
+  Future<void> applyRemotePlayback(PlaybackSettings value) async {
+    final scope = _scope();
+    _publish(_snapshot.copyWith(playback: value));
+    await _write(scope.accountId, 'playback', value.toJson());
+  }
+
+  Future<void> applyRemoteAppearance(AppearanceSettings value) async {
     final scope = _scope();
     _publish(_snapshot.copyWith(appearance: value));
     await _write(scope.accountId, 'appearance', value.toJson());
@@ -298,6 +330,34 @@ final class SettingsController {
     services.playbackBackendSelfHosted,
     services.allowInsecurePlaybackBackend,
   ].join(':');
+
+  Future<void> _recordPlayback(
+    String? accountId,
+    int contextVersion,
+    PlaybackSettings value,
+  ) async {
+    final synchronizer = _syncPlayback;
+    if (synchronizer == null || accountId == null) return;
+    try {
+      await synchronizer(accountId, contextVersion, value);
+    } catch (_) {
+      // Settings remain locally persisted while sync exposes its own failure.
+    }
+  }
+
+  Future<void> _recordAppearance(
+    String? accountId,
+    int contextVersion,
+    AppearanceSettings value,
+  ) async {
+    final synchronizer = _syncAppearance;
+    if (synchronizer == null || accountId == null) return;
+    try {
+      await synchronizer(accountId, contextVersion, value);
+    } catch (_) {
+      // Settings remain locally persisted while sync exposes its own failure.
+    }
+  }
 
   T _read<T>(
     String? accountId,

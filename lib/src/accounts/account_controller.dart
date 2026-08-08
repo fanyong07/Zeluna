@@ -115,6 +115,7 @@ final class AccountController {
     'services',
     'rulePlugins',
     'sourceEnabled',
+    'syncState.v1',
   ];
   static const _accountLibraryKeys = [
     'favorites',

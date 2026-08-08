@@ -445,19 +445,10 @@ final class SyncController {
           lastSyncedAt: _persistentState.lastSyncedAt,
         ),
       );
+    } on TimeoutException {
+      _markOffline(scope);
     } on CloudSyncUnavailableException {
-      if (!_isCurrent(scope)) return;
-      _setStatus(
-        scope,
-        SyncStatus(
-          phase: SyncPhase.offline,
-          pendingMutations: _persistentState.queue.length,
-          lastSyncedAt: _persistentState.lastSyncedAt,
-        ),
-      );
-      _retryTimer = Timer(retryDelay, () {
-        if (_isCurrent(scope) && !_authExpired) _scheduleCloudSync(scope);
-      });
+      _markOffline(scope);
     } on Object {
       if (!_isCurrent(scope)) return;
       _setStatus(
@@ -469,6 +460,21 @@ final class SyncController {
         ),
       );
     }
+  }
+
+  void _markOffline(_SyncScope scope) {
+    if (!_isCurrent(scope)) return;
+    _setStatus(
+      scope,
+      SyncStatus(
+        phase: SyncPhase.offline,
+        pendingMutations: _persistentState.queue.length,
+        lastSyncedAt: _persistentState.lastSyncedAt,
+      ),
+    );
+    _retryTimer = Timer(retryDelay, () {
+      if (_isCurrent(scope) && !_authExpired) _scheduleCloudSync(scope);
+    });
   }
 
   Future<void> _pushPending(_SyncScope scope) async {
@@ -810,10 +816,18 @@ final class _PersistentSyncState {
 final class _SyncReceipt {
   const _SyncReceipt({required this.mutationId, required this.serverRevision});
 
-  factory _SyncReceipt.fromJson(Map<String, dynamic> json) => _SyncReceipt(
-    mutationId: json['mutationId']?.toString() ?? '',
-    serverRevision: _nonNegativeInt(json['serverRevision']),
-  );
+  factory _SyncReceipt.fromJson(Map<String, dynamic> json) {
+    final mutationId = json['mutationId']?.toString() ?? '';
+    if (mutationId.length < 16 ||
+        mutationId.length > 100 ||
+        !RegExp(r'^[A-Za-z0-9:_-]+$').hasMatch(mutationId)) {
+      throw const FormatException('Invalid persisted sync receipt.');
+    }
+    return _SyncReceipt(
+      mutationId: mutationId,
+      serverRevision: _nonNegativeInt(json['serverRevision']),
+    );
+  }
 
   final String mutationId;
   final int serverRevision;

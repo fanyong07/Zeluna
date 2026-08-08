@@ -6,6 +6,7 @@ import '../accounts/account_controller.dart';
 import '../accounts/local_account_repository.dart';
 import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
+import '../sync/cloud_sync_transport.dart';
 
 abstract interface class LibraryStorage {
   Object? get(String key);
@@ -42,6 +43,15 @@ typedef LibraryHistorySynchronizer =
       AnimeSubject subject,
       AnimeEpisode? episode,
     );
+typedef LibraryCloudMutationWriter =
+    Future<bool> Function(
+      LibraryMutationContext context,
+      CloudSyncRecordType type,
+      LibraryEntry entry, {
+      required bool deleted,
+    });
+typedef LibraryPlaybackMutationWriter =
+    Future<bool> Function(LibraryMutationContext context, LibraryEntry entry);
 
 final class LibrarySnapshot {
   const LibrarySnapshot({
@@ -82,15 +92,21 @@ final class LibraryController {
     required LibraryStorage storage,
     required LibrarySnapshotPublisher publishSnapshot,
     required LibraryHistorySynchronizer syncHistory,
+    LibraryCloudMutationWriter? writeCloudMutation,
+    LibraryPlaybackMutationWriter? writePlaybackMutation,
     DateTime Function()? now,
   }) : _storage = storage,
        _publishSnapshot = publishSnapshot,
        _syncHistory = syncHistory,
+       _writeCloudMutation = writeCloudMutation,
+       _writePlaybackMutation = writePlaybackMutation,
        _now = now ?? DateTime.now;
 
   final LibraryStorage _storage;
   final LibrarySnapshotPublisher _publishSnapshot;
   final LibraryHistorySynchronizer _syncHistory;
+  final LibraryCloudMutationWriter? _writeCloudMutation;
+  final LibraryPlaybackMutationWriter? _writePlaybackMutation;
   final DateTime Function() _now;
 
   LibrarySnapshot _snapshot = const LibrarySnapshot();
@@ -135,16 +151,32 @@ final class LibraryController {
   }
 
   Future<bool> toggleFavorite(AnimeSubject subject) => _mutate((scope) async {
+    final previous = _entryForSubject(_snapshot.favorites, subject);
     final next = _toggleSubject(_snapshot.favorites, subject, _now());
     _publish(scope, _snapshot.copyWith(favorites: next));
+    final current = _entryForSubject(next, subject);
+    await _recordCloudLibrary(
+      scope,
+      CloudSyncRecordType.favorite,
+      current ?? previous!,
+      deleted: current == null,
+    );
     await _persistEntries(scope, 'favorites', next);
     _ensureScope(scope);
     return next.any((item) => sameSubjectIdentity(item.subject, subject));
   });
 
   Future<bool> toggleFollowing(AnimeSubject subject) => _mutate((scope) async {
+    final previous = _entryForSubject(_snapshot.following, subject);
     final next = _toggleSubject(_snapshot.following, subject, _now());
     _publish(scope, _snapshot.copyWith(following: next));
+    final current = _entryForSubject(next, subject);
+    await _recordCloudLibrary(
+      scope,
+      CloudSyncRecordType.following,
+      current ?? previous!,
+      deleted: current == null,
+    );
     await _persistEntries(scope, 'following', next);
     _ensureScope(scope);
     return next.any((item) => sameSubjectIdentity(item.subject, subject));
@@ -159,18 +191,25 @@ final class LibraryController {
         expectedContextVersion != scope.contextVersion) {
       return false;
     }
+    final entry = LibraryEntry(
+      subject: subject,
+      episode: episode,
+      updatedAt: _now(),
+      note: episode == null ? '打开详情' : '播放到 ${episode.displayTitle}',
+    );
     final next = <LibraryEntry>[
-      LibraryEntry(
-        subject: subject,
-        episode: episode,
-        updatedAt: _now(),
-        note: episode == null ? '打开详情' : '播放到 ${episode.displayTitle}',
-      ),
+      entry,
       ..._snapshot.history.where(
         (item) => !sameSubjectIdentity(item.subject, subject),
       ),
     ].take(80).toList(growable: false);
     _publish(scope, _snapshot.copyWith(history: next));
+    await _recordCloudLibrary(
+      scope,
+      CloudSyncRecordType.history,
+      entry,
+      deleted: false,
+    );
     await _persistEntries(scope, 'history', next);
     _ensureScope(scope);
     await _syncHistory(
@@ -203,23 +242,24 @@ final class LibraryController {
             positionSeconds / durationSeconds >= 0.98)) {
       positionSeconds = 0;
     }
-    var changed = false;
+    LibraryEntry? updatedEntry;
     final next = _snapshot.history
         .map((item) {
           if (!sameSubjectIdentity(item.subject, subject) ||
               item.episode?.id != episode.id) {
             return item;
           }
-          changed = true;
-          return item.copyWith(
+          updatedEntry = item.copyWith(
             positionSeconds: positionSeconds,
             durationSeconds: durationSeconds,
             updatedAt: _now(),
           );
+          return updatedEntry!;
         })
         .toList(growable: false);
-    if (!changed) return;
+    if (updatedEntry == null) return;
     _publish(scope, _snapshot.copyWith(history: next));
+    await _recordCloudPlayback(scope, updatedEntry!);
     await _persistEntries(scope, 'history', next);
   });
 
@@ -235,6 +275,9 @@ final class LibraryController {
   });
 
   Future<void> clear(String key) => _mutate((scope) async {
+    final previousHistory = key == 'history'
+        ? _snapshot.history
+        : const <LibraryEntry>[];
     final next = switch (key) {
       'history' => _snapshot.copyWith(history: const []),
       'imageFavorites' => _snapshot.copyWith(imageFavorites: const []),
@@ -243,6 +286,14 @@ final class LibraryController {
     };
     if (next == null) return;
     _publish(scope, next);
+    for (final entry in previousHistory) {
+      await _recordCloudLibrary(
+        scope,
+        CloudSyncRecordType.history,
+        entry,
+        deleted: true,
+      );
+    }
     await _storage.put(_storageKey(scope.accountId, key), const []);
     _ensureScope(scope);
   });
@@ -275,6 +326,23 @@ final class LibraryController {
   });
 
   Future<void> settleWrites() => _mutationQueue;
+
+  Future<void> applyRemoteRecord(CloudSyncRecord record) =>
+      _mutate((scope) async {
+        switch (record.type) {
+          case CloudSyncRecordType.favorite:
+            await _applyRemoteLibrary(scope, 'favorites', record);
+          case CloudSyncRecordType.following:
+            await _applyRemoteLibrary(scope, 'following', record);
+          case CloudSyncRecordType.history:
+            await _applyRemoteLibrary(scope, 'history', record);
+          case CloudSyncRecordType.playbackPosition:
+            await _applyRemotePlayback(scope, record);
+          case CloudSyncRecordType.appearanceSettings ||
+              CloudSyncRecordType.playbackSettings:
+            throw ArgumentError.value(record.type, 'record');
+        }
+      });
 
   void dispose() {
     if (_disposed) return;
@@ -338,6 +406,139 @@ final class LibraryController {
       entries.map((item) => item.toJson()).toList(growable: false),
     );
     _ensureScope(scope);
+  }
+
+  Future<void> _recordCloudLibrary(
+    _LibraryScope scope,
+    CloudSyncRecordType type,
+    LibraryEntry entry, {
+    required bool deleted,
+  }) async {
+    final writer = _writeCloudMutation;
+    if (writer == null || scope.accountId == null) return;
+    try {
+      await writer(
+        LibraryMutationContext(
+          accountId: scope.accountId,
+          contextVersion: scope.contextVersion,
+        ),
+        type,
+        entry,
+        deleted: deleted,
+      );
+    } catch (_) {
+      // Local persistence remains authoritative while sync reports its error.
+    }
+    _ensureScope(scope);
+  }
+
+  Future<void> _recordCloudPlayback(
+    _LibraryScope scope,
+    LibraryEntry entry,
+  ) async {
+    final writer = _writePlaybackMutation;
+    if (writer == null || scope.accountId == null) return;
+    try {
+      await writer(
+        LibraryMutationContext(
+          accountId: scope.accountId,
+          contextVersion: scope.contextVersion,
+        ),
+        entry,
+      );
+    } catch (_) {
+      // Playback resume remains locally persisted when cloud sync is offline.
+    }
+    _ensureScope(scope);
+  }
+
+  Future<void> _applyRemoteLibrary(
+    _LibraryScope scope,
+    String key,
+    CloudSyncRecord record,
+  ) async {
+    final current = switch (key) {
+      'favorites' => _snapshot.favorites,
+      'following' => _snapshot.following,
+      'history' => _snapshot.history,
+      _ => throw ArgumentError.value(key, 'key'),
+    };
+    final nextEntries = current
+        .where((item) => item.subject.identityKey != record.recordId)
+        .toList(growable: true);
+    if (!record.deleted) {
+      final entry = LibraryEntry.fromJson(record.payload);
+      if (entry.subject.identityKey != record.recordId) {
+        throw const FormatException('Remote library identity mismatch.');
+      }
+      nextEntries.insert(0, entry);
+    }
+    final bounded = nextEntries.take(80).toList(growable: false);
+    final next = switch (key) {
+      'favorites' => _snapshot.copyWith(favorites: bounded),
+      'following' => _snapshot.copyWith(following: bounded),
+      'history' => _snapshot.copyWith(history: bounded),
+      _ => throw ArgumentError.value(key, 'key'),
+    };
+    _publish(scope, next);
+    await _persistEntries(scope, key, bounded);
+  }
+
+  Future<void> _applyRemotePlayback(
+    _LibraryScope scope,
+    CloudSyncRecord record,
+  ) async {
+    final subjectJson = record.payload['subject'];
+    final episodeJson = record.payload['episode'];
+    if (subjectJson is! Map || episodeJson is! Map) {
+      throw const FormatException('Remote playback payload is invalid.');
+    }
+    final subject = AnimeSubject.fromJson(subjectJson.cast<String, dynamic>());
+    final episode = AnimeEpisode.fromJson(episodeJson.cast<String, dynamic>());
+    if (episode.identityKey(subjectKey: subject.identityKey) !=
+        record.recordId) {
+      throw const FormatException('Remote playback identity mismatch.');
+    }
+    final updatedAt = DateTime.tryParse(
+      record.payload['updatedAt']?.toString() ?? '',
+    );
+    if (updatedAt == null) {
+      throw const FormatException('Remote playback timestamp is invalid.');
+    }
+    final position = (record.payload['positionSeconds'] as num?)?.toInt() ?? 0;
+    final duration = (record.payload['durationSeconds'] as num?)?.toInt() ?? 0;
+    final next = _snapshot.history.toList(growable: true);
+    final index = next.indexWhere(
+      (item) =>
+          item.episode?.identityKey(subjectKey: item.subject.identityKey) ==
+          record.recordId,
+    );
+    if (record.deleted) {
+      if (index >= 0) {
+        next[index] = next[index].copyWith(
+          positionSeconds: 0,
+          durationSeconds: 0,
+          updatedAt: updatedAt,
+        );
+      }
+    } else {
+      final entry = LibraryEntry(
+        subject: subject,
+        episode: episode,
+        updatedAt: updatedAt,
+        note: index >= 0 ? next[index].note : '',
+        positionSeconds: position,
+        durationSeconds: duration,
+      );
+      if (index >= 0) {
+        next[index] = entry;
+      } else {
+        next.insert(0, entry);
+      }
+    }
+    final bounded = next.take(80).toList(growable: false);
+    _publish(scope, _snapshot.copyWith(history: bounded));
+    await _persistEntries(scope, 'history', bounded);
   }
 
   void _publish(_LibraryScope scope, LibrarySnapshot snapshot) {
@@ -420,4 +621,14 @@ List<LibraryEntry> _toggleSubject(
         .toList(growable: false);
   }
   return [LibraryEntry(subject: subject, updatedAt: timestamp), ...entries];
+}
+
+LibraryEntry? _entryForSubject(
+  List<LibraryEntry> entries,
+  AnimeSubject subject,
+) {
+  for (final entry in entries) {
+    if (sameSubjectIdentity(entry.subject, subject)) return entry;
+  }
+  return null;
 }

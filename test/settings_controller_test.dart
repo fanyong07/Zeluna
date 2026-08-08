@@ -170,6 +170,64 @@ void main() {
       expect(confirmed.allowInsecurePlaybackBackend, isTrue);
     },
   );
+
+  test(
+    'selected settings journal before persistence and remote apply has no echo',
+    () async {
+      final storage = _MemorySettingsStorage();
+      final playbackMutations = <PlaybackSettings>[];
+      final appearanceMutations = <AppearanceSettings>[];
+      final controller = SettingsController(
+        storage: storage,
+        publishSnapshot: (_) {},
+        applyKeepScreenOn: (_) async {},
+        onExternalServicesChanged: (_) async {},
+        syncPlayback: (accountId, contextVersion, settings) async {
+          expect(accountId, 'account-a');
+          expect(contextVersion, 4);
+          expect(
+            storage.values[AccountController.settingsKeyFor(
+              'account-a',
+              'playback',
+            )],
+            isNull,
+          );
+          playbackMutations.add(settings);
+          return true;
+        },
+        syncAppearance: (accountId, contextVersion, settings) async {
+          expect(accountId, 'account-a');
+          expect(contextVersion, 4);
+          expect(
+            storage.values[AccountController.settingsKeyFor(
+              'account-a',
+              'appearance',
+            )],
+            isNull,
+          );
+          appearanceMutations.add(settings);
+          return true;
+        },
+      );
+      controller.loadForAccount(accountId: 'account-a', contextVersion: 4);
+
+      await controller.updatePlayback(const PlaybackSettings(speed: 1.5));
+      await controller.updateAppearance(
+        const AppearanceSettings(compactMode: true),
+      );
+      expect(playbackMutations, hasLength(1));
+      expect(appearanceMutations, hasLength(1));
+
+      await controller.applyRemotePlayback(const PlaybackSettings(speed: 2));
+      await controller.applyRemoteAppearance(
+        const AppearanceSettings(reduceMotion: true),
+      );
+      expect(playbackMutations, hasLength(1), reason: 'pull must not echo');
+      expect(appearanceMutations, hasLength(1), reason: 'pull must not echo');
+      expect(controller.snapshot.playback.speed, 2);
+      expect(controller.snapshot.appearance.reduceMotion, isTrue);
+    },
+  );
 }
 
 final class _WriteGate {

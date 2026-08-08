@@ -13,6 +13,8 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:anime/src/sources/source_catalog_repository.dart';
+import 'package:anime/src/sync/cloud_sync_transport.dart';
+import 'package:anime/src/sync/sync_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -297,12 +299,20 @@ void main() {
         ).currentAccount()?.id,
         secondAccountId,
       );
+      await migratedSettings.put('account.$secondAccountId.syncState.v1', {
+        'schemaVersion': 1,
+        'queue': <Object?>[],
+      });
       await controller.deleteCurrentAccount(password: 'second-password');
       state = container.read(animeControllerProvider).requireValue;
       expect(state.accountSession.current, isNull);
       expect(state.accountSession.available, hasLength(1));
       expect(
         migratedLibrary.containsKey('account.$secondAccountId.favorites'),
+        isFalse,
+      );
+      expect(
+        migratedSettings.containsKey('account.$secondAccountId.syncState.v1'),
         isFalse,
       );
 
@@ -908,6 +918,183 @@ void main() {
     );
     expect(LocalAccountRepository(recoveredAccounts).pendingDeletion(), isNull);
   });
+
+  test(
+    'cloud account sync is local-first, merges pulls, and isolates logout',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'anime-controller-cloud-sync-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('anime.settings.v2');
+      await settings.put('services', _offlineServices.toJson());
+      await settings.close();
+      final cloud = _SyncCloudAccountService();
+      final container = ProviderContainer(
+        overrides: [
+          cloudAccountServiceProvider.overrideWithValue(cloud),
+          bangumiCredentialStoreProvider.overrideWithValue(
+            BangumiCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          tmdbCredentialStoreProvider.overrideWithValue(
+            TmdbCredentialStore(backend: _MemoryCredentialBackend()),
+          ),
+          sourceCatalogRepositoryProvider.overrideWithValue(
+            const _EmptySourceCatalogRepository(),
+          ),
+        ],
+      );
+      addTearDown(() async {
+        container.dispose();
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      await container.read(animeControllerProvider.future);
+      final controller = container.read(animeControllerProvider.notifier);
+
+      await controller.registerAccount(
+        email: 'sync@example.com',
+        nickname: '同步用户',
+        password: 'sync-password',
+        verificationCode: '123456',
+      );
+      await _waitForSync(
+        () =>
+            container
+                .read(animeControllerProvider)
+                .requireValue
+                .syncStatus
+                .phase ==
+            SyncPhase.synced,
+      );
+      cloud.pushed.clear();
+
+      expect(await controller.toggleFavorite(_subject), isTrue);
+      expect(
+        container.read(animeControllerProvider).requireValue.favorites,
+        hasLength(1),
+        reason: 'local UI updates before the cloud acknowledgement',
+      );
+      await _waitForSync(
+        () => cloud.pushed.any(
+          (batch) =>
+              batch.any((item) => item.type == CloudSyncRecordType.favorite),
+        ),
+      );
+      await _waitForSync(
+        () =>
+            container
+                .read(animeControllerProvider)
+                .requireValue
+                .syncStatus
+                .phase ==
+            SyncPhase.synced,
+      );
+
+      final remote = CloudSyncMutation.library(
+        mutationId: 'sync:v1:remote-device:00000001',
+        type: CloudSyncRecordType.following,
+        entry: LibraryEntry(
+          subject: _subject,
+          updatedAt: DateTime.utc(2026, 8, 8),
+        ),
+      );
+      cloud.addRemote(remote);
+      final pushesBeforePull = cloud.pushed.length;
+      await controller.synchronizeCloud();
+      expect(
+        container.read(animeControllerProvider).requireValue.following,
+        hasLength(1),
+      );
+      expect(
+        cloud.pushed,
+        hasLength(pushesBeforePull),
+        reason: 'pull must not echo',
+      );
+
+      await controller.signOutAccount();
+      expect(
+        container.read(animeControllerProvider).requireValue.syncStatus.phase,
+        SyncPhase.localOnly,
+      );
+      final pushesBeforeGuestMutation = cloud.pushed.length;
+      await controller.toggleFavorite(_subject);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(cloud.pushed, hasLength(pushesBeforeGuestMutation));
+    },
+  );
+}
+
+class _SyncCloudAccountService extends FakeCloudAccountService
+    implements CloudSyncTransport {
+  final pushed = <List<CloudSyncMutation>>[];
+  final _records = <CloudSyncRecord>[];
+  var _revision = 0;
+
+  @override
+  Future<CloudSyncPushResult> push(List<CloudSyncMutation> mutations) async {
+    pushed.add(List<CloudSyncMutation>.from(mutations));
+    final acknowledged = mutations
+        .map((mutation) {
+          final record = _record(mutation, ++_revision);
+          _records.removeWhere(
+            (item) =>
+                item.type == record.type && item.recordId == record.recordId,
+          );
+          _records.add(record);
+          return record;
+        })
+        .toList(growable: false);
+    return CloudSyncPushResult(
+      acknowledged: acknowledged,
+      nextRevision: acknowledged.last.serverRevision,
+    );
+  }
+
+  @override
+  Future<CloudSyncPullResult> pull({
+    required int afterRevision,
+    int limit = 200,
+  }) async {
+    final records = _records
+        .where((item) => item.serverRevision > afterRevision)
+        .take(limit)
+        .toList(growable: false);
+    return CloudSyncPullResult(
+      records: records,
+      nextRevision: records.isEmpty
+          ? afterRevision
+          : records.last.serverRevision,
+    );
+  }
+
+  void addRemote(CloudSyncMutation mutation) {
+    final record = _record(mutation, ++_revision);
+    _records.removeWhere(
+      (item) => item.type == record.type && item.recordId == record.recordId,
+    );
+    _records.add(record);
+  }
+
+  CloudSyncRecord _record(CloudSyncMutation mutation, int revision) =>
+      CloudSyncRecord.fromJson({
+        'type': mutation.type.wireName,
+        'record_id': mutation.recordId,
+        'payload': mutation.payload,
+        'deleted': mutation.deleted,
+        'client_mutation_id': mutation.mutationId,
+        'server_revision': revision,
+      });
+}
+
+Future<void> _waitForSync(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 3));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('Timed out waiting for cloud sync.');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
 }
 
 class _MemoryCredentialBackend

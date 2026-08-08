@@ -4,6 +4,7 @@ import 'package:anime/src/accounts/account_controller.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/library/library_controller.dart';
+import 'package:anime/src/sync/cloud_sync_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -131,6 +132,78 @@ void main() {
       expect(snapshot.favorites.single.subject.title, _subject.title);
       expect(storage.writeKeys, isEmpty);
       expect((storage.values[key] as List).first, malformed);
+    },
+  );
+
+  test(
+    'cloud journal precedes local write and remote merge creates no echo',
+    () async {
+      final storage = _MemoryLibraryStorage();
+      final mutations = <CloudSyncMutation>[];
+      var counter = 0;
+      final controller = LibraryController(
+        storage: storage,
+        publishSnapshot: (_) {},
+        syncHistory: (_, _, _) async {},
+        writeCloudMutation: (context, type, entry, {required deleted}) async {
+          expect(
+            storage.entriesFor('account-a', 'favorites'),
+            mutations.isEmpty ? isEmpty : hasLength(1),
+          );
+          final mutation = CloudSyncMutation.library(
+            mutationId: 'sync:v1:test-device:${++counter}'.padRight(24, '0'),
+            type: type,
+            entry: entry,
+            deleted: deleted,
+          );
+          mutations.add(mutation);
+          return true;
+        },
+        now: () => DateTime.utc(2026, 8, 2, 12),
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+
+      await controller.toggleFavorite(_subject);
+      expect(mutations, hasLength(1));
+      expect(storage.entriesFor('account-a', 'favorites'), hasLength(1));
+
+      final remoteEntry = LibraryEntry(
+        subject: _subject.copyWith(status: '完结'),
+        updatedAt: DateTime.utc(2026, 8, 3),
+      );
+      final remoteMutation = CloudSyncMutation.library(
+        mutationId: 'sync:v1:remote-device:00000001',
+        type: CloudSyncRecordType.favorite,
+        entry: remoteEntry,
+      );
+      await controller.applyRemoteRecord(
+        CloudSyncRecord.fromJson({
+          'type': remoteMutation.type.wireName,
+          'record_id': remoteMutation.recordId,
+          'payload': remoteMutation.payload,
+          'deleted': false,
+          'client_mutation_id': remoteMutation.mutationId,
+          'server_revision': 7,
+        }),
+      );
+
+      expect(mutations, hasLength(1), reason: 'pull merge must not echo');
+      expect(controller.snapshot.favorites.single.subject.status, '完结');
+      expect(
+        LibraryEntry.fromJson(
+          storage.entriesFor('account-a', 'favorites').single,
+        ).subject.status,
+        '完结',
+      );
+
+      expect(await controller.toggleFavorite(_subject), isFalse);
+      expect(mutations, hasLength(2));
+      expect(mutations.last.deleted, isTrue);
+      expect(storage.entriesFor('account-a', 'favorites'), isEmpty);
     },
   );
 }

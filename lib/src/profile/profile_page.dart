@@ -13,6 +13,7 @@ import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import '../shared_ui/settings_ui.dart';
+import '../sync/sync_controller.dart';
 
 class ProfilePage extends ConsumerWidget {
   const ProfilePage({super.key});
@@ -52,6 +53,16 @@ class ProfilePage extends ConsumerWidget {
     );
   }
 }
+
+String _profileSyncStatus(SyncStatus status) => switch (status.phase) {
+  SyncPhase.localOnly => '仅本机',
+  SyncPhase.checking => '检查中',
+  SyncPhase.pending => '待同步',
+  SyncPhase.synced => '已同步',
+  SyncPhase.offline => '离线缓存',
+  SyncPhase.expired => '登录失效',
+  SyncPhase.error => '需重试',
+};
 
 class _ProfileBanner extends StatelessWidget {
   const _ProfileBanner({required this.state});
@@ -1027,12 +1038,14 @@ class _ProfileRightRail extends StatelessWidget {
               _DeviceRow(
                 icon: Icons.devices_rounded,
                 title: '当前设备',
-                status: state.accountSession.isSignedIn ? '仅本机' : '游客空间',
+                status: state.accountSession.isSignedIn
+                    ? _profileSyncStatus(state.syncStatus)
+                    : '游客空间',
               ),
               const SizedBox(height: 8),
               Text(
                 state.accountSession.isSignedIn
-                    ? '当前已登录云端账号；收藏、追番和历史暂时保存在此设备，并与其他账号隔离。'
+                    ? '收藏、追番、历史、播放位置和选定偏好会先写入本机，再按当前账号同步；下载文件和私密来源配置始终留在本机。'
                     : '登录或创建云端账号后，可在安卓和 Windows 使用同一邮箱；本机资料会按账号隔离。',
                 style: Theme.of(
                   context,

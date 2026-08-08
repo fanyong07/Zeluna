@@ -28,6 +28,7 @@ import '../sources/source_catalog_repository.dart';
 import '../sources/source_controller.dart';
 import '../sources/source_rule_bridge.dart';
 import '../settings/settings_controller.dart';
+import '../sync/cloud_sync_transport.dart';
 import '../sync/sync_controller.dart';
 import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
@@ -307,6 +308,7 @@ class AnimeState {
     this.services = const ExternalServiceSettings(),
     this.rulePlugins = const RulePluginState(),
     this.sourceCatalog = const SourceCatalogState(),
+    this.syncStatus = const SyncStatus.localOnly(),
   });
 
   final AnimeHomeFeed homeFeed;
@@ -327,6 +329,7 @@ class AnimeState {
   final ExternalServiceSettings services;
   final RulePluginState rulePlugins;
   final SourceCatalogState sourceCatalog;
+  final SyncStatus syncStatus;
 
   AnimeState copyWith({
     AnimeHomeFeed? homeFeed,
@@ -347,6 +350,7 @@ class AnimeState {
     ExternalServiceSettings? services,
     RulePluginState? rulePlugins,
     SourceCatalogState? sourceCatalog,
+    SyncStatus? syncStatus,
   }) {
     return AnimeState(
       homeFeed: homeFeed ?? this.homeFeed,
@@ -367,6 +371,7 @@ class AnimeState {
       services: services ?? this.services,
       rulePlugins: rulePlugins ?? this.rulePlugins,
       sourceCatalog: sourceCatalog ?? this.sourceCatalog,
+      syncStatus: syncStatus ?? this.syncStatus,
     );
   }
 }
@@ -452,8 +457,13 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _settings = boxes[0];
     _library = boxes[1];
     await LocalIdentityMigration(settings: _settings, library: _library).run();
+    final cloudService = ref.read(cloudAccountServiceProvider);
+    final CloudSyncTransport? cloudTransport =
+        cloudService is CloudSyncTransport
+        ? cloudService as CloudSyncTransport
+        : null;
     _accountController = AccountController(
-      cloudService: ref.read(cloudAccountServiceProvider),
+      cloudService: cloudService,
       localRepository: LocalAccountRepository(boxes[2]),
       settings: _settings,
       library: _library,
@@ -486,22 +496,26 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         await WakelockPlus.toggle(enable: enabled).onError((_, _) {});
       },
       onExternalServicesChanged: _handleExternalServicesChanged,
+      syncPlayback: (accountId, contextVersion, settings) =>
+          _syncController?.enqueuePlaybackSettings(
+            accountId: accountId,
+            contextVersion: contextVersion,
+            settings: settings,
+          ) ??
+          Future<bool>.value(false),
+      syncAppearance: (accountId, contextVersion, settings) =>
+          _syncController?.enqueueAppearance(
+            accountId: accountId,
+            contextVersion: contextVersion,
+            settings: settings,
+          ) ??
+          Future<bool>.value(false),
     );
     final settingsSnapshot = _settingsDomain.loadForAccount(
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
     final services = settingsSnapshot.services;
-    final syncRepository = ref.read(externalServiceRepositoryProvider);
-    _syncController = SyncController(
-      uploadHistory: syncRepository.syncLocalHistory,
-      isContextCurrent: _accounts.isContextCurrent,
-    );
-    _syncDomain.loadForAccount(
-      accountId: activeAccount?.id,
-      contextVersion: _accounts.contextVersion,
-      services: services,
-    );
     final profileJson = _settings.get(_accountSettingsKey('profile'));
     _sourceController = SourceController(
       storage: HiveSourceStorage(_settings),
@@ -535,10 +549,34 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           episode: episode,
         );
       },
+      writeCloudMutation: (context, type, entry, {required deleted}) =>
+          _syncDomain.enqueueLibrary(
+            accountId: context.accountId,
+            contextVersion: context.contextVersion,
+            type: type,
+            entry: entry,
+            deleted: deleted,
+          ),
+      writePlaybackMutation: (context, entry) =>
+          _syncDomain.enqueuePlaybackPosition(
+            accountId: context.accountId,
+            contextVersion: context.contextVersion,
+            entry: entry,
+          ),
     );
     final librarySnapshot = await _libraryDomain.loadForAccount(
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
+    );
+    final syncRepository = ref.read(externalServiceRepositoryProvider);
+    _syncController = SyncController(
+      uploadHistory: syncRepository.syncLocalHistory,
+      isContextCurrent: _accounts.isContextCurrent,
+      cloudTransport: cloudTransport,
+      storage: HiveSyncStorage(_settings),
+      readLocalSnapshot: _readSyncLocalSnapshot,
+      applyRecord: _applyCloudSyncRecord,
+      publishStatus: _publishSyncStatus,
     );
     final playbackResolver = ref.read(rulePlaybackResolverProvider);
     _playbackDiscoveryController = PlaybackDiscoveryController(
@@ -598,6 +636,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     final feed = catalogLoad.snapshot.homeFeed;
     unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
+    final initialContextVersion = _accounts.contextVersion;
     final initialState = AnimeState(
       homeFeed: feed,
       settings: settingsSnapshot.playback,
@@ -616,6 +655,23 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       services: services,
       rulePlugins: sourceSnapshot.rulePlugins,
       sourceCatalog: sourceSnapshot.sourceCatalog,
+      syncStatus: activeAccount != null && cloudTransport != null
+          ? const SyncStatus(phase: SyncPhase.checking)
+          : const SyncStatus.localOnly(),
+    );
+    var syncBootstrapCancelled = false;
+    unawaited(
+      Future<void>.delayed(Duration.zero, () {
+        if (syncBootstrapCancelled ||
+            !_accounts.isContextCurrent(initialContextVersion)) {
+          return;
+        }
+        _syncDomain.loadForAccount(
+          accountId: activeAccount?.id,
+          contextVersion: initialContextVersion,
+          services: services,
+        );
+      }),
     );
     if (!catalogLoad.homeFresh) {
       unawaited(
@@ -626,6 +682,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       );
     }
     ref.onDispose(() {
+      syncBootstrapCancelled = true;
       _downloadController?.dispose();
       _libraryController?.dispose();
       _catalogController?.dispose();
@@ -1061,6 +1118,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<bool> toggleFollowing(AnimeSubject subject) =>
       _libraryDomain.toggleFollowing(subject);
 
+  Future<void> synchronizeCloud() => _syncDomain.synchronize();
+
   Future<bool> addHistory(
     AnimeSubject subject,
     AnimeEpisode? episode, {
@@ -1134,11 +1193,6 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     final profileJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'profile'),
     );
-    _syncDomain.loadForAccount(
-      accountId: accountId,
-      contextVersion: activation.contextVersion,
-      services: settingsSnapshot.services,
-    );
     final sourceSnapshot = await _sourceDomain.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,
@@ -1194,7 +1248,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         services: settingsSnapshot.services,
         rulePlugins: sourceSnapshot.rulePlugins,
         sourceCatalog: sourceSnapshot.sourceCatalog,
+        syncStatus: account == null
+            ? const SyncStatus.localOnly()
+            : const SyncStatus(phase: SyncPhase.checking),
       ),
+    );
+    _syncDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+      services: settingsSnapshot.services,
     );
     await _settingsDomain.applyRuntimeEffects().onError((_, _) {});
     if (!catalogLoad.homeFresh) {
@@ -1243,6 +1305,38 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         services: snapshot.services,
       ),
     );
+  }
+
+  SyncLocalSnapshot _readSyncLocalSnapshot() => SyncLocalSnapshot(
+    favorites: _libraryDomain.snapshot.favorites,
+    following: _libraryDomain.snapshot.following,
+    history: _libraryDomain.snapshot.history,
+    appearance: _settingsDomain.snapshot.appearance,
+    playback: _settingsDomain.snapshot.playback,
+  );
+
+  Future<void> _applyCloudSyncRecord(CloudSyncRecord record) async {
+    switch (record.type) {
+      case CloudSyncRecordType.favorite ||
+          CloudSyncRecordType.following ||
+          CloudSyncRecordType.history ||
+          CloudSyncRecordType.playbackPosition:
+        await _libraryDomain.applyRemoteRecord(record);
+      case CloudSyncRecordType.appearanceSettings:
+        await _settingsDomain.applyRemoteAppearance(
+          AppearanceSettings.fromJson(record.payload),
+        );
+      case CloudSyncRecordType.playbackSettings:
+        await _settingsDomain.applyRemotePlayback(
+          PlaybackSettings.fromJson(record.payload),
+        );
+    }
+  }
+
+  void _publishSyncStatus(SyncStatus status) {
+    final current = state.value;
+    if (current == null) return;
+    state = AsyncData(current.copyWith(syncStatus: status));
   }
 
   void _publishSourceSnapshot(SourceSnapshot snapshot) {

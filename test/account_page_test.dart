@@ -3,6 +3,7 @@ import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/sync/sync_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,6 +72,7 @@ void main() {
     expect(find.text('退出登录'), findsOneWidget);
     expect(find.text('清除此设备的账号数据'), findsOneWidget);
     expect(find.text('永久删除云端账号'), findsOneWidget);
+    expect(find.text('离线，3 项待同步'), findsWidgets);
 
     await tester.ensureVisible(find.text('永久删除云端账号'));
     await tester.pumpAndSettle();
@@ -197,6 +199,7 @@ class _SignedInAnimeController extends AnimeController {
       current: _account,
       available: [_account],
     ),
+    syncStatus: const SyncStatus(phase: SyncPhase.offline, pendingMutations: 3),
   );
 
   @override
