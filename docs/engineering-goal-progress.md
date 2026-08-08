@@ -1371,9 +1371,32 @@ Builds: not run for this server-only protocol slice. It changes no Flutter platf
 
 Commit: `e0c9b78 feat: add incremental cloud sync protocol`
 
+### Authenticated client transport
+
+Audit:
+
+- `CloudAccountRepository` was the sole owner of the secure-storage token and the account-backend network policy. A separate sync HTTP client or exported token would have duplicated authentication state and risked credential leakage.
+- Client payloads must remain narrower than ordinary local models: only the six G10 record types and their server-allowlisted fields may cross the account boundary.
+
+Changes:
+
+- Added a typed `CloudSyncTransport` implemented by the existing `CloudAccountRepository`. Push and pull reuse the same secure token and public-HTTPS account client without exposing the token to controllers, Hive, logs, self-hosted endpoints, or external-service repositories.
+- Added bounded push/pull response models, stable record-identity checks, monotonic revision validation, explicit authenticated/unavailable/protocol failures, and sanitized payload reconstruction that drops unknown fields before they can enter client state.
+- A 401 response clears the one shared secure token and becomes an explicit expired-auth result; transient/network/server failures retain local data for later retry. Automatic redirects remain disabled by the existing account network policy.
+
+Tests and gates:
+
+- Focused account transport and network-policy suite: 28 passed, 0 failed.
+- Regressions prove authenticated push, incremental pull cursors, strict sync paths, response parsing, unknown-field exclusion, shared-token expiration, credential header use only at the account origin, bounded responses, and redirect security.
+- Focused Flutter analysis and `git diff --check` passed. Diff secret-marker review found only intentional synthetic test values and exclusion assertions; no real credential or production operation was used.
+
+Builds: not run for this transport-only checkpoint. It changes no platform or packaging code; full Flutter tests and Android/Windows/Web applicable builds remain required after client integration.
+
+Commit: `67d5e6c feat: add authenticated cloud sync transport`
+
 Remaining G10 work:
 
-- Add a secure cloud-sync client repository and durable account-scoped Hive mutation queue with deterministic mutation IDs, acknowledgement retention, pull cursors, restart recovery, and migration from existing account-scoped library/settings data.
+- Add a durable account-scoped Hive mutation queue with deterministic mutation IDs, acknowledgement retention, pull cursors, restart recovery, and migration from existing account-scoped library/settings data.
 - Wire local library and selected settings writes to update the UI immediately, append mutations atomically, upload only while authenticated, and merge pulled records without generating echo mutations.
 - Expose honest synchronization/offline/expired states, keep guest data local-only, and prove reconnect, retry, account switching, logout isolation, two-device conflicts, and restart behavior across Flutter tests before completing G10.
 
