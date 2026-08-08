@@ -283,6 +283,15 @@ class _PlayerBottomBar extends StatelessWidget {
                 : Row(
                     children: [
                       _ControlIconButton(
+                        icon: Icons.skip_previous_rounded,
+                        tooltip: onPreviousEpisode == null
+                            ? '已经是第一集'
+                            : '上一集',
+                        onPressed: onPreviousEpisode,
+                        size: 26,
+                      ),
+                      const SizedBox(width: 2),
+                      _ControlIconButton(
                         icon: playing
                             ? Icons.pause_rounded
                             : Icons.play_arrow_rounded,
@@ -290,6 +299,13 @@ class _PlayerBottomBar extends StatelessWidget {
                         size: 32,
                         busy: loadingLine || buffering,
                         onPressed: onPlayPause,
+                      ),
+                      const SizedBox(width: 2),
+                      _ControlIconButton(
+                        icon: Icons.skip_next_rounded,
+                        tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
+                        onPressed: onNextEpisode,
+                        size: 26,
                       ),
                       const SizedBox(width: 12),
                       Text(
@@ -324,9 +340,13 @@ class _PlayerBottomBar extends StatelessWidget {
                       const SizedBox(width: 10),
                       Expanded(
                         child: Align(
-                          alignment: Alignment.centerLeft,
+                          alignment: fullscreen
+                              ? Alignment.center
+                              : Alignment.centerLeft,
                           child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 520),
+                            constraints: BoxConstraints(
+                              maxWidth: fullscreen ? 760 : 520,
+                            ),
                             child: DecoratedBox(
                               decoration: BoxDecoration(
                                 color: AppColors.theaterBg.withValues(
@@ -412,23 +432,6 @@ class _PlayerBottomBar extends StatelessWidget {
                         onSelected: onSpeedSelected,
                       ),
                       const SizedBox(width: 10),
-                      Tooltip(
-                        message: services.bilibiliSubtitleEnabled
-                            ? 'Bilibili 字幕 · ${services.subtitleLanguage}'
-                            : 'Bilibili 字幕已关闭',
-                        child: IconButton(
-                          onPressed: onSubtitlePanel,
-                          padding: EdgeInsets.zero,
-                          icon: Icon(
-                            Icons.subtitles_outlined,
-                            color: services.bilibiliSubtitleEnabled
-                                ? AppColors.theaterInk
-                                : AppColors.theaterFaint,
-                          ),
-                          iconSize: 23,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
                       TextButton(
                         onPressed: onLinePanel,
                         child: Text(

@@ -80,6 +80,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
   double? _appliedVolume;
+  var _manualVolumeOverride = false;
   bool _controlsVisible = true;
   double? _temporaryPlaybackRate;
   bool _pointerInChromeHotZone = false;
@@ -945,13 +946,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _applyPlaybackSettings(PlaybackSettings settings) {
+    final volumeSettingChanged =
+        _currentSettings.volumeBoost != settings.volumeBoost;
     _currentSettings = settings;
+    if (volumeSettingChanged) _manualVolumeOverride = false;
     final targetRate = settings.speed <= 0 ? 1.0 : settings.speed;
     if (_appliedRate != targetRate) {
       _appliedRate = targetRate;
       unawaited(_player.setRate(targetRate));
     }
-    final targetVolume = _muted ? 0.0 : _volumeFromSettings(settings);
+    final targetVolume = _muted
+        ? 0.0
+        : (_manualVolumeOverride ? _volume : _volumeFromSettings(settings));
     if (_appliedVolume != targetVolume) {
       _appliedVolume = targetVolume;
       unawaited(_player.setVolume(targetVolume));
@@ -1728,6 +1734,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _applyVolume(double value) async {
     final clamped = value.clamp(0, 200).toDouble();
+    _manualVolumeOverride = true;
     setState(() {
       _muted = clamped <= 0;
       _volume = clamped;
@@ -1749,6 +1756,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _revealPlayerControls();
     final next = (_muted ? _lastNonZeroVolume : _volume) + delta;
     final clamped = next.clamp(0, 200).toDouble();
+    _manualVolumeOverride = true;
     if (clamped <= 0) {
       setState(() {
         _muted = true;
@@ -1776,6 +1784,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         : (_lastNonZeroVolume > 0
               ? _lastNonZeroVolume
               : _volumeFromSettings(_currentSettings));
+    _manualVolumeOverride = true;
     setState(() {
       _muted = next;
       _volume = volume;
