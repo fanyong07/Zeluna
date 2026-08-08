@@ -1860,8 +1860,38 @@ Tests:
 
 Commit: pending (`security: add shared account rate limiting`)
 
-F3.2: not_started
-F3.3: not_started
+### F3.2 - Durable verification email outbox
+
+Status: completed
+
+Implementation:
+
+- Added reversible migration `0009_email_outbox` and an encrypted outbox model
+  with bounded status/attempt/claim metadata. Verification requests now write
+  the digest-only `VerifyCode` row and encrypted email payload in one database
+  transaction; the HTTP path never waits for SMTP.
+- Added independent `EMAIL_OUTBOX_ENCRYPTION_KEY` configuration using Fernet,
+  with fail-closed behavior when the key is absent or malformed. The key is
+  separate from JWT signing material, never logged, and delivered/terminal
+  payloads are erased.
+- Added a bounded worker with atomic multi-worker claims, stale-claim recovery,
+  exponential bounded retry, terminal failure classification, and history
+  cleanup. The production lifespan starts the worker; SMTP remains outside the
+  request transaction.
+- Added the direct `cryptography` dependency and locked it in `server/uv.lock`.
+
+Tests:
+
+- Outbox tests passed for atomic queueing, rollback/no-row behavior, encryption
+  key failure, SMTP retry, restart recovery, two-worker single-send behavior,
+  tamper rejection, payload erasure, and no plaintext code in durable payload.
+- Existing account anti-enumeration and registration/reset flows remained green;
+  SMTP-unavailable behavior is now a durable retry rather than a synchronous
+  account-existence signal.
+
+Commit: pending (`feat: deliver verification mail through durable outbox`)
+
+F3.3: in_progress
 F4: not_started
 F5: not_started
 F6: not_started

@@ -6,6 +6,7 @@ import bcrypt
 import jwt
 import pytest
 import run_prod
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server import account_api
 from server import auth
+from server import email_outbox
 from server.auth import (
     AuthConfigurationError,
     create_jwt,
@@ -24,7 +26,8 @@ from server.auth import (
     validate_session_token,
     verify_password,
 )
-from server.database import Base, User, UserToken, VerifyCode
+from server.database import Base, EmailOutbox, User, UserToken, VerifyCode
+from server.email_outbox import EmailOutboxWorker
 
 _TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
 
@@ -32,6 +35,11 @@ _TEST_SECRET = "zeluna-test-signing-key-with-more-than-32-bytes"
 @pytest.fixture(autouse=True)
 def secure_test_signing_key(monkeypatch):
     monkeypatch.setattr(auth, "SECRET_KEY", _TEST_SECRET)
+    monkeypatch.setattr(
+        email_outbox,
+        "EMAIL_OUTBOX_ENCRYPTION_KEY",
+        Fernet.generate_key().decode("ascii"),
+    )
     account_api._attempts.clear()
     yield
     account_api._attempts.clear()
@@ -145,6 +153,15 @@ def test_email_registration_login_session_and_logout(tmp_path, monkeypatch):
             json={"email": "USER@example.com", "purpose": "register"},
         )
         assert response.status_code == 202
+        async def queued_outbox():
+            async with sessions() as session:
+                return await session.scalar(select(EmailOutbox))
+
+        queued = asyncio.run(queued_outbox())
+        assert queued is not None
+        assert queued.encrypted_payload
+        assert "123456" not in queued.encrypted_payload
+        asyncio.run(EmailOutboxWorker(sessions, sender=capture_email).run_once())
         assert delivered["email"] == "user@example.com"
         assert delivered["purpose"] == "register"
         assert delivered["code"].isdigit()
@@ -245,6 +262,7 @@ def test_email_registration_login_session_and_logout(tmp_path, monkeypatch):
             json={"email": "user@example.com", "purpose": "reset_password"},
         )
         assert reset_code.status_code == 202
+        asyncio.run(EmailOutboxWorker(sessions, sender=capture_email).run_once())
         reset = client.post(
             "/api/v1/auth/password/reset",
             json={
@@ -316,8 +334,11 @@ def test_registration_code_requires_configured_email_delivery(tmp_path, monkeypa
             "/api/v1/auth/code",
             json={"email": "smtp-missing@example.com", "purpose": "register"},
         )
-        assert response.status_code == 503
-        assert response.json()["detail"] == "邮件服务尚未配置"
+        assert response.status_code == 202
+        result = asyncio.run(
+            EmailOutboxWorker(sessions, sender=unavailable).run_once()
+        )
+        assert result["retry"] == 1
 
     asyncio.run(engine.dispose())
 
@@ -415,6 +436,7 @@ def test_verification_code_locks_after_email_and_purpose_failure_budget(
             json={"email": "attempts@example.com", "purpose": "register"},
         )
         assert sent.status_code == 202
+        asyncio.run(EmailOutboxWorker(sessions, sender=capture_email).run_once())
 
         payload = {
             "email": "attempts@example.com",
@@ -450,6 +472,7 @@ def test_verification_code_locks_after_email_and_purpose_failure_budget(
             json={"email": "attempts@example.com", "purpose": "register"},
         )
         assert resent.status_code == 202
+        asyncio.run(EmailOutboxWorker(sessions, sender=capture_email).run_once())
         payload["code"] = delivered["code"]
         registered = client.post(
             "/api/v1/auth/register",

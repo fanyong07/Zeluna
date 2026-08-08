@@ -158,6 +158,39 @@ class RefreshTokenHistory(Base):
     )
 
 
+class EmailOutbox(Base):
+    """Durable encrypted email work item; plaintext codes never persist here."""
+
+    __tablename__ = "email_outbox"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    recipient: Mapped[str] = mapped_column(String(255), index=True)
+    encrypted_payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt_at: Mapped[float] = mapped_column(
+        Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+        server_default="0",
+        index=True,
+    )
+    created_at: Mapped[float] = mapped_column(
+        Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp()
+    )
+    delivered_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    last_error_code: Mapped[str] = mapped_column(
+        String(64), default="", server_default=""
+    )
+    claim_token: Mapped[str] = mapped_column(
+        String(96), default="", server_default="", index=True
+    )
+    locked_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+
+
 class VerifyCode(Base):
     __tablename__ = "verify_codes"
 

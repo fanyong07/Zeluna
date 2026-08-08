@@ -41,6 +41,11 @@ from .config import (
 from .database import User, UserToken, VerifyCode
 from .dependencies import get_session
 from .email_service import EmailDeliveryUnavailable, send_verification_email
+from .email_outbox import (
+    EmailOutboxConfigurationError,
+    encrypt_verification_payload,
+    queue_verification_email,
+)
 from .privacy import build_account_data_export, purge_expired_auth_artifacts
 from .rate_limit import (
     InMemoryRateLimiter,
@@ -415,6 +420,13 @@ async def request_code(
         return {"message": _CODE_REQUEST_MESSAGE}
 
     code = generate_verify_code()
+    try:
+        encrypted_payload = encrypt_verification_payload(
+            email, code, payload.purpose
+        )
+    except EmailOutboxConfigurationError as error:
+        await session.rollback()
+        raise HTTPException(status_code=503, detail="邮件服务尚未安全配置") from error
     await session.execute(delete(VerifyCode).where(VerifyCode.email == email))
     session.add(
         VerifyCode(
@@ -424,14 +436,13 @@ async def request_code(
             expires_at=time.time() + 600,
         )
     )
-    try:
-        await send_verification_email(email, code, payload.purpose)
-    except EmailDeliveryUnavailable as error:
-        await session.rollback()
-        raise HTTPException(status_code=503, detail="邮件服务尚未配置") from error
-    except Exception as error:
-        await session.rollback()
-        raise HTTPException(status_code=502, detail="验证码邮件发送失败，请稍后重试") from error
+    await queue_verification_email(
+        session,
+        email=email,
+        code=code,
+        purpose=payload.purpose,
+        encrypted_payload=encrypted_payload,
+    )
     await session.commit()
     return {"message": _CODE_REQUEST_MESSAGE}
 
