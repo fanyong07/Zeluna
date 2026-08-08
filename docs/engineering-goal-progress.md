@@ -1630,6 +1630,9 @@ Status: in_progress
   subtests; locked Ruff, compileall, strict pip-audit, repository security,
   dependency policy, and `git diff --check` also passed. Flutter full tests
   passed again with 612 passed, 26 intentionally skipped, and 0 failed.
+- GitHub Actions Quality Gates run `31248928773` (#119) completed successfully
+  on `c187eef` in 11m 15s: Flutter, Android Debug, Windows/WebView, Web,
+  Python/Alembic/Ruff/pip-audit, and supply-chain jobs all passed.
 - `flutter doctor --verbose` reports no toolchain issues; Windows, Chrome, and
   Edge are available, but no Android device or emulator is connected and no
   Android virtual device is configured.
@@ -1649,9 +1652,6 @@ Status: in_progress
   and is not treated as release acceptance evidence.
 - No real account, email, production database, deployment, public upload,
   irreversible operation, or production playback provider was accessed.
-- The current environment could not read the remote Actions result for the
-  latest pushed commits (the GitHub API returned 403); no remote CI green check
-  is claimed from that failed read.
 - The project license is still an explicit governance decision. Until the
   owner confirms a license and the release identity, G14 must remain
   `in_progress`.
