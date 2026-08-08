@@ -202,7 +202,11 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        testInstrumentationRunner =
+            "app.anime.anime.AndroidNetworkSecurityInstrumentation"
     }
+
+    testBuildType = "release"
 
     signingConfigs {
         if (hasUsableReleaseSigning) {
