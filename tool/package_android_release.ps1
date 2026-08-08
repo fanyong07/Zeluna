@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [switch]$UseLegacyDebugSigning
@@ -17,6 +18,7 @@ if ($null -eq $versionLine) {
 }
 $version = $versionLine.Matches[0].Groups[1].Value
 $deliveryPath = Join-Path $deliveryDirectory "Zeluna-Android-$version-release.apk"
+$checksumPath = "$deliveryPath.sha256"
 
 if (-not $SkipBuild) {
     $buildArguments = @('build', 'apk', '--release', '--suppress-analytics')
@@ -44,3 +46,12 @@ New-Item -ItemType Directory -Path $deliveryDirectory -Force | Out-Null
 Copy-Item -LiteralPath $releaseSource -Destination $deliveryPath -Force
 
 Write-Output "Android package: $deliveryPath"
+$checksum = (Get-FileHash -LiteralPath $deliveryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+[System.IO.File]::WriteAllText(
+    $checksumPath,
+    "$checksum *$([System.IO.Path]::GetFileName($deliveryPath))$([Environment]::NewLine)",
+    [System.Text.UTF8Encoding]::new($false)
+)
+Write-Output "Version: $version"
+Write-Output "SHA-256: $checksum"
+Write-Output "Checksum file: $checksumPath"

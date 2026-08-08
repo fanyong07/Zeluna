@@ -1,3 +1,4 @@
+[CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [string]$DeliveryDirectory
@@ -6,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRootFull = [System.IO.Path]::GetFullPath($projectRoot)
 $pubspecPath = Join-Path $projectRoot 'pubspec.yaml'
 $releaseSource = Join-Path $projectRoot 'build\windows\x64\runner\Release'
 $deliveryDirectory = if ([string]::IsNullOrWhiteSpace($DeliveryDirectory)) {
@@ -13,6 +15,10 @@ $deliveryDirectory = if ([string]::IsNullOrWhiteSpace($DeliveryDirectory)) {
 }
 else {
     [System.IO.Path]::GetFullPath($DeliveryDirectory)
+}
+$deliveryPrefix = $projectRootFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+if (-not $deliveryDirectory.StartsWith($deliveryPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw 'DeliveryDirectory must stay inside the project directory.'
 }
 $stagingDirectory = Join-Path $deliveryDirectory '.windows-staging'
 
@@ -23,6 +29,11 @@ if ($null -eq $versionLine) {
 }
 $version = $versionLine.Matches[0].Groups[1].Value
 $archivePath = Join-Path $deliveryDirectory "Zeluna-Windows-$version.zip"
+$checksumPath = "$archivePath.sha256"
+$commit = (& git -C $projectRootFull rev-parse HEAD 2>$null).Trim()
+if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{7,64}$') {
+    throw 'Unable to resolve the current Git commit for release provenance.'
+}
 
 if (-not $SkipBuild) {
     Push-Location $projectRoot
@@ -52,6 +63,20 @@ try {
         Where-Object { $_.Name -notlike '*.WebView2' } |
         Copy-Item -Destination $stagingDirectory -Recurse -Force
 
+    $metadata = [ordered]@{
+        schema = 'zeluna-windows-package-v1'
+        product = 'Zeluna'
+        version = $version
+        commit = $commit
+        built_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    $metadataPath = Join-Path $stagingDirectory 'Zeluna-release-metadata.json'
+    [System.IO.File]::WriteAllText(
+        $metadataPath,
+        (($metadata | ConvertTo-Json -Depth 3) + [Environment]::NewLine),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
     Compress-Archive -Path (Join-Path $stagingDirectory '*') `
         -DestinationPath $archivePath -CompressionLevel Optimal -Force
 }
@@ -62,3 +87,13 @@ finally {
 }
 
 Write-Output "Windows package: $archivePath"
+$checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+[System.IO.File]::WriteAllText(
+    $checksumPath,
+    "$checksum *$([System.IO.Path]::GetFileName($archivePath))$([Environment]::NewLine)",
+    [System.Text.UTF8Encoding]::new($false)
+)
+Write-Output "Version: $version"
+Write-Output "Commit: $commit"
+Write-Output "SHA-256: $checksum"
+Write-Output "Checksum file: $checksumPath"

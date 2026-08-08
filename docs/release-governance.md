@@ -19,11 +19,14 @@ version, CI run, artifact sizes, and SHA-256 values are written by
    supplied outside the repository. `android/key.properties` and keystore files
    are ignored and must never be printed, committed, or uploaded in logs.
    `tool/check_release.ps1` must reject missing/placeholder/debug signing,
-   stale artifacts, generic branding, and invalid manifests.
+   stale artifacts, generic branding, and invalid manifests. The Android
+   packaging helper emits a versioned filename, a `.sha256` sidecar, and the
+   checksum in its output.
 2. Windows: build `flutter build windows --release`, then use
    `tool/package_windows_release.ps1` to produce a versioned archive. The
    staging directory is disposable and must remain inside the project
-   `release/` directory.
+   `release/` directory. The archive includes a small version/commit metadata
+   file and the helper emits a `.sha256` sidecar.
 3. Web: build `flutter build web --release` and publish the complete `build/web`
    directory as an immutable versioned archive. Serve it over HTTPS; do not
    open `index.html` directly as a production test.
