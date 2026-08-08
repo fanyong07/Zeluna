@@ -95,24 +95,27 @@ void main() {
     expect(controller.state.appInForeground, isTrue);
   });
 
-  test('foreground recovery restores the phase that was active before pause', () {
-    final playing = PlaybackSessionController(episodeId: 101);
-    addTearDown(playing.dispose);
-    playing.dispatch(PlaybackSessionEvent.openRequested('line-a'));
-    playing.dispatch(PlaybackSessionEvent.firstFrame('line-a'));
-    playing.dispatch(PlaybackSessionEvent.applicationPaused());
-    expect(playing.state.phase, PlaybackSessionPhase.paused);
-    playing.dispatch(PlaybackSessionEvent.applicationResumed());
-    expect(playing.state.phase, PlaybackSessionPhase.playing);
+  test(
+    'foreground recovery restores the phase that was active before pause',
+    () {
+      final playing = PlaybackSessionController(episodeId: 101);
+      addTearDown(playing.dispose);
+      playing.dispatch(PlaybackSessionEvent.openRequested('line-a'));
+      playing.dispatch(PlaybackSessionEvent.firstFrame('line-a'));
+      playing.dispatch(PlaybackSessionEvent.applicationPaused());
+      expect(playing.state.phase, PlaybackSessionPhase.paused);
+      playing.dispatch(PlaybackSessionEvent.applicationResumed());
+      expect(playing.state.phase, PlaybackSessionPhase.playing);
 
-    final buffering = PlaybackSessionController(episodeId: 102);
-    addTearDown(buffering.dispose);
-    buffering.dispatch(PlaybackSessionEvent.openRequested('line-b'));
-    buffering.dispatch(PlaybackSessionEvent.bufferingStarted());
-    buffering.dispatch(PlaybackSessionEvent.applicationPaused());
-    buffering.dispatch(PlaybackSessionEvent.applicationResumed());
-    expect(buffering.state.phase, PlaybackSessionPhase.buffering);
-  });
+      final buffering = PlaybackSessionController(episodeId: 102);
+      addTearDown(buffering.dispose);
+      buffering.dispatch(PlaybackSessionEvent.openRequested('line-b'));
+      buffering.dispatch(PlaybackSessionEvent.bufferingStarted());
+      buffering.dispatch(PlaybackSessionEvent.applicationPaused());
+      buffering.dispatch(PlaybackSessionEvent.applicationResumed());
+      expect(buffering.state.phase, PlaybackSessionPhase.buffering);
+    },
+  );
 
   test('dispose owns the terminal state and rejects late callbacks', () {
     final controller = PlaybackSessionController(episodeId: 101);

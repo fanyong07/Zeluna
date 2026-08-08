@@ -128,9 +128,8 @@ void main() {
     final secondResult = Completer<List<PlaybackLine>>();
     var calls = 0;
     final repository = _repository(
-      loadQuickLines: (_, _, _) => calls++ == 0
-          ? firstResult.future
-          : secondResult.future,
+      loadQuickLines: (_, _, _) =>
+          calls++ == 0 ? firstResult.future : secondResult.future,
     );
     addTearDown(repository.dispose);
 

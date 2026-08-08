@@ -1048,9 +1048,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       if (preserveActivePlayback && _isPlayableLine(_line)) {
         _playbackTrace.record(
           'line_lookup_degraded',
-          fields: <String, Object?>{
-            'error_type': error.runtimeType.toString(),
-          },
+          fields: <String, Object?>{'error_type': error.runtimeType.toString()},
         );
         setState(() {
           _lineLookupMessage = '备用线路加载失败，当前线路继续播放';
