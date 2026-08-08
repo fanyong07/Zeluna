@@ -1342,7 +1342,40 @@ G9 completion boundary:
 
 ## G10 Cloud sync
 
-Status: not_started
+Status: in_progress
+
+### Server incremental sync contract
+
+Audit:
+
+- The G6 `SyncController` only serialized an optional one-shot history upload and explicitly had no durable queue, mutation idempotency, tombstones, pull cursor, or conflict resolution. The server had no account-owned synchronization tables or routes.
+- The recovered specification requires a local-first v1 scope covering favorites, following, history, playback position, appearance, and playback settings. Downloaded media, cookies, private headers, API keys, bearer tokens, temporary playback URLs, and untrusted-rule secrets remain excluded.
+- The four-material read inventory remains `total=4`, `read=4`, `skipped=0`. AniCh reports and VOD samples were used only as historical architecture context; this slice calls no third-party production API and imports no sampled route or token.
+
+Changes:
+
+- Added strict versioned Pydantic contracts for the six allowed record types. Unknown fields are rejected, string/list/number sizes are bounded, stable record identity is checked against the typed payload, and the authenticated account is always derived server-side.
+- Added `POST /api/v1/sync/push` and `GET /api/v1/sync/pull?after_revision=...` with `Cache-Control: no-store`, bounded batches, monotonic server revisions, deterministic pagination, account-scoped idempotency receipts, and one safe retry for concurrent unique-key races.
+- Added repository/service boundaries and an Alembic migration for `sync_revisions`, `sync_records`, and `sync_mutations`. The migration upgrades clean databases, recognizes an already-complete metadata-created schema, rejects partial sync schemas, participates in Alembic check/downgrade, and never auto-runs against production.
+- Conflict rules are explicit: favorite/following/settings use the latest accepted action; history keeps the latest metadata and maximum progress; playback position uses the latest client timestamp, completed wins an equal timestamp, and a strictly newer rewatch can resume; deletions persist as tombstones.
+- Cloud sync records now participate in the G9 privacy lifecycle: account export includes allowlisted record snapshots without mutation hashes or authentication material, and final deletion explicitly erases records, mutation receipts, and revision rows before removing the account.
+
+Tests and gates:
+
+- Focused sync, migration, privacy export, and account-erasure suite: 23 passed.
+- Full server suite: 165 passed, 3 subtests passed, 0 failed. The only warning is the existing third-party TestClient deprecation notice.
+- Sync API regressions cover retry idempotency, mutation-ID content conflicts, two-account isolation, history merge, incremental pull, deletion tombstones, completed-position stale-write rejection, typed payload rejection, and stable identity binding.
+- Python compileall, Ruff, Alembic upgrade/check/downgrade coverage, repository security gate, secret-marker scan, and `git diff --check` passed.
+
+Builds: not run for this server-only protocol slice. It changes no Flutter platform or packaging code; client integration and the cross-platform builds remain required before G10 can be marked completed.
+
+Commit: `e0c9b78 feat: add incremental cloud sync protocol`
+
+Remaining G10 work:
+
+- Add a secure cloud-sync client repository and durable account-scoped Hive mutation queue with deterministic mutation IDs, acknowledgement retention, pull cursors, restart recovery, and migration from existing account-scoped library/settings data.
+- Wire local library and selected settings writes to update the UI immediately, append mutations atomically, upload only while authenticated, and merge pulled records without generating echo mutations.
+- Expose honest synchronization/offline/expired states, keep guest data local-only, and prove reconnect, retry, account switching, logout isolation, two-device conflicts, and restart behavior across Flutter tests before completing G10.
 
 ## G11 Offline downloads
 
