@@ -1999,7 +1999,7 @@ Commit: `cc84b80 fix: require registration verification code`
 
 ### F8 - Final regression and release acceptance
 
-Status: in_progress
+Status: completed
 
 Current audit correction:
 
@@ -2029,13 +2029,20 @@ Local validation on the current implementation HEAD:
   Wasm Release builds passed. The known upstream CMake `CMP0175` warning is
   non-fatal.
 
+Correction branch Quality Gates:
+
+- Run ID: `31263437959`
+- SHA: `9fac96841696fa94999061e17d329b782cf1b176`
+- Result: success; Flutter, Android, Windows, Web, Python, and Supply Chain
+  jobs all completed successfully.
+
 Commits since F4: `5ff1595 style: align correction sources with format gate`;
 `a17f810 security: upgrade cryptography vulnerability baseline`.
 
-Remaining F8 work: update this evidence after the documentation commit, push
-the final correction HEAD, verify the latest six-job GitHub Quality Gates run
-belongs to that exact SHA, then enter F9. No production deployment, public/store
-upload, AAB publication, or private signing-key access is authorized.
+The code/release acceptance at the recorded implementation HEAD is complete.
+This documentation-only commit must still pass an exact-SHA Quality Gates run
+before F9. No production deployment, public/store upload, AAB publication, or
+private signing-key access is authorized.
 
 ### F9 - Automatic safe merge to main
 
