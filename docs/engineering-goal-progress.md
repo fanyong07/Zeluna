@@ -1342,7 +1342,7 @@ G9 completion boundary:
 
 ## G10 Cloud sync
 
-Status: in_progress
+Status: completed
 
 ### Server incremental sync contract
 
@@ -1433,9 +1433,33 @@ Builds: not yet run for this integration checkpoint. Full Flutter tests, reposit
 
 Commit: `8de1d23 feat: integrate local first cloud sync`
 
-Remaining G10 work:
+### Final validation and acceptance
 
-- Run the full client/server regression, repository-wide analysis/security gates, and applicable Android/Windows/Web release builds; resolve any failures before marking G10 completed.
+Final hardening:
+
+- Secure-token deletion failures after a 401 are now contained without exposing or retaining token material in app state. Hive/device-state startup failures become an explicit sync error while the ordinary local account/library/settings startup remains available.
+- Direct storage-failure regression passed together with the authenticated transport suite. Commit: `6d0f4a3 fix: contain cloud sync storage failures`.
+
+Final tests and gates:
+
+- Full Flutter suite: 604 passed, 26 intentionally skipped, 0 failed.
+- Windows WebView lifecycle integration: 2 passed, 0 failed.
+- Full server and Alembic suite: 165 passed, 3 subtests passed, 0 failed. The only warning remains the existing third-party Starlette TestClient deprecation notice.
+- `flutter analyze --suppress-analytics`: 0 issues. Dart format verified 215 files with 0 changes.
+- Python `compileall`, Ruff, strict pip-audit, dependency/license policy, repository artifact/secret gate, and `git diff --check` passed.
+
+Final builds:
+
+- Android debug build passed: `build/app/outputs/flutter-apk/app-debug.apk`, 268,989,371 bytes, SHA-256 `1B063AC145F2B567DFA541C1CCAB607F6323CD9161CCC5A0C4ABA631D78531D6`.
+- Web release build and Wasm dry run passed: `build/web/main.dart.js`, 4,898,443 bytes, SHA-256 `DABE09355BD16179DF703E038A32367515220CD79449E4B61E0C627E431B36CA`.
+- Windows release build passed: `build/windows/x64/runner/Release/Zeluna.exe`, 158,208 bytes, SHA-256 `2814F973D704BE8D76230EF5790EF91D9DE0ECE2F6C7D8A0E17173B29DE9A9FC`; `data/app.so`, 13,648,816 bytes, SHA-256 `089BF8D096B267CD7A5486A8945DEE412BDE9666C25608865A7A9BDBBF2637B1`.
+- Windows emitted only the previously documented upstream WebView CMake `CMP0175` developer warning; it did not fail either the integration test or Release build.
+
+Acceptance:
+
+- G10 is complete: all six allowlisted domains are local-first and account-scoped; durable retries are idempotent; pulls are incremental; tombstones and server conflict results converge; guest, offline, expired, restart, account-switch, logout, two-device, migration, privacy deletion, and no-echo behavior have direct evidence.
+- The four-material read inventory remains `total=4`, `read=4`, `skipped=0`. No AniCh production API, sampled real route, private code/protocol, token, DRM, membership, CAPTCHA, or access-control bypass was used.
+- No real account, production database, migration, scheduler, deployment, signing material, email, secret, irreversible external operation, or downloaded-media upload was accessed or changed.
 
 ## G11 Offline downloads
 
