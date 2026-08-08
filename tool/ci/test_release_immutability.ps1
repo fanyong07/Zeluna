@@ -20,8 +20,10 @@ if ($null -eq $versionLine) {
     throw 'Unable to read the version from pubspec.yaml.'
 }
 $version = $versionLine.Matches[0].Groups[1].Value
-$manifestPath = Join-Path $projectRoot (
-    "release\.immutability-test-{0}.json" -f [Guid]::NewGuid().ToString('N')
+$releaseRoot = Join-Path $projectRoot 'release'
+$createdReleaseRoot = -not (Test-Path -LiteralPath $releaseRoot)
+$manifestPath = Join-Path $releaseRoot (
+    ".immutability-test-{0}.json" -f [Guid]::NewGuid().ToString('N')
 )
 
 function Assert-ImmutableRefusal(
@@ -47,6 +49,7 @@ function Assert-ImmutableRefusal(
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
+    New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
     $androidPath = Join-Path $testRoot "Zeluna-Android-$version-release.apk"
     [System.IO.File]::WriteAllText($androidPath, 'android-sentinel')
@@ -80,5 +83,10 @@ finally {
     }
     if (Test-Path -LiteralPath $testRoot) {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
+    if ($createdReleaseRoot -and
+        (Test-Path -LiteralPath $releaseRoot) -and
+        $null -eq (Get-ChildItem -LiteralPath $releaseRoot -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $releaseRoot -Force
     }
 }
