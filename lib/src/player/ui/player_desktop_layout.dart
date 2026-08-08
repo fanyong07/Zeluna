@@ -70,6 +70,11 @@ class _ResponsivePlayerLayout extends StatelessWidget {
 bool usesMobilePlayerLayoutForSize(Size size, TargetPlatform platform) {
   final mobilePlatform =
       platform == TargetPlatform.android || platform == TargetPlatform.iOS;
+  // A portrait Android/iOS player is still a mobile surface on large-density
+  // emulators and tablets.  Using only shortestSide here made MuMu portrait
+  // windows fall through to the desktop chrome and cover the video with
+  // every desktop control.
+  if (mobilePlatform && size.height > size.width) return true;
   return size.width < 640 || (mobilePlatform && size.shortestSide < 600);
 }
 

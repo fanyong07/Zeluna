@@ -38,6 +38,13 @@ void main() {
       ),
       isTrue,
     );
+    expect(
+      usesMobilePlayerLayoutForSize(
+        const Size(900, 1600),
+        TargetPlatform.android,
+      ),
+      isTrue,
+    );
   });
 
   test('portrait mobile player keeps video above a details surface', () {

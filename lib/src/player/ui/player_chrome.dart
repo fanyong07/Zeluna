@@ -285,25 +285,18 @@ class _PlayerBottomBar extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: portraitMobile
-                ? 36
-                : (compact ? (mobileLandscape ? 42 : 88) : 52),
+            height: portraitMobile ? 36 : (compact ? 42 : 52),
             child: compact
                 ? _MobilePlayerControls(
-                    line: line,
-                    settings: settings,
                     playing: playing,
                     buffering: buffering,
                     loadingLine: loadingLine,
                     fullscreen: fullscreen,
-                    muted: muted,
                     onPlayPause: onPlayPause,
                     onPreviousEpisode: onPreviousEpisode,
                     onNextEpisode: onNextEpisode,
-                    onMute: onMute,
                     onFullscreen: onFullscreen,
-                    onEpisodePanel: onEpisodePanel,
-                    onLinePanel: onLinePanel,
+                    onSubtitlePanel: onSubtitlePanel,
                     landscape: mobileLandscape,
                   )
                 : Row(
@@ -633,158 +626,88 @@ class _VolumeButtonState extends State<_VolumeButton> {
 
 class _MobilePlayerControls extends StatelessWidget {
   const _MobilePlayerControls({
-    required this.line,
-    required this.settings,
     required this.playing,
     required this.buffering,
     required this.loadingLine,
     required this.fullscreen,
-    required this.muted,
     required this.onPlayPause,
     required this.onPreviousEpisode,
     required this.onNextEpisode,
-    required this.onMute,
     required this.onFullscreen,
-    required this.onEpisodePanel,
-    required this.onLinePanel,
+    required this.onSubtitlePanel,
     required this.landscape,
   });
 
-  final PlaybackLine? line;
-  final PlaybackSettings settings;
   final bool playing;
   final bool buffering;
   final bool loadingLine;
   final bool fullscreen;
-  final bool muted;
   final Future<void> Function() onPlayPause;
   final Future<void> Function()? onPreviousEpisode;
   final Future<void> Function()? onNextEpisode;
-  final Future<void> Function() onMute;
   final Future<void> Function() onFullscreen;
-  final VoidCallback onEpisodePanel;
-  final VoidCallback onLinePanel;
+  final VoidCallback onSubtitlePanel;
   final bool landscape;
 
   @override
   Widget build(BuildContext context) {
-    final compactTextButtonStyle = TextButton.styleFrom(
-      foregroundColor: AppColors.theaterInk,
-      minimumSize: Size(0, landscape ? 40 : 32),
-      padding: EdgeInsets.symmetric(horizontal: landscape ? 6 : 2),
-      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      visualDensity: VisualDensity.compact,
-      textStyle: TextStyle(
-        fontSize: landscape ? 14 : 11.5,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-    if (landscape) {
-      return Row(
+    final controlSize = landscape ? 36.0 : 32.0;
+    final sideIconSize = landscape ? 25.0 : 22.0;
+    final primaryIconSize = landscape ? 32.0 : 29.0;
+    return SizedBox(
+      height: controlSize,
+      child: Row(
         children: [
-          _ControlIconButton(
-            icon: Icons.skip_previous_rounded,
-            tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
-            onPressed: onPreviousEpisode,
-            size: 25,
-            compact: true,
-          ),
-          const SizedBox(width: 2),
+          if (onPreviousEpisode != null) ...[
+            _ControlIconButton(
+              icon: Icons.skip_previous_rounded,
+              tooltip: '上一集',
+              onPressed: onPreviousEpisode,
+              size: sideIconSize,
+              compact: true,
+              compactSize: controlSize,
+            ),
+            const SizedBox(width: 2),
+          ],
           _ControlIconButton(
             icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
             tooltip: playing ? '暂停' : '播放',
-            size: 32,
+            size: primaryIconSize,
             busy: loadingLine || buffering,
             onPressed: onPlayPause,
             compact: true,
+            compactSize: controlSize,
           ),
-          const SizedBox(width: 2),
+          if (onNextEpisode != null) ...[
+            const SizedBox(width: 2),
+            _ControlIconButton(
+              icon: Icons.skip_next_rounded,
+              tooltip: '下一集',
+              onPressed: onNextEpisode,
+              size: sideIconSize,
+              compact: true,
+              compactSize: controlSize,
+            ),
+          ],
+          SizedBox(width: landscape ? 8 : 6),
           _ControlIconButton(
-            icon: Icons.skip_next_rounded,
-            tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
-            onPressed: onNextEpisode,
-            size: 25,
+            icon: Icons.subtitles_outlined,
+            tooltip: '字幕设置',
+            onPressed: () async => onSubtitlePanel(),
+            size: landscape ? 24 : 22,
             compact: true,
+            compactSize: controlSize,
           ),
           const Spacer(),
           _ControlIconButton(
-            icon: muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-            tooltip: muted ? '取消静音' : '静音',
-            onPressed: onMute,
-            size: 24,
-            compact: true,
-          ),
-          const SizedBox(width: 2),
-          TextButton(
-            onPressed: onEpisodePanel,
-            style: compactTextButtonStyle,
-            child: const Text('选集'),
-          ),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 152),
-            child: TextButton(
-              onPressed: onLinePanel,
-              style: compactTextButtonStyle,
-              child: Text(
-                line == null ? '线路' : playbackLineProviderLabel(line!),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-          const SizedBox(width: 2),
-          _ControlIconButton(
             icon: fullscreen
                 ? Icons.fullscreen_exit_rounded
                 : Icons.fullscreen_rounded,
             tooltip: fullscreen ? '退出全屏' : '全屏',
             onPressed: onFullscreen,
-            size: 27,
+            size: landscape ? 27 : 23,
             compact: true,
-          ),
-        ],
-      );
-    }
-    return SizedBox(
-      height: 34,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _ControlIconButton(
-            icon: Icons.skip_previous_rounded,
-            tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
-            onPressed: onPreviousEpisode,
-            size: 22,
-            compact: true,
-            compactSize: 32,
-          ),
-          _ControlIconButton(
-            icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-            tooltip: playing ? '暂停' : '播放',
-            size: 29,
-            busy: loadingLine || buffering,
-            onPressed: onPlayPause,
-            compact: true,
-            compactSize: 32,
-          ),
-          _ControlIconButton(
-            icon: Icons.skip_next_rounded,
-            tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
-            onPressed: onNextEpisode,
-            size: 22,
-            compact: true,
-            compactSize: 32,
-          ),
-          const SizedBox(width: 8),
-          _ControlIconButton(
-            icon: fullscreen
-                ? Icons.fullscreen_exit_rounded
-                : Icons.fullscreen_rounded,
-            tooltip: fullscreen ? '退出全屏' : '全屏',
-            onPressed: onFullscreen,
-            size: 23,
-            compact: true,
-            compactSize: 32,
+            compactSize: controlSize,
           ),
         ],
       ),

@@ -373,11 +373,11 @@ class _PlayerCanvas extends StatelessWidget {
                                     child: Stack(
                                       fit: StackFit.expand,
                                       children: [
-                                        const Positioned(
+                                        Positioned(
                                           left: 0,
                                           right: 0,
                                           top: 0,
-                                          height: 126,
+                                          height: compact ? 88 : 126,
                                           child: DecoratedBox(
                                             decoration: BoxDecoration(
                                               gradient:
@@ -385,11 +385,11 @@ class _PlayerCanvas extends StatelessWidget {
                                             ),
                                           ),
                                         ),
-                                        const Positioned(
+                                        Positioned(
                                           left: 0,
                                           right: 0,
                                           bottom: 0,
-                                          height: 190,
+                                          height: compact ? 124 : 190,
                                           child: DecoratedBox(
                                             decoration: BoxDecoration(
                                               gradient:
