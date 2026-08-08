@@ -68,12 +68,6 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
       key: const ValueKey('portraitPlayerDetails'),
       padding: const EdgeInsets.only(bottom: 36),
       children: [
-        _PortraitPlayerNavigation(
-          episodeCount: widget.episodes.length,
-          lineCount: availableLines.length,
-          onEpisodePanel: widget.onEpisodePanel,
-          onLinePanel: widget.onLinePanel,
-        ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 18, 16, 0),
           child: Column(
@@ -257,93 +251,6 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _PortraitPlayerNavigation extends StatelessWidget {
-  const _PortraitPlayerNavigation({
-    required this.episodeCount,
-    required this.lineCount,
-    required this.onEpisodePanel,
-    required this.onLinePanel,
-  });
-
-  final int episodeCount;
-  final int lineCount;
-  final VoidCallback onEpisodePanel;
-  final VoidCallback onLinePanel;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(
-        color: AppColors.theaterBg,
-        border: Border(bottom: BorderSide(color: AppColors.theaterBorder)),
-      ),
-      child: SizedBox(
-        height: 50,
-        child: Row(
-          children: [
-            const SizedBox(width: 10),
-            const _PortraitNavigationItem(label: '简介', selected: true),
-            _PortraitNavigationItem(
-              label: '选集 $episodeCount',
-              onTap: onEpisodePanel,
-            ),
-            _PortraitNavigationItem(label: '线路 $lineCount', onTap: onLinePanel),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PortraitNavigationItem extends StatelessWidget {
-  const _PortraitNavigationItem({
-    required this.label,
-    this.selected = false,
-    this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            Expanded(
-              child: Center(
-                child: Text(
-                  label,
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: selected
-                        ? AppColors.primary2
-                        : AppColors.theaterMuted,
-                    fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              width: selected ? 30 : 0,
-              height: 3,
-              decoration: BoxDecoration(
-                color: AppColors.primary2,
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

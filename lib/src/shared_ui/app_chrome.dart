@@ -500,18 +500,23 @@ class SmallBadge extends StatelessWidget {
     this.active = false,
     this.icon,
     this.onTap,
+    this.compact = false,
   });
 
   final String label;
   final bool active;
   final IconData? icon;
   final VoidCallback? onTap;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 7 : 10,
+        vertical: compact ? 3 : 6,
+      ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -531,6 +536,7 @@ class SmallBadge extends StatelessWidget {
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
                 color: active ? scheme.onPrimary : scheme.onSurfaceVariant,
                 fontWeight: FontWeight.w700,
+                fontSize: compact ? 11 : null,
               ),
             ),
           ),

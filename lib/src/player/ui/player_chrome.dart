@@ -244,10 +244,13 @@ class _PlayerBottomBar extends StatelessWidget {
               style: Theme.of(context).textTheme.titleSmall?.copyWith(
                 color: AppColors.theaterInk,
                 fontWeight: FontWeight.w700,
+                fontSize: mobileLandscape ? null : 13,
               ),
             ),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: EdgeInsets.symmetric(
+              vertical: compact && !mobileLandscape ? 2 : 6,
+            ),
             child: _BufferedSeekBar(
               progress: progress,
               buffered: bufferProgress,
@@ -261,7 +264,7 @@ class _PlayerBottomBar extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: compact ? (mobileLandscape ? 42 : 96) : 52,
+            height: compact ? (mobileLandscape ? 42 : 88) : 52,
             child: compact
                 ? _MobilePlayerControls(
                     line: line,
@@ -284,9 +287,7 @@ class _PlayerBottomBar extends StatelessWidget {
                     children: [
                       _ControlIconButton(
                         icon: Icons.skip_previous_rounded,
-                        tooltip: onPreviousEpisode == null
-                            ? '已经是第一集'
-                            : '上一集',
+                        tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
                         onPressed: onPreviousEpisode,
                         size: 26,
                       ),
@@ -646,11 +647,14 @@ class _MobilePlayerControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final compactTextButtonStyle = TextButton.styleFrom(
       foregroundColor: AppColors.theaterInk,
-      minimumSize: const Size(0, 40),
-      padding: const EdgeInsets.symmetric(horizontal: 6),
+      minimumSize: Size(0, landscape ? 40 : 32),
+      padding: EdgeInsets.symmetric(horizontal: landscape ? 6 : 2),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,
-      textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+      textStyle: TextStyle(
+        fontSize: landscape ? 14 : 11.5,
+        fontWeight: FontWeight.w600,
+      ),
     );
     if (landscape) {
       return Row(
@@ -718,80 +722,95 @@ class _MobilePlayerControls extends StatelessWidget {
         ],
       );
     }
-    return Column(
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            _ControlIconButton(
-              icon: Icons.skip_previous_rounded,
-              tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
-              onPressed: onPreviousEpisode,
-              size: 25,
-              compact: true,
-            ),
-            _ControlIconButton(
-              icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              tooltip: playing ? '暂停' : '播放',
-              size: 34,
-              busy: loadingLine || buffering,
-              onPressed: onPlayPause,
-              compact: true,
-            ),
-            _ControlIconButton(
-              icon: Icons.skip_next_rounded,
-              tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
-              onPressed: onNextEpisode,
-              size: 25,
-              compact: true,
-            ),
-            _ControlIconButton(
-              icon: muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
-              tooltip: muted ? '取消静音' : '静音',
-              onPressed: onMute,
-              size: 24,
-              compact: true,
-            ),
-            _ControlIconButton(
-              icon: fullscreen
-                  ? Icons.fullscreen_exit_rounded
-                  : Icons.fullscreen_rounded,
-              tooltip: fullscreen ? '退出全屏' : '全屏',
-              onPressed: onFullscreen,
-              size: 27,
-              compact: true,
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            SmallBadge(label: _speedLabel(settings.speed)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextButton.icon(
-                onPressed: onLinePanel,
-                style: compactTextButtonStyle,
-                icon: const Icon(Icons.alt_route_rounded, size: 16),
-                label: Text(
-                  line == null ? '线路' : playbackLineProviderLabel(line!),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+    return SizedBox(
+      height: 36,
+      child: Row(
+        children: [
+          _ControlIconButton(
+            icon: Icons.skip_previous_rounded,
+            tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
+            onPressed: onPreviousEpisode,
+            size: 21,
+            compact: true,
+            compactSize: 34,
+          ),
+          _ControlIconButton(
+            icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+            tooltip: playing ? '暂停' : '播放',
+            size: 28,
+            busy: loadingLine || buffering,
+            onPressed: onPlayPause,
+            compact: true,
+            compactSize: 34,
+          ),
+          _ControlIconButton(
+            icon: Icons.skip_next_rounded,
+            tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
+            onPressed: onNextEpisode,
+            size: 21,
+            compact: true,
+            compactSize: 34,
+          ),
+          _ControlIconButton(
+            icon: muted ? Icons.volume_off_rounded : Icons.volume_up_rounded,
+            tooltip: muted ? '取消静音' : '静音',
+            onPressed: onMute,
+            size: 21,
+            compact: true,
+            compactSize: 34,
+          ),
+          _ControlIconButton(
+            icon: fullscreen
+                ? Icons.fullscreen_exit_rounded
+                : Icons.fullscreen_rounded,
+            tooltip: fullscreen ? '退出全屏' : '全屏',
+            onPressed: onFullscreen,
+            size: 22,
+            compact: true,
+            compactSize: 34,
+          ),
+          const SizedBox(width: 1),
+          SmallBadge(label: _speedLabel(settings.speed), compact: true),
+          const SizedBox(width: 1),
+          Expanded(
+            flex: 4,
+            child: TextButton(
+              onPressed: onLinePanel,
+              style: compactTextButtonStyle,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.alt_route_rounded, size: 14),
+                  const SizedBox(width: 2),
+                  Flexible(
+                    child: Text(
+                      line == null ? '线路' : playbackLineProviderLabel(line!),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextButton.icon(
-                onPressed: onEpisodePanel,
-                style: compactTextButtonStyle,
-                icon: const Icon(Icons.video_library_outlined, size: 16),
-                label: const Text('选集'),
+          ),
+          const SizedBox(width: 1),
+          Expanded(
+            flex: 2,
+            child: TextButton(
+              onPressed: onEpisodePanel,
+              style: compactTextButtonStyle,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.video_library_outlined, size: 14),
+                  const SizedBox(width: 2),
+                  const Flexible(child: Text('选集')),
+                ],
               ),
             ),
-          ],
-        ),
-      ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1004,6 +1023,7 @@ class _ControlIconButton extends StatelessWidget {
     this.size = 28,
     this.busy = false,
     this.compact = false,
+    this.compactSize,
   });
 
   final IconData icon;
@@ -1012,6 +1032,7 @@ class _ControlIconButton extends StatelessWidget {
   final double size;
   final bool busy;
   final bool compact;
+  final double? compactSize;
 
   @override
   Widget build(BuildContext context) {
@@ -1021,7 +1042,10 @@ class _ControlIconButton extends StatelessWidget {
         onPressed: onPressed,
         padding: EdgeInsets.zero,
         constraints: compact
-            ? const BoxConstraints.tightFor(width: 40, height: 40)
+            ? BoxConstraints.tightFor(
+                width: compactSize ?? 40,
+                height: compactSize ?? 40,
+              )
             : null,
         visualDensity: compact ? VisualDensity.compact : null,
         icon: busy

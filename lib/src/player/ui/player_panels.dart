@@ -263,75 +263,99 @@ class _EpisodePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-      itemCount: episodes.length,
-      separatorBuilder: (context, index) => const SizedBox(height: 14),
-      itemBuilder: (context, index) {
-        final episode = episodes[index];
-        final active = episode.id == selected.id;
-        return InkWell(
-          onTap: () => onSelected(episode),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 186,
-                height: 96,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(7),
-                  child: Stack(
-                    fit: StackFit.expand,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availableWidth = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width;
+        final thumbnailWidth = (availableWidth * 0.46).clamp(160.0, 240.0);
+        final thumbnailHeight = thumbnailWidth * 0.52;
+        return ListView.separated(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
+          itemCount: episodes.length,
+          separatorBuilder: (context, index) => const SizedBox(height: 10),
+          itemBuilder: (context, index) {
+            final episode = episodes[index];
+            final active = episode.id == selected.id;
+            return Material(
+              color: active ? AppColors.theaterPanelHigh : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () => onSelected(episode),
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Row(
                     children: [
-                      PosterArt(
-                        coverUrl: episode.thumbnailUrl ?? subject.coverUrl,
-                        title: episode.displayTitle,
+                      SizedBox(
+                        width: thumbnailWidth,
+                        height: thumbnailHeight,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              PosterArt(
+                                coverUrl:
+                                    episode.thumbnailUrl ?? subject.coverUrl,
+                                title: episode.displayTitle,
+                              ),
+                              const Positioned(
+                                left: 0,
+                                right: 0,
+                                bottom: 6,
+                                child: Align(
+                                  alignment: Alignment.bottomCenter,
+                                  child: _PanelPill('有资源'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
-                      const Positioned(
-                        left: 64,
-                        bottom: 6,
-                        child: _PanelPill('有资源'),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              episode.displayTitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleMedium
+                                  ?.copyWith(
+                                    color: active
+                                        ? AppColors.primary2
+                                        : AppColors.theaterInk,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              episode.airdate ?? '播出日期待补',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: AppColors.theaterMuted),
+                            ),
+                            if (episode.description.trim().isNotEmpty)
+                              Text(
+                                episode.description,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall
+                                    ?.copyWith(color: AppColors.theaterMuted),
+                              ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      episode.displayTitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: active
-                            ? AppColors.primary2
-                            : AppColors.theaterInk,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    Text(
-                      episode.airdate ?? '播出日期待补',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.theaterMuted,
-                      ),
-                    ),
-                    Text(
-                      episode.description,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: AppColors.theaterMuted,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -392,6 +416,7 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         Padding(
           padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
           child: _LineModeBar(
+            compact: _isMobilePlayerLayout(context),
             selected: _mode,
             onSelected: (mode) => setState(() {
               _mode = mode;
@@ -992,10 +1017,15 @@ class _PanelInlineStatus extends StatelessWidget {
 }
 
 class _LineModeBar extends StatelessWidget {
-  const _LineModeBar({required this.selected, required this.onSelected});
+  const _LineModeBar({
+    required this.selected,
+    required this.onSelected,
+    this.compact = false,
+  });
 
   final _PlaybackSourceMode selected;
   final ValueChanged<_PlaybackSourceMode> onSelected;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -1005,7 +1035,7 @@ class _LineModeBar extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       child: SizedBox(
-        height: 48,
+        height: compact ? 40 : 48,
         child: Row(
           children: [
             _mode(_PlaybackSourceMode.lines, Icons.alt_route_rounded, '线路'),
@@ -1023,6 +1053,7 @@ class _LineModeBar extends StatelessWidget {
       child: _ModeItem(
         icon,
         label,
+        compact: compact,
         selected: selected == mode,
         onTap: () => onSelected(mode),
       ),
@@ -1034,12 +1065,14 @@ class _ModeItem extends StatelessWidget {
   const _ModeItem(
     this.icon,
     this.label, {
+    this.compact = false,
     required this.selected,
     required this.onTap,
   });
 
   final IconData icon;
   final String label;
+  final bool compact;
   final bool selected;
   final VoidCallback onTap;
 
@@ -1047,7 +1080,7 @@ class _ModeItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.primary;
     return Padding(
-      padding: const EdgeInsets.all(4),
+      padding: EdgeInsets.all(compact ? 2 : 4),
       child: Material(
         color: selected ? accent.withValues(alpha: 0.18) : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
@@ -1061,15 +1094,20 @@ class _ModeItem extends StatelessWidget {
               Icon(
                 icon,
                 color: selected ? accent : AppColors.theaterMuted,
-                size: 19,
+                size: compact ? 16 : 19,
               ),
-              const SizedBox(width: 6),
-              Text(
-                label,
-                style: TextStyle(
-                  color: selected ? accent : AppColors.theaterMuted,
-                  fontSize: 12,
-                  fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+              SizedBox(width: compact ? 3 : 6),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: selected ? accent : AppColors.theaterMuted,
+                      fontSize: compact ? 11 : 12,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                    ),
+                  ),
                 ),
               ),
             ],
