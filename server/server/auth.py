@@ -2,6 +2,7 @@
 JWT 认证 + Protobuf token 解析
 """
 
+import asyncio
 import hashlib
 import secrets
 import struct
@@ -11,17 +12,18 @@ from typing import NamedTuple
 import bcrypt
 import jwt
 from fastapi import Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import (
     SECRET_KEY,
     JWT_ALGORITHM,
     ACCESS_TOKEN_EXPIRE,
+    REFRESH_TOKEN_EXPIRE_SECONDS,
     LEGACY_ACCOUNT_API_ENABLED,
     LEGACY_JWT_COMPATIBILITY_ENABLED,
 )
-from .database import User, UserToken
+from .database import RefreshTokenHistory, User, UserToken
 from .privacy import purge_expired_auth_artifacts
 
 
@@ -37,6 +39,29 @@ _INSECURE_SECRET_KEYS = {
 
 class AuthConfigurationError(RuntimeError):
     pass
+
+
+class RefreshTokenError(RuntimeError):
+    """Base error for rejected refresh credentials."""
+
+
+class RefreshTokenReuseDetected(RefreshTokenError):
+    pass
+
+
+class RefreshTokenRejected(RefreshTokenError):
+    pass
+
+
+class SessionCredentials(NamedTuple):
+    access_token: str
+    refresh_token: str
+    session_id: str
+    device_id: str
+    device_name: str
+    platform: str
+    access_expires_at: float
+    refresh_expires_at: float
 
 
 def signing_key() -> str:
@@ -86,7 +111,7 @@ def password_hash_needs_upgrade(hashed: str) -> bool:
     return not hashed.startswith(_BCRYPT_SHA256_PREFIX)
 
 
-def create_jwt(user_id: int) -> str:
+def create_jwt(user_id: int, session_id: str | None = None) -> str:
     now = int(time.time())
     payload = {
         "user_id": user_id,
@@ -97,6 +122,8 @@ def create_jwt(user_id: int) -> str:
         "exp": now + ACCESS_TOKEN_EXPIRE,
         "iat": now,
     }
+    if session_id:
+        payload["session_id"] = session_id
     return jwt.encode(payload, signing_key(), algorithm=JWT_ALGORITHM)
 
 
@@ -150,6 +177,25 @@ def validate_session_token(
     claims = decode_jwt(token)
     if claims is None:
         return None
+    if stored.session_id:
+        if stored.revoked_at > 0:
+            return None
+        if claims.get("session_id") != stored.session_id:
+            return None
+        try:
+            if float(claims["exp"]) <= current:
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+        token_id = claims.get("jti")
+        if (
+            not isinstance(token_id, str)
+            or not token_id
+            or not stored.token_id
+            or not secrets.compare_digest(stored.token_id, token_id)
+        ):
+            return None
+        return claims
     user_id = claims.get("user_id")
     if isinstance(user_id, bool) or not isinstance(user_id, int):
         return None
@@ -183,18 +229,48 @@ def bind_session_claims(stored: UserToken, claims: dict) -> bool:
     return changed
 
 
-async def issue_session_token(session: AsyncSession, user_id: int) -> str:
-    token = create_jwt(user_id)
-    claims = decode_jwt(token)
+_REFRESH_LOCK = asyncio.Lock()
+
+
+async def issue_session_credentials(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    device_id: str = "",
+    device_name: str = "",
+    platform: str = "",
+) -> SessionCredentials:
+    now = time.time()
+    session_id = secrets.token_urlsafe(24)
+    token_family_id = secrets.token_urlsafe(24)
+    refresh_token = secrets.token_urlsafe(48)
+    access_token = create_jwt(user_id, session_id)
+    claims = decode_jwt(access_token)
     if claims is None:
         raise AuthConfigurationError("newly issued account token could not be decoded")
+    refresh_expires_at = now + REFRESH_TOKEN_EXPIRE_SECONDS
     await purge_expired_auth_artifacts(session)
     session.add(
         UserToken(
             user_id=user_id,
-            token=token_digest(token),
+            token=token_digest(refresh_token),
             token_id=str(claims["jti"]),
-            expires_at=float(claims["exp"]),
+            expires_at=refresh_expires_at,
+            session_id=session_id,
+            device_id=device_id[:128],
+            device_name=device_name[:80],
+            platform=platform[:32],
+            token_family_id=token_family_id,
+            last_used_at=now,
+        )
+    )
+    session.add(
+        RefreshTokenHistory(
+            user_id=user_id,
+            session_id=session_id,
+            token_family_id=token_family_id,
+            digest=token_digest(refresh_token),
+            created_at=now,
         )
     )
     await session.flush()
@@ -207,7 +283,99 @@ async def issue_session_token(session: AsyncSession, user_id: int) -> str:
     )
     for stale_token in existing[4:]:
         await session.delete(stale_token)
-    return token
+    return SessionCredentials(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        session_id=session_id,
+        device_id=device_id[:128],
+        device_name=device_name[:80],
+        platform=platform[:32],
+        access_expires_at=float(claims["exp"]),
+        refresh_expires_at=refresh_expires_at,
+    )
+
+
+async def issue_session_token(session: AsyncSession, user_id: int) -> str:
+    """Compatibility wrapper returning only the new short-lived access token."""
+    credentials = await issue_session_credentials(session, user_id)
+    return credentials.access_token
+
+
+async def rotate_refresh_token(
+    session: AsyncSession,
+    refresh_token: str,
+) -> SessionCredentials:
+    """Rotate one opaque refresh token and reject any reuse of old digests."""
+    digest = token_digest(refresh_token.strip())
+    if not refresh_token.strip():
+        raise RefreshTokenRejected("refresh token is empty")
+    async with _REFRESH_LOCK:
+        history = await session.scalar(
+            select(RefreshTokenHistory).where(RefreshTokenHistory.digest == digest)
+        )
+        if history is None:
+            raise RefreshTokenRejected("refresh token is invalid")
+        if history.used_at > 0:
+            now = time.time()
+            history.reuse_detected_at = now
+            await session.execute(
+                update(UserToken)
+                .where(UserToken.token_family_id == history.token_family_id)
+                .values(revoked_at=now)
+            )
+            await session.commit()
+            raise RefreshTokenReuseDetected("refresh token reuse detected")
+
+        current = await session.scalar(
+            select(UserToken).where(
+                UserToken.session_id == history.session_id,
+                UserToken.token == digest,
+            )
+        )
+        now = time.time()
+        if (
+            current is None
+            or current.revoked_at > 0
+            or current.expires_at <= now
+            or current.token_family_id != history.token_family_id
+        ):
+            raise RefreshTokenRejected("refresh session is invalid")
+
+        user = await session.get(User, current.user_id)
+        if user is None:
+            raise RefreshTokenRejected("refresh session is invalid")
+        new_refresh = secrets.token_urlsafe(48)
+        new_digest = token_digest(new_refresh)
+        access_token = create_jwt(user.id, current.session_id)
+        claims = decode_jwt(access_token)
+        if claims is None:
+            raise AuthConfigurationError("rotated access token could not be decoded")
+        history.used_at = now
+        history.replaced_by_digest = new_digest
+        current.token = new_digest
+        current.token_id = str(claims["jti"])
+        current.last_used_at = now
+        current.refresh_rotated_at = now
+        session.add(
+            RefreshTokenHistory(
+                user_id=current.user_id,
+                session_id=current.session_id or "",
+                token_family_id=current.token_family_id,
+                digest=new_digest,
+                created_at=now,
+            )
+        )
+        await session.commit()
+        return SessionCredentials(
+            access_token=access_token,
+            refresh_token=new_refresh,
+            session_id=current.session_id or "",
+            device_id=current.device_id,
+            device_name=current.device_name,
+            platform=current.platform,
+            access_expires_at=float(claims["exp"]),
+            refresh_expires_at=current.expires_at,
+        )
 
 
 def generate_verify_code() -> str:
@@ -294,20 +462,33 @@ async def get_current_user(
     if parsed is None:
         return None
 
-    # New sessions are stored as SHA-256 digests so a database leak cannot be
-    # replayed as a bearer token. Raw legacy tokens are accepted only when the
-    # old account API is explicitly enabled.
-    accepted_tokens = [token_digest(parsed.token)]
-    if LEGACY_ACCOUNT_API_ENABLED:
-        accepted_tokens.append(parsed.token)
-    stmt = select(UserToken).where(UserToken.token.in_(accepted_tokens))
-    result = await session.execute(stmt)
-    user_token = result.scalar_one_or_none()
+    claims = decode_jwt(parsed.token)
+    session_id = claims.get("session_id") if isinstance(claims, dict) else None
+    if isinstance(session_id, str) and session_id:
+        # New access tokens are bound to a device session. The database stores
+        # only the refresh-token digest, so resolve them by session id.
+        user_token = await session.scalar(
+            select(UserToken).where(UserToken.session_id == session_id)
+        )
+    else:
+        # Legacy rows may still contain a digest (or, only when the explicitly
+        # bounded legacy API is enabled, the historical raw token).
+        accepted_tokens = [token_digest(parsed.token)]
+        if LEGACY_ACCOUNT_API_ENABLED:
+            accepted_tokens.append(parsed.token)
+        result = await session.execute(
+            select(UserToken).where(UserToken.token.in_(accepted_tokens))
+        )
+        user_token = result.scalar_one_or_none()
     if user_token:
         claims = validate_session_token(parsed.token, user_token)
         if claims is None:
-            await session.delete(user_token)
-            await session.commit()
+            # An expired access token must not destroy a still-valid refresh
+            # session. Legacy rows have no refresh lifecycle and can be safely
+            # removed once they fail validation.
+            if not user_token.session_id:
+                await session.delete(user_token)
+                await session.commit()
             return None
         if bind_session_claims(user_token, claims):
             await session.commit()

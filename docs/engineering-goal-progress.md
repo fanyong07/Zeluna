@@ -1798,7 +1798,44 @@ The focused set passed (18 tests); the full server suite passed (174 tests,
 3 subtests, 0 failures), with the existing Starlette deprecation warning only.
 Ruff, compileall, and `git diff --check` passed.
 
-F2: in_progress
+### F2 - Access / Refresh / Device Sessions
+
+Status: completed
+
+Implementation:
+
+- Access JWTs now default to a bounded 15-minute lifetime; refresh lifetime is
+  bounded to 30 days by configuration.
+- Refresh credentials are cryptographically random opaque values. Only their
+  SHA-256 digests are stored in `user_tokens` and `refresh_token_history`.
+- Device-scoped sessions support rotation, one-time-use enforcement, reuse
+  detection with token-family revocation, session listing, single-session
+  revocation, revoke-others, and logout revocation.
+- New access tokens resolve their session by `session_id`; expiry does not
+  destroy a still-valid refresh session. Account operations remain scoped by
+  `user_id`, including session IDOR protection.
+- Flutter stores access/refresh/session metadata and an install-scoped random
+  device ID through secure storage. Account requests use one refresh in flight,
+  retry the original request at most once, and clear local credentials when
+  refresh fails. The install device ID survives logout credential cleanup.
+- Added reversible migration `0008_account_refresh_sessions`; legacy token rows
+  remain structurally intact for bounded compatibility.
+
+Tests and gates:
+
+- Flutter focused cloud-account and account-controller suites passed, including
+  concurrent 401 single-flight refresh, refresh failure sign-out, secure
+  credential rotation, and no-refresh-loop behavior; Dart format and analyze
+  passed with 0 issues.
+- Full server suite passed: 176 tests, 3 subtests, 0 failures; Ruff and
+  `python -m compileall server tests` passed. Migration, account deletion,
+  sync, legacy route, session rotation, reuse detection, and cross-account IDOR
+  regressions are included.
+- No production account, token, signing key, database, deployment, or public
+  release was accessed or changed.
+
+Commit: pending (`security: add rotating account sessions`)
+
 F3: not_started
 F4: not_started
 F5: not_started

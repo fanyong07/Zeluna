@@ -103,9 +103,59 @@ class UserToken(Base):
     expires_at: Mapped[float] = mapped_column(
         Float, default=0.0, server_default="0"
     )
+    # New account sessions use these fields. Rows without a session_id are
+    # retained only for bounded legacy JWT compatibility during migration.
+    session_id: Mapped[str | None] = mapped_column(
+        String(96), unique=True, index=True, nullable=True
+    )
+    device_id: Mapped[str] = mapped_column(
+        String(128), default="", server_default=""
+    )
+    device_name: Mapped[str] = mapped_column(
+        String(80), default="", server_default=""
+    )
+    platform: Mapped[str] = mapped_column(
+        String(32), default="", server_default=""
+    )
+    token_family_id: Mapped[str] = mapped_column(
+        String(96), default="", server_default="", index=True
+    )
+    last_used_at: Mapped[float] = mapped_column(
+        Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+        server_default="0",
+    )
+    revoked_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0", index=True
+    )
+    refresh_rotated_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
 
     user: Mapped["User"] = relationship("User", back_populates="tokens")
+
+
+class RefreshTokenHistory(Base):
+    """Digest-only history used to detect reuse of rotated refresh tokens."""
+
+    __tablename__ = "refresh_token_history"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    session_id: Mapped[str] = mapped_column(String(96), index=True)
+    token_family_id: Mapped[str] = mapped_column(String(96), index=True)
+    digest: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    created_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+    used_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    replaced_by_digest: Mapped[str] = mapped_column(
+        String(128), default="", server_default=""
+    )
+    reuse_detected_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
 
 
 class VerifyCode(Base):

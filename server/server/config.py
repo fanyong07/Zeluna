@@ -8,7 +8,22 @@ BASE_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR}/data.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "").strip()
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE = 30 * 24 * 3600  # 30 days
+
+
+def _bounded_seconds(name: str, default: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(os.getenv(name, str(default)))))
+
+
+# Access tokens are deliberately short-lived. Refresh credentials are opaque
+# and rotated by the account session service rather than represented as JWTs.
+ACCESS_TOKEN_EXPIRE_SECONDS = _bounded_seconds(
+    "ACCESS_TOKEN_EXPIRE_SECONDS", 15 * 60, 60, 60 * 60
+)
+REFRESH_TOKEN_EXPIRE_SECONDS = _bounded_seconds(
+    "REFRESH_TOKEN_EXPIRE_SECONDS", 30 * 24 * 3600, 24 * 3600, 180 * 24 * 3600
+)
+# Retain the old import name for bounded compatibility with existing callers.
+ACCESS_TOKEN_EXPIRE = ACCESS_TOKEN_EXPIRE_SECONDS
 
 # 存储路径
 UPLOAD_DIR = BASE_DIR / "uploads"

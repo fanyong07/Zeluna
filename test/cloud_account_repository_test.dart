@@ -591,6 +591,110 @@ void main() {
       expect(tokens.value, isNull);
     },
   );
+
+  test(
+    'concurrent expired requests share one refresh and retry once',
+    () async {
+      final tokens = _MemoryCredentialStore(
+        const CloudAccountCredentials(
+          accessToken: 'expired-access',
+          refreshToken: 'refresh-before-rotation',
+          sessionId: 'session-1',
+          deviceId: 'device-1',
+        ),
+      );
+      var refreshCalls = 0;
+      var expiredCalls = 0;
+      var freshCalls = 0;
+      final client = MockClient((request) async {
+        if (request.url.path.endsWith('/me')) {
+          if (request.headers['Authorization'] == 'Bearer expired-access') {
+            expiredCalls++;
+            return http.Response(jsonEncode({'detail': 'expired'}), 401);
+          }
+          freshCalls++;
+          return http.Response(
+            jsonEncode({
+              'user': {
+                'id': '42',
+                'email': 'user@example.com',
+                'nickname': 'user',
+                'created_at': 1767225600,
+                'updated_at': 1767225601,
+              },
+            }),
+            200,
+          );
+        }
+        expect(request.url.path, '/api/v1/auth/refresh');
+        refreshCalls++;
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(jsonDecode(request.body), {
+          'refresh_token': 'refresh-before-rotation',
+        });
+        return http.Response(
+          jsonEncode({
+            'access_token': 'fresh-access',
+            'refresh_token': 'fresh-refresh',
+            'session': {
+              'session_id': 'session-1',
+              'device_id': 'device-1',
+              'device_name': 'Windows',
+              'platform': 'windows',
+              'access_expires_at': 1767226500,
+              'refresh_expires_at': 1769818500,
+            },
+          }),
+          200,
+        );
+      });
+      addTearDown(client.close);
+      final repository = CloudAccountRepository(
+        baseUrl: 'https://api.example',
+        client: client,
+        tokenStore: tokens,
+      );
+
+      final restored = await Future.wait([
+        repository.restoreSession(null),
+        repository.restoreSession(null),
+      ]);
+
+      expect(restored, everyElement(isA<LocalAccount>()));
+      expect(expiredCalls, 2);
+      expect(freshCalls, 2);
+      expect(refreshCalls, 1);
+      expect(tokens.credentials?.accessToken, 'fresh-access');
+      expect(tokens.credentials?.refreshToken, 'fresh-refresh');
+    },
+  );
+
+  test('refresh failure clears secure credentials and never loops', () async {
+    final tokens = _MemoryCredentialStore(
+      const CloudAccountCredentials(
+        accessToken: 'expired-access',
+        refreshToken: 'refresh-token',
+      ),
+    );
+    var refreshCalls = 0;
+    final client = MockClient((request) async {
+      if (request.url.path.endsWith('/me')) {
+        return http.Response(jsonEncode({'detail': 'expired'}), 401);
+      }
+      refreshCalls++;
+      return http.Response(jsonEncode({'detail': 'refresh expired'}), 401);
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+
+    expect(await repository.restoreSession(null), isNull);
+    expect(refreshCalls, 1);
+    expect(tokens.credentials, isNull);
+  });
 }
 
 class _MemoryTokenStore implements CloudAccountTokenStore {
@@ -604,4 +708,30 @@ class _MemoryTokenStore implements CloudAccountTokenStore {
 
   @override
   Future<void> write(String token) async => value = token;
+}
+
+class _MemoryCredentialStore
+    implements CloudAccountTokenStore, CloudAccountCredentialStore {
+  _MemoryCredentialStore(this.credentials);
+
+  CloudAccountCredentials? credentials;
+
+  @override
+  Future<String?> read() async => credentials?.accessToken;
+
+  @override
+  Future<void> write(String token) async {
+    credentials = CloudAccountCredentials(accessToken: token);
+  }
+
+  @override
+  Future<void> delete() async => credentials = null;
+
+  @override
+  Future<CloudAccountCredentials?> readCredentials() async => credentials;
+
+  @override
+  Future<void> writeCredentials(CloudAccountCredentials value) async {
+    credentials = value;
+  }
 }

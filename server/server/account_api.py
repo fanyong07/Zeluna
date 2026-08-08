@@ -17,13 +17,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
     AuthConfigurationError,
+    decode_jwt,
+    RefreshTokenRejected,
+    RefreshTokenReuseDetected,
+    SessionCredentials,
     bind_session_claims,
     generate_verify_code,
     hash_password,
+    issue_session_credentials,
     issue_session_token,
     password_hash_needs_upgrade,
     signing_key,
     token_digest,
+    rotate_refresh_token,
     validate_session_token,
     verify_login_password,
     verify_password,
@@ -54,6 +60,9 @@ class RegisterRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=40)
     password: str = Field(min_length=8, max_length=128)
     code: str = Field(pattern=r"^\d{6}$")
+    device_id: str = Field(default="", max_length=128)
+    device_name: str = Field(default="", max_length=80)
+    platform: str = Field(default="", max_length=32)
 
     @field_validator("nickname")
     @classmethod
@@ -67,6 +76,9 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
+    device_id: str = Field(default="", max_length=128)
+    device_name: str = Field(default="", max_length=80)
+    platform: str = Field(default="", max_length=32)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -82,6 +94,10 @@ class ResetPasswordRequest(BaseModel):
     email: EmailStr
     code: str = Field(pattern=r"^\d{6}$")
     new_password: str = Field(min_length=8, max_length=128)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=20, max_length=256)
 
 
 class ProfileRequest(BaseModel):
@@ -252,6 +268,51 @@ async def _issue_token(session: AsyncSession, user: User) -> str:
     return token
 
 
+async def _issue_credentials(
+    session: AsyncSession,
+    user: User,
+    *,
+    device_id: str = "",
+    device_name: str = "",
+    platform: str = "",
+) -> SessionCredentials:
+    try:
+        credentials = await issue_session_credentials(
+            session,
+            user.id,
+            device_id=device_id.strip(),
+            device_name=device_name.strip(),
+            platform=platform.strip(),
+        )
+    except AuthConfigurationError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="璐﹀彿鏈嶅姟瀹夊叏閰嶇疆涓嶅彲鐢?",
+        ) from error
+    await session.commit()
+    return credentials
+
+
+def _credentials_payload(
+    credentials: SessionCredentials,
+    user: User,
+) -> dict[str, object]:
+    return {
+        "user": _user_payload(user),
+        "access_token": credentials.access_token,
+        "refresh_token": credentials.refresh_token,
+        "token_type": "bearer",
+        "session": {
+            "session_id": credentials.session_id,
+            "device_id": credentials.device_id,
+            "device_name": credentials.device_name,
+            "platform": credentials.platform,
+            "access_expires_at": credentials.access_expires_at,
+            "refresh_expires_at": credentials.refresh_expires_at,
+        },
+    }
+
+
 async def current_account(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> tuple[User, UserToken]:
@@ -266,16 +327,25 @@ async def current_account(
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
-    result = await session.execute(
-        select(UserToken).where(UserToken.token == token_digest(token.strip()))
-    )
-    user_token = result.scalar_one_or_none()
+    raw_token = token.strip()
+    decoded = decode_jwt(raw_token)
+    session_id = decoded.get("session_id") if isinstance(decoded, dict) else None
+    if isinstance(session_id, str) and session_id:
+        user_token = await session.scalar(
+            select(UserToken).where(UserToken.session_id == session_id)
+        )
+    else:
+        result = await session.execute(
+            select(UserToken).where(UserToken.token == token_digest(raw_token))
+        )
+        user_token = result.scalar_one_or_none()
     if user_token is None:
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
-    claims = validate_session_token(token.strip(), user_token)
+    claims = validate_session_token(raw_token, user_token)
     if claims is None:
-        await session.delete(user_token)
-        await session.commit()
+        if not user_token.session_id:
+            await session.delete(user_token)
+            await session.commit()
         raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
     if bind_session_claims(user_token, claims):
         await session.commit()
@@ -393,8 +463,14 @@ async def register(
     except IntegrityError as error:
         await session.rollback()
         raise HTTPException(status_code=409, detail="昵称或邮箱已被使用") from error
-    token = await _issue_token(session, user)
-    return {"user": _user_payload(user), "access_token": token, "token_type": "bearer"}
+    credentials = await _issue_credentials(
+        session,
+        user,
+        device_id=payload.device_id,
+        device_name=payload.device_name,
+        platform=payload.platform,
+    )
+    return _credentials_payload(credentials, user)
 
 
 @router.post("/login")
@@ -418,8 +494,40 @@ async def login(
     if password_hash_needs_upgrade(user.password_hash):
         user.password_hash = hash_password(payload.password)
     user.updated_at = time.time()
-    token = await _issue_token(session, user)
-    return {"user": _user_payload(user), "access_token": token, "token_type": "bearer"}
+    credentials = await _issue_credentials(
+        session,
+        user,
+        device_id=payload.device_id,
+        device_name=payload.device_name,
+        platform=payload.platform,
+    )
+    return _credentials_payload(credentials, user)
+
+
+@router.post("/refresh")
+async def refresh(
+    payload: RefreshRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        credentials = await rotate_refresh_token(session, payload.refresh_token)
+    except RefreshTokenReuseDetected as error:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "refresh_reuse_detected", "message": "请重新登录"},
+        ) from error
+    except (RefreshTokenRejected, AuthConfigurationError) as error:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "refresh_expired", "message": "登录状态已失效，请重新登录"},
+        ) from error
+    stored = await session.scalar(
+        select(UserToken).where(UserToken.session_id == credentials.session_id)
+    )
+    user = await session.get(User, stored.user_id) if stored is not None else None
+    if user is None:
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+    return _credentials_payload(credentials, user)
 
 
 @router.get("/me")
@@ -427,12 +535,89 @@ async def me(account: tuple[User, UserToken] = Depends(current_account)):
     return {"user": _user_payload(account[0])}
 
 
+def _session_payload(row: UserToken, *, current: bool = False) -> dict[str, object]:
+    return {
+        "session_id": row.session_id,
+        "device_name": row.device_name,
+        "platform": row.platform,
+        "created_at": row.created_at,
+        "last_used_at": row.last_used_at,
+        "expires_at": row.expires_at,
+        "current": current,
+    }
+
+
+@router.get("/sessions")
+async def list_sessions(
+    account: tuple[User, UserToken] = Depends(current_account),
+    session: AsyncSession = Depends(get_session),
+):
+    rows = list(
+        await session.scalars(
+            select(UserToken)
+            .where(
+                UserToken.user_id == account[0].id,
+                UserToken.session_id.is_not(None),
+                UserToken.revoked_at == 0,
+                UserToken.expires_at > time.time(),
+            )
+            .order_by(UserToken.created_at.desc(), UserToken.id.desc())
+        )
+    )
+    return {
+        "sessions": [
+            _session_payload(row, current=row.id == account[1].id) for row in rows
+        ]
+    }
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def revoke_session(
+    session_id: str,
+    account: tuple[User, UserToken] = Depends(current_account),
+    session: AsyncSession = Depends(get_session),
+):
+    target = await session.scalar(
+        select(UserToken).where(
+            UserToken.user_id == account[0].id,
+            UserToken.session_id == session_id.strip(),
+            UserToken.session_id.is_not(None),
+        )
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    target.revoked_at = time.time()
+    await session.commit()
+
+
+@router.post("/sessions/revoke-others", status_code=204)
+async def revoke_other_sessions(
+    account: tuple[User, UserToken] = Depends(current_account),
+    session: AsyncSession = Depends(get_session),
+):
+    if account[1].session_id:
+        await session.execute(
+            update(UserToken)
+            .where(
+                UserToken.user_id == account[0].id,
+                UserToken.session_id.is_not(None),
+                UserToken.id != account[1].id,
+                UserToken.revoked_at == 0,
+            )
+            .values(revoked_at=time.time())
+        )
+    await session.commit()
+
+
 @router.post("/logout", status_code=204)
 async def logout(
     account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
-    await session.delete(account[1])
+    if account[1].session_id:
+        account[1].revoked_at = time.time()
+    else:
+        await session.delete(account[1])
     await session.commit()
 
 

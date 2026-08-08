@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/network/network_http_client.dart';
@@ -18,6 +20,19 @@ const defaultCloudAccountBaseUrl = String.fromEnvironment(
   'ZELUNA_ACCOUNT_URL',
   defaultValue: _defaultZelunaBackendUrl,
 );
+
+String get _deviceName => kIsWeb
+    ? 'Web'
+    : switch (defaultTargetPlatform) {
+        TargetPlatform.windows => 'Windows',
+        TargetPlatform.android => 'Android',
+        TargetPlatform.iOS => 'iOS',
+        TargetPlatform.macOS => 'macOS',
+        TargetPlatform.linux => 'Linux',
+        TargetPlatform.fuchsia => 'Fuchsia',
+      };
+
+String get _platformName => kIsWeb ? 'web' : defaultTargetPlatform.name;
 
 abstract interface class CloudAccountService {
   Future<LocalAccount?> restoreSession(LocalAccount? cachedAccount);
@@ -70,21 +85,145 @@ abstract interface class CloudAccountTokenStore {
   Future<void> delete();
 }
 
-class SecureCloudAccountTokenStore implements CloudAccountTokenStore {
+class CloudAccountCredentials {
+  const CloudAccountCredentials({
+    required this.accessToken,
+    this.refreshToken,
+    this.sessionId,
+    this.deviceId,
+    this.deviceName,
+    this.platform,
+    this.accessExpiresAt,
+    this.refreshExpiresAt,
+  });
+
+  final String accessToken;
+  final String? refreshToken;
+  final String? sessionId;
+  final String? deviceId;
+  final String? deviceName;
+  final String? platform;
+  final DateTime? accessExpiresAt;
+  final DateTime? refreshExpiresAt;
+}
+
+abstract interface class CloudAccountCredentialStore {
+  Future<CloudAccountCredentials?> readCredentials();
+
+  Future<void> writeCredentials(CloudAccountCredentials credentials);
+}
+
+class SecureCloudAccountTokenStore
+    implements CloudAccountTokenStore, CloudAccountCredentialStore {
   SecureCloudAccountTokenStore({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const _key = 'zeluna.cloud.account.token.v1';
+  static const _accessKey = 'zeluna.cloud.account.access.v2';
+  static const _refreshKey = 'zeluna.cloud.account.refresh.v2';
+  static const _sessionKey = 'zeluna.cloud.account.session.v2';
+  static const _deviceKey = 'zeluna.cloud.account.device.v2';
+  static const _deviceNameKey = 'zeluna.cloud.account.device-name.v2';
+  static const _platformKey = 'zeluna.cloud.account.platform.v2';
+  static const _accessExpiryKey = 'zeluna.cloud.account.access-expiry.v2';
+  static const _refreshExpiryKey = 'zeluna.cloud.account.refresh-expiry.v2';
   final FlutterSecureStorage _storage;
 
   @override
-  Future<String?> read() => _storage.read(key: _key);
+  Future<String?> read() async {
+    final access = await _storage.read(key: _accessKey);
+    return access ?? await _storage.read(key: _key);
+  }
 
   @override
   Future<void> write(String token) => _storage.write(key: _key, value: token);
 
   @override
-  Future<void> delete() => _storage.delete(key: _key);
+  Future<void> delete() async {
+    for (final key in [
+      _key,
+      _accessKey,
+      _refreshKey,
+      _sessionKey,
+      _deviceNameKey,
+      _platformKey,
+      _accessExpiryKey,
+      _refreshExpiryKey,
+    ]) {
+      await _storage.delete(key: key);
+    }
+  }
+
+  @override
+  Future<CloudAccountCredentials?> readCredentials() async {
+    final access = (await read())?.trim() ?? '';
+    if (access.isEmpty) return null;
+    return CloudAccountCredentials(
+      accessToken: access,
+      refreshToken: (await _storage.read(key: _refreshKey))?.trim(),
+      sessionId: await _storage.read(key: _sessionKey),
+      deviceId: await _storage.read(key: _deviceKey),
+      deviceName: await _storage.read(key: _deviceNameKey),
+      platform: await _storage.read(key: _platformKey),
+      accessExpiresAt: _readDate(await _storage.read(key: _accessExpiryKey)),
+      refreshExpiresAt: _readDate(await _storage.read(key: _refreshExpiryKey)),
+    );
+  }
+
+  @override
+  Future<void> writeCredentials(CloudAccountCredentials credentials) async {
+    await _storage.write(key: _key, value: credentials.accessToken);
+    await _storage.write(key: _accessKey, value: credentials.accessToken);
+    await _writeOptional(_refreshKey, credentials.refreshToken);
+    await _writeOptional(_sessionKey, credentials.sessionId);
+    await _writeIfPresent(_deviceKey, credentials.deviceId);
+    await _writeOptional(_deviceNameKey, credentials.deviceName);
+    await _writeOptional(_platformKey, credentials.platform);
+    await _writeOptional(
+      _accessExpiryKey,
+      credentials.accessExpiresAt?.millisecondsSinceEpoch.toString(),
+    );
+    await _writeOptional(
+      _refreshExpiryKey,
+      credentials.refreshExpiresAt?.millisecondsSinceEpoch.toString(),
+    );
+  }
+
+  Future<String> readOrCreateDeviceId() async {
+    final existing = (await _storage.read(key: _deviceKey))?.trim() ?? '';
+    if (RegExp(r'^[a-f0-9]{32}$').hasMatch(existing)) return existing;
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    final deviceId = bytes
+        .map((value) => value.toRadixString(16).padLeft(2, '0'))
+        .join();
+    await _storage.write(key: _deviceKey, value: deviceId);
+    return deviceId;
+  }
+
+  Future<void> _writeOptional(String key, String? value) async {
+    if (value == null || value.trim().isEmpty) {
+      await _storage.delete(key: key);
+    } else {
+      await _storage.write(key: key, value: value);
+    }
+  }
+
+  Future<void> _writeIfPresent(String key, String? value) async {
+    if (value != null && value.trim().isNotEmpty) {
+      await _storage.write(key: key, value: value);
+    }
+  }
+
+  DateTime? _readDate(String? value) {
+    final milliseconds = int.tryParse(value?.trim() ?? '');
+    if (milliseconds == null || milliseconds <= 0) return null;
+    try {
+      return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+    } on Object {
+      return null;
+    }
+  }
 }
 
 class AccountDeletionSchedule {
@@ -137,6 +276,12 @@ class CloudAccountRepository
   final bool _ownsClient;
   final CloudAccountTokenStore _tokenStore;
   final Duration requestTimeout;
+  Future<String?>? _refreshInFlight;
+
+  CloudAccountCredentialStore? get _credentialStore =>
+      _tokenStore is CloudAccountCredentialStore
+      ? _tokenStore as CloudAccountCredentialStore
+      : null;
 
   @override
   Future<LocalAccount?> restoreSession(LocalAccount? cachedAccount) async {
@@ -192,6 +337,7 @@ class CloudAccountRepository
     required String password,
     required String verificationCode,
   }) async {
+    final device = await _deviceMetadata();
     final response = await _post(
       'register',
       body: {
@@ -199,6 +345,7 @@ class CloudAccountRepository
         'nickname': _validateNickname(nickname),
         'password': _validatePassword(password),
         'code': _validateCode(verificationCode),
+        ...device,
       },
     );
     return _persistSession(_decodeSuccess(response));
@@ -209,9 +356,10 @@ class CloudAccountRepository
     required String email,
     required String password,
   }) async {
+    final device = await _deviceMetadata();
     final response = await _post(
       'login',
-      body: {'email': _validateEmail(email), 'password': password},
+      body: {'email': _validateEmail(email), 'password': password, ...device},
     );
     return _persistSession(_decodeSuccess(response));
   }
@@ -347,11 +495,60 @@ class CloudAccountRepository
     if (token.isEmpty) throw const AccountException('服务器没有返回登录状态，请重试');
     final account = _accountFrom(body['user']);
     try {
-      await _tokenStore.write(token);
+      await _persistCredentialsBody(body);
     } catch (_) {
       throw const AccountException('无法安全保存登录状态，请检查系统凭据存储');
     }
     return account;
+  }
+
+  Future<void> _persistCredentialsBody(Map<String, dynamic> body) async {
+    final token = body['access_token']?.toString().trim() ?? '';
+    if (token.isEmpty) {
+      throw const AccountException('服务器没有返回登录状态，请重试');
+    }
+    final session = body['session'];
+    final sessionMap = session is Map
+        ? session.cast<Object?, Object?>()
+        : const <Object?, Object?>{};
+    final refreshToken = body['refresh_token']?.toString().trim();
+    final store = _credentialStore;
+    if (store != null) {
+      if (refreshToken == null || refreshToken.isEmpty) {
+        throw const AccountException('服务器没有返回可续期的登录状态，请重试');
+      }
+      await store.writeCredentials(
+        CloudAccountCredentials(
+          accessToken: token,
+          refreshToken: refreshToken,
+          sessionId: sessionMap['session_id']?.toString(),
+          deviceId: sessionMap['device_id']?.toString(),
+          deviceName: sessionMap['device_name']?.toString(),
+          platform: sessionMap['platform']?.toString(),
+          accessExpiresAt: _dateTimeFromSeconds(
+            sessionMap['access_expires_at'],
+          ),
+          refreshExpiresAt: _dateTimeFromSeconds(
+            sessionMap['refresh_expires_at'],
+          ),
+        ),
+      );
+      return;
+    }
+    await _tokenStore.write(token);
+  }
+
+  Map<String, dynamic> _decodeJsonBody(http.Response response) {
+    if (response.bodyBytes.isEmpty) {
+      throw const AccountException('账号服务器返回了空数据');
+    }
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map) throw const FormatException();
+      return decoded.cast<String, dynamic>();
+    } on Object {
+      throw const AccountException('账号服务器返回了无法识别的数据');
+    }
   }
 
   Future<http.Response> _post(
@@ -366,7 +563,74 @@ class CloudAccountRepository
     String? token,
   }) => _send('PATCH', path, body: body, token: token);
 
+  Future<String?> _refreshSingleFlight(String failedAccessToken) {
+    final existing = _refreshInFlight;
+    if (existing != null) return existing;
+    final future = _refresh(failedAccessToken);
+    _refreshInFlight = future;
+    return future.whenComplete(() {
+      if (identical(_refreshInFlight, future)) _refreshInFlight = null;
+    });
+  }
+
+  Future<String?> _refresh(String failedAccessToken) async {
+    final credentials = await _readCredentials();
+    final refreshToken = credentials?.refreshToken?.trim() ?? '';
+    if (credentials == null || refreshToken.isEmpty) return null;
+    if (credentials.accessToken != failedAccessToken) {
+      return credentials.accessToken;
+    }
+    try {
+      final response = await _sendRaw(
+        'POST',
+        'refresh',
+        body: {'refresh_token': refreshToken},
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        await _tokenStore.delete();
+        return null;
+      }
+      final body = _decodeJsonBody(response);
+      await _persistCredentialsBody(body);
+      return body['access_token']?.toString().trim();
+    } on Object {
+      await _tokenStore.delete();
+      return null;
+    }
+  }
+
   Future<http.Response> _send(
+    String method,
+    String path, {
+    Map<String, Object?>? body,
+    String? token,
+    Uri? uri,
+    int maxResponseBytes = accountBackendDefaultMaxResponseBytes,
+  }) async {
+    final response = await _sendRaw(
+      method,
+      path,
+      body: body,
+      token: token,
+      uri: uri,
+      maxResponseBytes: maxResponseBytes,
+    );
+    if (response.statusCode != 401 || token == null || path == 'refresh') {
+      return response;
+    }
+    final refreshed = await _refreshSingleFlight(token);
+    if (refreshed == null || refreshed == token) return response;
+    return _sendRaw(
+      method,
+      path,
+      body: body,
+      token: refreshed,
+      uri: uri,
+      maxResponseBytes: maxResponseBytes,
+    );
+  }
+
+  Future<http.Response> _sendRaw(
     String method,
     String path, {
     Map<String, Object?>? body,
@@ -487,6 +751,27 @@ class CloudAccountRepository
             ),
       cloudAuthenticated: true,
     );
+  }
+
+  Future<Map<String, String>> _deviceMetadata() async {
+    final store = _tokenStore;
+    if (store is! SecureCloudAccountTokenStore) return const {};
+    final deviceId = await store.readOrCreateDeviceId();
+    return {
+      'device_id': deviceId,
+      'device_name': _deviceName,
+      'platform': _platformName,
+    };
+  }
+
+  Future<CloudAccountCredentials?> _readCredentials() async {
+    final store = _credentialStore;
+    if (store == null) return null;
+    try {
+      return await store.readCredentials();
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<String?> _readToken() async {
