@@ -1,6 +1,7 @@
 """Privacy lifecycle helpers for expired authentication artifacts."""
 
 from dataclasses import dataclass
+import json
 import time
 
 from sqlalchemy import delete, func, select, update
@@ -12,6 +13,9 @@ from .database import (
     CommentLike,
     Danmaku,
     PlayHistory,
+    SyncMutation,
+    SyncRecord,
+    SyncRevision,
     Thread,
     ThreadCollection,
     ThreadImage,
@@ -137,6 +141,9 @@ async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
         delete(BangumiCollection).where(BangumiCollection.user_id == user.id)
     )
     await session.execute(delete(PlayHistory).where(PlayHistory.user_id == user.id))
+    await session.execute(delete(SyncMutation).where(SyncMutation.user_id == user.id))
+    await session.execute(delete(SyncRecord).where(SyncRecord.user_id == user.id))
+    await session.execute(delete(SyncRevision).where(SyncRevision.user_id == user.id))
     await session.execute(delete(UserToken).where(UserToken.user_id == user.id))
     await session.execute(delete(VerifyCode).where(VerifyCode.email == user.email))
 
@@ -203,6 +210,13 @@ async def build_account_data_export(
 
     collections = await owned(BangumiCollection, BangumiCollection.user_id == user.id)
     history = await owned(PlayHistory, PlayHistory.user_id == user.id)
+    sync_records = list(
+        await session.scalars(
+            select(SyncRecord)
+            .where(SyncRecord.user_id == user.id)
+            .order_by(SyncRecord.revision.asc(), SyncRecord.id.asc())
+        )
+    )
     danmaku = await owned(Danmaku, Danmaku.user_id == user.id)
     threads = await owned(Thread, Thread.user_id == user.id)
     thread_images = list(
@@ -258,6 +272,21 @@ async def build_account_data_export(
                 }
                 for item in history
             ],
+        },
+        "cloud_sync": {
+            "records": [
+                {
+                    "record_id": item.record_id,
+                    "type": item.record_type,
+                    "schema_version": item.schema_version,
+                    "payload": json.loads(item.payload_json),
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "deleted": item.deleted,
+                    "server_revision": item.revision,
+                }
+                for item in sync_records
+            ]
         },
         "authored_content": {
             "danmaku": [

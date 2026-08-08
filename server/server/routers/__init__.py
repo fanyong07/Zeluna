@@ -12,6 +12,7 @@ from .legacy_media import router as legacy_media_router
 from .legacy_library import router as legacy_library_router
 from .legacy_lookup import router as legacy_lookup_router
 from .playback import router as playback_router
+from .sync import router as sync_router
 
 __all__ = [
     "admin_router",
@@ -26,4 +27,5 @@ __all__ = [
     "legacy_library_router",
     "legacy_lookup_router",
     "playback_router",
+    "sync_router",
 ]

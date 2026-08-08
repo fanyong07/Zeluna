@@ -15,6 +15,9 @@ from server.database import (
     CommentLike,
     Danmaku,
     PlayHistory,
+    SyncMutation,
+    SyncRecord,
+    SyncRevision,
     Thread,
     ThreadCollection,
     ThreadImage,
@@ -42,6 +45,9 @@ def test_account_erasure_inventory_covers_every_user_foreign_key():
         ("comments", "user_id", True),
         ("danmaku", "user_id", True),
         ("play_history", "user_id", False),
+        ("sync_mutations", "user_id", False),
+        ("sync_records", "user_id", False),
+        ("sync_revisions", "user_id", False),
         ("thread_collections", "user_id", False),
         ("thread_likes", "user_id", False),
         ("threads", "user_id", True),
@@ -239,6 +245,12 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
             )
             session.add_all([episode, owner_thread, keeper_thread])
             await session.flush()
+            sync_revision = SyncRevision(
+                user_id=owner.id,
+                created_at=10,
+            )
+            session.add(sync_revision)
+            await session.flush()
             owner_comment = Comment(
                 type="thread",
                 target_id=str(owner_thread.id),
@@ -298,6 +310,27 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                         token="owner-session",
                         token_id="owner-jti",
                         expires_at=1000,
+                    ),
+                    SyncRecord(
+                        user_id=owner.id,
+                        record_id="bangumi:1",
+                        record_type="favorite",
+                        schema_version=1,
+                        payload_json='{"subject":{"stableKey":"bangumi:1"}}',
+                        created_at=10,
+                        updated_at=10,
+                        deleted=False,
+                        last_mutation_id="owner-sync-mutation-0001",
+                        revision=sync_revision.revision,
+                    ),
+                    SyncMutation(
+                        user_id=owner.id,
+                        mutation_id="owner-sync-mutation-0001",
+                        payload_hash="a" * 64,
+                        record_id="bangumi:1",
+                        record_type="favorite",
+                        revision=sync_revision.revision,
+                        created_at=10,
                     ),
                     VerifyCode(
                         email=owner.email,
@@ -373,6 +406,21 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                             VerifyCode.email == owner.email
                         )
                     ),
+                    await session.scalar(
+                        select(func.count(SyncRecord.id)).where(
+                            SyncRecord.user_id == owner.id
+                        )
+                    ),
+                    await session.scalar(
+                        select(func.count(SyncMutation.id)).where(
+                            SyncMutation.user_id == owner.id
+                        )
+                    ),
+                    await session.scalar(
+                        select(func.count(SyncRevision.revision)).where(
+                            SyncRevision.user_id == owner.id
+                        )
+                    ),
                 ),
                 "keeper_counts": (*keeper_counts, kept_comment.like_count),
                 "reply_to": kept_comment.reply_to,
@@ -388,7 +436,7 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
     assert "owner public comment" in result["public_comment"][1]
     assert result["public_danmaku"] == (None, "owner public danmaku")
     assert result["image_count"] == 1
-    assert result["private_counts"] == (0, 0, 0, 0)
+    assert result["private_counts"] == (0, 0, 0, 0, 0, 0, 0)
     assert result["keeper_counts"] == (1, 1, 1)
     assert result["reply_to"] == "匿名"
     assert result["unrelated_reply_to"] == "owner-delete"

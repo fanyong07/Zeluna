@@ -16,6 +16,8 @@ from server.database import (
     Comment,
     Danmaku,
     PlayHistory,
+    SyncRecord,
+    SyncRevision,
     Thread,
     ThreadImage,
     User,
@@ -179,6 +181,9 @@ def test_authenticated_export_is_allowlisted_private_and_non_cacheable(
             subject = Bangumi(title="Private Export Subject")
             session.add_all([owner, other, subject])
             await session.flush()
+            sync_revision = SyncRevision(user_id=owner.id, created_at=12)
+            session.add(sync_revision)
+            await session.flush()
             episode = BangumiEpisode(bangumi_id=subject.id, number=1)
             owner_thread = Thread(title="Owner thread", user_id=owner.id)
             other_thread = Thread(title="Other thread", user_id=other.id)
@@ -196,6 +201,21 @@ def test_authenticated_export_is_allowlisted_private_and_non_cacheable(
                         bangumi_id=subject.id,
                         episode_id=episode.id,
                         position=42.5,
+                    ),
+                    SyncRecord(
+                        user_id=owner.id,
+                        record_id="bangumi:1",
+                        record_type="favorite",
+                        schema_version=1,
+                        payload_json=(
+                            '{"subject":{"stableKey":"bangumi:1",'
+                            '"title":"Private Export Subject"}}'
+                        ),
+                        created_at=12,
+                        updated_at=12,
+                        deleted=False,
+                        last_mutation_id="owner-export-mutation-0001",
+                        revision=sync_revision.revision,
                     ),
                     Danmaku(
                         user_id=owner.id,
@@ -265,6 +285,23 @@ def test_authenticated_export_is_allowlisted_private_and_non_cacheable(
         "Owner thread"
     ]
     assert body["private_library"]["play_history"][0]["position"] == 42.5
+    assert body["cloud_sync"]["records"] == [
+        {
+            "record_id": "bangumi:1",
+            "type": "favorite",
+            "schema_version": 1,
+            "payload": {
+                "subject": {
+                    "stableKey": "bangumi:1",
+                    "title": "Private Export Subject",
+                }
+            },
+            "created_at": 12.0,
+            "updated_at": 12.0,
+            "deleted": False,
+            "server_revision": 1,
+        }
+    ]
     serialized = json.dumps(body, sort_keys=True)
     for forbidden in (
         "owner-secret-hash",

@@ -21,6 +21,7 @@ from .routers import (
     legacy_library_router,
     legacy_lookup_router,
     playback_router,
+    sync_router,
 )
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
@@ -40,6 +41,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(catalog_router)
     app.include_router(playback_router)
+    app.include_router(sync_router)
     app.include_router(admin_router)
     app.add_middleware(
         CORSMiddleware,

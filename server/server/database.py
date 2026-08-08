@@ -422,6 +422,78 @@ class SourceHealth(Base):
     recent_success_rate: Mapped[float] = mapped_column(Float, default=0.5)
 
 
+class SyncRevision(Base):
+    """Globally monotonic revision allocated for an accepted sync change."""
+
+    __tablename__ = "sync_revisions"
+
+    revision: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+
+
+class SyncRecord(Base):
+    """Latest account-owned snapshot for one stable sync record."""
+
+    __tablename__ = "sync_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "record_type",
+            "record_id",
+            name="uq_sync_record_owner_type_id",
+        ),
+        Index("ix_sync_records_user_revision", "user_id", "revision"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    record_id: Mapped[str] = mapped_column(String(300))
+    record_type: Mapped[str] = mapped_column(String(40))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_mutation_id: Mapped[str] = mapped_column(String(100))
+    revision: Mapped[int] = mapped_column(
+        ForeignKey("sync_revisions.revision"), index=True
+    )
+
+
+class SyncMutation(Base):
+    """Account-scoped idempotency receipt for one client mutation."""
+
+    __tablename__ = "sync_mutations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "mutation_id",
+            name="uq_sync_mutation_owner_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    mutation_id: Mapped[str] = mapped_column(String(100))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    record_id: Mapped[str] = mapped_column(String(300))
+    record_type: Mapped[str] = mapped_column(String(40))
+    revision: Mapped[int] = mapped_column(
+        ForeignKey("sync_revisions.revision"), index=True
+    )
+    created_at: Mapped[float] = mapped_column(Float)
+
+
 def migration_head_revision() -> str:
     server_root = Path(__file__).resolve().parents[1]
     config = Config(str(server_root / "alembic.ini"))

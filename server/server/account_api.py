@@ -252,7 +252,7 @@ async def _issue_token(session: AsyncSession, user: User) -> str:
     return token
 
 
-async def _current_account(
+async def current_account(
     request: Request, session: AsyncSession = Depends(get_session)
 ) -> tuple[User, UserToken]:
     try:
@@ -423,13 +423,13 @@ async def login(
 
 
 @router.get("/me")
-async def me(account: tuple[User, UserToken] = Depends(_current_account)):
+async def me(account: tuple[User, UserToken] = Depends(current_account)):
     return {"user": _user_payload(account[0])}
 
 
 @router.post("/logout", status_code=204)
 async def logout(
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
     await session.delete(account[1])
@@ -438,7 +438,7 @@ async def logout(
 
 @router.get("/privacy/export")
 async def export_account_data(
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
     payload = await build_account_data_export(session, account[0])
@@ -456,7 +456,7 @@ async def export_account_data(
 async def request_account_deletion(
     payload: VerifyPasswordRequest,
     request: Request,
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
     user = account[0]
@@ -513,7 +513,7 @@ async def cancel_account_deletion(
 @router.patch("/profile")
 async def update_profile(
     payload: ProfileRequest,
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
     user = account[0]
@@ -530,7 +530,7 @@ async def update_profile(
 @router.post("/password")
 async def change_password(
     payload: ChangePasswordRequest,
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
     user, current_token = account
@@ -553,7 +553,7 @@ async def change_password(
 @router.post("/password/verify", status_code=204)
 async def verify_account_password(
     payload: VerifyPasswordRequest,
-    account: tuple[User, UserToken] = Depends(_current_account),
+    account: tuple[User, UserToken] = Depends(current_account),
 ):
     if not verify_password(payload.password, account[0].password_hash):
         raise HTTPException(status_code=400, detail="密码不正确，数据没有清除")
