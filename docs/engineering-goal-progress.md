@@ -1638,6 +1638,9 @@ Status: in_progress
 
 - No Android device or emulator is connected in this environment; Android
   cleartext/DNS-rebinding and signed-install acceptance are not verified.
+- Both the Android SDK and Oppo Connect ADB binaries returned only the device
+  list header, and the SDK has no local `system-images` directory; no hidden
+  phone or emulator was treated as available.
 - No signed Android AAB/APK was produced. The private keystore and
   `android/key.properties` were not read or used by this Goal.
 - During a validation mistake before the packaging helpers were hardened, the
