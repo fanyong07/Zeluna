@@ -394,6 +394,41 @@ void main() {
   });
 
   test(
+    'rule playback source puts the remembered provider inside quick lookup',
+    () async {
+      final requestedHosts = <String>[];
+      final rules = List.generate(
+        10,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:preferred-$index',
+          name: 'Preferred $index',
+          host: 'preferred-$index.example',
+          groupId: 'repo:preferred',
+          priority: index,
+        ),
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: _approvedRuleState(rules),
+        resolver: RulePlaybackResolver(
+          client: MockClient((request) async {
+            requestedHosts.add(request.url.host);
+            return http.Response('not found', 404);
+          }),
+        ),
+      );
+
+      await source.linesForEpisodeWithPreferredProvider(
+        _animeSubject,
+        _episode,
+        preferredProviderId: rules.last.id,
+      );
+
+      expect(requestedHosts, contains('preferred-9.example'));
+    },
+  );
+
+  test(
     'rule playback source preserves public-only safety through latency copy and cache',
     () async {
       RulePlaybackSourceRepository.clearRuntimeCaches();

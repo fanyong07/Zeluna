@@ -561,6 +561,14 @@ class PlaybackSettingsView extends StatelessWidget {
                             ),
                           ),
                           SettingsSwitchRow(
+                            title: '线路记忆',
+                            subtitle: '记住每部作品的成功线路，并提前准备下一集线路',
+                            value: settings.rememberLine,
+                            onChanged: (value) => onChanged(
+                              settings.copyWith(rememberLine: value),
+                            ),
+                          ),
+                          SettingsSwitchRow(
                             title: '自动全屏',
                             subtitle: '首次进入播放页面时自动切换全屏',
                             value: settings.autoFullscreen,

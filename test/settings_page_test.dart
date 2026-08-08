@@ -79,6 +79,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(changes.last.autoFullscreen, isTrue);
 
+    final rememberLine = find.byKey(const ValueKey('setting_switch_线路记忆'));
+    await tester.ensureVisible(rememberLine);
+    await tester.tap(rememberLine);
+    await tester.pumpAndSettle();
+    expect(changes.last.rememberLine, isFalse);
+
     final forward = find.byKey(const ValueKey('setting_choice_快进时间'));
     await tester.ensureVisible(forward);
     await tester.tap(forward);
@@ -192,7 +198,7 @@ void main() {
     expect(find.text('默认倍速'), findsNothing);
     expect(find.text('长按倍速'), findsNothing);
     expect(find.text('边缘双击'), findsNothing);
-    expect(find.text('线路记忆'), findsNothing);
+    expect(find.text('线路记忆'), findsOneWidget);
     expect(find.text('兼容模式'), findsNothing);
   });
 }

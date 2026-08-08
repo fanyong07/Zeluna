@@ -77,6 +77,18 @@ abstract class PlaybackSourceRepository {
   });
 }
 
+/// Optional capability for sources that can put a remembered provider first
+/// without changing the existing source-repository contract.
+abstract interface class PreferredPlaybackSourceRepository {
+  Future<List<PlaybackLine>> linesForEpisodeWithPreferredProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String preferredProviderId,
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+}
+
 class InternetArchivePlaybackSourceRepository {
   InternetArchivePlaybackSourceRepository({http.Client? client})
     : _client =
@@ -243,7 +255,8 @@ class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
   }
 }
 
-class RulePlaybackSourceRepository implements PlaybackSourceRepository {
+class RulePlaybackSourceRepository
+    implements PlaybackSourceRepository, PreferredPlaybackSourceRepository {
   RulePlaybackSourceRepository({
     required RulePluginRepository repository,
     required RulePluginState ruleState,
@@ -322,6 +335,43 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
     final rules = _selectLookupRules(
       _repository.playbackRulesFor(_ruleState, type),
       expandAll: expandAll,
+    );
+    if (rules.isEmpty) {
+      return const EmptyPlaybackSourceRepository().linesForEpisode(
+        subject,
+        episode,
+        cancellationToken: cancellationToken,
+      );
+    }
+    return expandAll
+        ? _resolveExpandedRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          )
+        : _resolveQuickRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          );
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeWithPreferredProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String preferredProviderId,
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository.playbackRulesFor(_ruleState, type),
+      expandAll: expandAll,
+      preferredProviderId: preferredProviderId,
     );
     if (rules.isEmpty) {
       return const EmptyPlaybackSourceRepository().linesForEpisode(
@@ -909,11 +959,18 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
   List<RulePlugin> _selectLookupRules(
     List<RulePlugin> rules, {
     required bool expandAll,
+    String? preferredProviderId,
   }) {
     if (rules.isEmpty) return const [];
     final validRules = rules.where(_isValidLookupRule).toList();
+    final preferred = preferredProviderId?.trim();
     final sorted = [...validRules]
       ..sort((a, b) {
+        if (preferred != null && preferred.isNotEmpty) {
+          final aPreferred = a.id == preferred;
+          final bPreferred = b.id == preferred;
+          if (aPreferred != bPreferred) return aPreferred ? -1 : 1;
+        }
         if (!expandAll) {
           final quickSearch = _quickSearchRank(
             a,
@@ -956,6 +1013,16 @@ class RulePlaybackSourceRepository implements PlaybackSourceRepository {
         if (selected.length >= _maxRulesPerQuickLookup) break;
       }
       groupOffset++;
+    }
+    if (preferred != null && preferred.isNotEmpty) {
+      final preferredRule = sorted
+          .where((rule) => rule.id == preferred)
+          .firstOrNull;
+      if (preferredRule != null && !selected.contains(preferredRule)) {
+        selected
+          ..removeLast()
+          ..insert(0, preferredRule);
+      }
     }
     return selected;
   }

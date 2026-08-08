@@ -107,6 +107,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
   bool _theaterMode = false;
+  Timer? _nextEpisodePrefetchTimer;
+  RulePlaybackCancellationToken? _nextEpisodePrefetchCancellation;
+  DateTime? _nextEpisodePrefetchStartedAt;
+  var _nextEpisodePrefetchStarted = false;
+  var _nextEpisodePrefetchRefreshRequested = false;
+  var _accountContextVersion = 0;
 
   Player get _player => _nativeVideo.player;
   VideoController get _controller => _nativeVideo.surfaceController;
@@ -132,6 +138,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _lineRepository.activeCancellationToken;
   Set<String> get _failedLineIds => _lineController.failedLineIds;
   Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
+  String? get _preferredProviderId => _lineController.preferredProviderId;
   set _preferredProviderId(String? value) =>
       _lineController.preferredProviderId = value;
 
@@ -143,6 +150,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webVideo = WebVideoController();
     _gestureController = PlayerGestureController();
     _episode = widget.request.episode;
+    _accountContextVersion = ref
+        .read(animeControllerProvider.notifier)
+        .accountContextVersion;
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _lineController = PlaybackLineController();
     _line = widget.request.initialLine;
@@ -321,6 +331,227 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _pendingRecoveryFromProvider = null;
     }
     _finalFailureTraceRecorded = false;
+    if (_currentSettings.rememberLine) {
+      final controller = ref.read(animeControllerProvider.notifier);
+      unawaited(
+        controller
+            .rememberPlaybackProvider(
+              subject: widget.request.subject,
+              line: line,
+              expectedAccountContextVersion: _accountContextVersion,
+            )
+            .onError((_, _) {}),
+      );
+      _scheduleNextEpisodePrefetch();
+    }
+  }
+
+  AnimeEpisode? get _nextEpisode {
+    final index = _currentEpisodeIndex;
+    if (index < 0 || index >= widget.request.episodes.length - 1) {
+      return null;
+    }
+    return widget.request.episodes[index + 1];
+  }
+
+  static bool _isPrefetchableSubject(AnimeSubject subject) {
+    final source = subject.source.trim().toLowerCase();
+    return source != 'direct' && source != 'offline';
+  }
+
+  static bool _isPrefetchableLine(PlaybackLine? line) {
+    final provider = line?.providerId.trim().toLowerCase() ?? '';
+    return provider.isNotEmpty &&
+        provider != 'direct' &&
+        provider != 'local' &&
+        provider != 'network' &&
+        provider != 'offline' &&
+        !provider.startsWith('direct:') &&
+        !provider.startsWith('local:') &&
+        !provider.startsWith('network:') &&
+        !provider.startsWith('offline:');
+  }
+
+  bool _hasUsableNextEpisodePrefetch() {
+    final next = _nextEpisode;
+    if (next == null) return false;
+    final controller = ref.read(animeControllerProvider.notifier);
+    final preferredProviderId =
+        _preferredProviderId ??
+        controller.rememberedPlaybackProvider(widget.request.subject);
+    return controller.prefetchedLineForEpisode(
+          widget.request.subject,
+          next,
+          preferredProviderId: preferredProviderId,
+        ) !=
+        null;
+  }
+
+  void _scheduleNextEpisodePrefetch() {
+    if (!mounted ||
+        !_currentSettings.rememberLine ||
+        widget.request.offlineOnly ||
+        !_isPrefetchableSubject(widget.request.subject) ||
+        !_isPrefetchableLine(_line) ||
+        !_appInForeground ||
+        _nextEpisode == null ||
+        _nextEpisodePrefetchStarted ||
+        _nextEpisodePrefetchTimer != null) {
+      return;
+    }
+    if (_hasUsableNextEpisodePrefetch()) {
+      _nextEpisodePrefetchStarted = true;
+      return;
+    }
+    _nextEpisodePrefetchTimer = Timer(const Duration(seconds: 3), () {
+      _nextEpisodePrefetchTimer = null;
+      if (!mounted ||
+          !_currentSettings.rememberLine ||
+          !_appInForeground ||
+          !_isPrefetchableLine(_line) ||
+          !_playing ||
+          _buffering ||
+          _loadingLine ||
+          _playbackFailed ||
+          _pendingRecoveryLineId != null ||
+          _nativeVideo.resumeSeek.isPending ||
+          _nativeVideo.resumeSeek.isSeeking ||
+          _nextEpisode == null) {
+        return;
+      }
+      _startNextEpisodePrefetch();
+    });
+  }
+
+  void _startNextEpisodePrefetch({bool forceRefresh = false}) {
+    final next = _nextEpisode;
+    if (!mounted ||
+        next == null ||
+        widget.request.offlineOnly ||
+        !_isPrefetchableSubject(widget.request.subject) ||
+        !_isPrefetchableLine(_line) ||
+        !_currentSettings.rememberLine ||
+        (!_appInForeground ||
+            _buffering ||
+            _loadingLine ||
+            _playbackFailed ||
+            _pendingRecoveryLineId != null ||
+            _nativeVideo.resumeSeek.isPending ||
+            _nativeVideo.resumeSeek.isSeeking)) {
+      return;
+    }
+    if (forceRefresh) {
+      _cancelNextEpisodePrefetch();
+    } else if (_nextEpisodePrefetchStarted) {
+      return;
+    }
+    final token = RulePlaybackCancellationToken();
+    _nextEpisodePrefetchCancellation = token;
+    _nextEpisodePrefetchStartedAt = DateTime.now();
+    _nextEpisodePrefetchStarted = true;
+    final preferredProviderId =
+        _preferredProviderId ??
+        ref
+            .read(animeControllerProvider.notifier)
+            .rememberedPlaybackProvider(widget.request.subject);
+    _playbackTrace.record(
+      forceRefresh
+          ? 'next_line_prefetch_refresh_started'
+          : 'next_line_prefetch_started',
+      fields: <String, Object?>{
+        'next_episode_number': next.number,
+        if (preferredProviderId?.isNotEmpty == true)
+          'preferred_provider': preferredProviderId,
+      },
+    );
+    final future = ref
+        .read(animeControllerProvider.notifier)
+        .prefetchPlaybackForEpisode(
+          widget.request.subject,
+          next,
+          preferredProviderId: preferredProviderId,
+          forceRefresh: forceRefresh,
+          cancellationToken: token,
+        );
+    unawaited(
+      future
+          .then<void>(
+            (_) {
+              if (token.isCancelled) return;
+              final startedAt = _nextEpisodePrefetchStartedAt;
+              _playbackTrace.record(
+                forceRefresh
+                    ? 'next_line_prefetch_refresh_completed'
+                    : 'next_line_prefetch_completed',
+                fields: <String, Object?>{
+                  'next_episode_number': next.number,
+                  if (startedAt != null)
+                    'elapsed_ms': DateTime.now()
+                        .difference(startedAt)
+                        .inMilliseconds,
+                },
+              );
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              if (token.isCancelled) return;
+              final startedAt = _nextEpisodePrefetchStartedAt;
+              _playbackTrace.record(
+                'next_line_prefetch_failed',
+                fields: <String, Object?>{
+                  'next_episode_number': next.number,
+                  'error_type': error.runtimeType.toString(),
+                  if (startedAt != null)
+                    'elapsed_ms': DateTime.now()
+                        .difference(startedAt)
+                        .inMilliseconds,
+                },
+              );
+            },
+          )
+          .whenComplete(() {
+            if (identical(_nextEpisodePrefetchCancellation, token)) {
+              _nextEpisodePrefetchCancellation = null;
+              _nextEpisodePrefetchStartedAt = null;
+            }
+          }),
+    );
+  }
+
+  void _maybeRefreshNextEpisodePrefetch() {
+    if (_nextEpisode == null ||
+        !_isPrefetchableLine(_line) ||
+        !_nextEpisodePrefetchStarted ||
+        _nextEpisodePrefetchRefreshRequested ||
+        !_playing ||
+        _buffering ||
+        _loadingLine ||
+        _duration <= Duration.zero) {
+      return;
+    }
+    final remaining = _duration - _position;
+    if (remaining > const Duration(minutes: 3)) return;
+    _nextEpisodePrefetchRefreshRequested = true;
+    _startNextEpisodePrefetch(forceRefresh: true);
+  }
+
+  void _cancelNextEpisodePrefetch() {
+    _nextEpisodePrefetchTimer?.cancel();
+    _nextEpisodePrefetchTimer = null;
+    final token = _nextEpisodePrefetchCancellation;
+    if (token != null && !token.isCancelled) {
+      final startedAt = _nextEpisodePrefetchStartedAt;
+      _playbackTrace.record(
+        'next_line_prefetch_cancelled',
+        fields: <String, Object?>{
+          if (_nextEpisode != null) 'next_episode_number': _nextEpisode!.number,
+          if (startedAt != null)
+            'elapsed_ms': DateTime.now().difference(startedAt).inMilliseconds,
+        },
+      );
+      token.cancel();
+    }
+    _nextEpisodePrefetchCancellation = null;
+    _nextEpisodePrefetchStartedAt = null;
   }
 
   void _beginPlaybackRecovery(
@@ -329,6 +560,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     PlaybackLine? previous,
     Duration position = Duration.zero,
   }) {
+    _cancelNextEpisodePrefetch();
+    _nextEpisodePrefetchStarted = false;
+    _nextEpisodePrefetchRefreshRequested = false;
     if (strategy == 'auto_switch' && previous?.id != target.id) {
       _sessionController.dispatch(
         PlaybackSessionEvent.alternativeSelected(target.id),
@@ -384,6 +618,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_restoreSystemUi());
     if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
     _appFullscreen.dispose();
+    _cancelNextEpisodePrefetch();
     unawaited(_nativeVideo.dispose());
     _webVideo.dispose();
     _recoveryController.dispose();
@@ -413,7 +648,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _playing &&
         _sessionController.state.userIntent != PlaybackIntent.paused) {
       _scheduleSingleBackupLookup();
+      _scheduleNextEpisodePrefetch();
     } else {
+      if (!inForeground) {
+        _cancelNextEpisodePrefetch();
+        _nextEpisodePrefetchStarted = false;
+        _nextEpisodePrefetchRefreshRequested = false;
+      }
       _backupLookupDelayTimer?.cancel();
       _backupLookupDelayTimer = null;
     }
@@ -838,7 +1079,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           });
           if (reachedFirstFrame) {
             _scheduleSingleBackupLookup();
+            _scheduleNextEpisodePrefetch();
           }
+          _maybeRefreshNextEpisodePrefetch();
         }),
       )
       ..track(
@@ -900,10 +1143,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             buffering: value,
           );
           if (value) {
+            _cancelNextEpisodePrefetch();
+            _nextEpisodePrefetchStarted = false;
+            _nextEpisodePrefetchRefreshRequested = false;
             _backupLookupDelayTimer?.cancel();
             _backupLookupDelayTimer = null;
           } else if (_playing) {
             _scheduleSingleBackupLookup();
+            _scheduleNextEpisodePrefetch();
           }
         }),
       )
@@ -946,9 +1193,30 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _applyPlaybackSettings(PlaybackSettings settings) {
+    final accountContextVersion = ref
+        .read(animeControllerProvider.notifier)
+        .accountContextVersion;
+    if (accountContextVersion != _accountContextVersion) {
+      _accountContextVersion = accountContextVersion;
+      _cancelNextEpisodePrefetch();
+      _nextEpisodePrefetchStarted = false;
+      _nextEpisodePrefetchRefreshRequested = false;
+      _preferredProviderId = null;
+    }
     final volumeSettingChanged =
         _currentSettings.volumeBoost != settings.volumeBoost;
     _currentSettings = settings;
+    if (settings.rememberLine) {
+      _preferredProviderId ??= ref
+          .read(animeControllerProvider.notifier)
+          .rememberedPlaybackProvider(widget.request.subject);
+      _scheduleNextEpisodePrefetch();
+    } else {
+      _preferredProviderId = null;
+      _cancelNextEpisodePrefetch();
+      _nextEpisodePrefetchStarted = false;
+      _nextEpisodePrefetchRefreshRequested = false;
+    }
     if (volumeSettingChanged) _manualVolumeOverride = false;
     final targetRate = settings.speed <= 0 ? 1.0 : settings.speed;
     if (_appliedRate != targetRate) {
@@ -1297,6 +1565,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     bool force = false,
     Duration? resumePosition,
   }) async {
+    _cancelNextEpisodePrefetch();
+    _nextEpisodePrefetchStarted = false;
+    _nextEpisodePrefetchRefreshRequested = false;
     var line = requestedLine;
     _recoveryController.cancelCurrentLineRetry();
     if (!_isPlayableLine(line)) {
@@ -1822,6 +2093,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController.dispatch(
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
+    final controller = ref.read(animeControllerProvider.notifier);
+    final preferredProviderId = _currentSettings.rememberLine
+        ? (_preferredProviderId ??
+              controller.rememberedPlaybackProvider(widget.request.subject))
+        : null;
+    final preparedLine = _currentSettings.rememberLine
+        ? controller.prefetchedLineForEpisode(
+            widget.request.subject,
+            episode,
+            preferredProviderId: preferredProviderId,
+          )
+        : null;
+    _cancelNextEpisodePrefetch();
+    _nextEpisodePrefetchStarted = false;
+    _nextEpisodePrefetchRefreshRequested = false;
     _danmakuController.changeEpisode();
     _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
@@ -1831,7 +2117,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_lineRepository.cancelLookup());
     _lineRepository.resetForEpisode(
       episodeId: episode.id,
-      lookupInProgress: true,
+      initialLines: preparedLine == null ? const [] : [preparedLine],
+      lookupInProgress: preparedLine == null,
     );
     _resetPlaybackStallWatchdog(
       position: Duration.zero,
@@ -1845,7 +2132,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeVideo.resumeSeek.cancel();
     setState(() {
       _episode = episode;
-      _line = null;
+      _line = preparedLine;
       _loadedUrl = null;
       _playerMessage = null;
       _lineLookupMessage = null;
@@ -1854,12 +2141,23 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _duration = Duration.zero;
       _buffer = Duration.zero;
       _episodePanel = false;
+      _loadingLine = _isPlayableLine(preparedLine);
     });
     _startPlaybackTrace();
+    if (preparedLine != null) {
+      _playbackTrace.record(
+        'next_line_prefetch_cache_hit',
+        fields: <String, Object?>{
+          'episode_number': episode.number,
+          'provider': preparedLine.providerId,
+        },
+      );
+    }
     unawaited(
       _stopAndResolveSelectedEpisode(
         episodeId: episode.id,
         playbackSerial: playbackSerial,
+        preparedLine: preparedLine,
       ),
     );
   }
@@ -1867,6 +2165,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Future<void> _stopAndResolveSelectedEpisode({
     required int episodeId,
     required int playbackSerial,
+    PlaybackLine? preparedLine,
   }) async {
     try {
       await _player.stop();
@@ -1878,11 +2177,22 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _episode.id != episodeId) {
       return;
     }
-    await _resolveLinesForCurrentEpisode();
+    if (preparedLine != null && _isPlayableLine(preparedLine)) {
+      await _openLine(preparedLine, force: true);
+      if (!mounted || _episode.id != episodeId) return;
+      await _resolveLinesForCurrentEpisode(
+        autoplay: _playbackFailed || !_isPlayableLine(_line),
+      );
+    } else {
+      await _resolveLinesForCurrentEpisode();
+    }
   }
 
   void _selectLine(PlaybackLine line) {
     _revealPlayerControls();
+    _cancelNextEpisodePrefetch();
+    _nextEpisodePrefetchStarted = false;
+    _nextEpisodePrefetchRefreshRequested = false;
     if (_line?.id != line.id) {
       _sessionController.dispatch(
         PlaybackSessionEvent.alternativeSelected(line.id),
@@ -2296,6 +2606,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (!mounted) return;
     _notePlaybackProgress(value);
     setState(() => _position = value);
+    _maybeRefreshNextEpisodePrefetch();
   }
 
   void _handleWebDuration(Duration value) {
@@ -2327,6 +2638,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _recordFirstFrame(_line!);
       }
       _scheduleSingleBackupLookup();
+      _scheduleNextEpisodePrefetch();
     } else {
       _backupLookupDelayTimer?.cancel();
       _backupLookupDelayTimer = null;

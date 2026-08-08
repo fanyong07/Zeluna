@@ -37,6 +37,7 @@ import 'danmaku_repository.dart';
 import 'external_service_repository.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
+import 'playback_line_memory_store.dart';
 import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
@@ -381,6 +382,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   static const _libraryBox = 'anime.library.v2';
   late Box<dynamic> _settings;
   late Box<dynamic> _library;
+  late PlaybackLineMemoryStore _playbackLineMemory;
   AccountController? _accountController;
   SettingsController? _settingsController;
   SourceController? _sourceController;
@@ -456,6 +458,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ]);
     _settings = boxes[0];
     _library = boxes[1];
+    _playbackLineMemory = PlaybackLineMemoryStore(_settings);
     await LocalIdentityMigration(settings: _settings, library: _library).run();
     final cloudService = ref.read(cloudAccountServiceProvider);
     final CloudSyncTransport? cloudTransport =
@@ -515,6 +518,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
     );
+    _playbackLineMemory.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
+    if (!settingsSnapshot.playback.rememberLine) {
+      await _playbackLineMemory.clearForCurrentAccount(
+        expectedContextVersion: _accounts.contextVersion,
+      );
+    }
     final services = settingsSnapshot.services;
     final profileJson = _settings.get(_accountSettingsKey('profile'));
     _sourceController = SourceController(
@@ -624,7 +636,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         return await repository?.detail(subject) ?? _fallbackDetail(subject);
       },
       enrichDetail: (bundle, _) => _enrichSparseDetail(bundle),
-      prefetchPlayback: _playbackDiscoveryDomain.prefetchPlayback,
+      prefetchPlayback: (subject, episodes) {
+        if (_settingsDomain.snapshot.playback.rememberLine) {
+          _playbackDiscoveryDomain.prefetchPlayback(subject, episodes);
+        }
+      },
       fallbackSeries: _fallbackExternalSeries,
       fallbackMovies: _fallbackExternalMovies,
     );
@@ -819,8 +835,63 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   PlaybackLine? prefetchedLineForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) => _playbackDiscoveryDomain.prefetchedLineForEpisode(subject, episode);
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    Duration minValidity = const Duration(seconds: 60),
+  }) {
+    final rememberLine = state.value?.settings.rememberLine ?? true;
+    if (!rememberLine) return null;
+    final preferred =
+        preferredProviderId ??
+        (rememberLine
+            ? _playbackLineMemory.preferredProviderFor(subject)
+            : null);
+    return _playbackDiscoveryDomain.prefetchedLineForEpisode(
+      subject,
+      episode,
+      preferredProviderId: preferred,
+      minValidity: minValidity,
+    );
+  }
+
+  String? rememberedPlaybackProvider(AnimeSubject subject) {
+    if (!(state.value?.settings.rememberLine ?? true)) return null;
+    return _playbackLineMemory.preferredProviderFor(subject);
+  }
+
+  Future<void> rememberPlaybackProvider({
+    required AnimeSubject subject,
+    required PlaybackLine line,
+    required int expectedAccountContextVersion,
+  }) {
+    if (!(state.value?.settings.rememberLine ?? true)) {
+      return Future<void>.value();
+    }
+    return _playbackLineMemory.rememberSuccessfulProvider(
+      subject: subject,
+      line: line,
+      expectedContextVersion: expectedAccountContextVersion,
+    );
+  }
+
+  Future<void> prefetchPlaybackForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    if (!(state.value?.settings.rememberLine ?? true)) {
+      return Future<void>.value();
+    }
+    return _playbackDiscoveryDomain.prefetchPlaybackForEpisode(
+      subject,
+      episode,
+      preferredProviderId: preferredProviderId,
+      forceRefresh: forceRefresh,
+      cancellationToken: cancellationToken,
+    );
+  }
 
   Future<List<PlaybackLine>> prepareSingleBackupForEpisode(
     AnimeSubject subject,
@@ -1003,8 +1074,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<void> retryPendingAccountCleanup() => _accounts.retryPendingCleanup();
 
-  Future<void> updateSettings(PlaybackSettings settings) =>
-      _settingsDomain.updatePlayback(settings);
+  Future<void> updateSettings(PlaybackSettings settings) async {
+    await _settingsDomain.updatePlayback(settings);
+    if (!settings.rememberLine) {
+      await _playbackLineMemory.clearForCurrentAccount(
+        expectedContextVersion: _accountContextVersion,
+      );
+      _playbackDiscoveryController?.clearCaches();
+    }
+  }
 
   Future<void> updateProfile(UserProfileSettings profile) =>
       _accounts.updateProfile(profile);
@@ -1198,6 +1276,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
+    _playbackLineMemory.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+    );
+    if (!settingsSnapshot.playback.rememberLine) {
+      await _playbackLineMemory.clearForCurrentAccount(
+        expectedContextVersion: activation.contextVersion,
+      );
+    }
     final profileJson = _settings.get(
       _accountSettingsKeyFor(accountId, 'profile'),
     );
@@ -1335,9 +1422,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           AppearanceSettings.fromJson(record.payload),
         );
       case CloudSyncRecordType.playbackSettings:
-        await _settingsDomain.applyRemotePlayback(
-          PlaybackSettings.fromJson(record.payload),
-        );
+        final next = PlaybackSettings.fromJson(record.payload);
+        await _settingsDomain.applyRemotePlayback(next);
+        if (!next.rememberLine) {
+          await _playbackLineMemory.clearForCurrentAccount(
+            expectedContextVersion: _accountContextVersion,
+          );
+          _playbackDiscoveryController?.clearCaches();
+        }
     }
   }
 
@@ -1423,6 +1515,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _libraryController?.settleWrites();
     await _syncController?.settle();
     await _catalogController?.settleWrites();
+    await _playbackLineMemory.settleWrites();
     await _downloadController?.quiesce();
   }
 

@@ -8,6 +8,7 @@ import 'package:anime/src/data/media_download_backend.dart';
 import 'package:anime/src/data/media_download_result.dart';
 import 'package:anime/src/data/media_download_service.dart';
 import 'package:anime/src/data/media_download_task.dart';
+import 'package:anime/src/data/playback_line_memory_store.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
@@ -41,6 +42,16 @@ void main() {
         'playback',
         const PlaybackSettings(speed: 1.5).toJson(),
       );
+      await settings.put(playbackLineMemorySettingsKey, {
+        'version': 1,
+        'entries': [
+          {
+            'subjectKey': _subject.identityKey,
+            'providerId': 'zeluna:guest',
+            'updatedAt': DateTime(2026).millisecondsSinceEpoch,
+          },
+        ],
+      });
       await settings.put(
         'profile',
         const UserProfileSettings()
@@ -186,6 +197,10 @@ void main() {
       expect(migratedSettings.containsKey('danmaku'), isFalse);
       expect(migratedSettings.containsKey('misc'), isFalse);
       expect(migratedSettings.containsKey('sourceEnabled'), isFalse);
+      expect(
+        migratedSettings.containsKey(playbackLineMemorySettingsKey),
+        isFalse,
+      );
       expect(migratedLibrary.containsKey('favorites'), isFalse);
       expect(migratedLibrary.containsKey('history'), isFalse);
       expect(migratedLibrary.containsKey('following'), isFalse);
@@ -198,6 +213,12 @@ void main() {
       );
       expect(
         migratedSettings.containsKey('account.$firstAccountId.sourceEnabled'),
+        isTrue,
+      );
+      expect(
+        migratedSettings.containsKey(
+          'account.$firstAccountId.$playbackLineMemorySettingsKey',
+        ),
         isTrue,
       );
       expect(
@@ -482,6 +503,20 @@ void main() {
         .accountSession
         .current!
         .id;
+    final activeSettings = Hive.box<dynamic>('anime.settings.v2');
+    await activeSettings.put(
+      'account.$accountId.$playbackLineMemorySettingsKey',
+      <String, dynamic>{
+        'version': 1,
+        'entries': <Map<String, dynamic>>[
+          <String, dynamic>{
+            'subjectKey': _subject.identityKey,
+            'providerId': 'zeluna:account-owned',
+            'updatedAt': DateTime(2026).millisecondsSinceEpoch,
+          },
+        ],
+      },
+    );
     expect(await credentialStore.readAccessToken(), token);
     expect(await credentialStore.readAccessToken(accountId: accountId), isNull);
     final firstSettings = await Hive.openBox<dynamic>('anime.settings.v2');
@@ -917,6 +952,13 @@ void main() {
       LocalAccountRepository.boxName,
     );
     expect(LocalAccountRepository(recoveredAccounts).pendingDeletion(), isNull);
+    final recoveredSettings = Hive.box<dynamic>('anime.settings.v2');
+    expect(
+      recoveredSettings.containsKey(
+        'account.$accountId.$playbackLineMemorySettingsKey',
+      ),
+      isFalse,
+    );
   });
 
   test(

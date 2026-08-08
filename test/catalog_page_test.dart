@@ -1291,8 +1291,10 @@ class _PrefetchedLineAnimeController extends _FakeAnimeController {
   @override
   PlaybackLine? prefetchedLineForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    Duration minValidity = const Duration(seconds: 60),
+  }) {
     return _prefetchedLine;
   }
 }

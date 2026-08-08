@@ -27,5 +27,10 @@ class AsyncSingleFlight<K, V> {
 
   void clear() => _pending.clear();
 
+  /// Drops one shared operation so a forced refresh can start a new request.
+  /// The old future is left to settle, but its caller remains responsible for
+  /// ignoring the result when its cancellation/context token is stale.
+  void remove(K key) => _pending.remove(key);
+
   int get pendingCount => _pending.length;
 }

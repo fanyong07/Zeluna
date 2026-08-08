@@ -116,6 +116,7 @@ final class AccountController {
     'rulePlugins',
     'sourceEnabled',
     'syncState.v1',
+    'playbackLineMemory.v1',
   ];
   static const _accountLibraryKeys = [
     'favorites',

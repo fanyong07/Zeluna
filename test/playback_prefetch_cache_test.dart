@@ -68,6 +68,25 @@ void main() {
     expect(cache.read('episode:1'), [same(candidate)]);
   });
 
+  test(
+    'a prefetched route with less than the required validity is rejected',
+    () {
+      final cache = PlaybackPrefetchCache(now: () => now);
+      final route = line(
+        id: 'short-lived',
+        url: 'https://cdn.example/short-lived.m3u8',
+        expiresAt: now.add(const Duration(seconds: 59)),
+      );
+
+      cache.write('episode:1', [route]);
+
+      expect(
+        cache.read('episode:1', minValidity: const Duration(seconds: 60)),
+        isNull,
+      );
+    },
+  );
+
   test('cache stays bounded and evicts the oldest prefetch', () {
     final cache = PlaybackPrefetchCache(maxEntries: 2, now: () => now);
     cache.write('episode:1', [

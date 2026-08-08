@@ -142,14 +142,22 @@ final class PlaybackDiscoveryController {
        _verifyLine = verifyLine,
        _isContextCurrent = isContextCurrent,
        _clearRuleRuntimeCaches = clearRuleRuntimeCaches,
-       _backendCache = PlaybackPrefetchCache(now: now);
+       _now = now ?? DateTime.now,
+       _backendCache = PlaybackPrefetchCache(now: now),
+       _episodePrefetchCache = PlaybackPrefetchCache(
+         ttl: const Duration(minutes: 45),
+         maxEntries: 8,
+         now: now,
+       );
 
   final PlaybackBackendRepositoryFactory _backendRepository;
   final PlaybackRuleRepositoryFactory _ruleRepository;
   final PlaybackLineVerifier _verifyLine;
   final PlaybackContextGuard _isContextCurrent;
   final void Function() _clearRuleRuntimeCaches;
+  final DateTime Function() _now;
   final PlaybackPrefetchCache _backendCache;
+  final PlaybackPrefetchCache _episodePrefetchCache;
   final AsyncSingleFlight<String, List<PlaybackLine>> _backendLookups =
       AsyncSingleFlight<String, List<PlaybackLine>>();
   final Map<String, Future<void>> _prefetches = <String, Future<void>>{};
@@ -223,10 +231,14 @@ final class PlaybackDiscoveryController {
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
+    bool forceRefresh = false,
+    String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
   }) => linesForEpisodeMode(
     subject,
     episode,
+    forceRefresh: forceRefresh,
+    preferredProviderId: preferredProviderId,
     cancellationToken: cancellationToken,
   );
 
@@ -252,10 +264,14 @@ final class PlaybackDiscoveryController {
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
+    bool forceRefresh = false,
+    String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final scope = _scope();
     if (cancellationToken?.isCancelled ?? false) return const [];
+    final preferred = preferredProviderId?.trim();
+    final wantsPreferred = preferred?.isNotEmpty == true;
     var backendLines = const <PlaybackLine>[];
     var probedBackendLines = const <PlaybackLine>[];
     var ruleLines = const <PlaybackLine>[];
@@ -265,6 +281,14 @@ final class PlaybackDiscoveryController {
     bool hasPlayableLine(Iterable<PlaybackLine> lines) => lines.any(
       (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
     );
+    bool hasPreferredPlayableLine(Iterable<PlaybackLine> lines) =>
+        wantsPreferred &&
+        lines.any(
+          (line) =>
+              line.providerId == preferred &&
+              line.available &&
+              (line.url?.trim().isNotEmpty ?? false),
+        );
     Future<({String kind, List<PlaybackLine> lines})> tagged(
       String kind,
       Future<List<PlaybackLine>> future,
@@ -276,6 +300,7 @@ final class PlaybackDiscoveryController {
         scope,
         subject,
         episode,
+        forceRefresh: forceRefresh,
         cancellationToken: cancellationToken,
       ).timeout(
         const Duration(seconds: 6),
@@ -304,6 +329,7 @@ final class PlaybackDiscoveryController {
             subject,
             episode,
             expandAll: expandAll,
+            preferredProviderId: preferred,
             cancellationToken: cancellationToken,
           ),
         ),
@@ -324,7 +350,8 @@ final class PlaybackDiscoveryController {
 
     if (firstEvent.kind == 'backend') {
       backendLines = firstEvent.lines;
-      if (hasPlayableLine(backendLines)) {
+      if (hasPlayableLine(backendLines) &&
+          (!wantsPreferred || hasPreferredPlayableLine(backendLines))) {
         return mergePlaybackLines(backendLines);
       }
       startBackendCandidateProbe();
@@ -364,7 +391,10 @@ final class PlaybackDiscoveryController {
         ...probedBackendLines,
         ...ruleLines,
       ]);
-      if (hasPlayableLine(merged)) return merged;
+      if (hasPlayableLine(merged) &&
+          (!wantsPreferred || hasPreferredPlayableLine(merged))) {
+        return merged;
+      }
     }
 
     return isCurrentRequest()
@@ -378,18 +408,39 @@ final class PlaybackDiscoveryController {
 
   PlaybackLine? prefetchedLineForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    Duration minValidity = const Duration(seconds: 60),
+  }) {
     final scope = _scope();
+    final prefetched = _episodePrefetchCache.read(
+      _episodePrefetchKey(scope, subject, episode),
+      minValidity: minValidity,
+    );
+    final cached = <PlaybackLine>[if (prefetched != null) ...prefetched];
     final lookupKey = _backendPlaybackLookupKey(
       scope,
       _services,
       subject,
       episode,
     );
-    if (lookupKey == null) return null;
-    final lines = _backendCache.read(lookupKey);
-    if (lines == null) return null;
+    if (lookupKey != null) {
+      final backend = _backendCache.read(lookupKey, minValidity: minValidity);
+      if (backend != null) cached.addAll(backend);
+    }
+    final unique = <String, PlaybackLine>{
+      for (final line in cached) line.id: line,
+    };
+    final lines = <PlaybackLine>[...unique.values];
+    final preferred = preferredProviderId?.trim();
+    if (preferred != null && preferred.isNotEmpty) {
+      lines.sort((a, b) {
+        final aPreferred = a.providerId == preferred;
+        final bPreferred = b.providerId == preferred;
+        if (aPreferred == bPreferred) return 0;
+        return aPreferred ? -1 : 1;
+      });
+    }
     for (final line in lines) {
       if (line.available &&
           (line.serverVerified || line.clientVerified) &&
@@ -571,26 +622,87 @@ final class PlaybackDiscoveryController {
             episodes.any((item) => item.id == historyEpisode.id)
         ? historyEpisode
         : episodes.first;
-    final key = <Object?>[
-      scope.accountId,
-      scope.contextVersion,
-      scope.epoch,
-      subject.source,
-      subject.id,
-      subject.title,
-      episode.id,
-      episode.number,
-    ].join('|');
-    if (_prefetches.containsKey(key)) return;
+    _startPrefetch(
+      scope,
+      subject,
+      episode,
+      cacheEpisode: false,
+      preferredProviderId: null,
+      forceRefresh: false,
+    );
+  }
 
-    final cancellationToken = RulePlaybackCancellationToken();
+  Future<void> prefetchPlaybackForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final scope = _scope();
+    if (cancellationToken?.isCancelled == true ||
+        !_isPrefetchableSubject(subject)) {
+      return;
+    }
+    final key = _prefetchJobKey(scope, subject, episode, episodeCache: true);
+    if (forceRefresh) {
+      _prefetchTokens[key]?.cancel();
+      _prefetches.remove(key);
+      _prefetchTokens.remove(key);
+    }
+    final existing = _prefetches[key];
+    if (existing != null) {
+      await existing;
+      return;
+    }
+    final token = cancellationToken ?? RulePlaybackCancellationToken();
+    _prefetchTokens[key] = token;
     late final Future<void> prefetch;
     prefetch =
         _prefetchAndRankPlayback(
           scope,
           subject,
           episode,
-          cancellationToken: cancellationToken,
+          cancellationToken: token,
+          cacheEpisode: true,
+          preferredProviderId: preferredProviderId,
+          forceRefresh: forceRefresh,
+        ).whenComplete(() {
+          if (identical(_prefetches[key], prefetch)) {
+            _prefetches.remove(key);
+            _prefetchTokens.remove(key);
+          }
+        });
+    _prefetches[key] = prefetch;
+    await prefetch;
+  }
+
+  void _startPrefetch(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool cacheEpisode,
+    required String? preferredProviderId,
+    required bool forceRefresh,
+  }) {
+    final key = _prefetchJobKey(
+      scope,
+      subject,
+      episode,
+      episodeCache: cacheEpisode,
+    );
+    if (_prefetches.containsKey(key)) return;
+    final token = RulePlaybackCancellationToken();
+    late final Future<void> prefetch;
+    prefetch =
+        _prefetchAndRankPlayback(
+          scope,
+          subject,
+          episode,
+          cancellationToken: token,
+          cacheEpisode: cacheEpisode,
+          preferredProviderId: preferredProviderId,
+          forceRefresh: forceRefresh,
         ).onError((_, _) {}).whenComplete(() {
           if (identical(_prefetches[key], prefetch)) {
             _prefetches.remove(key);
@@ -598,7 +710,7 @@ final class PlaybackDiscoveryController {
           }
         });
     _prefetches[key] = prefetch;
-    _prefetchTokens[key] = cancellationToken;
+    _prefetchTokens[key] = token;
   }
 
   void clearCaches() => _invalidateAsyncWork();
@@ -615,20 +727,36 @@ final class PlaybackDiscoveryController {
     AnimeSubject subject,
     AnimeEpisode episode, {
     required RulePlaybackCancellationToken cancellationToken,
+    required bool cacheEpisode,
+    required String? preferredProviderId,
+    required bool forceRefresh,
   }) async {
     final lines = await linesForEpisode(
       subject,
       episode,
+      forceRefresh: forceRefresh,
+      preferredProviderId: preferredProviderId,
       cancellationToken: cancellationToken,
     );
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
-    var backendLines = lines
-        .where((line) => line.providerId.startsWith('zeluna:'))
-        .toList(growable: false);
-    if (backendLines.isEmpty) return;
+    final preferred = preferredProviderId?.trim();
+    var candidates = cacheEpisode
+        ? lines.toList(growable: true)
+        : lines
+              .where((line) => line.providerId.startsWith('zeluna:'))
+              .toList(growable: true);
+    if (candidates.isEmpty) return;
+    if (preferred != null && preferred.isNotEmpty) {
+      candidates.sort((a, b) {
+        final aPreferred = a.providerId == preferred;
+        final bPreferred = b.providerId == preferred;
+        if (aPreferred == bPreferred) return 0;
+        return aPreferred ? -1 : 1;
+      });
+    }
 
-    final refreshThreshold = DateTime.now().add(const Duration(seconds: 15));
-    final candidates = backendLines
+    final refreshThreshold = _now().add(const Duration(seconds: 15));
+    final probeCandidates = candidates
         .where(
           (line) =>
               !line.clientVerified &&
@@ -637,11 +765,11 @@ final class PlaybackDiscoveryController {
               (line.expiresAt == null ||
                   line.expiresAt!.isAfter(refreshThreshold)),
         )
-        .take(3)
+        .take(cacheEpisode ? 2 : 3)
         .toList(growable: false);
     await for (final verified in probePlaybackLinesProgressively(
-      candidates,
-      maxConcurrent: 3,
+      probeCandidates,
+      maxConcurrent: cacheEpisode ? 2 : 3,
       cancellationToken: cancellationToken,
       verify: (line) => verifyPlaybackLine(
         line,
@@ -650,15 +778,19 @@ final class PlaybackDiscoveryController {
       ),
     )) {
       if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
-      backendLines = replacePlaybackLine(backendLines, verified);
+      candidates = replacePlaybackLine(candidates, verified);
     }
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
-    _cacheBackendPlaybackLines(
-      scope,
-      subject,
-      episode,
-      rankPlaybackLinesForStartup(backendLines),
-    );
+    final ranked = rankPlaybackLinesForStartup(candidates);
+    if (cacheEpisode) {
+      _episodePrefetchCache.write(
+        _episodePrefetchKey(scope, subject, episode),
+        ranked,
+        ttl: const Duration(minutes: 45),
+      );
+    } else {
+      _cacheBackendPlaybackLines(scope, subject, episode, ranked);
+    }
   }
 
   Future<List<PlaybackLine>> _backendLinesForEpisode(
@@ -666,6 +798,7 @@ final class PlaybackDiscoveryController {
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
+    bool forceRefresh = false,
     RulePlaybackCancellationToken? cancellationToken,
   }) {
     if (!_isCurrent(scope) || cancellationToken?.isCancelled == true) {
@@ -680,8 +813,12 @@ final class PlaybackDiscoveryController {
       expandAll: expandAll,
     );
     if (lookupKey == null) return Future.value(const <PlaybackLine>[]);
-    final cached = _backendCache.read(lookupKey);
-    if (cached != null) return Future.value(cached);
+    if (!forceRefresh) {
+      final cached = _backendCache.read(lookupKey);
+      if (cached != null) return Future.value(cached);
+    } else {
+      _backendLookups.remove(lookupKey);
+    }
     final pending = _backendLookups.run(lookupKey, () {
       final repository = _backendRepository(services);
       if (repository == null) return Future.value(const <PlaybackLine>[]);
@@ -707,17 +844,31 @@ final class PlaybackDiscoveryController {
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool expandAll = false,
+    String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     if (!_isCurrent(scope) || _ruleState.customRules.isEmpty) return const [];
-    final ruleState = _ruleState;
-    final lines = await _ruleRepository(ruleState)
-        .linesForEpisodeMode(
-          subject,
-          episode,
-          expandAll: expandAll,
-          cancellationToken: cancellationToken,
-        )
+    final repository = _ruleRepository(_ruleState);
+    final preferred = preferredProviderId?.trim();
+    final preferredRepository = repository is PreferredPlaybackSourceRepository
+        ? repository as PreferredPlaybackSourceRepository
+        : null;
+    final lookup =
+        preferred == null || preferred.isEmpty || preferredRepository == null
+        ? repository.linesForEpisodeMode(
+            subject,
+            episode,
+            expandAll: expandAll,
+            cancellationToken: cancellationToken,
+          )
+        : preferredRepository.linesForEpisodeWithPreferredProvider(
+            subject,
+            episode,
+            preferredProviderId: preferred,
+            expandAll: expandAll,
+            cancellationToken: cancellationToken,
+          );
+    final lines = await lookup
         .timeout(
           const Duration(seconds: 12),
           onTimeout: () => const <PlaybackLine>[],
@@ -820,6 +971,38 @@ final class PlaybackDiscoveryController {
     if (lookupKey != null) _backendCache.write(lookupKey, lines);
   }
 
+  String _prefetchJobKey(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool episodeCache = false,
+  }) => <Object?>[
+    episodeCache ? 'next-prefetch' : 'detail-prefetch',
+    scope.accountId,
+    scope.contextVersion,
+    scope.epoch,
+    subject.identityKey,
+    episode.identityKey(subjectKey: subject.identityKey),
+  ].join('|');
+
+  String _episodePrefetchKey(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) => <Object?>[
+    'next-episode',
+    scope.accountId,
+    scope.contextVersion,
+    scope.epoch,
+    subject.identityKey,
+    episode.identityKey(subjectKey: subject.identityKey),
+  ].join('|');
+
+  static bool _isPrefetchableSubject(AnimeSubject subject) {
+    final source = subject.source.trim().toLowerCase();
+    return source != 'direct' && source != 'offline';
+  }
+
   List<PlaybackLine> _backendLinesNeedingBackgroundProbe(
     List<PlaybackLine> lines,
   ) {
@@ -853,6 +1036,7 @@ final class PlaybackDiscoveryController {
     _prefetches.clear();
     _backendLookups.clear();
     _backendCache.clear();
+    _episodePrefetchCache.clear();
   }
 
   _PlaybackDiscoveryScope _scope() {

@@ -265,6 +265,211 @@ void main() {
     expect(second.single.id, 'backend-2');
     expect(calls, 2);
   });
+
+  test(
+    'next-episode prefetch deduplicates and verifies at most two preferred candidates',
+    () async {
+      final nextEpisode = _episodeFor(2);
+      var backendCalls = 0;
+      var verifyCalls = 0;
+      var inFlight = 0;
+      var maxInFlight = 0;
+      final requestedEpisodes = <int>[];
+      final backend = _FakePlaybackRepository(
+        load:
+            (subject, episode, {required expandAll, cancellationToken}) async {
+              backendCalls++;
+              requestedEpisodes.add(episode.id);
+              return <PlaybackLine>[
+                _line(
+                  'fallback',
+                  provider: 'zeluna:fallback',
+                  episodeId: nextEpisode.id,
+                  serverVerified: true,
+                ),
+                _line(
+                  'preferred',
+                  provider: 'rule:preferred',
+                  episodeId: nextEpisode.id,
+                  serverVerified: true,
+                ),
+                _line(
+                  'third',
+                  provider: 'zeluna:third',
+                  episodeId: nextEpisode.id,
+                  serverVerified: true,
+                ),
+              ];
+            },
+      );
+      final controller = _controller(
+        backend: backend,
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              verifyCalls++;
+              inFlight++;
+              maxInFlight = maxInFlight < inFlight ? inFlight : maxInFlight;
+              await Future<void>.delayed(const Duration(milliseconds: 10));
+              inFlight--;
+              return _verified(line);
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+
+      await Future.wait([
+        controller.prefetchPlaybackForEpisode(
+          _subject,
+          nextEpisode,
+          preferredProviderId: 'rule:preferred',
+        ),
+        controller.prefetchPlaybackForEpisode(
+          _subject,
+          nextEpisode,
+          preferredProviderId: 'rule:preferred',
+        ),
+      ]);
+
+      expect(backendCalls, 1);
+      expect(requestedEpisodes, [nextEpisode.id]);
+      expect(verifyCalls, 2);
+      expect(maxInFlight, lessThanOrEqualTo(2));
+      expect(
+        controller
+            .prefetchedLineForEpisode(
+              _subject,
+              nextEpisode,
+              preferredProviderId: 'rule:preferred',
+            )
+            ?.providerId,
+        'rule:preferred',
+      );
+    },
+  );
+
+  test(
+    'direct and offline subjects do not start next-episode prefetch',
+    () async {
+      var backendCalls = 0;
+      final backend = _FakePlaybackRepository(
+        load: (_, episode, {required expandAll, cancellationToken}) async {
+          backendCalls++;
+          return <PlaybackLine>[_line('unexpected', episodeId: episode.id)];
+        },
+      );
+      final controller = _controller(backend: backend, activeVersion: () => 1);
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+
+      for (final source in ['direct', 'offline']) {
+        final subject = _subject.copyWith(source: source);
+        await controller.prefetchPlaybackForEpisode(subject, _episodeFor(2));
+      }
+
+      expect(backendCalls, 0);
+    },
+  );
+
+  test('account switch cancels a late next-episode prefetch write', () async {
+    var activeVersion = 1;
+    final verification = Completer<void>();
+    var verifyCalls = 0;
+    final nextEpisode = _episodeFor(2);
+    final controller = _controller(
+      backend: _FakePlaybackRepository(
+        load: (_, episode, {required expandAll, cancellationToken}) async => [
+          _line('next-account-a', episodeId: episode.id, serverVerified: true),
+        ],
+      ),
+      activeVersion: () => activeVersion,
+      verify:
+          (
+            line, {
+            enrichMetadata = true,
+            forceRefresh = false,
+            cancellationToken,
+          }) async {
+            verifyCalls++;
+            await verification.future;
+            return _verified(line);
+          },
+    );
+    addTearDown(controller.dispose);
+    _load(controller, accountId: 'account-a', contextVersion: 1);
+    final oldPrefetch = controller.prefetchPlaybackForEpisode(
+      _subject,
+      nextEpisode,
+    );
+    await _waitUntil(() => verifyCalls == 1);
+
+    activeVersion = 2;
+    _load(controller, accountId: 'account-b', contextVersion: 2);
+    verification.complete();
+    await oldPrefetch;
+
+    expect(controller.prefetchedLineForEpisode(_subject, nextEpisode), isNull);
+  });
+
+  test(
+    'forced next-episode refresh replaces a cancelled in-flight result',
+    () async {
+      final oldVerification = Completer<void>();
+      var backendCalls = 0;
+      final nextEpisode = _episodeFor(2);
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, episode, {required expandAll, cancellationToken}) async {
+            backendCalls++;
+            return <PlaybackLine>[
+              _line(
+                backendCalls == 1 ? 'old' : 'new',
+                episodeId: episode.id,
+                serverVerified: true,
+              ),
+            ];
+          },
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              if (line.id == 'old') await oldVerification.future;
+              return _verified(line);
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final oldPrefetch = controller.prefetchPlaybackForEpisode(
+        _subject,
+        nextEpisode,
+      );
+      await _waitUntil(() => backendCalls == 1);
+      final freshPrefetch = controller.prefetchPlaybackForEpisode(
+        _subject,
+        nextEpisode,
+        forceRefresh: true,
+      );
+      await freshPrefetch;
+      oldVerification.complete();
+      await oldPrefetch;
+
+      expect(backendCalls, 2);
+      expect(
+        controller.prefetchedLineForEpisode(_subject, nextEpisode)?.id,
+        'new',
+      );
+    },
+  );
 }
 
 PlaybackDiscoveryController _controller({
@@ -352,9 +557,10 @@ PlaybackLine _line(
   String provider = 'zeluna:test',
   bool available = true,
   bool serverVerified = false,
+  int? episodeId,
 }) => PlaybackLine(
   id: id,
-  episodeId: _episode.id,
+  episodeId: episodeId ?? _episode.id,
   providerId: provider,
   providerName: provider,
   title: id,
@@ -363,6 +569,16 @@ PlaybackLine _line(
   url: 'https://$id.example/video.m3u8',
   serverVerified: serverVerified,
   available: available,
+);
+
+AnimeEpisode _episodeFor(int number) => AnimeEpisode(
+  id: 400602000 + number,
+  subjectId: _subject.id,
+  number: number,
+  title: 'Episode $number',
+  airdate: '2026-08-02',
+  duration: '24:00',
+  description: '',
 );
 
 PlaybackLine _verified(PlaybackLine line) => PlaybackLine(

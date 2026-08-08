@@ -17,13 +17,16 @@ class PlaybackPrefetchCache {
   final Map<String, _PlaybackPrefetchEntry> _entries =
       <String, _PlaybackPrefetchEntry>{};
 
-  List<PlaybackLine>? read(String key) {
+  List<PlaybackLine>? read(
+    String key, {
+    Duration minValidity = const Duration(seconds: 15),
+  }) {
     final now = _now();
     _removeExpiredEntries(now);
     final entry = _entries[key];
     if (entry == null) return null;
     final lines = entry.lines
-        .where((line) => _isReusable(line, now))
+        .where((line) => _isReusable(line, now, minValidity))
         .toList(growable: false);
     if (lines.isEmpty) {
       _entries.remove(key);
@@ -38,10 +41,10 @@ class PlaybackPrefetchCache {
     return List<PlaybackLine>.unmodifiable(lines);
   }
 
-  void write(String key, Iterable<PlaybackLine> lines) {
+  void write(String key, Iterable<PlaybackLine> lines, {Duration? ttl}) {
     final now = _now();
     final reusable = lines
-        .where((line) => _isReusable(line, now))
+        .where((line) => _isReusable(line, now, Duration.zero))
         .toList(growable: false);
     if (reusable.isEmpty) {
       _entries.remove(key);
@@ -55,7 +58,7 @@ class PlaybackPrefetchCache {
     }
     _entries[key] = _PlaybackPrefetchEntry(
       lines: List<PlaybackLine>.unmodifiable(reusable),
-      expiresAt: now.add(ttl),
+      expiresAt: now.add(ttl ?? this.ttl),
     );
   }
 
@@ -67,7 +70,11 @@ class PlaybackPrefetchCache {
     _entries.removeWhere((_, entry) => !entry.expiresAt.isAfter(now));
   }
 
-  static bool _isReusable(PlaybackLine line, DateTime now) {
+  static bool _isReusable(
+    PlaybackLine line,
+    DateTime now,
+    Duration minValidity,
+  ) {
     final rawUrl = line.url?.trim() ?? '';
     final uri = Uri.tryParse(rawUrl);
     if (uri == null ||
@@ -76,8 +83,7 @@ class PlaybackPrefetchCache {
       return false;
     }
     final expiresAt = line.expiresAt;
-    if (expiresAt != null &&
-        !expiresAt.isAfter(now.add(const Duration(seconds: 15)))) {
+    if (expiresAt != null && !expiresAt.isAfter(now.add(minValidity))) {
       return false;
     }
     return line.available ||
