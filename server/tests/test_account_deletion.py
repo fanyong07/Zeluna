@@ -1,8 +1,11 @@
 import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server import account_api, auth, privacy
@@ -110,6 +113,7 @@ def test_poison_account_does_not_block_other_deletions(tmp_path, monkeypatch):
     assert [user.email for user in remaining] == ["poison@example.com"]
 
     monkeypatch.setattr(privacy, "_finalize_account_deletion", original)
+
     async def second_cleanup():
         async with sessions() as session:
             return await finalize_due_account_deletions(
@@ -117,12 +121,254 @@ def test_poison_account_does_not_block_other_deletions(tmp_path, monkeypatch):
             )
 
     assert asyncio.run(second_cleanup()) == 1
+
     async def count_users():
         async with sessions() as session:
             return await session.scalar(select(func.count(User.id)))
 
     assert asyncio.run(count_users()) == 0
     asyncio.run(engine.dispose())
+
+
+def test_candidate_selection_commits_before_locked_finalizer(monkeypatch):
+    events = []
+    statements = {}
+    user = SimpleNamespace(id=7)
+
+    class SelectionSession:
+        async def scalars(self, statement):
+            statements["selection"] = statement
+            events.append("selection")
+            return [user.id]
+
+        async def commit(self):
+            events.append("selection_commit")
+
+    class AccountSession:
+        async def scalar(self, statement):
+            statements["claim"] = statement
+            events.append("claim")
+            return user
+
+        async def commit(self):
+            events.append("finalizer_commit")
+
+        async def rollback(self):
+            events.append("finalizer_rollback")
+
+    class AccountContext:
+        async def __aenter__(self):
+            events.append("finalizer_enter")
+            return AccountSession()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            events.append("finalizer_exit")
+
+    async def fake_finalize(session, account):
+        assert account is user
+        events.append("finalize")
+
+    monkeypatch.setattr(privacy, "_finalize_account_deletion", fake_finalize)
+
+    async def exercise():
+        stats = {}
+        finalized = await finalize_due_account_deletions(
+            SelectionSession(),
+            now=100,
+            limit=1,
+            session_factory=AccountContext,
+            stats=stats,
+        )
+        return finalized, stats
+
+    finalized, stats = asyncio.run(exercise())
+    assert finalized == 1
+    assert stats == {
+        "processed": 1,
+        "finalized": 1,
+        "failed": 0,
+        "errors": {},
+    }
+    assert events == [
+        "selection",
+        "selection_commit",
+        "finalizer_enter",
+        "claim",
+        "finalize",
+        "finalizer_commit",
+        "finalizer_exit",
+    ]
+
+    selection_sql = str(
+        statements["selection"].compile(dialect=postgresql.dialect())
+    ).upper()
+    claim_sql = str(statements["claim"].compile(dialect=postgresql.dialect())).upper()
+    assert "FOR UPDATE" not in selection_sql
+    assert "USERS.DELETION_DUE_AT >" in claim_sql
+    assert "USERS.DELETION_DUE_AT <=" in claim_sql
+    assert "FOR UPDATE SKIP LOCKED" in claim_sql
+
+
+def test_finalizer_rechecks_due_state_after_candidate_selection(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'deletion-recheck.db').as_posix()}"
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def prepare():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            user = User(
+                email="cancel-before-finalize@example.com",
+                name="cancel-before-finalize",
+                password_hash="hash",
+                deletion_requested_at=1,
+                deletion_due_at=99,
+            )
+            session.add(user)
+            await session.commit()
+            return user.id
+
+    user_id = asyncio.run(prepare())
+    cancellation_applied = False
+
+    @asynccontextmanager
+    async def cancel_then_open_finalizer():
+        nonlocal cancellation_applied
+        if not cancellation_applied:
+            async with sessions() as cancellation_session:
+                await cancellation_session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(deletion_requested_at=0, deletion_due_at=0)
+                )
+                await cancellation_session.commit()
+            cancellation_applied = True
+        async with sessions() as account_session:
+            yield account_session
+
+    async def exercise():
+        stats = {}
+        async with sessions() as selection_session:
+            finalized = await finalize_due_account_deletions(
+                selection_session,
+                now=100,
+                limit=1,
+                session_factory=cancel_then_open_finalizer,
+                stats=stats,
+            )
+        async with sessions() as inspection_session:
+            remaining = await inspection_session.get(User, user_id)
+        return finalized, stats, remaining
+
+    finalized, stats, remaining = asyncio.run(exercise())
+    assert cancellation_applied
+    assert finalized == 0
+    assert stats == {
+        "processed": 0,
+        "finalized": 0,
+        "failed": 0,
+        "errors": {},
+    }
+    assert remaining is not None
+    assert remaining.deletion_requested_at == 0
+    assert remaining.deletion_due_at == 0
+    asyncio.run(engine.dispose())
+
+
+def test_concurrent_workers_only_finalize_the_claimed_account(monkeypatch):
+    async def exercise():
+        first_claimed = asyncio.Event()
+        second_attempted = asyncio.Event()
+        state = {"locked": False, "finalizations": 0}
+        claim_statements = []
+
+        class SelectionSession:
+            def __init__(self):
+                self.committed = False
+
+            async def scalars(self, statement):
+                return [11]
+
+            async def commit(self):
+                self.committed = True
+
+        class AccountSession:
+            def __init__(self):
+                self.owns_claim = False
+
+            async def scalar(self, statement):
+                claim_statements.append(statement)
+                if not state["locked"]:
+                    state["locked"] = True
+                    self.owns_claim = True
+                    first_claimed.set()
+                    await second_attempted.wait()
+                    return SimpleNamespace(id=11)
+                await first_claimed.wait()
+                second_attempted.set()
+                return None
+
+            async def commit(self):
+                if self.owns_claim:
+                    state["locked"] = False
+
+            async def rollback(self):
+                if self.owns_claim:
+                    state["locked"] = False
+
+        class AccountContext:
+            def __init__(self, selection_session):
+                self.selection_session = selection_session
+                self.account_session = AccountSession()
+
+            async def __aenter__(self):
+                assert self.selection_session.committed
+                return self.account_session
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return None
+
+        async def fake_finalize(session, account):
+            assert account.id == 11
+            state["finalizations"] += 1
+
+        monkeypatch.setattr(privacy, "_finalize_account_deletion", fake_finalize)
+        first_selection = SelectionSession()
+        second_selection = SelectionSession()
+        first_stats = {}
+        second_stats = {}
+
+        results = await asyncio.gather(
+            finalize_due_account_deletions(
+                first_selection,
+                now=100,
+                limit=1,
+                session_factory=lambda: AccountContext(first_selection),
+                stats=first_stats,
+            ),
+            finalize_due_account_deletions(
+                second_selection,
+                now=100,
+                limit=1,
+                session_factory=lambda: AccountContext(second_selection),
+                stats=second_stats,
+            ),
+        )
+        return results, first_stats, second_stats, state, claim_statements
+
+    results, first_stats, second_stats, state, claim_statements = asyncio.run(
+        exercise()
+    )
+    assert sorted(results) == [0, 1]
+    assert state["finalizations"] == 1
+    assert sorted([first_stats["processed"], second_stats["processed"]]) == [0, 1]
+    assert sorted([first_stats["finalized"], second_stats["finalized"]]) == [0, 1]
+    assert len(claim_statements) == 2
+    for statement in claim_statements:
+        claim_sql = str(statement.compile(dialect=postgresql.dialect())).upper()
+        assert "FOR UPDATE SKIP LOCKED" in claim_sql
 
 
 def test_account_erasure_inventory_covers_every_user_foreign_key():

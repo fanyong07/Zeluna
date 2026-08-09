@@ -107,6 +107,57 @@ async def finalize_due_account_deletions(
 
     cutoff = time.time() if now is None else now
     bounded_limit = max(1, min(1000, limit))
+    counters: dict[str, int] = {"processed": 0, "finalized": 0, "failed": 0}
+    errors: dict[str, int] = {}
+    if session_factory is not None:
+        # Selection must not retain a User row lock while an independent
+        # finalizer transaction tries to modify the same account. Commit the
+        # short selection transaction before opening any finalizer session.
+        candidate_ids = list(
+            await session.scalars(
+                select(User.id)
+                .where(
+                    User.deletion_due_at > 0,
+                    User.deletion_due_at <= cutoff,
+                )
+                .order_by(User.deletion_due_at.asc(), User.id.asc())
+                .limit(bounded_limit)
+            )
+        )
+        await session.commit()
+        for user_id in candidate_ids:
+            async with session_factory() as account_session:
+                try:
+                    account = await account_session.scalar(
+                        select(User)
+                        .where(
+                            User.id == user_id,
+                            User.deletion_due_at > 0,
+                            User.deletion_due_at <= cutoff,
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                    if account is None:
+                        continue
+                    counters["processed"] += 1
+                    await _finalize_account_deletion(account_session, account)
+                    await account_session.commit()
+                    counters["finalized"] += 1
+                except Exception as error:
+                    await account_session.rollback()
+                    error_code = _deletion_error_code(error)
+                    errors[error_code] = errors.get(error_code, 0) + 1
+                    await _record_deletion_failure(
+                        account_session, user_id, now=now, error_code=error_code
+                    )
+                    counters["failed"] += 1
+        if stats is not None:
+            stats.update(counters)
+            stats["errors"] = errors
+        return counters["finalized"]
+
+    # Direct callers/tests that already own a session retain the original
+    # savepoint behavior and keep their selected rows locked in that session.
     users = list(
         await session.scalars(
             select(User)
@@ -119,34 +170,6 @@ async def finalize_due_account_deletions(
             .with_for_update(skip_locked=True)
         )
     )
-    counters: dict[str, int] = {"processed": 0, "finalized": 0, "failed": 0}
-    errors: dict[str, int] = {}
-    if session_factory is not None:
-        for user in users:
-            counters["processed"] += 1
-            async with session_factory() as account_session:
-                try:
-                    account = await account_session.get(User, user.id)
-                    if account is None:
-                        continue
-                    await _finalize_account_deletion(account_session, account)
-                    await account_session.commit()
-                    counters["finalized"] += 1
-                except Exception as error:
-                    await account_session.rollback()
-                    error_code = _deletion_error_code(error)
-                    errors[error_code] = errors.get(error_code, 0) + 1
-                    await _record_deletion_failure(
-                        account_session, user.id, now=now, error_code=error_code
-                    )
-                    counters["failed"] += 1
-        if stats is not None:
-            stats.update(counters)
-            stats["errors"] = errors
-        return counters["finalized"]
-
-    # Direct callers/tests that already own a session still receive isolated
-    # savepoints. The scheduler path above uses a fresh transaction per account.
     for user in users:
         counters["processed"] += 1
         try:
