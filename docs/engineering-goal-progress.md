@@ -2205,7 +2205,16 @@ Status: in_progress (foundations completed; production wiring pending)
 
 Commits: `65876df feat: cache next episode warmup bundles`,
 `41a3717 perf: validate warmup transition freshness`,
-`1051529 feat: produce next episode warmup bundles`
+`1051529 feat: produce next episode warmup bundles`,
+`f63f9e6 feat: validate warmup fallback before recovery`
+
+- Immediate fallback recovery now re-checks the expected prepared line ID,
+  verified route state, expiry, and a caller-provided transition validity
+  margin before it can bypass cold discovery. This helper is independently
+  committed; the controller/player consumption wiring remains pending.
+- Focused continuity regression: all 15 tests passed, static analysis of the
+  helper and its test reported no issues, and scoped diff/encoding/secret
+  checks passed.
 
 - The broader `anime_controller_playback_hedge_test.dart` is not claimed as
   passing in the current dirty integration worktree: cancellation request
