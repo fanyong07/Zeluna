@@ -469,57 +469,90 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nextEpisodePrefetchCancellation = token;
     _nextEpisodePrefetchStartedAt = DateTime.now();
     _nextEpisodePrefetchStarted = true;
+    final controller = ref.read(animeControllerProvider.notifier);
     final preferredProviderId =
         _preferredProviderId ??
-        ref
-            .read(animeControllerProvider.notifier)
-            .rememberedPlaybackProvider(widget.request.subject);
-    _playbackTrace.record(
+        controller.rememberedPlaybackProvider(widget.request.subject);
+    _playbackTrace.recordContinuity(
       forceRefresh
-          ? 'next_line_prefetch_refresh_started'
-          : 'next_line_prefetch_started',
+          ? PlaybackContinuityTraceEvent.nextWarmupRefreshStarted
+          : PlaybackContinuityTraceEvent.nextWarmupStarted,
       fields: <String, Object?>{
-        'next_episode_number': next.number,
         if (preferredProviderId?.isNotEmpty == true)
           'preferred_provider': preferredProviderId,
       },
     );
-    final future = ref
-        .read(animeControllerProvider.notifier)
-        .prefetchPlaybackForEpisode(
-          widget.request.subject,
-          next,
-          preferredProviderId: preferredProviderId,
-          forceRefresh: forceRefresh,
-          cancellationToken: token,
-        );
+    final future = controller.prefetchPlaybackForEpisode(
+      widget.request.subject,
+      next,
+      preferredProviderId: preferredProviderId,
+      forceRefresh: forceRefresh,
+      cancellationToken: token,
+    );
     unawaited(
       future
           .then<void>(
             (_) {
               if (token.isCancelled) return;
               final startedAt = _nextEpisodePrefetchStartedAt;
-              _playbackTrace.record(
-                forceRefresh
-                    ? 'next_line_prefetch_refresh_completed'
-                    : 'next_line_prefetch_completed',
+              final bundle = controller.prefetchedWarmupBundleForEpisode(
+                widget.request.subject,
+                next,
+                minValidity: Duration.zero,
+              );
+              if (bundle == null) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupFailed,
+                  fields: const <String, Object?>{
+                    'reason_code': 'no_fresh_bundle',
+                  },
+                );
+                return;
+              }
+              final readinessFields = <String, Object?>{
+                if (bundle.preferredProviderId != null)
+                  'preferred_provider': bundle.preferredProviderId,
+                'line_count': bundle.allLines.length,
+                'fallback_count': bundle.fallback == null ? 0 : 1,
+                if (startedAt != null)
+                  'elapsed_ms': DateTime.now()
+                      .difference(startedAt)
+                      .inMilliseconds,
+              };
+              _playbackTrace.recordContinuity(
+                PlaybackContinuityTraceEvent.nextWarmupPrimaryReady,
                 fields: <String, Object?>{
-                  'next_episode_number': next.number,
-                  if (startedAt != null)
-                    'elapsed_ms': DateTime.now()
-                        .difference(startedAt)
-                        .inMilliseconds,
+                  ...readinessFields,
+                  'provider': bundle.primary.providerId,
                 },
               );
+              final fallback = bundle.fallback;
+              if (fallback != null) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupFallbackReady,
+                  fields: <String, Object?>{
+                    ...readinessFields,
+                    'provider': fallback.providerId,
+                  },
+                );
+              }
+              if (forceRefresh) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupRefreshCompleted,
+                  fields: <String, Object?>{
+                    ...readinessFields,
+                    'provider': bundle.primary.providerId,
+                  },
+                );
+              }
             },
             onError: (Object error, StackTrace stackTrace) {
               if (token.isCancelled) return;
               final startedAt = _nextEpisodePrefetchStartedAt;
-              _playbackTrace.record(
-                'next_line_prefetch_failed',
+              _playbackTrace.recordContinuity(
+                PlaybackContinuityTraceEvent.nextWarmupFailed,
                 fields: <String, Object?>{
-                  'next_episode_number': next.number,
-                  'error_type': error.runtimeType.toString(),
+                  'reason_code': 'lookup_error',
                   if (startedAt != null)
                     'elapsed_ms': DateTime.now()
                         .difference(startedAt)
@@ -560,10 +593,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final token = _nextEpisodePrefetchCancellation;
     if (token != null && !token.isCancelled) {
       final startedAt = _nextEpisodePrefetchStartedAt;
-      _playbackTrace.record(
-        'next_line_prefetch_cancelled',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.nextWarmupCancelled,
         fields: <String, Object?>{
-          if (_nextEpisode != null) 'next_episode_number': _nextEpisode!.number,
           if (startedAt != null)
             'elapsed_ms': DateTime.now().difference(startedAt).inMilliseconds,
         },
@@ -586,8 +618,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (strategy == 'auto_switch' &&
         previous?.id == _warmupTransitionPrimaryLineId &&
         target.id == _warmupTransitionFallbackLineId) {
-      _playbackTrace.record(
-        'episode_transition_fallback_hit',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionFallbackHit,
         fields: <String, Object?>{'provider': target.providerId},
       );
     }
@@ -1833,8 +1865,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final warmupPrimaryFailed =
         line.id == _warmupTransitionPrimaryLineId && hasWarmupFallback;
     if (warmupPrimaryFailed) {
-      _playbackTrace.record(
-        'episode_transition_primary_failed',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionPrimaryFailed,
         fields: <String, Object?>{
           'provider': line.providerId,
           'fallback_count': 1,
@@ -1842,8 +1874,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         },
       );
     } else if (line.id == _warmupTransitionFallbackLineId) {
-      _playbackTrace.record(
-        'episode_transition_fallback_failed',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionFallbackFailed,
         fields: <String, Object?>{
           'provider': line.providerId,
           'reason_code': 'runtime_failure',
@@ -2230,8 +2262,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'provider': preparedLine.providerId,
         },
       );
-      _playbackTrace.record(
-        'episode_transition_warmup_hit',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionWarmupHit,
         fields: <String, Object?>{
           'provider': preparedLine.providerId,
           if (preparedBundle.preferredProviderId != null)
@@ -2242,8 +2274,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         },
       );
     } else {
-      _playbackTrace.record(
-        'episode_transition_warmup_miss',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionWarmupMiss,
         fields: <String, Object?>{
           'reason_code': !_currentSettings.rememberLine
               ? 'disabled'
@@ -2280,8 +2312,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     if (preparedLine != null && _isPlayableLine(preparedLine)) {
-      _playbackTrace.record(
-        'episode_transition_primary_open',
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionPrimaryOpen,
         fields: <String, Object?>{'provider': preparedLine.providerId},
       );
       _openingWarmupTransitionPrimary =

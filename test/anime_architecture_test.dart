@@ -40,10 +40,44 @@ void main() {
     expect(controllerSource, contains('prefetchedWarmupBundleForEpisode('));
     expect(playerSource, contains('buildWarmupTransitionInventory('));
     expect(playerSource, contains('initialLines: preparedLines'));
-    expect(playerSource, contains('episode_transition_warmup_hit'));
-    expect(playerSource, contains('episode_transition_warmup_miss'));
+    expect(
+      playerSource,
+      contains('PlaybackContinuityTraceEvent.episodeTransitionWarmupHit'),
+    );
+    expect(
+      playerSource,
+      contains('PlaybackContinuityTraceEvent.episodeTransitionWarmupMiss'),
+    );
     expect(playerSource, contains('_openingWarmupTransitionPrimary'));
     expect(playerSource, contains('warmupFallbackReadyForImmediateRecovery('));
+  });
+
+  test('continuity telemetry uses the constrained event registry', () {
+    final playerSource = File(
+      'lib/src/player/player_page.dart',
+    ).readAsStringSync();
+    final traceSource = File(
+      'lib/src/player/playback_performance_trace.dart',
+    ).readAsStringSync();
+
+    expect(playerSource, contains('_playbackTrace.recordContinuity('));
+    for (final event in <String>[
+      'next_warmup_started',
+      'next_warmup_primary_ready',
+      'next_warmup_fallback_ready',
+      'next_warmup_refresh_started',
+      'next_warmup_refresh_completed',
+      'next_warmup_failed',
+      'next_warmup_cancelled',
+      'episode_transition_warmup_hit',
+      'episode_transition_warmup_miss',
+      'episode_transition_primary_open',
+      'episode_transition_primary_failed',
+      'episode_transition_fallback_hit',
+      'episode_transition_fallback_failed',
+    ]) {
+      expect(traceSource, contains("'$event'"));
+    }
   });
 
   test(
