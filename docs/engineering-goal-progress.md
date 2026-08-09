@@ -2080,3 +2080,84 @@ Final repository state: `MERGED TO MAIN`.
 
 No production deployment, public/store upload, AAB publication, or private
 signing-key access was performed.
+
+## Post-G14 Playback Continuity Correction
+
+Status: in_progress
+
+Task source inventory:
+
+- `D:\下载\Zeluna_Post_G14_Playback_Continuity_Goal.md` was read completely as
+  UTF-8: 22,904 bytes, 1,215 lines, SHA-256
+  `DADD1555165C04097F8D1A1C889C116BC84C907ADD8DAC8B771A4D3EFD33B396`.
+- Starting `main` and `origin/main`: `d1a22dcdfb390f4c21f384297ccbffd8489e3bd5`.
+- Starting working tree: clean.
+- Starting Quality Gates run: `31275352387`, successful on the exact starting
+  SHA with all six jobs successful.
+
+### A1 - Privacy deletion transaction isolation
+
+Status: completed
+
+- The scheduler path now selects only due account IDs without a row lock and
+  commits that short selection transaction before opening a finalizer session.
+- Each finalizer transaction re-checks due eligibility and claims the User row
+  with `FOR UPDATE SKIP LOCKED`; a cancelled account is skipped and two workers
+  cannot finalize the same claimed row concurrently.
+- Poison-account isolation, bounded retry metadata, low-cardinality errors, and
+  no-PII behavior remain intact.
+- Regression coverage verifies selection-before-finalizer ordering, PostgreSQL
+  dialect SQL, cancellation between selection and claim, deterministic dual
+  worker claiming, and the existing poison/direct-session behavior: 12 passed.
+- No live PostgreSQL service was available locally; the completed regression is
+  PostgreSQL-dialect compilation plus deterministic lock/transaction simulation,
+  not a claim that a real PostgreSQL lock-wait run occurred.
+
+Commit: `e960956 fix: isolate privacy deletion claims`
+
+### A2 - Refresh rotation multi-instance atomicity
+
+Status: completed
+
+- Removed the process-local refresh lock as a correctness boundary. Old refresh
+  credentials are now claimed by one database CAS:
+  `UPDATE ... WHERE digest = ? AND used_at = 0 RETURNING ...`.
+- Claim, current-session update, replacement-history insertion, and commit stay
+  in one transaction. A losing concurrent request detects reuse, revokes the
+  whole token family, and leaves no second valid refresh chain.
+- The two-independent-session concurrency regression passed with exactly one
+  rotation and one reuse result; the complete account-session file passed 3
+  tests. Ruff and diff checks passed.
+
+Commit: `03c4939 security: make refresh rotation atomic`
+
+### A3 - Legacy JWT migration default
+
+Status: completed
+
+- `LEGACY_JWT_COMPATIBILITY_ENABLED` now defaults to `false` in code and the
+  environment example. Deployment guidance permits `true` only as an explicit,
+  bounded migration override.
+- Tests now prove the default is closed, the migration override can explicitly
+  enable issuer-less legacy JWTs, and the disabled path rejects them. New
+  Access/Refresh/Device Session behavior remains unchanged.
+- Combined account API/session regression: 24 passed; Ruff passed.
+
+Commit: `47bc2c6 security: disable legacy jwt by default`
+
+### A4 - Repository cleanup and encoding
+
+Status: completed
+
+- Removed accidentally tracked `.diff_namestat.txt` and `_branch_log.txt` and
+  added exact root ignore rules so later audits cannot recommit them.
+- Corrected the only targeted user-visible mojibake to
+  `账号服务安全配置不可用` and added the `_issue_credentials` 503 regression.
+- Full account API regression: 20 passed. Ruff, targeted mojibake scan, ignore
+  verification, and diff checks passed.
+
+Commit: `75ff322 chore: remove repository audit artifacts`
+
+Next required stage: C1-C7 playback continuity. Full regression, platform
+builds, migrations, supply-chain gates, and the exact final-main GitHub run
+remain pending and must not be inferred from these focused results.
