@@ -2264,19 +2264,33 @@ Commit: `a2a87e5 test: cover warmup scope invalidation`
 
 ### C7 - Continuity telemetry safety
 
-Status: in_progress (redaction completed; event wiring pending)
+Status: completed
 
 - Playback trace redaction now rejects credential/exception/message/stack
   fields, URL-shaped and URL-encoded values, signed-query fragments, and
   Bearer/Cookie/Token/Signature-shaped strings before they reach a sink.
-- The redaction regression passed 5/5 and focused static analysis reported no
-  issues. Exact warmup-ready/transition event wiring remains coupled to the
-  pending player bundle-consumption integration and is not marked complete.
+- The dedicated redaction regression passed 5/5 before the event wiring was
+  integrated.
+- Continuity telemetry is constrained to a registry of exactly 13 required
+  warmup/transition events. `recordContinuity` rejects unregistered event names
+  and forwards only the Goal-approved low-cardinality field set; it does not
+  add remote upload or persistence.
+- The player now emits the registered start, primary/fallback-ready, refresh,
+  failure, cancellation, and transition outcome events through the constrained
+  path. Media URLs, signed route data, request credentials, exception text,
+  episode numbers, and other high-cardinality values are not emitted.
+- The two player/test integration blobs were composed over `26c9d24` and staged
+  without the shared recommendation worktree changes. Staged diff, encoding,
+  credential/URL, and recommendation/personalization scans all passed.
+- The exact isolated snapshot passed 42/42 telemetry and architecture tests
+  (35 architecture plus 7 trace tests), and full Flutter static analysis
+  reported no issues.
 
-Commit: `8e12736 security: redact playback trace credentials`
+Commits: `8e12736 security: redact playback trace credentials`,
+`26c9d24 feat: constrain playback continuity telemetry`,
+`f5d1aff feat: emit playback continuity telemetry`
 
-Next required stage: complete exact continuity telemetry wiring and the
-remaining C1-C7 player regression matrix. Full regression on the resulting
-main SHA, platform builds, migrations, supply-chain gates, and the exact
-final-main GitHub run remain pending and must not be inferred from these
-focused or pre-integration results.
+Next required stage: complete the remaining C1-C7 player regression matrix.
+Full regression on the resulting main SHA, platform builds, migrations,
+supply-chain gates, and the exact final-main GitHub run remain pending and must
+not be inferred from these focused or pre-integration results.
