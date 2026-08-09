@@ -4,6 +4,52 @@ import 'package:flutter/foundation.dart';
 
 typedef PlaybackTraceSink = void Function(Map<String, Object?> event);
 
+abstract final class PlaybackContinuityTraceEvent {
+  static const nextWarmupStarted = 'next_warmup_started';
+  static const nextWarmupPrimaryReady = 'next_warmup_primary_ready';
+  static const nextWarmupFallbackReady = 'next_warmup_fallback_ready';
+  static const nextWarmupRefreshStarted = 'next_warmup_refresh_started';
+  static const nextWarmupRefreshCompleted = 'next_warmup_refresh_completed';
+  static const nextWarmupFailed = 'next_warmup_failed';
+  static const nextWarmupCancelled = 'next_warmup_cancelled';
+  static const episodeTransitionWarmupHit = 'episode_transition_warmup_hit';
+  static const episodeTransitionWarmupMiss = 'episode_transition_warmup_miss';
+  static const episodeTransitionPrimaryOpen = 'episode_transition_primary_open';
+  static const episodeTransitionPrimaryFailed =
+      'episode_transition_primary_failed';
+  static const episodeTransitionFallbackHit = 'episode_transition_fallback_hit';
+  static const episodeTransitionFallbackFailed =
+      'episode_transition_fallback_failed';
+
+  static const values = <String>{
+    nextWarmupStarted,
+    nextWarmupPrimaryReady,
+    nextWarmupFallbackReady,
+    nextWarmupRefreshStarted,
+    nextWarmupRefreshCompleted,
+    nextWarmupFailed,
+    nextWarmupCancelled,
+    episodeTransitionWarmupHit,
+    episodeTransitionWarmupMiss,
+    episodeTransitionPrimaryOpen,
+    episodeTransitionPrimaryFailed,
+    episodeTransitionFallbackHit,
+    episodeTransitionFallbackFailed,
+  };
+}
+
+const _playbackContinuityTraceFieldKeys = <String>{
+  'provider',
+  'preferred_provider',
+  'elapsed_ms',
+  'remaining_ms_bucket',
+  'cache_age_ms',
+  'warmup_age_bucket',
+  'line_count',
+  'fallback_count',
+  'reason_code',
+};
+
 /// Emits a small anonymous timeline for one playback attempt. It deliberately
 /// excludes media URLs, titles, account identifiers and request headers.
 class PlaybackPerformanceTrace {
@@ -33,6 +79,21 @@ class PlaybackPerformanceTrace {
   void record(String event, {Map<String, Object?> fields = const {}}) {
     final now = _clock();
     _emit(event, now, fields);
+  }
+
+  void recordContinuity(
+    String event, {
+    Map<String, Object?> fields = const {},
+  }) {
+    if (!PlaybackContinuityTraceEvent.values.contains(event)) return;
+    record(
+      event,
+      fields: <String, Object?>{
+        for (final entry in fields.entries)
+          if (_playbackContinuityTraceFieldKeys.contains(entry.key))
+            entry.key: entry.value,
+      },
+    );
   }
 
   void recordBufferingChanged({

@@ -125,6 +125,54 @@ void main() {
     expect(events.single['line_count'], 2);
   });
 
+  test('continuity trace accepts only exact events and allowed fields', () {
+    final events = <Map<String, Object?>>[];
+    final trace = PlaybackPerformanceTrace(
+      attemptId: 'attempt-continuity',
+      clock: () => DateTime.utc(2026, 8, 1, 12),
+      sink: events.add,
+    );
+
+    trace.recordContinuity(
+      PlaybackContinuityTraceEvent.nextWarmupPrimaryReady,
+      fields: const <String, Object?>{
+        'provider': 'zeluna:primary',
+        'line_count': 2,
+        'next_episode_number': 12,
+        'error_type': 'ClientException',
+      },
+    );
+    trace.recordContinuity('unregistered_continuity_event');
+
+    expect(events, hasLength(1));
+    expect(
+      events.single['event'],
+      PlaybackContinuityTraceEvent.nextWarmupPrimaryReady,
+    );
+    expect(events.single['provider'], 'zeluna:primary');
+    expect(events.single['line_count'], 2);
+    expect(events.single, isNot(contains('next_episode_number')));
+    expect(events.single, isNot(contains('error_type')));
+  });
+
+  test('continuity trace event registry matches the required matrix', () {
+    expect(PlaybackContinuityTraceEvent.values, <String>{
+      'next_warmup_started',
+      'next_warmup_primary_ready',
+      'next_warmup_fallback_ready',
+      'next_warmup_refresh_started',
+      'next_warmup_refresh_completed',
+      'next_warmup_failed',
+      'next_warmup_cancelled',
+      'episode_transition_warmup_hit',
+      'episode_transition_warmup_miss',
+      'episode_transition_primary_open',
+      'episode_transition_primary_failed',
+      'episode_transition_fallback_hit',
+      'episode_transition_fallback_failed',
+    });
+  });
+
   test('playback trace can be disabled and is bounded per attempt', () {
     final events = <Map<String, Object?>>[];
     final trace = PlaybackPerformanceTrace(
