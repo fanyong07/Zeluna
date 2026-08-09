@@ -52,6 +52,79 @@ void main() {
     expect(playerSource, contains('warmupFallbackReadyForImmediateRecovery('));
   });
 
+  test(
+    'player lifecycle wires the two-stage warmup and cancellation gates',
+    () {
+      final playerSource = File(
+        'lib/src/player/player_page.dart',
+      ).readAsStringSync();
+
+      String section(String start, String end) {
+        final startIndex = playerSource.indexOf(start);
+        final endIndex = playerSource.indexOf(end, startIndex + start.length);
+        expect(startIndex, isNonNegative, reason: 'missing $start');
+        expect(endIndex, greaterThan(startIndex), reason: 'missing $end');
+        return playerSource.substring(startIndex, endIndex);
+      }
+
+      final firstFrame = section(
+        'void _recordFirstFrame(',
+        'void _clearWarmupTransitionState()',
+      );
+      expect(firstFrame, contains('if (_currentSettings.rememberLine)'));
+      expect(firstFrame, contains('_scheduleNextEpisodePrefetch();'));
+
+      final schedule = section(
+        'void _scheduleNextEpisodePrefetch()',
+        'void _startNextEpisodePrefetch(',
+      );
+      expect(
+        schedule,
+        contains('_nextEpisodeWarmupCoordinator.scheduleInitial('),
+      );
+      expect(schedule, contains('_currentSettings.rememberLine &&'));
+      expect(schedule, contains('_playing &&'));
+      expect(schedule, contains('!_buffering &&'));
+
+      final refresh = section(
+        'void _maybeRefreshNextEpisodePrefetch()',
+        'void _cancelNextEpisodePrefetch()',
+      );
+      expect(
+        refresh,
+        contains('_nextEpisodeWarmupCoordinator.requestNearTransitionRefresh('),
+      );
+      expect(
+        refresh,
+        contains('_startNextEpisodePrefetch(forceRefresh: true)'),
+      );
+
+      final recovery = section(
+        'void _beginPlaybackRecovery(',
+        'void dispose()',
+      );
+      expect(recovery, contains('_resetNextEpisodePrefetch();'));
+
+      final episodeChange = section(
+        'void _selectEpisode(',
+        'Future<void> _stopAndResolveSelectedEpisode(',
+      );
+      expect(episodeChange, contains('_resetNextEpisodePrefetch();'));
+
+      final lineChange = section(
+        'void _selectLine(',
+        'Future<void> _pickLocalPlaybackFile()',
+      );
+      expect(lineChange, contains('_resetNextEpisodePrefetch();'));
+
+      final dispose = section(
+        'void dispose()',
+        'void didChangeAppLifecycleState(',
+      );
+      expect(dispose, contains('_cancelNextEpisodePrefetch();'));
+    },
+  );
+
   test('continuity telemetry uses the constrained event registry', () {
     final playerSource = File(
       'lib/src/player/player_page.dart',
