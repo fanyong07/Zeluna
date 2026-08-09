@@ -341,6 +341,18 @@ void main() {
       expect(requestedEpisodes, [nextEpisode.id]);
       expect(verifyCalls, 2);
       expect(maxInFlight, lessThanOrEqualTo(2));
+      final bundle = controller.prefetchedWarmupBundleForEpisode(
+        _subject,
+        nextEpisode,
+      );
+      expect(
+        bundle?.episodeIdentity,
+        nextEpisode.identityKey(subjectKey: _subject.identityKey),
+      );
+      expect(bundle?.primary.providerId, 'rule:preferred');
+      expect(bundle?.fallback?.providerId, 'zeluna:fallback');
+      expect(bundle?.allLines, hasLength(2));
+      expect(controller.cachedWarmupEntries, 1);
       expect(
         controller
             .prefetchedLineForEpisode(
@@ -415,6 +427,11 @@ void main() {
     await oldPrefetch;
 
     expect(controller.prefetchedLineForEpisode(_subject, nextEpisode), isNull);
+    expect(
+      controller.prefetchedWarmupBundleForEpisode(_subject, nextEpisode),
+      isNull,
+    );
+    expect(controller.cachedWarmupEntries, 0);
   });
 
   test(
@@ -460,6 +477,7 @@ void main() {
         nextEpisode,
         forceRefresh: true,
       );
+      expect(controller.cachedWarmupEntries, 0);
       await freshPrefetch;
       oldVerification.complete();
       await oldPrefetch;
@@ -469,6 +487,84 @@ void main() {
         controller.prefetchedLineForEpisode(_subject, nextEpisode)?.id,
         'new',
       );
+      expect(
+        controller
+            .prefetchedWarmupBundleForEpisode(_subject, nextEpisode)
+            ?.primary
+            .id,
+        'new',
+      );
+    },
+  );
+
+  test(
+    'forced next-episode refresh hides a previously cached bundle',
+    () async {
+      final forcedResult = Completer<List<PlaybackLine>>();
+      var backendCalls = 0;
+      final nextEpisode = _episodeFor(2);
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, episode, {required expandAll, cancellationToken}) {
+            backendCalls++;
+            if (backendCalls == 1) {
+              return Future<List<PlaybackLine>>.value(<PlaybackLine>[
+                _line(
+                  'cached-old',
+                  episodeId: episode.id,
+                  serverVerified: true,
+                ),
+              ]);
+            }
+            return forcedResult.future;
+          },
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async => _verified(line),
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+
+      await controller.prefetchPlaybackForEpisode(_subject, nextEpisode);
+      expect(
+        controller
+            .prefetchedWarmupBundleForEpisode(_subject, nextEpisode)
+            ?.primary
+            .id,
+        'cached-old',
+      );
+
+      final forced = controller.prefetchPlaybackForEpisode(
+        _subject,
+        nextEpisode,
+        forceRefresh: true,
+      );
+      await _waitUntil(() => backendCalls == 2);
+
+      expect(
+        controller.prefetchedWarmupBundleForEpisode(_subject, nextEpisode),
+        isNull,
+      );
+
+      forcedResult.complete(<PlaybackLine>[
+        _line('forced-fresh', episodeId: nextEpisode.id, serverVerified: true),
+      ]);
+      await forced;
+
+      expect(
+        controller
+            .prefetchedWarmupBundleForEpisode(_subject, nextEpisode)
+            ?.primary
+            .id,
+        'forced-fresh',
+      );
+      expect(backendCalls, 2);
     },
   );
 

@@ -148,7 +148,7 @@ final class PlaybackDiscoveryController {
        _now = now ?? DateTime.now,
        _interactivePreferredHeadStart = interactivePreferredHeadStart,
        _backendCache = PlaybackPrefetchCache(now: now),
-       _episodePrefetchCache = PlaybackPrefetchCache(
+       _episodeWarmupCache = NextEpisodeWarmupCache(
          ttl: const Duration(minutes: 45),
          maxEntries: 8,
          now: now,
@@ -162,7 +162,7 @@ final class PlaybackDiscoveryController {
   final DateTime Function() _now;
   final Duration _interactivePreferredHeadStart;
   final PlaybackPrefetchCache _backendCache;
-  final PlaybackPrefetchCache _episodePrefetchCache;
+  final NextEpisodeWarmupCache _episodeWarmupCache;
   final Map<String, _BackendLookupOperation> _backendLookups =
       <String, _BackendLookupOperation>{};
   final Map<String, Future<void>> _prefetches = <String, Future<void>>{};
@@ -183,6 +183,7 @@ final class PlaybackDiscoveryController {
   String? get accountId => _accountId;
   int get contextVersion => _contextVersion;
   int get cachedBackendEntries => _backendCache.length;
+  int get cachedWarmupEntries => _episodeWarmupCache.length;
 
   void loadForAccount({
     required String? accountId,
@@ -787,11 +788,13 @@ final class PlaybackDiscoveryController {
     Duration minValidity = const Duration(seconds: 60),
   }) {
     final scope = _scope();
-    final prefetched = _episodePrefetchCache.read(
+    final prefetched = _episodeWarmupCache.read(
       _episodePrefetchKey(scope, subject, episode),
       minValidity: minValidity,
     );
-    final cached = <PlaybackLine>[if (prefetched != null) ...prefetched];
+    final cached = <PlaybackLine>[
+      if (prefetched != null) ...prefetched.allLines,
+    ];
     final lookupKey = _backendPlaybackLookupKey(
       scope,
       _services,
@@ -823,6 +826,18 @@ final class PlaybackDiscoveryController {
       }
     }
     return null;
+  }
+
+  NextEpisodeWarmupBundle? prefetchedWarmupBundleForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    Duration minValidity = const Duration(seconds: 60),
+  }) {
+    final scope = _scope();
+    return _episodeWarmupCache.read(
+      _episodePrefetchKey(scope, subject, episode),
+      minValidity: minValidity,
+    );
   }
 
   Future<List<PlaybackLine>> prepareSingleBackupForEpisode(
@@ -1023,6 +1038,7 @@ final class PlaybackDiscoveryController {
       _prefetchTokens[key]?.cancel();
       _prefetches.remove(key);
       _prefetchTokens.remove(key);
+      _episodeWarmupCache.remove(_episodePrefetchKey(scope, subject, episode));
     }
     final existing = _prefetches[key];
     if (existing != null) {
@@ -1158,9 +1174,13 @@ final class PlaybackDiscoveryController {
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final ranked = rankPlaybackLinesForStartup(candidates);
     if (cacheEpisode) {
-      _episodePrefetchCache.write(
+      if (ranked.isEmpty) return;
+      _episodeWarmupCache.write(
         _episodePrefetchKey(scope, subject, episode),
-        ranked,
+        episodeIdentity: episode.identityKey(subjectKey: subject.identityKey),
+        primary: ranked.first,
+        fallbacks: ranked.skip(1).take(1),
+        preferredProviderId: preferred,
         ttl: const Duration(minutes: 45),
       );
     } else {
@@ -1483,7 +1503,7 @@ final class PlaybackDiscoveryController {
     }
     _backendLookups.clear();
     _backendCache.clear();
-    _episodePrefetchCache.clear();
+    _episodeWarmupCache.clear();
   }
 
   _PlaybackDiscoveryScope _scope() {
