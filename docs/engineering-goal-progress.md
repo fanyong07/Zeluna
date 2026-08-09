@@ -2083,7 +2083,7 @@ signing-key access was performed.
 
 ## Post-G14 Playback Continuity Correction
 
-Status: in_progress
+Status: completed
 
 Task source inventory:
 
@@ -2357,7 +2357,7 @@ Commit: `fbef03a test: normalize pinned hls bundle line endings`
 
 ### V2 - GitHub Quality Gates
 
-Status: in_progress (code checkpoint passed; final documentation SHA pending)
+Status: completed
 
 - Quality Gates run `31300413565` (#194) completed successfully for exact main
   SHA `fbef03a1229842b852c9df4234198692167eab22` in 13m24s.
@@ -2365,10 +2365,10 @@ Status: in_progress (code checkpoint passed; final documentation SHA pending)
   Secrets/Licenses/SBOM were all successful. The supply-chain report artifact
   digest was
   `EFA9975F1CD0828EA83163D7258DAB67BF0913ED42DB3D689ABDF9AC0A90828F`.
-- This evidence update creates a new documentation-only main SHA. Its own
-  exact-head Quality Gates run must pass before the overall status can be
-  changed from `in_progress` to `completed`.
-
-Next required stage: push this evidence checkpoint, confirm that its exact main
-SHA has all six V2 jobs successful, then record final completion without
-inferring success from the preceding SHA.
+- The evidence checkpoint then received Quality Gates run `31301342588` (#195)
+  for exact main SHA `e85b02e5d5970e9939523c1e01436b737bd5bf69`.
+  All six jobs succeeded in 12m44s; the supply-chain artifact digest was
+  `0FCF27B15BBD1A8EFC0B7A3CC80112BFF26ED7C4C4EE2EE902908E506F718016`.
+- This final status change is documentation-only. Final handoff still requires
+  the resulting main SHA to receive its own successful exact-head Quality
+  Gates run; no further commit may be added after that confirmation.
