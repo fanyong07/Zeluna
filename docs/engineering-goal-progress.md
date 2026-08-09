@@ -2227,6 +2227,24 @@ Commits: `65876df feat: cache next episode warmup bundles`,
 
 Commit: `512fcb6 fix: isolate cancelled playback lookups`
 
+### C7 - Warmup cancellation and scope safety
+
+Status: in_progress (controller scope matrix completed; player integration pending)
+
+- The discovery controller regression matrix now proves that account changes,
+  remember-line cache clearing, backend configuration changes, rule
+  configuration changes, controller disposal, and caller cancellation all
+  cancel the in-flight verification scope and reject its late warmup result.
+- Existing player wiring was audited to cancel next-episode work on manual
+  episode/line changes, account-context changes, remember-line disablement,
+  app backgrounding, hard recovery, and page disposal. These player paths are
+  not yet marked complete because the pending bundle-consumption integration
+  still shares dirty files with separate recommendation work.
+- Full discovery-controller regression passed 29/29 and focused static
+  analysis reported no issues; scoped diff/encoding/secret checks passed.
+
+Commit: `a2a87e5 test: cover warmup scope invalidation`
+
 Next required stage: wire bundle production and consumption through the
 existing discovery/controller/player paths, then complete lifecycle recovery,
 telemetry, and the remaining C1-C7 regression matrix. Full regression,
