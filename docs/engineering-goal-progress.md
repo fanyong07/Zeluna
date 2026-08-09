@@ -2158,9 +2158,32 @@ Status: completed
 
 Commit: `75ff322 chore: remove repository audit artifacts`
 
+### C1 - Two-stage warmup scheduling
+
+Status: completed
+
+- A dedicated `NextEpisodeWarmupCoordinator` now owns the three-second
+  stable-play delay, coalesces duplicate initial triggers, and permits exactly
+  one force refresh after playback enters the three-minute transition window.
+- Reset cancels the pending delay and clears the per-cycle start/refresh state.
+  Player recovery, buffering priority, account/settings invalidation, manual
+  episode/line changes, backgrounding, and disposal keep their existing token
+  cancellation paths.
+- Three deterministic coordinator regressions exercise delay, coalescing,
+  reset/late-callback rejection, and the exact refresh boundary without using
+  real-time sleeps. The player lifecycle integration guard verifies first-frame
+  scheduling, `rememberLine` gating, refresh wiring, and every required reset.
+- The exact isolated index snapshot passed the 136-test C1-C7 playback matrix
+  and full Flutter static analysis with no issues. The additional integration
+  guard passed in both the isolated snapshot and the shared worktree, bringing
+  `anime_architecture_test.dart` to 36/36.
+
+Commits: `473e255 refactor: coordinate next episode warmup lifecycle`,
+`0b86d29 test: lock playback warmup lifecycle wiring`
+
 ### C2/C4 - Interactive and warmup lookup policy
 
-Status: in_progress (lookup-policy slice completed)
+Status: completed
 
 - Interactive and background-warmup lookups now have separate completion
   policies. The remembered Provider receives a bounded 750 ms interactive
@@ -2186,8 +2209,7 @@ Commit: `8107f30 refactor: harden provider-aware playback lookup`
 
 ### C3/C5/C6 - Warmup bundle and transition-freshness foundations
 
-Status: in_progress (production and transition consumption completed; final
-player/telemetry regression pending)
+Status: completed
 
 - `NextEpisodeWarmupBundle` and its bounded runtime cache model a verified
   primary plus at most one verified fallback, Provider preference, preparation
@@ -2246,21 +2268,21 @@ Commit: `2019ce8 feat: consume warmup fallback on episode transition`
 
 ### C7 - Warmup cancellation and scope safety
 
-Status: in_progress (controller scope matrix completed; player integration pending)
+Status: completed
 
 - The discovery controller regression matrix now proves that account changes,
   remember-line cache clearing, backend configuration changes, rule
   configuration changes, controller disposal, and caller cancellation all
   cancel the in-flight verification scope and reject its late warmup result.
-- Existing player wiring was audited to cancel next-episode work on manual
-  episode/line changes, account-context changes, remember-line disablement,
-  app backgrounding, hard recovery, and page disposal. These player paths are
-  not yet marked complete because the pending bundle-consumption integration
-  still shares dirty files with separate recommendation work.
+- Player wiring cancels and resets next-episode work on manual episode/line
+  changes, account-context changes, remember-line disablement, app
+  backgrounding, hard recovery, and page disposal. The lifecycle integration
+  guard scopes each assertion to the responsible player method.
 - Full discovery-controller regression passed 29/29 and focused static
   analysis reported no issues; scoped diff/encoding/secret checks passed.
 
-Commit: `a2a87e5 test: cover warmup scope invalidation`
+Commits: `a2a87e5 test: cover warmup scope invalidation`,
+`0b86d29 test: lock playback warmup lifecycle wiring`
 
 ### C7 - Continuity telemetry safety
 
@@ -2290,7 +2312,6 @@ Commits: `8e12736 security: redact playback trace credentials`,
 `26c9d24 feat: constrain playback continuity telemetry`,
 `f5d1aff feat: emit playback continuity telemetry`
 
-Next required stage: complete the remaining C1-C7 player regression matrix.
-Full regression on the resulting main SHA, platform builds, migrations,
-supply-chain gates, and the exact final-main GitHub run remain pending and must
-not be inferred from these focused or pre-integration results.
+Next required stage: V1 full regression on the resulting main SHA, platform
+builds, migrations, and supply-chain gates. The exact final-main V2 GitHub run
+also remains pending and must not be inferred from the focused C1-C7 results.
