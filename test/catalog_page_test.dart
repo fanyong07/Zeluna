@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:anime/src/app/anime_app.dart';
+import 'package:anime/src/catalog/catalog_controller.dart';
 import 'package:anime/src/catalog/catalog_page.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
@@ -62,10 +63,102 @@ void main() {
     expect(find.text('索引'), findsOneWidget);
     expect(find.text('分类'), findsOneWidget);
     expect(find.text('标签'), findsOneWidget);
-    expect(find.text('今日推荐'), findsOneWidget);
+    expect(find.text('为你推荐'), findsOneWidget);
     expect(find.text('我的'), findsOneWidget);
     expect(find.text('画廊'), findsNothing);
     expect(find.text('孤独摇滚！'), findsWidgets);
+  });
+
+  testWidgets('home recommendation can be dismissed as not interested', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastNotInterested = null;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    const menuKey = ValueKey('recommendation-menu-wikidata:2875');
+    final menu = find.byKey(menuKey);
+    expect(menu, findsOneWidget);
+    await tester.ensureVisible(menu);
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('不感兴趣'));
+    await tester.pumpAndSettle();
+
+    expect(_FakeAnimeController.lastNotInterested?.id, _movieSubject.id);
+    expect(find.byKey(menuKey), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('pure chart mode hides inactive not-interested actions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(
+            _PersonalizationDisabledAnimeController.new,
+          ),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('recommendation-menu-wikidata:2875')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('rotate-home-recommendations')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('home rotates recommendations from the local candidate pool', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.rotateCalls = 0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    final rotate = find.byKey(const ValueKey('rotate-home-recommendations'));
+    expect(rotate, findsOneWidget);
+    await tester.ensureVisible(rotate);
+    await tester.tap(rotate);
+    await tester.pump();
+
+    expect(_FakeAnimeController.rotateCalls, 1);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('disabled Chinese preference shows the anime original title', (
@@ -164,6 +257,34 @@ void main() {
 
     expect(find.text('立即播放'), findsOneWidget);
     expect(find.text('Inception'), findsWidgets);
+  });
+
+  testWidgets('home hero starts with the feed-selected subject', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(
+            _FeedSelectedHeroAnimeController.new,
+          ),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('查看详情'));
+    await tester.pumpAndSettle();
+
+    final detail = tester.widget<DetailPage>(find.byType(DetailPage));
+    expect(detail.subject.id, _subject.id);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('schedule selects today and weekday taps stay in sync', (
@@ -432,13 +553,14 @@ void main() {
     _expectInternalMetadataProvidersHidden();
   });
 
-  testWidgets('detail does not open player after the account context changes', (
+  testWidgets('detail does not write history before the player has a frame', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    _HistoryTrackingAnimeController.addHistoryCalls = 0;
 
     final router = GoRouter(
       routes: [
@@ -450,7 +572,7 @@ void main() {
         GoRoute(
           path: '/player',
           builder: (context, state) =>
-              const Scaffold(body: Center(child: Text('不应打开的播放页'))),
+              const Scaffold(body: Center(child: Text('测试播放页'))),
         ),
       ],
     );
@@ -459,7 +581,7 @@ void main() {
       ProviderScope(
         overrides: [
           animeControllerProvider.overrideWith(
-            _StaleAfterHistoryAnimeController.new,
+            _HistoryTrackingAnimeController.new,
           ),
         ],
         child: MaterialApp.router(routerConfig: router),
@@ -470,8 +592,8 @@ void main() {
     await tester.tap(find.text('立即播放'));
     await tester.pumpAndSettle();
 
-    expect(find.text('不应打开的播放页'), findsNothing);
-    expect(find.byType(DetailPage), findsOneWidget);
+    expect(find.text('测试播放页'), findsOneWidget);
+    expect(_HistoryTrackingAnimeController.addHistoryCalls, 0);
   });
 
   testWidgets('detail hands a prefetched verified line directly to player', (
@@ -517,6 +639,7 @@ void main() {
 
     expect(find.text('测试播放页'), findsOneWidget);
     expect(capturedRequest?.initialLine?.id, _prefetchedLine.id);
+    expect(capturedRequest?.resumePosition, const Duration(minutes: 2));
   });
 
   testWidgets('profile history preview expands in place', (tester) async {
@@ -613,7 +736,7 @@ void main() {
         ProviderScope(
           overrides: [
             animeControllerProvider.overrideWith(
-              _StaleAfterHistoryAnimeController.new,
+              _StaleAfterDetailAnimeController.new,
             ),
           ],
           child: MaterialApp.router(routerConfig: router),
@@ -655,7 +778,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('今日推荐'), findsOneWidget);
+    expect(find.text('为你推荐'), findsOneWidget);
     expect(find.text('个人中心'), findsNothing);
   });
 
@@ -970,6 +1093,142 @@ void main() {
     expect(_FakeAnimeController.lastSettings.speed, 1.5);
   });
 
+  testWidgets('recommended catalog cards can be downranked without hiding', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 1200);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastNotInterested = null;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.anime),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    const menuKey = ValueKey('recommendation-menu-bangumi:1');
+    expect(find.byKey(menuKey), findsOneWidget);
+    await tester.ensureVisible(find.byKey(menuKey));
+    await tester.tap(find.byKey(menuKey));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('不感兴趣'));
+    await tester.pumpAndSettle();
+
+    expect(_FakeAnimeController.lastNotInterested?.id, _subject.id);
+    expect(find.byKey(menuKey), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'all metadata hubs use responsive sort controls without overflow',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      for (final width in const [430.0, 1200.0]) {
+        tester.view.physicalSize = Size(width, 900);
+        for (final kind in MetadataHubKind.values) {
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                animeControllerProvider.overrideWith(_FakeAnimeController.new),
+              ],
+              child: MaterialApp(home: MetadataHubPage(kind: kind)),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+
+          expect(
+            find.byKey(const ValueKey('catalog-sort-dropdown')),
+            width < 760 ? findsOneWidget : findsNothing,
+          );
+          expect(
+            find.byKey(const ValueKey('catalog-sort-segmented')),
+            width < 760 ? findsNothing : findsOneWidget,
+          );
+          expect(tester.takeException(), isNull);
+        }
+      }
+    },
+  );
+
+  testWidgets('desktop catalog sorting survives local filters', (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastCatalogSort = null;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.movie),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final sortControl = find.byKey(const ValueKey('catalog-sort-segmented'));
+    await tester.tap(
+      find.descendant(of: sortControl, matching: find.text('高分')),
+    );
+    await tester.pumpAndSettle();
+    expect(_FakeAnimeController.lastCatalogSort, CatalogSortMode.topRated);
+
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pumpAndSettle();
+
+    final segmented = tester.widget<SegmentedButton<CatalogSortMode>>(
+      sortControl,
+    );
+    expect(segmented.selected, {CatalogSortMode.topRated});
+    expect(_FakeAnimeController.lastCatalogSort, CatalogSortMode.topRated);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('mobile catalog sorting uses a dropdown', (tester) async {
+    tester.view.physicalSize = const Size(430, 900);
+    tester.view.devicePixelRatio = 1;
+    _FakeAnimeController.lastCatalogSort = null;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(
+          home: MetadataHubPage(kind: MetadataHubKind.anime),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.byKey(const ValueKey('catalog-sort-dropdown')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('最新').last);
+    await tester.pumpAndSettle();
+
+    expect(_FakeAnimeController.lastCatalogSort, CatalogSortMode.latest);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('mobile metadata filters stay collapsed until requested', (
     tester,
   ) async {
@@ -1007,6 +1266,9 @@ class _FakeAnimeController extends AnimeController {
   static PlaybackSettings lastSettings = const PlaybackSettings();
   static ExternalServiceSettings lastServices = const ExternalServiceSettings();
   static (String, bool)? lastSourceToggle;
+  static CatalogSortMode? lastCatalogSort;
+  static AnimeSubject? lastNotInterested;
+  static int rotateCalls = 0;
   static RulePluginState lastRulePlugins = const RulePluginRepository()
       .defaultState();
 
@@ -1196,14 +1458,18 @@ class _FakeAnimeController extends AnimeController {
   @override
   Future<List<AnimeSubject>> discoverSubjects({
     bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
   }) async {
+    lastCatalogSort = sort;
     return const [_subject, _seriesSubject, _movieSubject];
   }
 
   @override
   Future<List<AnimeSubject>> seriesSubjects({
     bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
   }) async {
+    lastCatalogSort = sort;
     return const [
       _seriesSubject,
       _koreanSeriesSubject,
@@ -1217,13 +1483,25 @@ class _FakeAnimeController extends AnimeController {
   @override
   Future<List<AnimeSubject>> movieSubjects({
     bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
   }) async {
+    lastCatalogSort = sort;
     return const [
       _movieSubject,
       _playableMovieSubject,
       _movieDramaSubject,
       _localizedMovieSubject,
     ];
+  }
+
+  @override
+  Future<void> markRecommendationNotInterested(AnimeSubject subject) async {
+    lastNotInterested = subject;
+  }
+
+  @override
+  void rotateRecommendations() {
+    rotateCalls++;
   }
 
   @override
@@ -1287,6 +1565,13 @@ class _FakeAnimeController extends AnimeController {
   }
 }
 
+class _PersonalizationDisabledAnimeController extends _FakeAnimeController {
+  @override
+  Future<AnimeState> build() async => (await super.build()).copyWith(
+    homePreferences: const HomePreferences(personalizedRecommendations: false),
+  );
+}
+
 class _PrefetchedLineAnimeController extends _FakeAnimeController {
   @override
   PlaybackLine? prefetchedLineForEpisode(
@@ -1297,6 +1582,25 @@ class _PrefetchedLineAnimeController extends _FakeAnimeController {
   }) {
     return _prefetchedLine;
   }
+}
+
+class _FeedSelectedHeroAnimeController extends _FakeAnimeController {
+  @override
+  Future<AnimeState> build() async => AnimeState(
+    homeFeed: AnimeHomeFeed(
+      hero: _subject,
+      recent: const [_subject],
+      recommended: [
+        AnimeSubject.fromJson({
+          ..._movieSubject.toJson(),
+          'bannerUrl': 'banner-art',
+        }),
+      ],
+      index: const [_subject, _movieSubject],
+      categories: const [],
+      tags: const [],
+    ),
+  );
 }
 
 class _DelayedMetadataController extends AnimeController {
@@ -1326,6 +1630,7 @@ class _DelayedMetadataController extends AnimeController {
   @override
   Future<List<AnimeSubject>> discoverSubjects({
     bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
   }) async {
     if (!_ready) {
       earlyDiscoveryCalls++;
@@ -1339,7 +1644,29 @@ class _DelayedMetadataController extends AnimeController {
   }
 }
 
-class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
+class _HistoryTrackingAnimeController extends _FakeAnimeController {
+  static int addHistoryCalls = 0;
+
+  @override
+  PlaybackLine? prefetchedLineForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    Duration minValidity = const Duration(seconds: 60),
+  }) => null;
+
+  @override
+  Future<bool> addHistory(
+    AnimeSubject subject,
+    AnimeEpisode? episode, {
+    int? expectedAccountContextVersion,
+  }) async {
+    addHistoryCalls++;
+    return false;
+  }
+}
+
+class _StaleAfterDetailAnimeController extends _FakeAnimeController {
   int _contextVersion = 1;
 
   @override
@@ -1349,13 +1676,9 @@ class _StaleAfterHistoryAnimeController extends _FakeAnimeController {
   bool isAccountContextCurrent(int version) => version == _contextVersion;
 
   @override
-  Future<bool> addHistory(
-    AnimeSubject subject,
-    AnimeEpisode? episode, {
-    int? expectedAccountContextVersion,
-  }) async {
+  Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
     _contextVersion++;
-    return true;
+    return super.detail(subject);
   }
 }
 
@@ -1660,6 +1983,8 @@ final _historyEntries = [
       ),
       updatedAt: DateTime(2026, 5, 5, 12, i),
       note: '测试历史 $i',
+      positionSeconds: i == 1 ? 120 : 0,
+      durationSeconds: i == 1 ? 1440 : 0,
     ),
 ];
 

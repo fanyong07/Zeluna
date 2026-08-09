@@ -14,9 +14,11 @@ import '../core/identity/local_identity_migration.dart';
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
 import '../downloads/download_controller.dart';
 import '../library/library_controller.dart';
 import '../playback/playback_discovery_controller.dart';
+import '../recommendations/recommendations.dart';
 import '../rules/drpy_runtime.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -40,6 +42,7 @@ import 'media_download_task.dart';
 import 'playback_line_memory_store.dart';
 import 'playback_prefetch_cache.dart';
 import 'playback_source_repository.dart';
+import 'search_history_store.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
 import 'zeluna_backend_playback_repository.dart';
@@ -390,8 +393,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   DownloadController? _downloadController;
   LibraryController? _libraryController;
   CatalogController? _catalogController;
+  RecommendationController? _recommendationController;
   PlaybackDiscoveryController? _playbackDiscoveryController;
   SyncController? _syncController;
+  var _recommendationNonce = 0;
+  String? _lastServedRecommendationFingerprint;
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -429,6 +435,14 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return controller;
   }
 
+  RecommendationController get _recommendationDomain {
+    final controller = _recommendationController;
+    if (controller == null) {
+      throw StateError('推荐控制器尚未准备好');
+    }
+    return controller;
+  }
+
   PlaybackDiscoveryController get _playbackDiscoveryDomain {
     final controller = _playbackDiscoveryController;
     if (controller == null) {
@@ -460,6 +474,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     _settings = boxes[0];
     _library = boxes[1];
     _playbackLineMemory = PlaybackLineMemoryStore(_settings);
+    _recommendationController = RecommendationController(
+      store: _HiveRecommendationEventStore(_library),
+    );
     await LocalIdentityMigration(settings: _settings, library: _library).run();
     final cloudService = ref.read(cloudAccountServiceProvider);
     final CloudSyncTransport? cloudTransport =
@@ -489,10 +506,15 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       selectCredentialContext: _selectCredentialAccountContext,
       publishSession: _publishAccountSession,
       publishProfile: _publishAccountProfile,
+      searchHistoryStore: ref.read(searchHistoryStoreProvider),
     );
     final accountBootstrap = await _accounts.initialize();
     final activeAccount = accountBootstrap.activeAccount;
     final accountSession = accountBootstrap.session;
+    await _recommendationDomain.loadForAccount(
+      accountId: activeAccount?.id,
+      contextVersion: _accounts.contextVersion,
+    );
     _settingsController = SettingsController(
       storage: HiveSettingsStorage(_settings),
       publishSnapshot: _publishSettingsSnapshot,
@@ -632,6 +654,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         final repository = _backendCatalogRepositoryFor(settings);
         return repository == null ? const [] : repository.home(type);
       },
+      loadCandidates: (type, settings) async {
+        final repository = _backendCatalogRepositoryFor(settings);
+        return repository == null
+            ? const <CatalogCandidate>[]
+            : repository.homeCandidates(type);
+      },
       loadDetail: (subject, settings) async {
         final repository = _backendCatalogRepositoryFor(settings);
         return await repository?.detail(subject) ?? _fallbackDetail(subject);
@@ -651,7 +679,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       services: services,
       fallbackHomeFeed: bangumiRepository.fallbackHomeFeed(),
     );
-    final feed = catalogLoad.snapshot.homeFeed;
+    final feed = _composeRecommendedHomeFeed(
+      catalogLoad.snapshot,
+      librarySnapshot: librarySnapshot,
+      preferences: settingsSnapshot.homePreferences,
+    );
     unawaited(_settingsDomain.applyRuntimeEffects().onError((_, _) {}));
     final initialContextVersion = _accounts.contextVersion;
     final initialState = AnimeState(
@@ -698,11 +730,18 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         ).onError((_, _) {}),
       );
     }
+    unawaited(
+      Future<void>.delayed(
+        Duration.zero,
+        _recordCurrentHomeRecommendationsServed,
+      ).onError((_, _) {}),
+    );
     ref.onDispose(() {
       syncBootstrapCancelled = true;
       _downloadController?.dispose();
       _libraryController?.dispose();
       _catalogController?.dispose();
+      _recommendationController?.dispose();
       _playbackDiscoveryController?.dispose();
       _syncController?.dispose();
     });
@@ -732,14 +771,32 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<List<AnimeSubject>> tagSubjects(String name) =>
       _catalogDomain.tagSubjects(name);
 
-  Future<List<AnimeSubject>> discoverSubjects({bool waitForRefresh = false}) =>
-      _catalogDomain.discoverSubjects(waitForRefresh: waitForRefresh);
+  Future<List<AnimeSubject>> discoverSubjects({
+    bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
+  }) => _catalogSubjects(
+    SubjectContentType.anime,
+    sort: sort,
+    waitForRefresh: waitForRefresh,
+  );
 
-  Future<List<AnimeSubject>> seriesSubjects({bool waitForRefresh = false}) =>
-      _catalogDomain.seriesSubjects(waitForRefresh: waitForRefresh);
+  Future<List<AnimeSubject>> seriesSubjects({
+    bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
+  }) => _catalogSubjects(
+    SubjectContentType.series,
+    sort: sort,
+    waitForRefresh: waitForRefresh,
+  );
 
-  Future<List<AnimeSubject>> movieSubjects({bool waitForRefresh = false}) =>
-      _catalogDomain.movieSubjects(waitForRefresh: waitForRefresh);
+  Future<List<AnimeSubject>> movieSubjects({
+    bool waitForRefresh = false,
+    CatalogSortMode sort = CatalogSortMode.recommended,
+  }) => _catalogSubjects(
+    SubjectContentType.movie,
+    sort: sort,
+    waitForRefresh: waitForRefresh,
+  );
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() =>
       _catalogDomain.weeklySchedule();
@@ -1104,6 +1161,84 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   Future<void> updateHomePreferences(HomePreferences preferences) =>
       _settingsDomain.updateHomePreferences(preferences);
 
+  Future<void> resetRecommendationPreferences() async {
+    final contextVersion = _accountContextVersion;
+    await _recommendationDomain.clearForCurrentAccount(
+      expectedContextVersion: contextVersion,
+    );
+    if (!isAccountContextCurrent(contextVersion)) return;
+    _recommendationNonce = 0;
+    _lastServedRecommendationFingerprint = null;
+    _rebuildRecommendedHome(recordServed: true);
+  }
+
+  Future<void> markRecommendationNotInterested(AnimeSubject subject) async {
+    if (!_personalizedRecommendationsEnabled) return;
+    final contextVersion = _accountContextVersion;
+    await _recordRecommendationEvent(
+      RecommendationEventType.notInterested,
+      subject,
+      id: 'recommendation:not-interested:${canonicalWorkKey(subject)}',
+      expectedContextVersion: contextVersion,
+    );
+    if (!isAccountContextCurrent(contextVersion)) return;
+    _rebuildRecommendedHome(recordServed: true);
+  }
+
+  void rotateRecommendations() {
+    _recommendationNonce++;
+    _lastServedRecommendationFingerprint = null;
+    _rebuildRecommendedHome(recordServed: true);
+  }
+
+  Future<void> recordRecommendationFirstFrame(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    int? expectedAccountContextVersion,
+  }) async {
+    final expected = expectedAccountContextVersion ?? _accountContextVersion;
+    if (!isAccountContextCurrent(expected)) return;
+    try {
+      await _libraryDomain.addHistory(
+        subject,
+        episode,
+        expectedContextVersion: expected,
+      );
+    } on AccountException {
+      return;
+    }
+    await _recordPlaybackRecommendation(
+      RecommendationEventType.firstFrame,
+      subject,
+      episode,
+      expectedContextVersion: expected,
+    );
+  }
+
+  Future<void> recordRecommendationEffectiveWatch(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    int? expectedAccountContextVersion,
+  }) => _recordPlaybackRecommendation(
+    RecommendationEventType.effectiveWatch,
+    subject,
+    episode,
+    expectedContextVersion:
+        expectedAccountContextVersion ?? _accountContextVersion,
+  );
+
+  Future<void> recordRecommendationCompleted(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    int? expectedAccountContextVersion,
+  }) => _recordPlaybackRecommendation(
+    RecommendationEventType.completed,
+    subject,
+    episode,
+    expectedContextVersion:
+        expectedAccountContextVersion ?? _accountContextVersion,
+  );
+
   Future<void> updateAppearance(AppearanceSettings settings) =>
       _settingsDomain.updateAppearance(settings);
 
@@ -1314,6 +1449,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       accountId: accountId,
       contextVersion: activation.contextVersion,
     );
+    await _recommendationDomain.loadForAccount(
+      accountId: accountId,
+      contextVersion: activation.contextVersion,
+    );
+    _recommendationNonce = 0;
+    _lastServedRecommendationFingerprint = null;
     _playbackDiscoveryDomain.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,
@@ -1329,6 +1470,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           .read(bangumiMetadataRepositoryProvider)
           .fallbackHomeFeed(),
     );
+    final recommendedHome = _composeRecommendedHomeFeed(
+      catalogLoad.snapshot,
+      librarySnapshot: librarySnapshot,
+      preferences: settingsSnapshot.homePreferences,
+    );
     final current = state.value;
     if (current == null ||
         !_accounts.isContextCurrent(activation.contextVersion)) {
@@ -1339,7 +1485,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
     state = AsyncData(
       current.copyWith(
-        homeFeed: catalogLoad.snapshot.homeFeed,
+        homeFeed: recommendedHome,
         selectedSubjects: catalogLoad.snapshot.selectedSubjects,
         settings: settingsSnapshot.playback,
         favorites: librarySnapshot.favorites,
@@ -1371,6 +1517,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (!catalogLoad.homeFresh) {
       unawaited(_catalogDomain.refreshHome().onError((_, _) {}));
     }
+    unawaited(_recordCurrentHomeRecommendationsServed().onError((_, _) {}));
   }
 
   void _selectCredentialAccountContext(
@@ -1404,6 +1551,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   void _publishSettingsSnapshot(SettingsSnapshot snapshot) {
     final current = state.value;
     if (current == null) return;
+    final recommendationModeChanged =
+        current.homePreferences.personalizedRecommendations !=
+        snapshot.homePreferences.personalizedRecommendations;
     state = AsyncData(
       current.copyWith(
         settings: snapshot.playback,
@@ -1414,6 +1564,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         services: snapshot.services,
       ),
     );
+    if (recommendationModeChanged) {
+      _recommendationNonce = 0;
+      _lastServedRecommendationFingerprint = null;
+      _rebuildRecommendedHome(recordServed: true);
+    }
   }
 
   SyncLocalSnapshot _readSyncLocalSnapshot() => SyncLocalSnapshot(
@@ -1490,17 +1645,452 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         feedbacks: snapshot.feedbacks,
       ),
     );
+    _rebuildRecommendedHome(recordServed: false);
   }
 
   void _publishCatalogSnapshot(CatalogSnapshot snapshot) {
     final current = state.value;
     if (current == null) return;
+    final feed = _composeRecommendedHomeFeed(
+      snapshot,
+      librarySnapshot: _libraryDomain.snapshot,
+      preferences: current.homePreferences,
+    );
     state = AsyncData(
       current.copyWith(
-        homeFeed: snapshot.homeFeed,
+        homeFeed: feed,
         selectedSubjects: snapshot.selectedSubjects,
       ),
     );
+    unawaited(_recordCurrentHomeRecommendationsServed().onError((_, _) {}));
+  }
+
+  bool get _personalizedRecommendationsEnabled =>
+      state.value?.homePreferences.personalizedRecommendations ??
+      _settingsController
+          ?.snapshot
+          .homePreferences
+          .personalizedRecommendations ??
+      true;
+
+  Future<void> _recordPlaybackRecommendation(
+    RecommendationEventType type,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required int expectedContextVersion,
+  }) async {
+    if (!isAccountContextCurrent(expectedContextVersion) ||
+        !_personalizedRecommendationsEnabled) {
+      return;
+    }
+    final workKey = canonicalWorkKey(subject);
+    await _recordRecommendationEvent(
+      type,
+      subject,
+      id: 'recommendation:playback:${type.name}:$workKey:${episode.id}',
+      sessionId: 'episode:${episode.id}',
+      expectedContextVersion: expectedContextVersion,
+    );
+    if (!isAccountContextCurrent(expectedContextVersion)) return;
+    _rebuildRecommendedHome(recordServed: false);
+  }
+
+  Future<void> _recordRecommendationEvent(
+    RecommendationEventType type,
+    AnimeSubject subject, {
+    required int expectedContextVersion,
+    String? id,
+    String? sessionId,
+  }) async {
+    if (!isAccountContextCurrent(expectedContextVersion) ||
+        !_personalizedRecommendationsEnabled) {
+      return;
+    }
+    try {
+      await _recommendationDomain.record(
+        RecommendationEvent.forSubject(
+          id: id,
+          type: type,
+          subject: subject,
+          occurredAt: DateTime.now(),
+          sessionId: sessionId,
+        ),
+        expectedContextVersion: expectedContextVersion,
+      );
+    } on StateError {
+      // Account switches deliberately invalidate stale recommendation writes.
+    }
+  }
+
+  RecommendationSnapshot _effectiveRecommendationSnapshot(
+    LibrarySnapshot librarySnapshot,
+  ) {
+    final stored = _recommendationDomain.snapshot;
+    final storedPlaybackWorks = stored.behaviors
+        .where(
+          (event) =>
+              event.type == RecommendationEventType.firstFrame ||
+              event.type == RecommendationEventType.effectiveWatch ||
+              event.type == RecommendationEventType.completed,
+        )
+        .map((event) => event.workKey)
+        .toSet();
+    final libraryEvents = <RecommendationEvent>[];
+    void addLibraryEvent(
+      RecommendationEventType type,
+      LibraryEntry entry,
+      String source,
+    ) {
+      final workKey = canonicalWorkKey(entry.subject);
+      libraryEvents.add(
+        RecommendationEvent.forSubject(
+          id: 'recommendation:library:$source:$workKey',
+          type: type,
+          subject: entry.subject,
+          occurredAt: entry.updatedAt,
+          sessionId: source,
+        ),
+      );
+    }
+
+    for (final entry in librarySnapshot.following) {
+      addLibraryEvent(RecommendationEventType.following, entry, 'following');
+    }
+    for (final entry in librarySnapshot.favorites) {
+      addLibraryEvent(RecommendationEventType.favorite, entry, 'favorite');
+    }
+    for (final entry in librarySnapshot.history) {
+      if (storedPlaybackWorks.contains(canonicalWorkKey(entry.subject))) {
+        continue;
+      }
+      addLibraryEvent(RecommendationEventType.firstFrame, entry, 'history');
+    }
+    final now = DateTime.now();
+    final behaviors = <RecommendationEvent>[
+      ...stored.behaviors,
+      ...libraryEvents,
+    ];
+    return RecommendationSnapshot(
+      accountId: stored.accountId,
+      contextVersion: stored.contextVersion,
+      behaviors: behaviors,
+      served: stored.served,
+      profile: RecommendationProfile.fromEvents(
+        behaviors: behaviors,
+        served: stored.served,
+        now: now,
+      ),
+      generatedAt: now,
+    );
+  }
+
+  AnimeHomeFeed _composeRecommendedHomeFeed(
+    CatalogSnapshot catalogSnapshot, {
+    required LibrarySnapshot librarySnapshot,
+    required HomePreferences preferences,
+  }) {
+    final candidates = _catalogCandidates(catalogSnapshot);
+    if (candidates.isEmpty) return catalogSnapshot.homeFeed;
+    final now = DateTime.now();
+    RecommendationSnapshot? recommendationSnapshot;
+    late final List<CatalogCandidate> ordered;
+    if (preferences.personalizedRecommendations) {
+      recommendationSnapshot = _effectiveRecommendationSnapshot(
+        librarySnapshot,
+      );
+      final result = rankCatalog(
+        candidates: candidates,
+        snapshot: recommendationSnapshot,
+        now: now,
+        nonce: _recommendationNonce,
+      );
+      ordered = _interleaveRankedCandidates(result);
+    } else {
+      ordered = _pureChartHomepageCandidates(candidates, now: now);
+    }
+    if (ordered.isEmpty) return catalogSnapshot.homeFeed;
+    final recommended = ordered
+        .take(recommendationDefaultTotalSlots)
+        .map((item) => item.subject)
+        .toList(growable: false);
+    final withBanner = ordered.where(
+      (item) => (item.subject.bannerUrl ?? '').trim().isNotEmpty,
+    );
+    final notRecentlyServed = recommendationSnapshot == null
+        ? withBanner
+        : withBanner.where(
+            (item) => !recommendationSnapshot!.profile.lastServedAt.containsKey(
+              item.workKey,
+            ),
+          );
+    final hero = notRecentlyServed.isNotEmpty
+        ? notRecentlyServed.first.subject
+        : withBanner.isNotEmpty
+        ? withBanner.first.subject
+        : recommended.first;
+    final base = catalogSnapshot.homeFeed;
+    return AnimeHomeFeed(
+      hero: hero,
+      recent: base.recent,
+      recommended: recommended,
+      index: base.index,
+      categories: base.categories,
+      tags: base.tags,
+      seriesHighlights: base.seriesHighlights,
+      movieHighlights: base.movieHighlights,
+    );
+  }
+
+  List<CatalogCandidate> _catalogCandidates(CatalogSnapshot snapshot) {
+    final candidates = <CatalogCandidate>[
+      for (final values in snapshot.homeCandidates.values) ...values,
+    ];
+    if (candidates.isNotEmpty) {
+      return _deduplicateRecommendationCandidates(candidates);
+    }
+    final feed = snapshot.homeFeed;
+    return _deduplicateRecommendationCandidates(
+      <AnimeSubject>[
+        feed.hero,
+        ...feed.recommended,
+        ...feed.index,
+        ...feed.seriesHighlights,
+        ...feed.movieHighlights,
+      ].map((subject) => CatalogCandidate(subject: subject)),
+    );
+  }
+
+  List<CatalogCandidate> _deduplicateRecommendationCandidates(
+    Iterable<CatalogCandidate> candidates,
+  ) {
+    final byKey = <String, CatalogCandidate>{};
+    for (final candidate in candidates) {
+      if (candidate.subject.title.trim().isEmpty) continue;
+      final current = byKey[candidate.workKey];
+      byKey[candidate.workKey] = current == null
+          ? candidate
+          : current.merge(candidate);
+    }
+    return byKey.values.toList(growable: false);
+  }
+
+  List<CatalogCandidate> _interleaveRankedCandidates(
+    RecommendationRankingResult result,
+  ) {
+    final queues = <SubjectContentType, List<CatalogCandidate>>{
+      for (final type in SubjectContentType.values)
+        type: result.byType[type]!
+            .map((item) => item.candidate)
+            .toList(growable: true),
+    };
+    return interleaveRecommendationCandidates(queues, seed: result.seed);
+  }
+
+  List<CatalogCandidate> _pureChartHomepageCandidates(
+    Iterable<CatalogCandidate> candidates, {
+    required DateTime now,
+  }) {
+    final seed = recommendationStableSeed(
+      accountId: _recommendationDomain.accountId,
+      date: now,
+      nonce: _recommendationNonce,
+    );
+    final baseSeed = recommendationStableSeed(
+      accountId: _recommendationDomain.accountId,
+      date: now,
+    );
+    final queues = <SubjectContentType, List<CatalogCandidate>>{};
+    for (final type in SubjectContentType.values) {
+      final values =
+          candidates
+              .where((item) => item.contentType == type)
+              .toList(growable: true)
+            ..sort(_comparePopularCandidates);
+      final chartWindow = values
+          .take(recommendationColdStartQuotaPerType * 3)
+          .toList(growable: false);
+      queues[type] = _rotatingChartSelection(
+        chartWindow,
+        seed: '$baseSeed|${type.name}',
+      );
+    }
+    return interleaveRecommendationCandidates(queues, seed: 'pure:$seed');
+  }
+
+  List<CatalogCandidate> _rotatingChartSelection(
+    List<CatalogCandidate> candidates, {
+    required String seed,
+  }) {
+    if (candidates.length <= recommendationColdStartQuotaPerType) {
+      return candidates.toList(growable: true);
+    }
+    final baseOffset = seed.codeUnits.fold<int>(
+      0,
+      (value, unit) => (value * 31 + unit) & 0x7fffffff,
+    );
+    final offset = (baseOffset + _recommendationNonce * 2) % candidates.length;
+    return <CatalogCandidate>[
+      ...candidates.skip(offset),
+      ...candidates.take(offset),
+    ].take(recommendationColdStartQuotaPerType).toList(growable: true);
+  }
+
+  Future<List<AnimeSubject>> _catalogSubjects(
+    SubjectContentType type, {
+    required CatalogSortMode sort,
+    required bool waitForRefresh,
+  }) async {
+    final candidates = await _catalogDomain.candidatesForType(
+      type,
+      waitForRefresh: waitForRefresh,
+    );
+    final unique = _deduplicateRecommendationCandidates(candidates);
+    if (sort == CatalogSortMode.recommended &&
+        _personalizedRecommendationsEnabled) {
+      final profile = _effectiveRecommendationSnapshot(_libraryDomain.snapshot);
+      final ranked = rankCatalogForType(
+        type: type,
+        candidates: unique,
+        snapshot: profile,
+        now: DateTime.now(),
+        nonce: _recommendationNonce,
+        excludeKnownWorks: false,
+      );
+      final rankedKeys = ranked.map((item) => item.candidate.workKey).toSet();
+      final blocked =
+          unique
+              .where((item) => !rankedKeys.contains(item.workKey))
+              .toList(growable: false)
+            ..sort(_comparePopularCandidates);
+      return <AnimeSubject>[
+        ...ranked.map((item) => item.candidate.subject),
+        ...blocked.map((item) => item.subject),
+      ];
+    }
+    final sorted = unique.toList(growable: false)
+      ..sort(switch (sort) {
+        CatalogSortMode.topRated => _compareTopRatedCandidates,
+        CatalogSortMode.latest => _compareLatestCandidates,
+        CatalogSortMode.recommended ||
+        CatalogSortMode.popular => _comparePopularCandidates,
+      });
+    return sorted.map((item) => item.subject).toList(growable: false);
+  }
+
+  int _comparePopularCandidates(
+    CatalogCandidate first,
+    CatalogCandidate second,
+  ) {
+    final byScore = _catalogPopularityScore(
+      second,
+    ).compareTo(_catalogPopularityScore(first));
+    return byScore != 0 ? byScore : first.workKey.compareTo(second.workKey);
+  }
+
+  int _compareTopRatedCandidates(
+    CatalogCandidate first,
+    CatalogCandidate second,
+  ) {
+    final byRating = (second.subject.ratingScore ?? -1).compareTo(
+      first.subject.ratingScore ?? -1,
+    );
+    if (byRating != 0) return byRating;
+    final byVotes = (second.subject.ratingTotal ?? 0).compareTo(
+      first.subject.ratingTotal ?? 0,
+    );
+    return byVotes != 0 ? byVotes : first.workKey.compareTo(second.workKey);
+  }
+
+  int _compareLatestCandidates(
+    CatalogCandidate first,
+    CatalogCandidate second,
+  ) {
+    final firstDate = _catalogDate(first.subject);
+    final secondDate = _catalogDate(second.subject);
+    if (firstDate != null || secondDate != null) {
+      if (firstDate == null) return 1;
+      if (secondDate == null) return -1;
+      final byDate = secondDate.compareTo(firstDate);
+      if (byDate != 0) return byDate;
+    }
+    return _comparePopularCandidates(first, second);
+  }
+
+  DateTime? _catalogDate(AnimeSubject subject) {
+    final raw = subject.date?.trim() ?? '';
+    final parsed = DateTime.tryParse(raw);
+    if (parsed != null) return parsed;
+    final year = int.tryParse(subject.year);
+    return year == null ? null : DateTime.utc(year);
+  }
+
+  double _catalogPopularityScore(CatalogCandidate candidate) {
+    final chart = candidate.evidence.chartScore;
+    if (chart > 0) return chart;
+    final rating = ((candidate.subject.ratingScore ?? 0) / 10).clamp(0.0, 1.0);
+    final votes = candidate.subject.ratingTotal ?? 0;
+    final voteConfidence = votes <= 0 ? 0.0 : votes / (votes + 500);
+    return (rating * 0.8 + voteConfidence * 0.2).clamp(0.0, 1.0);
+  }
+
+  void _rebuildRecommendedHome({required bool recordServed}) {
+    final current = state.value;
+    final catalog = _catalogController;
+    final library = _libraryController;
+    if (current == null || catalog == null || library == null) return;
+    final feed = _composeRecommendedHomeFeed(
+      catalog.snapshot,
+      librarySnapshot: library.snapshot,
+      preferences: current.homePreferences,
+    );
+    state = AsyncData(current.copyWith(homeFeed: feed));
+    if (recordServed) {
+      unawaited(_recordCurrentHomeRecommendationsServed().onError((_, _) {}));
+    }
+  }
+
+  Future<void> _recordCurrentHomeRecommendationsServed() async {
+    if (!_personalizedRecommendationsEnabled) return;
+    final current = state.value;
+    final catalog = _catalogController;
+    final recommendation = _recommendationController;
+    if (current == null || catalog == null || recommendation == null) return;
+    final candidates = <String, CatalogCandidate>{
+      for (final item in _catalogCandidates(catalog.snapshot))
+        item.workKey: item,
+    };
+    final visible = <CatalogCandidate>[];
+    final seen = <String>{};
+    for (final subject in <AnimeSubject>[
+      current.homeFeed.hero,
+      ...current.homeFeed.recommended,
+    ]) {
+      final key = canonicalWorkKey(subject);
+      if (!seen.add(key)) continue;
+      visible.add(candidates[key] ?? CatalogCandidate(subject: subject));
+    }
+    if (visible.isEmpty) return;
+    final now = DateTime.now();
+    final fingerprint =
+        '${recommendation.accountId ?? 'guest'}|'
+        '${now.year}-${now.month}-${now.day}|$_recommendationNonce|'
+        '${visible.map((item) => item.workKey).join(',')}';
+    if (_lastServedRecommendationFingerprint == fingerprint) return;
+    try {
+      final recorded = await recommendation.recordServed(
+        visible.map(
+          (candidate) => RecommendationServedEvent.forCandidate(
+            candidate: candidate,
+            servedAt: now,
+            surface: 'home',
+          ),
+        ),
+        expectedContextVersion: _accountContextVersion,
+      );
+      if (recorded) _lastServedRecommendationFingerprint = fingerprint;
+    } on StateError {
+      // Ignore a display record invalidated by an account switch.
+    }
   }
 
   Future<void> _handleExternalServicesChanged(
@@ -1529,6 +2119,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     await _libraryController?.settleWrites();
     await _syncController?.settle();
     await _catalogController?.settleWrites();
+    await _recommendationController?.settleWrites();
     await _playbackLineMemory.settleWrites();
     await _downloadController?.quiesce();
   }
@@ -1538,6 +2129,22 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   static String _accountSettingsKeyFor(String? accountId, String key) =>
       AccountController.settingsKeyFor(accountId, key);
+}
+
+final class _HiveRecommendationEventStore implements RecommendationEventStore {
+  const _HiveRecommendationEventStore(this._box);
+
+  final Box<dynamic> _box;
+
+  @override
+  Object? read(String storageKey) => _box.get(storageKey);
+
+  @override
+  Future<void> write(String storageKey, Object value) =>
+      _box.put(storageKey, value);
+
+  @override
+  Future<void> delete(String storageKey) => _box.delete(storageKey);
 }
 
 const _fallbackExternalSeries = [

@@ -5,8 +5,10 @@ import 'package:anime/src/accounts/account_controller.dart';
 import 'package:anime/src/accounts/cloud_account_repository.dart';
 import 'package:anime/src/accounts/local_account_repository.dart';
 import 'package:anime/src/data/bangumi_credential_store.dart';
+import 'package:anime/src/data/search_history_store.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/recommendations/recommendation_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
@@ -155,6 +157,125 @@ void main() {
     );
     expect(controller.activeAccount?.email, 'second@example.com');
   });
+
+  test(
+    'first registration migrates and account deletion clears recommendation data',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'account-controller-recommendation-data-',
+      );
+      Hive.init(root.path);
+      final settings = await Hive.openBox<dynamic>('settings');
+      final library = await Hive.openBox<dynamic>('library');
+      final accounts = await Hive.openBox<dynamic>('accounts');
+      addTearDown(() async {
+        await Hive.close();
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+
+      const behavior = [
+        {'subjectKey': 'bangumi:1', 'type': 'play'},
+      ];
+      const served = [
+        {'subjectKey': 'bangumi:2', 'servedAt': '2026-08-09T00:00:00Z'},
+      ];
+      const homeCache = {'version': 1, 'items': <Object>[]};
+      await library.put(recommendationBehaviorStorageKey, behavior);
+      await library.put(recommendationServedStorageKey, served);
+      await library.put('metadata.cache.home', homeCache);
+      final searchHistory = SearchHistoryStore();
+      await searchHistory.add('', '科幻');
+      await searchHistory.add('', '冒险');
+
+      final credentialBackend = _MemoryCredentialBackend();
+      final controller = AccountController(
+        cloudService: FakeCloudAccountService(),
+        localRepository: LocalAccountRepository(accounts),
+        settings: settings,
+        library: library,
+        bangumiCredentialStore: BangumiCredentialStore(
+          backend: credentialBackend,
+        ),
+        tmdbCredentialStore: TmdbCredentialStore(backend: credentialBackend),
+        activateScope: (_) async {},
+        quiesceDownloads: () async {},
+        readOwnedDownloads: () => const <AccountOwnedDownload>[],
+        cancelDownload: (_, _) {},
+        deleteDownloadFile: (_) async {},
+        selectCredentialContext: (_, {required resetCredentialState}) {},
+        publishSession: (_) {},
+        publishProfile: (_) {},
+        searchHistoryStore: searchHistory,
+      );
+
+      await controller.initialize();
+      await controller.register(
+        email: 'recommendations@example.com',
+        nickname: 'Recommendations',
+        password: 'recommendation-password',
+        verificationCode: '123456',
+      );
+      final accountId = controller.activeAccount!.id;
+
+      expect(
+        library.get(
+          AccountController.libraryKeyFor(
+            accountId,
+            recommendationBehaviorStorageKey,
+          ),
+        ),
+        behavior,
+      );
+      expect(
+        library.get(
+          AccountController.libraryKeyFor(
+            accountId,
+            recommendationServedStorageKey,
+          ),
+        ),
+        served,
+      );
+      expect(
+        library.get(
+          AccountController.libraryKeyFor(accountId, 'metadata.cache.home'),
+        ),
+        homeCache,
+      );
+      expect(library.containsKey(recommendationBehaviorStorageKey), isFalse);
+      expect(library.containsKey(recommendationServedStorageKey), isFalse);
+      expect(library.containsKey('metadata.cache.home'), isFalse);
+      expect(await searchHistory.load(''), isEmpty);
+      expect(await searchHistory.load(accountId), ['冒险', '科幻']);
+
+      await controller.deleteCurrent(password: 'recommendation-password');
+
+      expect(
+        library.containsKey(
+          AccountController.libraryKeyFor(
+            accountId,
+            recommendationBehaviorStorageKey,
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        library.containsKey(
+          AccountController.libraryKeyFor(
+            accountId,
+            recommendationServedStorageKey,
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        library.containsKey(
+          AccountController.libraryKeyFor(accountId, 'metadata.cache.home'),
+        ),
+        isFalse,
+      );
+      expect(await searchHistory.load(accountId), isEmpty);
+    },
+  );
 }
 
 class _MemoryCredentialBackend

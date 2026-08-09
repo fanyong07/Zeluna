@@ -4,8 +4,11 @@ import 'dart:typed_data';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../data/bangumi_credential_store.dart';
+import '../data/search_history_store.dart';
 import '../data/tmdb_credential_store.dart';
 import '../domain/anime_models.dart';
+import '../recommendations/recommendation_models.dart'
+    show recommendationBehaviorStorageKey, recommendationServedStorageKey;
 import 'cloud_account_repository.dart';
 import 'local_account_repository.dart';
 
@@ -86,6 +89,7 @@ final class AccountController {
     required AccountContextSelector selectCredentialContext,
     required AccountSessionPublisher publishSession,
     required AccountProfilePublisher publishProfile,
+    SearchHistoryStore? searchHistoryStore,
   }) : _cloudService = cloudService,
        _localRepository = localRepository,
        _settings = settings,
@@ -99,7 +103,8 @@ final class AccountController {
        _deleteDownloadFile = deleteDownloadFile,
        _selectCredentialContext = selectCredentialContext,
        _publishSession = publishSession,
-       _publishProfile = publishProfile;
+       _publishProfile = publishProfile,
+       _searchHistoryStore = searchHistoryStore ?? SearchHistoryStore();
 
   static const _pendingBangumiCredentialMigrationKey =
       'credentials.pending.bangumi.v1';
@@ -125,6 +130,9 @@ final class AccountController {
     'offlineTasks',
     'imageFavorites',
     'feedbacks',
+    recommendationBehaviorStorageKey,
+    recommendationServedStorageKey,
+    'metadata.cache.home',
   ];
 
   final CloudAccountService _cloudService;
@@ -141,6 +149,7 @@ final class AccountController {
   final AccountContextSelector _selectCredentialContext;
   final AccountSessionPublisher _publishSession;
   final AccountProfilePublisher _publishProfile;
+  final SearchHistoryStore _searchHistoryStore;
 
   LocalAccount? _activeAccount;
   var _contextVersion = 0;
@@ -459,6 +468,7 @@ final class AccountController {
       } catch (_) {
         // Registration remains usable; startup retries the durable marker.
       }
+      await _searchHistoryStore.migrateGuestToAccount(accountId);
       for (final key in _accountSettingKeys) {
         if (key == 'profile') continue;
         final value = _settings.get(key);
@@ -558,6 +568,7 @@ final class AccountController {
       () => _bangumiCredentialStore.clearAccount(pending.accountId),
     );
     await attempt(() => _tmdbCredentialStore.clearAccount(pending.accountId));
+    await attempt(() => _searchHistoryStore.clearAccount(pending.accountId));
     if (_settings.get(_pendingBangumiCredentialMigrationKey)?.toString() ==
         pending.accountId) {
       await attempt(

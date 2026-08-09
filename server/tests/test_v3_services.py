@@ -157,7 +157,7 @@ class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
             await service.aclose()
             await engine.dispose()
 
-    async def test_bangumi_ranked_home_fetches_all_requested_pages(self):
+    async def test_bangumi_ranked_home_fetches_at_most_two_pages(self):
         requests: list[tuple[int, int]] = []
 
         def handler(request: httpx.Request):
@@ -180,8 +180,8 @@ class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
         service = CatalogService(transport=httpx.MockTransport(handler))
         try:
             items = await service._bangumi_ranked(240)
-            self.assertEqual(requests, [(0, 100), (100, 100), (200, 40)])
-            self.assertEqual(len(items), 3)
+            self.assertEqual(requests, [(0, 100), (100, 100)])
+            self.assertEqual(len(items), 2)
         finally:
             await service.aclose()
 

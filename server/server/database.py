@@ -449,6 +449,14 @@ class CatalogSubject(Base):
     """Bangumi/TMDB 元数据的本地目录项，stable_id 是客户端唯一作品 ID。"""
 
     __tablename__ = "catalog_subjects"
+    __table_args__ = (
+        Index(
+            "ix_catalog_subjects_home_rank",
+            "media_type",
+            "ranked_at",
+            "ranking_score",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     stable_id: Mapped[str] = mapped_column(String(200), unique=True, index=True)
@@ -460,6 +468,11 @@ class CatalogSubject(Base):
     aliases_json: Mapped[str] = mapped_column(Text, default="[]")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     popularity: Mapped[float] = mapped_column(Float, default=0.0)
+    ranking_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    ranking_score: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    ranked_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     updated_at: Mapped[float] = mapped_column(
         Float,
         default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),

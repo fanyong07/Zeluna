@@ -779,15 +779,29 @@ class UserProfileSettings {
 }
 
 class HomePreferences {
-  const HomePreferences({this.defaultTab = AnimeHomeTab.recommended});
+  const HomePreferences({
+    this.defaultTab = AnimeHomeTab.recommended,
+    this.personalizedRecommendations = true,
+  });
 
   final AnimeHomeTab defaultTab;
+  final bool personalizedRecommendations;
 
-  HomePreferences copyWith({AnimeHomeTab? defaultTab}) {
-    return HomePreferences(defaultTab: defaultTab ?? this.defaultTab);
+  HomePreferences copyWith({
+    AnimeHomeTab? defaultTab,
+    bool? personalizedRecommendations,
+  }) {
+    return HomePreferences(
+      defaultTab: defaultTab ?? this.defaultTab,
+      personalizedRecommendations:
+          personalizedRecommendations ?? this.personalizedRecommendations,
+    );
   }
 
-  Map<String, dynamic> toJson() => {'defaultTab': defaultTab.name};
+  Map<String, dynamic> toJson() => {
+    'defaultTab': defaultTab.name,
+    'personalizedRecommendations': personalizedRecommendations,
+  };
 
   factory HomePreferences.fromJson(Map<String, dynamic> json) {
     final tabName = json['defaultTab']?.toString();
@@ -795,7 +809,11 @@ class HomePreferences {
       (item) => item.name == tabName,
       orElse: () => AnimeHomeTab.recommended,
     );
-    return HomePreferences(defaultTab: tab);
+    return HomePreferences(
+      defaultTab: tab,
+      personalizedRecommendations:
+          json['personalizedRecommendations'] as bool? ?? true,
+    );
   }
 }
 

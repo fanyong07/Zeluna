@@ -96,6 +96,13 @@ void main() {
       );
       expect(controller.snapshot.history.single.positionSeconds, 120);
 
+      expect(await controller.addHistory(_subject, _episode), isTrue);
+      expect(
+        controller.snapshot.history.single.positionSeconds,
+        120,
+        reason: '同一集首帧刷新历史时不应清空已保存的续播位置',
+      );
+
       await controller.updatePlaybackProgress(
         _subject,
         _episode,
@@ -103,8 +110,12 @@ void main() {
         duration: const Duration(seconds: 600),
       );
       expect(controller.snapshot.history.single.positionSeconds, 0);
-      expect(syncContexts.single.accountId, 'account-a');
-      expect(syncContexts.single.contextVersion, 7);
+      expect(syncContexts, hasLength(2));
+      expect(
+        syncContexts.every((item) => item.accountId == 'account-a'),
+        isTrue,
+      );
+      expect(syncContexts.every((item) => item.contextVersion == 7), isTrue);
       expect(
         LibraryEntry.fromJson(
           storage.entriesFor('account-a', 'history').single,

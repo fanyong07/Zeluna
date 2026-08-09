@@ -14,7 +14,12 @@ from server.repositories.catalog import (
 )
 
 
-def _write(*, title: str, popularity: float = 1) -> CatalogWrite:
+def _write(
+    *,
+    title: str,
+    popularity: float = 1,
+    ranked_at: float | None = None,
+) -> CatalogWrite:
     metadata = {
         "stable_id": "bangumi:1",
         "title": title,
@@ -32,6 +37,22 @@ def _write(*, title: str, popularity: float = 1) -> CatalogWrite:
         metadata_json=json.dumps(metadata),
         popularity=popularity,
         updated_at=time.time(),
+        ranking_json=(
+            json.dumps(
+                {
+                    "batchId": "bangumi:anime:test",
+                    "rankedAt": ranked_at,
+                    "globalScore": 0.5,
+                    "lists": [
+                        {"provider": "bangumi", "kind": "rank", "rank": 1}
+                    ],
+                }
+            )
+            if ranked_at is not None
+            else None
+        ),
+        ranking_score=0.5 if ranked_at is not None else None,
+        ranked_at=ranked_at,
     )
 
 
@@ -93,6 +114,52 @@ class CatalogRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 [],
             )
+
+    async def test_metadata_refresh_preserves_home_ranking_evidence(self):
+        ranked_at = time.time()
+        async with self.sessions() as session:
+            repository = SqlCatalogRepository(session)
+            await repository.persist_many(
+                [_write(title="Ranked", popularity=5, ranked_at=ranked_at)]
+            )
+            await repository.persist_many(
+                [_write(title="Detail refreshed", popularity=9)]
+            )
+
+            home = await repository.home_cached(
+                media_type="anime",
+                fresh_after=ranked_at - 1,
+                limit=10,
+            )
+            row = await session.get(CatalogSubject, 1)
+
+        self.assertEqual(home[0]["title"], "Detail refreshed")
+        self.assertEqual(home[0]["ranking"]["batchId"], "bangumi:anime:test")
+        self.assertEqual(row.ranked_at, ranked_at)
+        self.assertEqual(row.ranking_score, 0.5)
+
+    async def test_home_cache_uses_ranked_at_instead_of_metadata_updated_at(self):
+        now = time.time()
+        old_ranked_at = now - 7 * 3600
+        async with self.sessions() as session:
+            repository = SqlCatalogRepository(session)
+            await repository.persist_many(
+                [_write(title="Stale ranking", ranked_at=old_ranked_at)]
+            )
+
+            fresh = await repository.home_cached(
+                media_type="anime",
+                fresh_after=now - 6 * 3600,
+                limit=10,
+            )
+            stale = await repository.home_cached(
+                media_type="anime",
+                fresh_after=now - 72 * 3600,
+                limit=10,
+            )
+
+        self.assertEqual(fresh, [])
+        self.assertEqual([item["title"] for item in stale], ["Stale ranking"])
 
     async def test_catalog_service_uses_injected_repository_before_network(self):
         cached = [

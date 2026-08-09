@@ -6,6 +6,24 @@ import 'package:anime/src/settings/settings_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'home preferences keep personalized recommendations on for old JSON',
+    () {
+      final legacy = HomePreferences.fromJson({
+        'defaultTab': AnimeHomeTab.browse.name,
+      });
+      expect(legacy.defaultTab, AnimeHomeTab.browse);
+      expect(legacy.personalizedRecommendations, isTrue);
+
+      final disabled = legacy.copyWith(personalizedRecommendations: false);
+      expect(disabled.personalizedRecommendations, isFalse);
+      expect(
+        HomePreferences.fromJson(disabled.toJson()).personalizedRecommendations,
+        isFalse,
+      );
+    },
+  );
+
   test('loads and persists independent account settings scopes', () async {
     final storage = _MemorySettingsStorage({
       AccountController.settingsKeyFor('account-a', 'playback'):

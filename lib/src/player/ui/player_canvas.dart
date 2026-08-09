@@ -122,6 +122,7 @@ class _PlayerCanvas extends StatelessWidget {
   const _PlayerCanvas({
     required this.controller,
     required this.webPlayerController,
+    required this.playbackGeneration,
     required this.subject,
     required this.episodes,
     required this.episode,
@@ -173,6 +174,7 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onWebPosition,
     required this.onWebDuration,
     required this.onWebPlaying,
+    required this.onWebEnded,
     required this.onSettingsPanel,
     required this.controlsVisible,
     required this.autoHideChrome,
@@ -185,6 +187,7 @@ class _PlayerCanvas extends StatelessWidget {
 
   final VideoController controller;
   final WebStreamPlayerController webPlayerController;
+  final int playbackGeneration;
   final AnimeSubject subject;
   final List<AnimeEpisode> episodes;
   final AnimeEpisode episode;
@@ -238,6 +241,7 @@ class _PlayerCanvas extends StatelessWidget {
   final ValueChanged<Duration> onWebPosition;
   final ValueChanged<Duration> onWebDuration;
   final ValueChanged<bool> onWebPlaying;
+  final VoidCallback onWebEnded;
   final VoidCallback onSettingsPanel;
   final VoidCallback onToggleControls;
   final VoidCallback onTemporaryDoubleSpeedStart;
@@ -334,6 +338,7 @@ class _PlayerCanvas extends StatelessWidget {
                                 _StreamVideoSurface(
                                   controller: controller,
                                   webPlayerController: webPlayerController,
+                                  playbackGeneration: playbackGeneration,
                                   line: line,
                                   settings: settings,
                                   superResolutionActive: superResolutionActive,
@@ -348,6 +353,7 @@ class _PlayerCanvas extends StatelessWidget {
                                   onWebPosition: onWebPosition,
                                   onWebDuration: onWebDuration,
                                   onWebPlaying: onWebPlaying,
+                                  onWebEnded: onWebEnded,
                                   poster: PosterArt(
                                     coverUrl: subject.bannerUrl,
                                     fallbackCoverUrl: subject.coverUrl,
@@ -881,6 +887,7 @@ class _StreamVideoSurface extends StatelessWidget {
   const _StreamVideoSurface({
     required this.controller,
     required this.webPlayerController,
+    required this.playbackGeneration,
     required this.line,
     required this.settings,
     required this.superResolutionActive,
@@ -895,11 +902,13 @@ class _StreamVideoSurface extends StatelessWidget {
     required this.onWebPosition,
     required this.onWebDuration,
     required this.onWebPlaying,
+    required this.onWebEnded,
     required this.poster,
   });
 
   final VideoController controller;
   final WebStreamPlayerController webPlayerController;
+  final int playbackGeneration;
   final PlaybackLine? line;
   final PlaybackSettings settings;
   final bool superResolutionActive;
@@ -914,6 +923,7 @@ class _StreamVideoSurface extends StatelessWidget {
   final ValueChanged<Duration> onWebPosition;
   final ValueChanged<Duration> onWebDuration;
   final ValueChanged<bool> onWebPlaying;
+  final VoidCallback onWebEnded;
   final Widget poster;
 
   @override
@@ -928,6 +938,7 @@ class _StreamVideoSurface extends StatelessWidget {
       video = const SizedBox.shrink();
     } else if (useWebPlayer) {
       video = WebStreamPlayer(
+        key: ValueKey<int>(playbackGeneration),
         url: url,
         controller: webPlayerController,
         playing: playing,
@@ -941,6 +952,7 @@ class _StreamVideoSurface extends StatelessWidget {
         onPosition: onWebPosition,
         onDuration: onWebDuration,
         onPlaying: onWebPlaying,
+        onEnded: onWebEnded,
       );
     } else {
       video = Video(

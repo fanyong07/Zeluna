@@ -74,6 +74,17 @@ void main() {
     );
   });
 
+  test('stale web media callbacks are rejected after a new open', () {
+    expect(
+      webPlaybackEventIsCurrent(eventGeneration: 7, currentGeneration: 7),
+      isTrue,
+    );
+    expect(
+      webPlaybackEventIsCurrent(eventGeneration: 7, currentGeneration: 8),
+      isFalse,
+    );
+  });
+
   test('player function panel uses about 30 percent in landscape', () {
     expect(playerFunctionPanelWidthForSize(const Size(1280, 720)), 384);
     expect(playerFunctionPanelWidthForSize(const Size(800, 360)), 240);

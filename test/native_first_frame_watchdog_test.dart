@@ -2,6 +2,77 @@ import 'package:anime/src/player/video/native_video_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native media events stay blocked across stop and open transitions', () {
+    final guard = NativeMediaEventGuard();
+    guard.beginOpen(openSerial: 4, mediaUri: 'https://media.test/ep2.mp4');
+
+    expect(guard.isTransitioning, isTrue);
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 4,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+
+    guard.finishOpen(openSerial: 4);
+    expect(guard.isTransitioning, isFalse);
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 4,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: const Duration(seconds: 1),
+        playerStateValue: const Duration(seconds: 1),
+      ),
+      isTrue,
+    );
+  });
+
+  test('native media events reject stale serial, uri, and state values', () {
+    final guard = NativeMediaEventGuard()
+      ..beginOpen(openSerial: 8, mediaUri: 'https://media.test/ep2.mp4')
+      ..finishOpen(openSerial: 8);
+
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 9,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep1.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: false,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: const Duration(minutes: 22),
+        playerStateValue: Duration.zero,
+      ),
+      isFalse,
+    );
+  });
+
   testWidgets(
     'native position progress confirms first frame and cancels timeout',
     (tester) async {

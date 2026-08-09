@@ -1,6 +1,7 @@
 import 'package:anime/src/app/anime_app.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/settings/settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -113,6 +114,92 @@ void main() {
     expect(controller.updated?.allowInsecurePlaybackBackend, isTrue);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'home settings persist the recommendation switch and expose reset',
+    (tester) async {
+      await _setViewport(tester);
+      var reset = false;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(_HomeSettingsController.new),
+          ],
+          child: MaterialApp(
+            theme: ThemeData.dark(useMaterial3: true),
+            home: HomeSettingsPage(
+              onResetRecommendationPreferences: () async => reset = true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('个性化推荐'), findsOneWidget);
+      final toggle = find.byKey(const ValueKey('setting_switch_个性化推荐'));
+      await tester.tap(toggle);
+      await tester.pump();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(HomeSettingsPage)),
+      );
+      final controller =
+          container.read(animeControllerProvider.notifier)
+              as _HomeSettingsController;
+      expect(controller.updated?.personalizedRecommendations, isFalse);
+
+      final resetAction = find.byKey(
+        const ValueKey('reset_recommendation_preferences'),
+      );
+      await tester.ensureVisible(resetAction);
+      await tester.tap(resetAction);
+      await tester.pumpAndSettle();
+      expect(find.text('重置推荐偏好？'), findsOneWidget);
+      await tester.tap(
+        find.byKey(const ValueKey('confirm_reset_recommendation_preferences')),
+      );
+      await tester.pumpAndSettle();
+      expect(reset, isTrue);
+      expect(find.text('推荐偏好已重置'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('home settings route delegates recommendation reset', (
+    tester,
+  ) async {
+    await _setViewport(tester);
+    _HomeSettingsController.resetCalls = 0;
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_HomeSettingsController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AnimeApp)),
+    );
+    container.read(routerProvider).go('/profile/home-settings');
+    await tester.pumpAndSettle();
+
+    final resetAction = find.byKey(
+      const ValueKey('reset_recommendation_preferences'),
+    );
+    await tester.ensureVisible(resetAction);
+    await tester.tap(resetAction);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('confirm_reset_recommendation_preferences')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_HomeSettingsController.resetCalls, 1);
+    expect(find.text('推荐偏好已重置'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 Future<void> _setViewport(WidgetTester tester) async {
@@ -143,6 +230,24 @@ class _SelfHostedSettingsController extends AnimeController {
   @override
   Future<void> updateServices(ExternalServiceSettings settings) async {
     updated = settings;
+  }
+}
+
+class _HomeSettingsController extends AnimeController {
+  static int resetCalls = 0;
+  HomePreferences? updated;
+
+  @override
+  Future<AnimeState> build() async => const AnimeState(homeFeed: _feed);
+
+  @override
+  Future<void> updateHomePreferences(HomePreferences preferences) async {
+    updated = preferences;
+  }
+
+  @override
+  Future<void> resetRecommendationPreferences() async {
+    resetCalls++;
   }
 }
 

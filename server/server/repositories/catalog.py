@@ -30,6 +30,9 @@ class CatalogWrite:
     metadata_json: str
     popularity: float
     updated_at: float
+    ranking_json: str | None = None
+    ranking_score: float | None = None
+    ranked_at: float | None = None
 
 
 class CatalogRepository(Protocol):
@@ -105,17 +108,28 @@ class SqlCatalogRepository:
                 select(CatalogSubject)
                 .where(
                     CatalogSubject.media_type == media_type,
-                    CatalogSubject.updated_at >= fresh_after,
+                    CatalogSubject.ranked_at >= fresh_after,
                 )
-                .order_by(CatalogSubject.popularity.desc())
+                .order_by(
+                    CatalogSubject.ranking_score.desc(),
+                    CatalogSubject.popularity.desc(),
+                    CatalogSubject.stable_id.asc(),
+                )
                 .limit(limit)
             )
         ).all()
-        return [
-            item
-            for row in rows
-            if (item := _metadata(row.metadata_json)) is not None
-        ]
+        items: list[dict] = []
+        for row in rows:
+            item = _metadata(row.metadata_json)
+            if item is None:
+                continue
+            ranking = _metadata(row.ranking_json)
+            if ranking is not None:
+                ranking.setdefault("globalScore", row.ranking_score)
+                ranking.setdefault("rankedAt", row.ranked_at)
+                item["ranking"] = ranking
+            items.append(item)
+        return items
 
     async def get_cached(self, stable_id: str) -> CatalogCacheEntry | None:
         row = await self._session.scalar(
@@ -149,4 +163,11 @@ class SqlCatalogRepository:
             row.metadata_json = entry.metadata_json
             row.popularity = entry.popularity
             row.updated_at = entry.updated_at
+            # Search and detail refreshes intentionally carry no ranking
+            # payload. They may improve metadata, but must never make an item
+            # look like a fresh home-ranking candidate.
+            if entry.ranked_at is not None:
+                row.ranking_json = entry.ranking_json or "{}"
+                row.ranking_score = entry.ranking_score or 0.0
+                row.ranked_at = entry.ranked_at
         await self._session.commit()

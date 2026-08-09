@@ -6,6 +6,7 @@ import '../accounts/local_account_repository.dart';
 import '../data/chinese_text.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
+import '../recommendations/recommendation_models.dart';
 import '../settings/settings_controller.dart';
 
 abstract interface class CatalogStorage {
@@ -42,6 +43,11 @@ typedef CatalogHomeLoader =
       SubjectContentType type,
       ExternalServiceSettings services,
     );
+typedef CatalogCandidateLoader =
+    Future<List<CatalogCandidate>> Function(
+      SubjectContentType type,
+      ExternalServiceSettings services,
+    );
 typedef CatalogDetailLoader =
     Future<AnimeDetailBundle> Function(
       AnimeSubject subject,
@@ -55,21 +61,36 @@ typedef CatalogDetailEnricher =
 typedef CatalogPlaybackPrefetcher =
     void Function(AnimeSubject subject, List<AnimeEpisode> episodes);
 
+enum CatalogSortMode {
+  recommended('推荐'),
+  popular('热门'),
+  topRated('高分'),
+  latest('最新');
+
+  const CatalogSortMode(this.label);
+
+  final String label;
+}
+
 final class CatalogSnapshot {
   const CatalogSnapshot({
     required this.homeFeed,
     this.selectedSubjects = const {},
+    this.homeCandidates = const {},
   });
 
   final AnimeHomeFeed homeFeed;
   final Map<int, AnimeDetailBundle> selectedSubjects;
+  final Map<SubjectContentType, List<CatalogCandidate>> homeCandidates;
 
   CatalogSnapshot copyWith({
     AnimeHomeFeed? homeFeed,
     Map<int, AnimeDetailBundle>? selectedSubjects,
+    Map<SubjectContentType, List<CatalogCandidate>>? homeCandidates,
   }) => CatalogSnapshot(
     homeFeed: homeFeed ?? this.homeFeed,
     selectedSubjects: selectedSubjects ?? this.selectedSubjects,
+    homeCandidates: homeCandidates ?? this.homeCandidates,
   );
 }
 
@@ -88,6 +109,7 @@ final class CatalogController {
     required CatalogSnapshotPublisher publishSnapshot,
     required CatalogSearchLoader search,
     required CatalogHomeLoader loadHome,
+    CatalogCandidateLoader? loadCandidates,
     required CatalogDetailLoader loadDetail,
     required CatalogDetailEnricher enrichDetail,
     required CatalogPlaybackPrefetcher prefetchPlayback,
@@ -98,6 +120,7 @@ final class CatalogController {
        _publishSnapshot = publishSnapshot,
        _search = search,
        _loadHome = loadHome,
+       _loadCandidates = loadCandidates,
        _loadDetail = loadDetail,
        _enrichDetail = enrichDetail,
        _prefetchPlayback = prefetchPlayback,
@@ -109,9 +132,9 @@ final class CatalogController {
   static const seriesMetadataCacheKey = 'metadata.cache.series';
   static const movieMetadataCacheKey = 'metadata.cache.movie';
   static const homeFeedCacheKey = 'metadata.cache.home';
-  static const _homeFeedCacheVersion = 4;
-  static const _homeFeedCacheTtl = Duration(hours: 1);
-  static const _metadataCacheVersion = 11;
+  static const _homeFeedCacheVersion = 5;
+  static const _homeFeedCacheTtl = Duration(hours: 6);
+  static const _metadataCacheVersion = 12;
   static const _metadataCacheLimit = 1200;
   static const _metadataCacheTtl = Duration(hours: 8);
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
@@ -120,6 +143,7 @@ final class CatalogController {
   final CatalogSnapshotPublisher _publishSnapshot;
   final CatalogSearchLoader _search;
   final CatalogHomeLoader _loadHome;
+  final CatalogCandidateLoader? _loadCandidates;
   final CatalogDetailLoader _loadDetail;
   final CatalogDetailEnricher _enrichDetail;
   final CatalogPlaybackPrefetcher _prefetchPlayback;
@@ -136,8 +160,8 @@ final class CatalogController {
   var _loaded = false;
   var _disposed = false;
   var _homeFresh = false;
-  final _metadataRefreshes = <String, Future<List<AnimeSubject>>>{};
-  final _latestMetadataRefreshes = <String, Future<List<AnimeSubject>>>{};
+  final _metadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
+  final _latestMetadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
   Future<void> _writeQueue = Future<void>.value();
 
   CatalogSnapshot get snapshot => _snapshot;
@@ -167,10 +191,28 @@ final class CatalogController {
     await _writeQueue;
     _ensureConfigured(scope);
     final cached = _readHomeFeedCache(_servicesSignature(services));
+    final cachedCandidates = <SubjectContentType, List<CatalogCandidate>>{
+      for (final type in SubjectContentType.values)
+        type: _readSubjectCache(
+          _metadataCacheKey(type),
+          _metadataSignature(_metadataKind(type)),
+        ).candidates,
+    };
+    final fallbackCandidates = _fallbackCandidatesFromFeed(
+      cached.feed ?? fallbackHomeFeed,
+    );
     _snapshot = _freeze(
       CatalogSnapshot(
         homeFeed: cached.feed ?? fallbackHomeFeed,
         selectedSubjects: const {},
+        homeCandidates: {
+          for (final type in SubjectContentType.values)
+            type: _uniqueCandidates(
+              cachedCandidates[type]?.isNotEmpty == true
+                  ? cachedCandidates[type]!
+                  : fallbackCandidates[type] ?? const <CatalogCandidate>[],
+            ),
+        },
       ),
     );
     _homeFresh = cached.fresh;
@@ -197,51 +239,53 @@ final class CatalogController {
           .where((item) => item.tags.any((value) => value.name == name))
           .toList(growable: false);
 
-  Future<List<AnimeSubject>> discoverSubjects({bool waitForRefresh = false}) {
-    final fallback = _homeSubjects
-        .where(
-          (subject) =>
-              subjectMatchesContentType(subject, SubjectContentType.anime),
-        )
-        .toList(growable: false);
-    return _metadataSubjects(
-      key: animeMetadataCacheKey,
-      signature: _metadataSignature('anime'),
-      contentType: SubjectContentType.anime,
+  List<CatalogCandidate> cachedCandidates(SubjectContentType type) =>
+      _snapshot.homeCandidates[type] ?? const <CatalogCandidate>[];
+
+  Future<List<CatalogCandidate>> candidatesForType(
+    SubjectContentType type, {
+    bool waitForRefresh = false,
+  }) async {
+    final fallback = switch (type) {
+      SubjectContentType.anime =>
+        _homeSubjects
+            .where((subject) => subjectMatchesContentType(subject, type))
+            .toList(growable: false),
+      SubjectContentType.series => _fallbackSeries,
+      SubjectContentType.movie => _fallbackMovies,
+    };
+    if (type != SubjectContentType.anime && !_services.mediaMetadataEnabled) {
+      return _uniqueCandidates([
+        ...cachedCandidates(type),
+        ...fallback.map((subject) => CatalogCandidate(subject: subject)),
+      ]);
+    }
+    return _metadataCandidates(
+      key: _metadataCacheKey(type),
+      signature: _metadataSignature(_metadataKind(type)),
+      contentType: type,
       fallback: fallback,
       waitForRefresh: waitForRefresh,
     );
   }
 
-  Future<List<AnimeSubject>> seriesSubjects({bool waitForRefresh = false}) {
-    if (!_services.mediaMetadataEnabled) {
-      return Future.value(
-        _subjectsOfType(_fallbackSeries, SubjectContentType.series),
-      );
-    }
-    return _metadataSubjects(
-      key: seriesMetadataCacheKey,
-      signature: _metadataSignature('series'),
-      contentType: SubjectContentType.series,
-      fallback: _fallbackSeries,
-      waitForRefresh: waitForRefresh,
-    );
-  }
+  Future<List<AnimeSubject>> discoverSubjects({bool waitForRefresh = false}) =>
+      candidatesForType(
+        SubjectContentType.anime,
+        waitForRefresh: waitForRefresh,
+      ).then(_candidateSubjects);
 
-  Future<List<AnimeSubject>> movieSubjects({bool waitForRefresh = false}) {
-    if (!_services.mediaMetadataEnabled) {
-      return Future.value(
-        _subjectsOfType(_fallbackMovies, SubjectContentType.movie),
-      );
-    }
-    return _metadataSubjects(
-      key: movieMetadataCacheKey,
-      signature: _metadataSignature('movie'),
-      contentType: SubjectContentType.movie,
-      fallback: _fallbackMovies,
-      waitForRefresh: waitForRefresh,
-    );
-  }
+  Future<List<AnimeSubject>> seriesSubjects({bool waitForRefresh = false}) =>
+      candidatesForType(
+        SubjectContentType.series,
+        waitForRefresh: waitForRefresh,
+      ).then(_candidateSubjects);
+
+  Future<List<AnimeSubject>> movieSubjects({bool waitForRefresh = false}) =>
+      candidatesForType(
+        SubjectContentType.movie,
+        waitForRefresh: waitForRefresh,
+      ).then(_candidateSubjects);
 
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
     final subjects = await discoverSubjects(waitForRefresh: true);
@@ -282,46 +326,57 @@ final class CatalogController {
   Future<void> refreshHome() async {
     final scope = _scope();
     final refreshVersion = ++_homeRefreshVersion;
-    final groups =
-        await Future.wait([
-          _loadHome(SubjectContentType.anime, _services),
-          _loadHome(SubjectContentType.series, _services),
-          _loadHome(SubjectContentType.movie, _services),
-        ]).onError(
-          (_, _) => const [
-            <AnimeSubject>[],
-            <AnimeSubject>[],
-            <AnimeSubject>[],
-          ],
-        );
+    final groups = await Future.wait([
+      for (final type in SubjectContentType.values)
+        _loadCandidateGroup(
+          type,
+          _services,
+        ).onError((_, _) => const <CatalogCandidate>[]),
+    ]);
     if (!_isCurrent(scope) || refreshVersion != _homeRefreshVersion) return;
-    final anime = _uniqueSubjects(groups[0]);
-    if (anime.isEmpty) return;
-    final categories = <String, AnimeCategory>{};
-    for (final subject in anime) {
-      for (final category in subject.categories) {
-        categories.putIfAbsent(category.name, () => category);
-      }
+    final candidates = <SubjectContentType, List<CatalogCandidate>>{
+      for (var index = 0; index < SubjectContentType.values.length; index++)
+        SubjectContentType.values[index]: _uniqueCandidates([
+          ...groups[index],
+          if (groups[index].isEmpty)
+            ..._snapshot.homeCandidates[SubjectContentType.values[index]] ??
+                const <CatalogCandidate>[],
+        ]),
+    };
+    if (candidates.values.every((items) => items.isEmpty)) return;
+    final feed = _buildHomeFeed(candidates, fallback: _snapshot.homeFeed);
+    final fetchedAt = _now().toUtc().toIso8601String();
+    final writes = <Future<void>>[
+      _enqueueWrite(scope, _homeFeedStorageKey, {
+        'version': _homeFeedCacheVersion,
+        'signature': _servicesSignature(_services),
+        'fetchedAt': fetchedAt,
+        'feed': feed.toJson(),
+      }),
+    ];
+    for (var index = 0; index < SubjectContentType.values.length; index++) {
+      if (groups[index].isEmpty) continue;
+      final type = SubjectContentType.values[index];
+      writes.add(
+        _enqueueWrite(
+          scope,
+          _metadataCacheKey(type),
+          _candidateCachePayload(
+            signature: _metadataSignature(_metadataKind(type)),
+            fetchedAt: fetchedAt,
+            candidates: candidates[type] ?? const <CatalogCandidate>[],
+            refreshCount: groups[index].length,
+          ),
+        ),
+      );
     }
-    final feed = AnimeHomeFeed(
-      hero: anime.first,
-      recent: anime.take(24).toList(growable: false),
-      recommended: anime.skip(8).take(24).toList(growable: false),
-      index: anime,
-      categories: categories.values.toList(growable: false),
-      tags: const [],
-      seriesHighlights: _uniqueSubjects(groups[1]),
-      movieHighlights: _uniqueSubjects(groups[2]),
-    );
-    await _enqueueWrite(scope, homeFeedCacheKey, {
-      'version': _homeFeedCacheVersion,
-      'signature': _servicesSignature(_services),
-      'fetchedAt': _now().toUtc().toIso8601String(),
-      'feed': feed.toJson(),
-    });
+    await Future.wait(writes);
     if (!_isCurrent(scope) || refreshVersion != _homeRefreshVersion) return;
     _homeFresh = true;
-    _publish(scope, _snapshot.copyWith(homeFeed: feed));
+    _publish(
+      scope,
+      _snapshot.copyWith(homeFeed: feed, homeCandidates: candidates),
+    );
   }
 
   Future<void> applyServices(
@@ -341,7 +396,7 @@ final class CatalogController {
     await _writeQueue;
     _ensureScope(scope);
     await Future.wait([
-      _storage.delete(homeFeedCacheKey),
+      _deleteHomeFeedCaches(),
       _storage.delete(animeMetadataCacheKey),
       _storage.delete(seriesMetadataCacheKey),
       _storage.delete(movieMetadataCacheKey),
@@ -365,7 +420,7 @@ final class CatalogController {
     await _writeQueue;
     _ensureScope(scope);
     await Future.wait([
-      _storage.delete(homeFeedCacheKey),
+      _deleteHomeFeedCaches(),
       _storage.delete(seriesMetadataCacheKey),
       _storage.delete(movieMetadataCacheKey),
     ]);
@@ -396,7 +451,7 @@ final class CatalogController {
     _latestMetadataRefreshes.clear();
   }
 
-  Future<List<AnimeSubject>> _metadataSubjects({
+  Future<List<CatalogCandidate>> _metadataCandidates({
     required String key,
     required String signature,
     required SubjectContentType contentType,
@@ -405,32 +460,42 @@ final class CatalogController {
   }) async {
     final scope = _scope();
     final cached = _readSubjectCache(key, signature);
-    final cachedSubjects = _subjectsOfType(cached.subjects, contentType);
-    final fallbackSubjects = _subjectsOfType(fallback, contentType);
-    final initial = _uniqueSubjects([...cachedSubjects, ...fallbackSubjects]);
+    final storedCandidates = cached.candidates
+        .where((item) => item.contentType == contentType)
+        .toList(growable: false);
+    final liveCandidates = cachedCandidates(
+      contentType,
+    ).where((item) => item.contentType == contentType).toList(growable: false);
+    final fallbackCandidates = _subjectsOfType(
+      fallback,
+      contentType,
+    ).map((subject) => CatalogCandidate(subject: subject));
+    final initial = _uniqueCandidates(
+      storedCandidates.isNotEmpty
+          ? storedCandidates
+          : liveCandidates.isNotEmpty
+          ? liveCandidates
+          : fallbackCandidates,
+    );
     if (cached.fresh) return initial;
     final refresh = _refreshSubjectCache(
       scope,
       key,
       signature,
       contentType,
-    ).onError((_, _) => const <AnimeSubject>[]);
+    ).onError((_, _) => const <CatalogCandidate>[]);
     if (!waitForRefresh) {
       unawaited(refresh);
       return initial;
     }
-    final refreshed = _subjectsOfType(await refresh, contentType);
+    final refreshed = (await refresh)
+        .where((item) => item.contentType == contentType)
+        .toList(growable: false);
     _ensureScope(scope);
-    return refreshed.isEmpty
-        ? initial
-        : _uniqueSubjects([
-            ...refreshed,
-            ...cachedSubjects,
-            ...fallbackSubjects,
-          ]);
+    return refreshed.isEmpty ? initial : refreshed;
   }
 
-  Future<List<AnimeSubject>> _refreshSubjectCache(
+  Future<List<CatalogCandidate>> _refreshSubjectCache(
     _CatalogScope scope,
     String key,
     String signature,
@@ -442,35 +507,39 @@ final class CatalogController {
     if (active != null && identical(_latestMetadataRefreshes[key], active)) {
       return active;
     }
-    late final Future<List<AnimeSubject>> task;
+    late final Future<List<CatalogCandidate>> task;
     task = () async {
-      final refreshed = uniqueCatalogSubjects(
-        await _loadHome(type, services),
-        preferChinese: services.preferBangumiChinese,
+      final refreshed = _uniqueCandidates(
+        await _loadCandidateGroup(type, services),
       );
       if (refreshed.isEmpty || !_isCurrent(scope)) {
-        return const <AnimeSubject>[];
+        return const <CatalogCandidate>[];
       }
-      final subjects = _uniqueSubjects([
-        ...refreshed,
-        ..._compatibleCachedSubjects(key, signature),
-      ]);
+      final candidates = refreshed;
       if (!identical(_latestMetadataRefreshes[key], task)) {
-        return const <AnimeSubject>[];
+        return const <CatalogCandidate>[];
       }
-      await _enqueueWrite(scope, key, {
-        'version': _metadataCacheVersion,
-        'signature': signature,
-        'fetchedAt': _now().toUtc().toIso8601String(),
-        'refreshCount': refreshed.length,
-        'subjects': subjects
-            .take(_metadataCacheLimit)
-            .map((item) => item.toJson())
-            .toList(growable: false),
-      });
+      await _enqueueWrite(
+        scope,
+        key,
+        _candidateCachePayload(
+          signature: signature,
+          fetchedAt: _now().toUtc().toIso8601String(),
+          candidates: candidates,
+          refreshCount: refreshed.length,
+        ),
+      );
+      if (_isCurrent(scope) && identical(_latestMetadataRefreshes[key], task)) {
+        _publish(
+          scope,
+          _snapshot.copyWith(
+            homeCandidates: {..._snapshot.homeCandidates, type: candidates},
+          ),
+        );
+      }
       return _isCurrent(scope) && identical(_latestMetadataRefreshes[key], task)
-          ? subjects
-          : const <AnimeSubject>[];
+          ? candidates
+          : const <CatalogCandidate>[];
     }();
     _metadataRefreshes[operationKey] = task;
     _latestMetadataRefreshes[key] = task;
@@ -485,7 +554,7 @@ final class CatalogController {
   }
 
   _HomeFeedCacheSnapshot _readHomeFeedCache(String signature) {
-    final value = _storage.get(homeFeedCacheKey);
+    final value = _storage.get(_homeFeedStorageKey);
     if (value is! Map ||
         value['version'] != _homeFeedCacheVersion ||
         value['signature']?.toString() != signature ||
@@ -514,11 +583,28 @@ final class CatalogController {
     if (value is! Map || value['subjects'] is! List) {
       return const _SubjectCacheSnapshot();
     }
-    final subjects = <AnimeSubject>[];
-    for (final raw in (value['subjects'] as List).whereType<Map>()) {
+    final candidates = <CatalogCandidate>[];
+    final rankings = value['rankings'] is List
+        ? value['rankings'] as List
+        : const <Object?>[];
+    final rows = value['subjects'] as List;
+    for (var index = 0; index < rows.length; index++) {
+      final raw = rows[index];
+      if (raw is! Map) continue;
       try {
         final subject = AnimeSubject.fromJson(raw.cast<String, dynamic>());
-        if (subject.title.trim().isNotEmpty) subjects.add(subject);
+        if (subject.title.trim().isEmpty) continue;
+        final rawRanking = index < rankings.length ? rankings[index] : null;
+        candidates.add(
+          CatalogCandidate(
+            subject: subject,
+            evidence: rawRanking is Map
+                ? CatalogRankingEvidence.fromJson(
+                    rawRanking.cast<String, dynamic>(),
+                  )
+                : const CatalogRankingEvidence(),
+          ),
+        );
       } catch (_) {
         // Preserve malformed cache data; skip only the unreadable row.
       }
@@ -530,7 +616,7 @@ final class CatalogController {
         : _metadataCacheTtl;
     final age = fetchedAt == null ? null : _now().difference(fetchedAt);
     return _SubjectCacheSnapshot(
-      subjects: subjects,
+      candidates: candidates,
       fresh:
           value['version'] == _metadataCacheVersion &&
           value['signature']?.toString() == signature &&
@@ -540,31 +626,11 @@ final class CatalogController {
     );
   }
 
-  List<AnimeSubject> _compatibleCachedSubjects(String key, String signature) {
-    final value = _storage.get(key);
-    if (value is! Map ||
-        value['version'] != _metadataCacheVersion ||
-        value['signature']?.toString() != signature ||
-        value['subjects'] is! List) {
-      return const [];
-    }
-    final subjects = <AnimeSubject>[];
-    for (final raw in (value['subjects'] as List).whereType<Map>()) {
-      try {
-        final subject = AnimeSubject.fromJson(raw.cast<String, dynamic>());
-        if (subject.title.trim().isNotEmpty) subjects.add(subject);
-      } catch (_) {
-        // Keep refresh resilient without rewriting the unreadable source row.
-      }
-    }
-    return subjects;
-  }
-
   bool _isSparseMetadataResult(String key, int count) {
     final expected = switch (key) {
       animeMetadataCacheKey => 120,
-      seriesMetadataCacheKey => 250,
-      movieMetadataCacheKey => 250,
+      seriesMetadataCacheKey => 120,
+      movieMetadataCacheKey => 120,
       _ => 1,
     };
     return count < expected;
@@ -576,6 +642,243 @@ final class CatalogController {
   ) => _uniqueSubjects(
     subjects.where((subject) => subjectMatchesContentType(subject, type)),
   );
+
+  List<AnimeSubject> _candidateSubjects(
+    Iterable<CatalogCandidate> candidates,
+  ) => _uniqueSubjects(candidates.map((item) => item.subject));
+
+  Future<List<CatalogCandidate>> _loadCandidateGroup(
+    SubjectContentType type,
+    ExternalServiceSettings services,
+  ) async {
+    final loader = _loadCandidates;
+    if (loader != null) return loader(type, services);
+    return (await _loadHome(type, services))
+        .map((subject) => CatalogCandidate(subject: subject, contentType: type))
+        .toList(growable: false);
+  }
+
+  List<CatalogCandidate> _uniqueCandidates(
+    Iterable<CatalogCandidate> candidates,
+  ) {
+    final byKey = <String, CatalogCandidate>{};
+    for (final candidate in candidates) {
+      if (candidate.subject.title.trim().isEmpty) continue;
+      final current = byKey[candidate.workKey];
+      byKey[candidate.workKey] = current == null
+          ? candidate
+          : current.merge(candidate);
+    }
+    return List<CatalogCandidate>.unmodifiable(byKey.values);
+  }
+
+  Map<String, Object?> _candidateCachePayload({
+    required String signature,
+    required String fetchedAt,
+    required Iterable<CatalogCandidate> candidates,
+    required int refreshCount,
+  }) {
+    final bounded = candidates
+        .take(_metadataCacheLimit)
+        .toList(growable: false);
+    return <String, Object?>{
+      'version': _metadataCacheVersion,
+      'signature': signature,
+      'fetchedAt': fetchedAt,
+      'refreshCount': refreshCount,
+      'subjects': bounded
+          .map((item) => item.subject.toJson())
+          .toList(growable: false),
+      'rankings': bounded
+          .map((item) => item.evidence.toJson())
+          .toList(growable: false),
+    };
+  }
+
+  Map<SubjectContentType, List<CatalogCandidate>> _fallbackCandidatesFromFeed(
+    AnimeHomeFeed feed,
+  ) {
+    final all = <AnimeSubject>[
+      feed.hero,
+      ...feed.index,
+      ...feed.recommended,
+      ...feed.recent,
+      ...feed.seriesHighlights,
+      ...feed.movieHighlights,
+    ];
+    return <SubjectContentType, List<CatalogCandidate>>{
+      for (final type in SubjectContentType.values)
+        type: _uniqueCandidates(
+          all
+              .where((subject) => subjectMatchesContentType(subject, type))
+              .map(
+                (subject) =>
+                    CatalogCandidate(subject: subject, contentType: type),
+              ),
+        ),
+    };
+  }
+
+  AnimeHomeFeed _buildHomeFeed(
+    Map<SubjectContentType, List<CatalogCandidate>> candidates, {
+    required AnimeHomeFeed fallback,
+  }) {
+    final animeCandidates = candidates[SubjectContentType.anime] ?? const [];
+    final seriesCandidates = candidates[SubjectContentType.series] ?? const [];
+    final movieCandidates = candidates[SubjectContentType.movie] ?? const [];
+    final anime = _candidateSubjects(animeCandidates);
+    final series = _candidateSubjects(seriesCandidates);
+    final movies = _candidateSubjects(movieCandidates);
+    final rankedGroups = <List<CatalogCandidate>>[
+      _sortBaseCandidates(animeCandidates),
+      _sortBaseCandidates(seriesCandidates),
+      _sortBaseCandidates(movieCandidates),
+    ];
+    final recommended = _candidateSubjects(
+      _roundRobinCandidates(rankedGroups, limit: 24),
+    );
+    final heroPool = _sortBaseCandidates([
+      ...animeCandidates,
+      ...seriesCandidates,
+      ...movieCandidates,
+    ]);
+    final hero =
+        heroPool
+            .where((item) => (item.subject.bannerUrl ?? '').trim().isNotEmpty)
+            .map((item) => item.subject)
+            .firstOrNull ??
+        recommended.firstOrNull ??
+        anime.firstOrNull ??
+        series.firstOrNull ??
+        movies.firstOrNull ??
+        fallback.hero;
+    final recentCandidates = [...animeCandidates]
+      ..sort(_compareRecentCandidates);
+    final recent = _candidateSubjects(
+      recentCandidates,
+    ).take(24).toList(growable: false);
+    final categories = <String, AnimeCategory>{};
+    final tags = <String, AnimeTag>{};
+    for (final subject in anime) {
+      for (final category in subject.categories) {
+        categories.putIfAbsent(category.name, () => category);
+      }
+      for (final tag in subject.tags) {
+        tags.putIfAbsent(tag.name, () => tag);
+      }
+    }
+    return AnimeHomeFeed(
+      hero: hero,
+      recent: recent.isEmpty ? fallback.recent : recent,
+      recommended: recommended.isEmpty ? fallback.recommended : recommended,
+      index: anime.isEmpty ? fallback.index : anime,
+      categories: categories.isEmpty
+          ? fallback.categories
+          : categories.values.toList(growable: false),
+      tags: tags.isEmpty ? fallback.tags : tags.values.toList(growable: false),
+      seriesHighlights: series.isEmpty ? fallback.seriesHighlights : series,
+      movieHighlights: movies.isEmpty ? fallback.movieHighlights : movies,
+    );
+  }
+
+  List<CatalogCandidate> _sortBaseCandidates(
+    Iterable<CatalogCandidate> values,
+  ) => values.toList(growable: false)
+    ..sort((first, second) {
+      final byScore = _baseCandidateScore(
+        second,
+      ).compareTo(_baseCandidateScore(first));
+      return byScore != 0 ? byScore : first.workKey.compareTo(second.workKey);
+    });
+
+  List<CatalogCandidate> _roundRobinCandidates(
+    List<List<CatalogCandidate>> groups, {
+    required int limit,
+  }) {
+    final result = <CatalogCandidate>[];
+    final seen = <String>{};
+    for (var index = 0; result.length < limit; index++) {
+      var added = false;
+      for (final group in groups) {
+        if (index >= group.length) continue;
+        final candidate = group[index];
+        if (seen.add(candidate.workKey)) result.add(candidate);
+        added = true;
+        if (result.length == limit) break;
+      }
+      if (!added) break;
+    }
+    return result;
+  }
+
+  int _compareRecentCandidates(
+    CatalogCandidate first,
+    CatalogCandidate second,
+  ) {
+    final firstRank = _freshListRank(first.evidence);
+    final secondRank = _freshListRank(second.evidence);
+    if (firstRank != secondRank) return firstRank.compareTo(secondRank);
+    final firstDate = DateTime.tryParse(first.subject.date ?? '');
+    final secondDate = DateTime.tryParse(second.subject.date ?? '');
+    if (firstDate != null || secondDate != null) {
+      if (firstDate == null) return 1;
+      if (secondDate == null) return -1;
+      final byDate = secondDate.compareTo(firstDate);
+      if (byDate != 0) return byDate;
+    }
+    return _baseCandidateScore(second).compareTo(_baseCandidateScore(first));
+  }
+
+  int _freshListRank(CatalogRankingEvidence evidence) {
+    final ranks = evidence.lists
+        .where((item) {
+          final kind = item.kind.toLowerCase();
+          return kind.contains('daily') ||
+              kind.contains('calendar') ||
+              kind.contains('airing') ||
+              kind.contains('broadcast') ||
+              kind.contains('on_the_air') ||
+              kind.contains('now_playing');
+        })
+        .map((item) => item.rank)
+        .where((rank) => rank > 0)
+        .toList(growable: false);
+    return ranks.isEmpty ? 1 << 30 : ranks.reduce((a, b) => a < b ? a : b);
+  }
+
+  double _baseCandidateScore(CatalogCandidate candidate) {
+    final chart = candidate.evidence.chartScore;
+    final rating = ((candidate.subject.ratingScore ?? 0) / 10).clamp(0.0, 1.0);
+    final votes = candidate.subject.ratingTotal ?? 0;
+    final voteConfidence = votes <= 0 ? 0.0 : votes / (votes + 500);
+    return chart > 0
+        ? chart
+        : (rating * 0.85 + voteConfidence * 0.15).clamp(0.0, 1.0);
+  }
+
+  String get _homeFeedStorageKey {
+    final account = _accountId?.trim() ?? '';
+    return account.isEmpty
+        ? homeFeedCacheKey
+        : 'account.$account.$homeFeedCacheKey';
+  }
+
+  Future<void> _deleteHomeFeedCaches() async {
+    final keys = <String>{homeFeedCacheKey, _homeFeedStorageKey};
+    await Future.wait(keys.map(_storage.delete));
+  }
+
+  String _metadataCacheKey(SubjectContentType type) => switch (type) {
+    SubjectContentType.anime => animeMetadataCacheKey,
+    SubjectContentType.series => seriesMetadataCacheKey,
+    SubjectContentType.movie => movieMetadataCacheKey,
+  };
+
+  String _metadataKind(SubjectContentType type) => switch (type) {
+    SubjectContentType.anime => 'anime',
+    SubjectContentType.series => 'series',
+    SubjectContentType.movie => 'movie',
+  };
 
   List<AnimeSubject> get _homeSubjects => _uniqueSubjects([
     _snapshot.homeFeed.hero,
@@ -611,6 +914,11 @@ final class CatalogController {
     selectedSubjects: Map<int, AnimeDetailBundle>.unmodifiable(
       snapshot.selectedSubjects,
     ),
+    homeCandidates:
+        Map<SubjectContentType, List<CatalogCandidate>>.unmodifiable({
+          for (final entry in snapshot.homeCandidates.entries)
+            entry.key: List<CatalogCandidate>.unmodifiable(entry.value),
+        }),
   );
 
   _CatalogScope _scope() {
@@ -674,10 +982,17 @@ final class _HomeFeedCacheSnapshot {
 }
 
 final class _SubjectCacheSnapshot {
-  const _SubjectCacheSnapshot({this.subjects = const [], this.fresh = false});
+  const _SubjectCacheSnapshot({this.candidates = const [], this.fresh = false});
 
-  final List<AnimeSubject> subjects;
+  final List<CatalogCandidate> candidates;
   final bool fresh;
+}
+
+extension _FirstOrNull<T> on Iterable<T> {
+  T? get firstOrNull {
+    final iterator = this.iterator;
+    return iterator.moveNext() ? iterator.current : null;
+  }
 }
 
 List<AnimeSubject> uniqueCatalogSubjects(

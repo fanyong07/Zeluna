@@ -45,6 +45,85 @@ void main() {
     expect(stableSubjectId(subjects.single), 'tmdb:tv:42');
     expect(subjects.single.categories.single.name, '剧情');
   });
+
+  test('首页候选保留服务端榜单证据且兼容时间戳', () async {
+    final client = MockClient((request) async {
+      expect(request.url.path, '/api/v3/catalog/home/movie');
+      expect(request.url.queryParameters['limit'], '240');
+      return _jsonResponse([
+        {
+          'stable_id': 'tmdb:movie:99',
+          'title': '榜单电影',
+          'genres': ['科幻'],
+          'external_ids': {'imdb': 'tt1234567'},
+          'ranking': {
+            'batchId': 'tmdb:movie:1770000000123',
+            'rankedAt': 1770000000.123,
+            'globalScore': 0.875,
+            'lists': [
+              {'provider': 'tmdb', 'kind': 'trending_week', 'rank': 2},
+              {'provider': 'tmdb', 'kind': 'popular', 'rank': 5},
+              {'provider': '', 'kind': 'invalid', 'rank': 1},
+              {'provider': 'tmdb', 'kind': 'invalid', 'rank': 0},
+            ],
+          },
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendCatalogRepository(
+      baseUrl: 'https://backend.example',
+      client: client,
+    );
+
+    final candidates = await repository.homeCandidates(
+      SubjectContentType.movie,
+    );
+
+    expect(candidates, hasLength(1));
+    final candidate = candidates.single;
+    expect(candidate.subject.title, '榜单电影');
+    expect(candidate.contentType, SubjectContentType.movie);
+    expect(candidate.evidence.batchId, 'tmdb:movie:1770000000123');
+    expect(
+      candidate.evidence.rankedAt,
+      DateTime.fromMillisecondsSinceEpoch(1770000000123, isUtc: true),
+    );
+    expect(candidate.evidence.globalScore, 0.875);
+    expect(candidate.evidence.lists, hasLength(2));
+    expect(candidate.evidence.lists.first.provider, 'tmdb');
+    expect(candidate.evidence.lists.first.kind, 'trending_week');
+    expect(candidate.evidence.lists.first.rank, 2);
+    expect(candidate.externalIds, {'imdb': 'tt1234567'});
+  });
+
+  test('旧 home 接口保持只返回作品的兼容行为', () async {
+    final client = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'stable_id': 'bangumi:123',
+          'title': '兼容动画',
+          'genres': const [],
+          'ranking': {
+            'batchId': 'bangumi:anime:test',
+            'rankedAt': '2026-08-09T00:00:00Z',
+            'globalScore': 0.9,
+            'lists': const [],
+          },
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendCatalogRepository(
+      baseUrl: 'https://backend.example',
+      client: client,
+    );
+
+    final subjects = await repository.home(SubjectContentType.anime);
+
+    expect(subjects, hasLength(1));
+    expect(subjects.single.title, '兼容动画');
+  });
   test('客户端不会缓存后台返回的轻量目录记录', () async {
     final client = MockClient((request) async {
       expect(request.url.path, '/api/v3/catalog/subject/bangumi:590786');

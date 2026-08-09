@@ -639,6 +639,14 @@ void main() {
     );
   });
 
+  test('web play events need positive media progress before first frame', () {
+    expect(webPlaybackHasFirstFrame(position: Duration.zero), isFalse);
+    expect(
+      webPlaybackHasFirstFrame(position: const Duration(milliseconds: 1)),
+      isTrue,
+    );
+  });
+
   test('active loaded line survives an unavailable verification snapshot', () {
     const current = PlaybackLine(
       id: 'current',

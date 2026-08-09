@@ -1544,8 +1544,13 @@ class _HistoryStatRow extends StatelessWidget {
   }
 }
 
+typedef ResetRecommendationPreferencesCallback = Future<void> Function();
+
 class HomeSettingsPage extends ConsumerWidget {
-  const HomeSettingsPage({super.key});
+  const HomeSettingsPage({super.key, this.onResetRecommendationPreferences});
+
+  final ResetRecommendationPreferencesCallback?
+  onResetRecommendationPreferences;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -1555,6 +1560,34 @@ class HomeSettingsPage extends ConsumerWidget {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
           children: [
+            SettingsCard(
+              children: [
+                SettingsSwitchRow(
+                  title: '个性化推荐',
+                  subtitle: '结合观看、追番和收藏习惯调整首页与分类排序',
+                  value: state.homePreferences.personalizedRecommendations,
+                  onChanged: (value) => ref
+                      .read(animeControllerProvider.notifier)
+                      .updateHomePreferences(
+                        state.homePreferences.copyWith(
+                          personalizedRecommendations: value,
+                        ),
+                      ),
+                ),
+                SettingsActionRow(
+                  key: const ValueKey('reset_recommendation_preferences'),
+                  icon: Icons.restart_alt_rounded,
+                  title: '重置推荐偏好',
+                  subtitle: onResetRecommendationPreferences == null
+                      ? '推荐模块接入后可清除已学习的兴趣与展示记录'
+                      : '清除已学习的兴趣与展示记录，不会删除观看历史、收藏或追番',
+                  onTap: onResetRecommendationPreferences == null
+                      ? null
+                      : () => _confirmResetRecommendationPreferences(context),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
             SettingsCard(
               children: [
                 for (final tab in AnimeHomeTab.values)
@@ -1574,6 +1607,32 @@ class HomeSettingsPage extends ConsumerWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmResetRecommendationPreferences(
+    BuildContext context,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重置推荐偏好？'),
+        content: const Text('将清除推荐系统已学习的兴趣和展示记录，不会删除观看历史、收藏或追番。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm_reset_recommendation_preferences'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认重置'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    await onResetRecommendationPreferences!();
+    if (context.mounted) _showToast(context, '推荐偏好已重置');
   }
 }
 
@@ -2306,13 +2365,17 @@ Future<void> _playDownloadTask(
   }
   final controller = ref.read(animeControllerProvider.notifier);
   final accountContextVersion = controller.accountContextVersion;
-  final recorded = await controller.addHistory(
-    task.subject,
-    task.episode,
-    expectedAccountContextVersion: accountContextVersion,
-  );
+  final historyEntry = ref
+      .read(animeControllerProvider)
+      .value
+      ?.history
+      .where(
+        (entry) =>
+            sameSubjectIdentity(entry.subject, task.subject) &&
+            entry.episode?.id == task.episode.id,
+      )
+      .firstOrNull;
   if (!context.mounted ||
-      !recorded ||
       !controller.isAccountContextCurrent(accountContextVersion)) {
     return;
   }
@@ -2324,6 +2387,7 @@ Future<void> _playDownloadTask(
       episode: task.episode,
       initialLine: line,
       offlineOnly: true,
+      resumePosition: _resumePositionFor(historyEntry, task.episode),
     ),
   );
 }
@@ -2407,13 +2471,7 @@ Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
     _openDetail(context, entry.subject);
     return;
   }
-  final recorded = await controller.addHistory(
-    entry.subject,
-    episode,
-    expectedAccountContextVersion: accountContextVersion,
-  );
   if (!context.mounted ||
-      !recorded ||
       !controller.isAccountContextCurrent(accountContextVersion)) {
     return;
   }
@@ -2423,8 +2481,16 @@ Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
       subject: entry.subject,
       episodes: episodes.isEmpty ? [episode] : episodes,
       episode: episode,
+      resumePosition: _resumePositionFor(entry, episode),
     ),
   );
+}
+
+Duration _resumePositionFor(LibraryEntry? entry, AnimeEpisode episode) {
+  if (entry?.episode?.id != episode.id || (entry?.positionSeconds ?? 0) <= 0) {
+    return Duration.zero;
+  }
+  return Duration(seconds: entry!.positionSeconds);
 }
 
 void _openDetail(BuildContext context, AnimeSubject subject) {

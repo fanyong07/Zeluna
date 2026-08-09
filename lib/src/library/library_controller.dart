@@ -191,11 +191,15 @@ final class LibraryController {
         expectedContextVersion != scope.contextVersion) {
       return false;
     }
+    final previous = _entryForSubject(_snapshot.history, subject);
+    final sameEpisode = previous?.episode?.id == episode?.id;
     final entry = LibraryEntry(
       subject: subject,
       episode: episode,
       updatedAt: _now(),
       note: episode == null ? '打开详情' : '播放到 ${episode.displayTitle}',
+      positionSeconds: sameEpisode ? previous!.positionSeconds : 0,
+      durationSeconds: sameEpisode ? previous!.durationSeconds : 0,
     );
     final next = <LibraryEntry>[
       entry,

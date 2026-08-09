@@ -16,16 +16,22 @@ class SearchHistoryStore {
     return id.isEmpty ? 'guest' : 'account.$id';
   }
 
+  List<String> _terms(Object? raw) {
+    if (raw is! List) return const [];
+    final seen = <String>{};
+    return raw
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty && seen.add(item))
+        .take(maxEntries)
+        .toList(growable: false);
+  }
+
   /// History is a convenience; storage trouble (uninitialized Hive in tests,
   /// corrupt box, denied disk) silently degrades to an empty list.
   Future<List<String>> load(String accountId) async {
     try {
       final box = await _openBox();
-      final raw = box.get(_key(accountId));
-      if (raw is! List) return const [];
-      return List.unmodifiable(
-        raw.map((item) => item.toString()).where((item) => item.isNotEmpty),
-      );
+      return List.unmodifiable(_terms(box.get(_key(accountId))));
     } catch (_) {
       return const [];
     }
@@ -66,6 +72,45 @@ class SearchHistoryStore {
       final box = await _openBox();
       await box.delete(_key(accountId));
     } catch (_) {}
+  }
+
+  /// Moves the guest search terms into the first registered account.
+  ///
+  /// The target write happens before deleting the guest key, making the
+  /// operation safe to retry after an interrupted registration.
+  Future<void> migrateGuestToAccount(String accountId) async {
+    final normalizedAccountId = accountId.trim();
+    if (normalizedAccountId.isEmpty) {
+      throw ArgumentError.value(accountId, 'accountId', 'must not be empty');
+    }
+    final box = await _openBox();
+    final guestTerms = _terms(box.get(_key('')));
+    if (guestTerms.isEmpty) {
+      await box.delete(_key(''));
+      return;
+    }
+    final accountKey = _key(normalizedAccountId);
+    final accountTerms = _terms(box.get(accountKey));
+    final seen = <String>{};
+    final merged = <String>[
+      ...accountTerms,
+      ...guestTerms,
+    ].where((item) => seen.add(item)).take(maxEntries).toList(growable: false);
+    await box.put(accountKey, merged);
+    await box.delete(_key(''));
+  }
+
+  /// Removes search history owned by a deleted account.
+  ///
+  /// Unlike the UI convenience [clear], failures are allowed to propagate so
+  /// account-deletion recovery can retry the cleanup on the next startup.
+  Future<void> clearAccount(String accountId) async {
+    final normalizedAccountId = accountId.trim();
+    if (normalizedAccountId.isEmpty) {
+      throw ArgumentError.value(accountId, 'accountId', 'must not be empty');
+    }
+    final box = await _openBox();
+    await box.delete(_key(normalizedAccountId));
   }
 }
 

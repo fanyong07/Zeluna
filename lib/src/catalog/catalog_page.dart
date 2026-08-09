@@ -18,6 +18,7 @@ import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import '../sources/external_source_adapters.dart';
+import 'catalog_controller.dart';
 import 'subject_playability.dart';
 import 'search_ranking.dart';
 import '../shared_ui/skeleton.dart';
@@ -222,7 +223,11 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
             subject: state.homeFeed.hero,
             progress: _watchProgress(state.history),
           ),
-          child: _body(state.homeFeed),
+          child: _body(
+            state.homeFeed,
+            personalizedRecommendations:
+                state.homePreferences.personalizedRecommendations,
+          ),
         );
       },
     );
@@ -246,7 +251,10 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
     return (latest / total).clamp(0.05, 1);
   }
 
-  Widget _body(AnimeHomeFeed feed) {
+  Widget _body(
+    AnimeHomeFeed feed, {
+    required bool personalizedRecommendations,
+  }) {
     final compact = MediaQuery.sizeOf(context).width < 760;
     final content = switch (_tab) {
       AnimeHomeTab.recent => _RecentTab(
@@ -255,7 +263,13 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
       ),
       AnimeHomeTab.recommended => _RecommendTab(
         feed: feed,
+        personalizedRecommendations: personalizedRecommendations,
         onOpen: _openDetail,
+        onRotate: () =>
+            ref.read(animeControllerProvider.notifier).rotateRecommendations(),
+        onNotInterested: (subject) => ref
+            .read(animeControllerProvider.notifier)
+            .markRecommendationNotInterested(subject),
       ),
       AnimeHomeTab.browse => _IndexTab(
         subjects: feed.index,
@@ -452,6 +466,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   String _type = '全部';
   String _language = '全部';
   String _year = '全部';
+  CatalogSortMode _sortMode = CatalogSortMode.recommended;
   _PlaybackFilter _playbackFilter = _PlaybackFilter.all;
   Future<List<AnimeSubject>>? _subjectsFuture;
   int _subjectsRequestVersion = 0;
@@ -470,6 +485,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.kind == widget.kind) return;
     _subjectsRequestVersion++;
+    _sortMode = CatalogSortMode.recommended;
     _subjectsFuture = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _refreshSubjectsInBackground();
@@ -546,6 +562,15 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                       child: SizedBox(height: compact ? 10 : 14),
                     ),
                     SliverToBoxAdapter(
+                      child: _CatalogSortControl(
+                        selected: _sortMode,
+                        onChanged: _selectSortMode,
+                      ),
+                    ),
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: compact ? 10 : 14),
+                    ),
+                    SliverToBoxAdapter(
                       child: _InlineFilterPanel(
                         type: _type,
                         language: _language,
@@ -578,6 +603,20 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
                         subjects: subjects,
                         onOpen: _openDetail,
                         showPlaybackAvailability: true,
+                        trailingBuilder:
+                            _sortMode == CatalogSortMode.recommended &&
+                                state
+                                    .homePreferences
+                                    .personalizedRecommendations
+                            ? (subject) => _RecommendationCardMenu(
+                                subject: subject,
+                                onNotInterested: () =>
+                                    _markMetadataNotInterested(
+                                      subject,
+                                      rawSubjects,
+                                    ),
+                              )
+                            : null,
                       ),
                     const SliverToBoxAdapter(child: SizedBox(height: 120)),
                   ],
@@ -679,14 +718,26 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     return switch (widget.kind) {
       MetadataHubKind.anime => controller.discoverSubjects(
         waitForRefresh: waitForRefresh,
+        sort: _sortMode,
       ),
       MetadataHubKind.series => controller.seriesSubjects(
         waitForRefresh: waitForRefresh,
+        sort: _sortMode,
       ),
       MetadataHubKind.movie => controller.movieSubjects(
         waitForRefresh: waitForRefresh,
+        sort: _sortMode,
       ),
     };
+  }
+
+  void _selectSortMode(CatalogSortMode value) {
+    if (value == _sortMode) return;
+    _subjectsRequestVersion++;
+    setState(() {
+      _sortMode = value;
+      _subjectsFuture = _loadSubjects(ref);
+    });
   }
 
   Future<void> _refreshSubjectsInBackground() async {
@@ -696,7 +747,9 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
       if (!mounted || requestVersion != _subjectsRequestVersion) return;
       final subjects = await _loadSubjects(ref, waitForRefresh: true);
       if (!mounted || requestVersion != _subjectsRequestVersion) return;
-      setState(() => _subjectsFuture = Future.value(subjects));
+      setState(() {
+        _subjectsFuture = Future.value(subjects);
+      });
     } catch (_) {
       // Keep the already visible cache or fallback list on refresh failures.
     }
@@ -713,7 +766,40 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
         .invalidateMetadataCache(kind);
     if (!mounted) return;
     _subjectsRequestVersion++;
-    setState(() => _subjectsFuture = _loadSubjects(ref, waitForRefresh: true));
+    setState(() {
+      _subjectsFuture = _loadSubjects(ref, waitForRefresh: true);
+    });
+  }
+
+  Future<void> _markMetadataNotInterested(
+    AnimeSubject subject,
+    List<AnimeSubject> currentSubjects,
+  ) async {
+    final requestVersion = ++_subjectsRequestVersion;
+    final reordered = <AnimeSubject>[
+      ...currentSubjects.where((item) => !sameSubjectIdentity(item, subject)),
+      subject,
+    ];
+    setState(() {
+      _subjectsFuture = Future.value(reordered);
+    });
+    try {
+      await ref
+          .read(animeControllerProvider.notifier)
+          .markRecommendationNotInterested(subject);
+      if (!mounted || requestVersion != _subjectsRequestVersion) return;
+      final refreshed = await _loadSubjects(ref);
+      if (!mounted || requestVersion != _subjectsRequestVersion) return;
+      setState(() {
+        _subjectsFuture = Future.value(refreshed);
+      });
+    } catch (_) {
+      if (!mounted || requestVersion != _subjectsRequestVersion) return;
+      setState(() {
+        _subjectsFuture = Future.value(currentSubjects);
+      });
+      _showToast(context, '暂时无法更新推荐偏好');
+    }
   }
 
   List<AnimeSubject> _filterSubjects(List<AnimeSubject> subjects) {
@@ -939,6 +1025,71 @@ class _MetadataTopFilters extends StatelessWidget {
             icon: const Icon(Icons.refresh_rounded, size: 19),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _CatalogSortControl extends StatelessWidget {
+  const _CatalogSortControl({required this.selected, required this.onChanged});
+
+  final CatalogSortMode selected;
+  final ValueChanged<CatalogSortMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    if (compact) {
+      return AppPanel(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            Icon(Icons.sort_rounded, size: 18, color: context.inkMuted),
+            const SizedBox(width: 8),
+            Text(
+              '排序',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: context.inkMuted,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const Spacer(),
+            DropdownButtonHideUnderline(
+              child: DropdownButton<CatalogSortMode>(
+                key: const ValueKey('catalog-sort-dropdown'),
+                value: selected,
+                isDense: true,
+                borderRadius: BorderRadius.circular(10),
+                items: [
+                  for (final mode in CatalogSortMode.values)
+                    DropdownMenuItem(value: mode, child: Text(mode.label)),
+                ],
+                onChanged: (value) {
+                  if (value != null) onChanged(value);
+                },
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: SegmentedButton<CatalogSortMode>(
+        key: const ValueKey('catalog-sort-segmented'),
+        segments: [
+          for (final mode in CatalogSortMode.values)
+            ButtonSegment(value: mode, label: Text(mode.label)),
+        ],
+        selected: {selected},
+        showSelectedIcon: false,
+        onSelectionChanged: (values) => onChanged(values.first),
+        style: const ButtonStyle(
+          visualDensity: VisualDensity(horizontal: -2, vertical: -2),
+          padding: WidgetStatePropertyAll(
+            EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          ),
+        ),
       ),
     );
   }
@@ -2094,25 +2245,25 @@ class _DetailPageState extends ConsumerState<DetailPage> {
             .firstOrNull;
         final compact = MediaQuery.sizeOf(context).width < 760;
 
-        Future<void> play(AnimeEpisode episode) async {
+        void play(AnimeEpisode episode) {
           final controller = ref.read(animeControllerProvider.notifier);
           final accountContextVersion = controller.accountContextVersion;
-          final recorded = await controller.addHistory(
-            bundle.subject,
-            episode,
-            expectedAccountContextVersion: accountContextVersion,
-          );
           if (!context.mounted ||
-              !recorded ||
               !controller.isAccountContextCurrent(accountContextVersion)) {
             return;
           }
+          final resumePosition =
+              historyEntry?.episode?.id == episode.id &&
+                  (historyEntry?.positionSeconds ?? 0) > 0
+              ? Duration(seconds: historyEntry!.positionSeconds)
+              : Duration.zero;
           context.push(
             '/player',
             extra: PlaySessionRequest(
               subject: bundle.subject,
               episodes: bundle.episodes,
               episode: episode,
+              resumePosition: resumePosition,
               initialLine: controller.prefetchedLineForEpisode(
                 bundle.subject,
                 episode,
@@ -2472,10 +2623,19 @@ class _RecentTab extends StatelessWidget {
 }
 
 class _RecommendTab extends StatefulWidget {
-  const _RecommendTab({required this.feed, required this.onOpen});
+  const _RecommendTab({
+    required this.feed,
+    required this.personalizedRecommendations,
+    required this.onOpen,
+    required this.onRotate,
+    required this.onNotInterested,
+  });
 
   final AnimeHomeFeed feed;
+  final bool personalizedRecommendations;
   final ValueChanged<AnimeSubject> onOpen;
+  final VoidCallback onRotate;
+  final FutureOr<void> Function(AnimeSubject subject) onNotInterested;
 
   @override
   State<_RecommendTab> createState() => _RecommendTabState();
@@ -2489,6 +2649,7 @@ class _RecommendTabState extends State<_RecommendTab> {
   int _heroCount = 0;
   Timer? _heroTimer;
   bool _heroHovering = false;
+  final Set<String> _dismissedRecommendationKeys = {};
 
   @override
   void initState() {
@@ -2509,6 +2670,12 @@ class _RecommendTabState extends State<_RecommendTab> {
     if (oldWidget.feed != widget.feed) {
       _heroIndex = 0;
       if (_heroController.hasClients) _heroController.jumpToPage(0);
+      final currentKeys = widget.feed.recommended
+          .map(_recommendationCardKey)
+          .toSet();
+      _dismissedRecommendationKeys.removeWhere(
+        (key) => !currentKeys.contains(key),
+      );
     }
   }
 
@@ -2528,6 +2695,13 @@ class _RecommendTabState extends State<_RecommendTab> {
         ? 0
         : _heroIndex.clamp(0, heroSubjects.length - 1).toInt();
     final shortcuts = _shortcuts(widget.feed);
+    final recommendations = widget.feed.recommended
+        .where(
+          (subject) => !_dismissedRecommendationKeys.contains(
+            _recommendationCardKey(subject),
+          ),
+        )
+        .toList(growable: false);
     return CustomScrollView(
       slivers: [
         SliverToBoxAdapter(
@@ -2577,13 +2751,28 @@ class _RecommendTabState extends State<_RecommendTab> {
             ),
           ),
         ),
-        const SliverToBoxAdapter(
-          child: SectionTitle(title: '今日推荐', icon: Icons.local_fire_department),
+        SliverToBoxAdapter(
+          child: SectionTitle(
+            title: '为你推荐',
+            icon: Icons.auto_awesome_rounded,
+            action: TextButton.icon(
+              key: const ValueKey('rotate-home-recommendations'),
+              onPressed: widget.onRotate,
+              icon: const Icon(Icons.shuffle_rounded, size: 18),
+              label: const Text('换一批'),
+            ),
+          ),
         ),
         const SliverToBoxAdapter(child: SizedBox(height: 10)),
         _SubjectGridSliver(
-          subjects: widget.feed.recommended,
+          subjects: recommendations,
           onOpen: widget.onOpen,
+          trailingBuilder: widget.personalizedRecommendations
+              ? (subject) => _RecommendationCardMenu(
+                  subject: subject,
+                  onNotInterested: () => _markNotInterested(subject),
+                )
+              : null,
         ),
         const SliverToBoxAdapter(child: SizedBox(height: 20)),
         const SliverToBoxAdapter(
@@ -2602,13 +2791,32 @@ class _RecommendTabState extends State<_RecommendTab> {
       ...feed.recommended,
       ...feed.recent,
     ]);
-    final withBanners = candidates
-        .where((item) => (item.bannerUrl ?? '').isNotEmpty)
+    final remaining = candidates
+        .where(
+          (item) =>
+              _recommendationCardKey(item) != _recommendationCardKey(feed.hero),
+        )
+        .toList(growable: false);
+    final withBanners = remaining
+        .where((item) => (item.bannerUrl ?? '').trim().isNotEmpty)
         .toList(growable: false);
     return [
+      feed.hero,
       ...withBanners,
-      ...candidates.where((item) => !withBanners.contains(item)),
+      ...remaining.where((item) => !withBanners.contains(item)),
     ].take(7).toList(growable: false);
+  }
+
+  Future<void> _markNotInterested(AnimeSubject subject) async {
+    final key = _recommendationCardKey(subject);
+    setState(() => _dismissedRecommendationKeys.add(key));
+    try {
+      await widget.onNotInterested(subject);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _dismissedRecommendationKeys.remove(key));
+      _showToast(context, '暂时无法更新推荐偏好');
+    }
   }
 
   List<_HomeShortcutData> _shortcuts(AnimeHomeFeed feed) {
@@ -2709,6 +2917,48 @@ class _RecommendTabState extends State<_RecommendTab> {
     );
   }
 }
+
+class _RecommendationCardMenu extends StatelessWidget {
+  const _RecommendationCardMenu({
+    required this.subject,
+    required this.onNotInterested,
+  });
+
+  final AnimeSubject subject;
+  final VoidCallback onNotInterested;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<_RecommendationCardAction>(
+      key: ValueKey('recommendation-menu-${_recommendationCardKey(subject)}'),
+      tooltip: '推荐选项',
+      child: const SizedBox.square(
+        dimension: 28,
+        child: Icon(Icons.more_horiz_rounded, size: 18),
+      ),
+      onSelected: (action) {
+        if (action == _RecommendationCardAction.notInterested) {
+          onNotInterested();
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(
+          value: _RecommendationCardAction.notInterested,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.block_rounded, size: 18),
+              SizedBox(width: 10),
+              Text('不感兴趣'),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+enum _RecommendationCardAction { notInterested }
 
 class _CategoryShortcut extends StatelessWidget {
   const _CategoryShortcut({
@@ -2999,11 +3249,13 @@ class _SubjectGridSliver extends StatelessWidget {
     required this.subjects,
     required this.onOpen,
     this.showPlaybackAvailability = false,
+    this.trailingBuilder,
   });
 
   final List<AnimeSubject> subjects;
   final ValueChanged<AnimeSubject> onOpen;
   final bool showPlaybackAvailability;
+  final Widget Function(AnimeSubject subject)? trailingBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -3019,6 +3271,7 @@ class _SubjectGridSliver extends StatelessWidget {
             badge: showPlaybackAvailability
                 ? subjectPlaybackLabel(subject)
                 : null,
+            trailing: trailingBuilder?.call(subject),
             onTap: () => onOpen(subject),
           );
         }, childCount: subjects.length),
@@ -4380,6 +4633,9 @@ List<AnimeSubject> _uniqueSubjectList(Iterable<AnimeSubject> subjects) {
   return result;
 }
 
+String _recommendationCardKey(AnimeSubject subject) =>
+    '${subject.source}:${subject.id}';
+
 SubjectContentType _subjectContentTypeFor(MetadataHubKind kind) {
   return switch (kind) {
     MetadataHubKind.anime => SubjectContentType.anime,
@@ -4390,7 +4646,7 @@ SubjectContentType _subjectContentTypeFor(MetadataHubKind kind) {
 
 const _fallbackHeroSubject = AnimeSubject(
   id: -1,
-  title: '今日推荐',
+  title: '为你推荐',
   originalTitle: 'Daily Picks',
   summary: '推荐内容正在准备中，稍后会自动刷新。',
   coverUrl: null,

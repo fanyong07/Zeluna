@@ -47,6 +47,7 @@ class WebStreamPlayer extends StatefulWidget {
     this.onPosition,
     this.onDuration,
     this.onPlaying,
+    this.onEnded,
   });
 
   final String url;
@@ -62,6 +63,7 @@ class WebStreamPlayer extends StatefulWidget {
   final ValueChanged<Duration>? onPosition;
   final ValueChanged<Duration>? onDuration;
   final ValueChanged<bool>? onPlaying;
+  final VoidCallback? onEnded;
 
   @override
   State<WebStreamPlayer> createState() => _WebStreamPlayerState();
@@ -90,6 +92,7 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
   StreamSubscription<web.Event>? _errorSub;
   StreamSubscription<web.Event>? _playSub;
   StreamSubscription<web.Event>? _pauseSub;
+  StreamSubscription<web.Event>? _endedSub;
 
   @override
   void initState() {
@@ -201,6 +204,7 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     _errorSub?.cancel();
     _playSub?.cancel();
     _pauseSub?.cancel();
+    _endedSub?.cancel();
     _destroyHls();
     _video.pause();
     _video.playbackRate = _safePlaybackRate(widget.rate);
@@ -231,6 +235,7 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
       if (widget.playing) unawaited(_playIfAllowed());
     });
     _timeSub = _video.onTimeUpdate.listen((_) {
+      if (_readySerial != _loadSerial) return;
       final position = _video.currentTime;
       if (position.isFinite && position >= 0) {
         widget.onPosition?.call(
@@ -249,6 +254,10 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     _pauseSub = _video.onPause.listen((_) {
       _nativePlayButton.style.display = 'block';
       widget.onPlaying?.call(false);
+    });
+    _endedSub = _video.onEnded.listen((_) {
+      if (_readySerial != _loadSerial || !_video.ended) return;
+      widget.onEnded?.call();
     });
   }
 

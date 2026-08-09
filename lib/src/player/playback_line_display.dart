@@ -334,6 +334,12 @@ bool webPlaybackShouldApplyPlayingUpdate({
   return playing || !loading;
 }
 
+bool webPlaybackHasFirstFrame({required Duration position}) {
+  // HTMLMediaElement.onPlay only confirms command acceptance. Advancing media
+  // time is the portable signal that playback has produced content.
+  return position > Duration.zero;
+}
+
 bool shouldPreserveLoadedPlaybackLine({
   required PlaybackLine? currentLine,
   required PlaybackLine? replacementLine,

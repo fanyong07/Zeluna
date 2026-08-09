@@ -14,6 +14,7 @@ import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
+import '../recommendations/recommendation_playback.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
@@ -46,6 +47,13 @@ part 'ui/player_desktop_layout.dart';
 
 const _episodeTransitionSafetyMargin = Duration(seconds: 30);
 
+bool webPlaybackEventIsCurrent({
+  required int eventGeneration,
+  required int currentGeneration,
+}) {
+  return eventGeneration == currentGeneration;
+}
+
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key, required this.request});
 
@@ -70,6 +78,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final SubtitleController _subtitleController;
   late final Anime4KController _anime4kController;
   late PlaybackPerformanceTrace _playbackTrace;
+  final _nativeMediaEvents = NativeMediaEventGuard();
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   int? _handledFailureOpenSerial;
@@ -117,6 +126,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   String? _warmupTransitionFallbackLineId;
   var _openingWarmupTransitionPrimary = false;
   var _accountContextVersion = 0;
+  int? _recommendationFirstFrameEpisodeId;
+  int? _recommendationEffectiveEpisodeId;
+  int? _recommendationCompletedEpisodeId;
+  Duration _recommendationWatched = Duration.zero;
+  Duration? _recommendationLastObservedPosition;
+  DateTime? _lastPlaybackProgressPersistedAt;
+  int? _handledEndedEpisodeId;
+  int? _handledEndedOpenSerial;
 
   Player get _player => _nativeVideo.player;
   VideoController get _controller => _nativeVideo.surfaceController;
@@ -309,6 +326,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (_firstFrameTraceOpenSerial == _openLineSerial) return;
     _firstFrameTraceOpenSerial = _openLineSerial;
     _sessionController.dispatch(PlaybackSessionEvent.firstFrame(line.id));
+    _recordRecommendationFirstFrame();
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
     _playbackTrace.recordBufferingChanged(
       buffering: false,
@@ -675,6 +693,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(_persistPlaybackProgress(force: true));
+    _nativeMediaEvents.invalidate();
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }
@@ -705,6 +725,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           ? PlaybackSessionEvent.applicationResumed()
           : PlaybackSessionEvent.applicationPaused(),
     );
+    if (!inForeground) unawaited(_persistPlaybackProgress(force: true));
     _resetPlaybackStallWatchdog(
       grace: inForeground ? const Duration(seconds: 3) : Duration.zero,
     );
@@ -730,6 +751,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             ? state.settings
             : state.settings.copyWith(speed: _temporaryPlaybackRate);
         _applyPlaybackSettings(effectiveSettings);
+        final playbackGeneration = _openLineSerial;
         final superResolutionStatus = _anime4kController.displayStatus;
         final superResolutionPanelStatus = _buildSuperResolutionPanelStatus(
           superResolutionStatus,
@@ -773,6 +795,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                       player: _PlayerCanvas(
                         controller: _controller,
                         webPlayerController: _webPlayerController,
+                        playbackGeneration: playbackGeneration,
                         subject: widget.request.subject,
                         episodes: widget.request.episodes,
                         episode: _episode,
@@ -836,11 +859,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         danmakuInput: _danmakuController.input,
                         onSendDanmaku: (text) =>
                             _sendLocalDanmaku(text, settings: state.danmaku),
-                        onWebReady: _handleWebReady,
-                        onWebError: _handleWebError,
-                        onWebPosition: _handleWebPosition,
-                        onWebDuration: _handleWebDuration,
-                        onWebPlaying: _handleWebPlaying,
+                        onWebReady: () => _handleWebReady(playbackGeneration),
+                        onWebError: () => _handleWebError(playbackGeneration),
+                        onWebPosition: (value) =>
+                            _handleWebPosition(playbackGeneration, value),
+                        onWebDuration: (value) =>
+                            _handleWebDuration(playbackGeneration, value),
+                        onWebPlaying: (value) =>
+                            _handleWebPlaying(playbackGeneration, value),
+                        onWebEnded: () => _handleWebEnded(playbackGeneration),
                         onSettingsPanel: _toggleSettingsPanel,
                       ),
                     ),
@@ -1084,7 +1111,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeVideo
       ..track(
         _player.stream.playing.listen((value) {
-          if (!mounted || _usesWebPlayer) return;
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.playing,
+          )) {
+            return;
+          }
           _sessionController.dispatch(
             PlaybackSessionEvent.playbackStateChanged(value),
           );
@@ -1105,6 +1139,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             );
             _scheduleSingleBackupLookup();
           } else {
+            unawaited(_persistPlaybackProgress(force: true));
             _backupLookupDelayTimer?.cancel();
             _backupLookupDelayTimer = null;
             _controlsHideTimer?.cancel();
@@ -1114,7 +1149,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       )
       ..track(
         _player.stream.position.listen((value) {
-          if (!mounted || _usesWebPlayer) return;
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.position,
+          )) {
+            return;
+          }
           _notePlaybackProgress(value);
           _nativeVideo.resumeSeek.handleProgress(value);
           final previousPosition = _position;
@@ -1148,37 +1190,62 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       )
       ..track(
         _player.stream.duration.listen((value) {
-          if (mounted && !_usesWebPlayer) {
-            setState(() => _duration = value);
-            if (value > Duration.zero) {
-              _nativeVideo.resumeSeek.nudge(mediaReady: true);
-            }
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.duration,
+          )) {
+            return;
+          }
+          setState(() => _duration = value);
+          if (value > Duration.zero) {
+            _nativeVideo.resumeSeek.nudge(mediaReady: true);
           }
         }),
       )
       ..track(
         _player.stream.buffer.listen((value) {
-          if (mounted && !_usesWebPlayer) setState(() => _buffer = value);
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.buffer,
+          )) {
+            return;
+          }
+          setState(() => _buffer = value);
         }),
       )
       ..track(
         _player.stream.videoParams.listen((value) {
-          if (mounted && !_usesWebPlayer) {
-            _anime4kController.updateVideoDimensions(
-              width: value.w ?? 0,
-              height: value.h ?? 0,
-            );
-            unawaited(
-              _anime4kController.refreshFrameRate(
-                usesWebPlayer: _usesWebPlayer,
-              ),
-            );
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.videoParams,
+          )) {
+            return;
           }
+          _anime4kController.updateVideoDimensions(
+            width: value.w ?? 0,
+            height: value.h ?? 0,
+          );
+          unawaited(
+            _anime4kController.refreshFrameRate(usesWebPlayer: _usesWebPlayer),
+          );
         }),
       )
       ..track(
         _player.stream.buffering.listen((value) {
-          if (!mounted || _usesWebPlayer) return;
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.buffering,
+          )) {
+            return;
+          }
           _sessionController.dispatch(
             value
                 ? PlaybackSessionEvent.bufferingStarted()
@@ -1226,19 +1293,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       )
       ..track(
         _player.stream.completed.listen((completed) {
-          if (_usesWebPlayer) return;
-          if (completed) {
-            _sessionController.dispatch(PlaybackSessionEvent.playbackEnded());
-            _backupLookupDelayTimer?.cancel();
-            _backupLookupDelayTimer = null;
-            _resetPlaybackStallWatchdog();
-            if (_currentSettings.autoNext) _playNextEpisode();
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+                playerState,
+                eventValue: completed,
+                playerStateValue: playerState.completed,
+              ) ||
+              _firstFrameTraceOpenSerial != _openLineSerial) {
+            return;
           }
+          if (completed) _handlePlaybackEnded();
         }),
       )
       ..track(
         _player.stream.error.listen((error) {
-          if (_usesWebPlayer) return;
+          if (!_acceptsNativeMedia(_player.state)) return;
           _handlePlayerError(error);
         }),
       )
@@ -1252,12 +1321,45 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
   }
 
+  bool _acceptsNativeMedia(PlayerState playerState) {
+    if (!mounted || _usesWebPlayer) return false;
+    final playlist = playerState.playlist;
+    final index = playlist.index;
+    final playerMediaUri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    return _nativeMediaEvents.isCurrent(
+      currentOpenSerial: _openLineSerial,
+      playerMediaUri: playerMediaUri,
+    );
+  }
+
+  bool _acceptsNativeValue<T>(
+    PlayerState playerState, {
+    required T eventValue,
+    required T playerStateValue,
+  }) {
+    if (!mounted || _usesWebPlayer) return false;
+    final playlist = playerState.playlist;
+    final index = playlist.index;
+    final playerMediaUri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    return _nativeMediaEvents.acceptsValue(
+      currentOpenSerial: _openLineSerial,
+      playerMediaUri: playerMediaUri,
+      eventValue: eventValue,
+      playerStateValue: playerStateValue,
+    );
+  }
+
   void _applyPlaybackSettings(PlaybackSettings settings) {
     final accountContextVersion = ref
         .read(animeControllerProvider.notifier)
         .accountContextVersion;
     if (accountContextVersion != _accountContextVersion) {
       _accountContextVersion = accountContextVersion;
+      _resetRecommendationTracking();
       _resetNextEpisodePrefetch();
       _preferredProviderId = null;
       _clearWarmupTransitionState();
@@ -1372,6 +1474,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       } else if (available.isEmpty && usesProgressiveLookup) {
         _startExpandedLineLookup(autoplay: autoplay);
       } else if (available.isEmpty) {
+        _nativeMediaEvents.invalidate();
         await _player.stop();
         _recordFinalPlaybackFailure(reason: 'no_playable_line');
       }
@@ -1412,6 +1515,135 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _notePlaybackProgress(Duration value) {
     _recoveryController.notePlaybackProgress(value);
+    _trackRecommendationWatchTime(value);
+    unawaited(_persistPlaybackProgress());
+  }
+
+  void _resetRecommendationTracking() {
+    _recommendationFirstFrameEpisodeId = null;
+    _recommendationEffectiveEpisodeId = null;
+    _recommendationCompletedEpisodeId = null;
+    _recommendationWatched = Duration.zero;
+    _recommendationLastObservedPosition = null;
+    _lastPlaybackProgressPersistedAt = null;
+    _handledEndedEpisodeId = null;
+    _handledEndedOpenSerial = null;
+  }
+
+  void _recordRecommendationFirstFrame() {
+    if (_recommendationFirstFrameEpisodeId == _episode.id) return;
+    _recommendationFirstFrameEpisodeId = _episode.id;
+    _recommendationEffectiveEpisodeId = null;
+    _recommendationCompletedEpisodeId = null;
+    _recommendationWatched = Duration.zero;
+    _recommendationLastObservedPosition = _position;
+    final controller = ref.read(animeControllerProvider.notifier);
+    unawaited(
+      controller.recordRecommendationFirstFrame(
+        widget.request.subject,
+        _episode,
+        expectedAccountContextVersion: _accountContextVersion,
+      ),
+    );
+  }
+
+  void _trackRecommendationWatchTime(Duration value) {
+    if (_recommendationFirstFrameEpisodeId != _episode.id) {
+      _recommendationLastObservedPosition = value;
+      return;
+    }
+    final previous = _recommendationLastObservedPosition;
+    _recommendationLastObservedPosition = value;
+    if (previous != null && _playing) {
+      final delta = value - previous;
+      if (delta > Duration.zero && delta <= const Duration(seconds: 5)) {
+        _recommendationWatched += delta;
+      }
+    }
+    final duration = _duration;
+    if (duration <= Duration.zero) return;
+    final effectiveThreshold = recommendationEffectiveWatchThreshold(duration);
+    if (_recommendationEffectiveEpisodeId != _episode.id &&
+        _recommendationWatched >= effectiveThreshold) {
+      _recommendationEffectiveEpisodeId = _episode.id;
+      unawaited(
+        ref
+            .read(animeControllerProvider.notifier)
+            .recordRecommendationEffectiveWatch(
+              widget.request.subject,
+              _episode,
+              expectedAccountContextVersion: _accountContextVersion,
+            ),
+      );
+    }
+    final reachedEnd = recommendationPlaybackReachedCompletion(
+      position: value,
+      duration: duration,
+    );
+    if (reachedEnd) _recordRecommendationCompletion();
+  }
+
+  void _recordRecommendationCompletion() {
+    if (_recommendationFirstFrameEpisodeId != _episode.id ||
+        _recommendationCompletedEpisodeId == _episode.id) {
+      return;
+    }
+    _recommendationCompletedEpisodeId = _episode.id;
+    unawaited(
+      ref
+          .read(animeControllerProvider.notifier)
+          .recordRecommendationCompleted(
+            widget.request.subject,
+            _episode,
+            expectedAccountContextVersion: _accountContextVersion,
+          ),
+    );
+  }
+
+  void _handlePlaybackEnded() {
+    if (!mounted ||
+        (_handledEndedEpisodeId == _episode.id &&
+            _handledEndedOpenSerial == _openLineSerial)) {
+      return;
+    }
+    _handledEndedEpisodeId = _episode.id;
+    _handledEndedOpenSerial = _openLineSerial;
+    _sessionController.dispatch(PlaybackSessionEvent.playbackEnded());
+    _backupLookupDelayTimer?.cancel();
+    _backupLookupDelayTimer = null;
+    _resetPlaybackStallWatchdog();
+    _recordRecommendationCompletion();
+    unawaited(_persistPlaybackProgress(force: true));
+    if (_currentSettings.autoNext) unawaited(_playNextEpisode());
+  }
+
+  Future<void> _persistPlaybackProgress({bool force = false}) async {
+    if (_recommendationFirstFrameEpisodeId != _episode.id ||
+        _position <= Duration.zero ||
+        _duration <= Duration.zero) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastPlaybackProgressPersistedAt;
+    if (!force &&
+        last != null &&
+        now.difference(last) < const Duration(seconds: 15)) {
+      return;
+    }
+    _lastPlaybackProgressPersistedAt = now;
+    try {
+      await ref
+          .read(animeControllerProvider.notifier)
+          .updatePlaybackProgress(
+            widget.request.subject,
+            _episode,
+            position: _position,
+            duration: _duration,
+            expectedAccountContextVersion: _accountContextVersion,
+          );
+    } catch (_) {
+      // Playback must remain responsive when optional progress persistence fails.
+    }
   }
 
   void _checkPlaybackStall() {
@@ -1627,6 +1859,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     var line = requestedLine;
     _recoveryController.cancelCurrentLineRetry();
     if (!_isPlayableLine(line)) {
+      _nativeMediaEvents.invalidate();
       await _player.stop();
       if (!mounted) return;
       setState(() {
@@ -1650,6 +1883,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
     _nativeVideo.resumeSeek.cancel();
     final serial = ++_openLineSerial;
+    _nativeMediaEvents.invalidate();
     _handledFailureOpenSerial = null;
     _playbackTrace.recordBufferingChanged(
       buffering: false,
@@ -1744,6 +1978,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                   ),
           );
           _handleWebError(
+            serial,
             message: event.phase == WebStartupTimeoutPhase.soft
                 ? '7 秒内没有出画面，已尝试切换备用线路。'
                 : '长时间未能开始播放，已尝试切换其他线路。',
@@ -1793,6 +2028,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       final media = line.headers.isEmpty
           ? Media(url)
           : Media(url, httpHeaders: line.headers);
+      _nativeMediaEvents.beginOpen(openSerial: serial, mediaUri: media.uri);
       _ignoreNativeErrorsUntil = DateTime.now().add(
         const Duration(milliseconds: 750),
       );
@@ -1804,6 +2040,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         },
       );
       await _player.open(media, play: true);
+      if (!mounted || serial != _openLineSerial) return;
+      _nativeMediaEvents.finishOpen(openSerial: serial);
+      final openedState = _player.state;
       if (requestedResumePosition > Duration.zero) {
         _nativeVideo.resumeSeek.arm(
           openSerial: serial,
@@ -1811,14 +2050,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         );
       }
       _refreshSuperResolutionShader();
-      if (!mounted || serial != _openLineSerial) return;
       setState(() {
+        _playing = openedState.playing;
+        _duration = openedState.duration;
+        _buffer = openedState.buffer;
+        _buffering = openedState.buffering;
         _loadingLine = false;
         _playbackFailed = false;
         _playerMessage = null;
       });
     } catch (error) {
       if (!mounted || serial != _openLineSerial) return;
+      _nativeMediaEvents.invalidate();
       _playbackTrace.record(
         'line_open_failed',
         fields: <String, Object?>{
@@ -2183,6 +2426,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       setState(() => _episodePanel = false);
       return;
     }
+    unawaited(_persistPlaybackProgress(force: true));
     _sessionController.dispatch(
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
@@ -2212,6 +2456,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _danmakuController.changeEpisode();
     _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
+    _nativeMediaEvents.invalidate();
     _webVideo.cancelStartupWatchdog();
     _nativeVideo.cancelFirstFrameWatchdog();
     _cancelSingleBackupLookup();
@@ -2231,6 +2476,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController.clearPendingAutoSwitch();
     _pendingInitialResumePosition = null;
     _nativeVideo.resumeSeek.cancel();
+    _resetRecommendationTracking();
     setState(() {
       _episode = episode;
       _line = preparedLine;
@@ -2530,8 +2776,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     if (_leaving) return;
     _leaving = true;
+    _nativeMediaEvents.invalidate();
     _cancelSingleBackupLookup();
     await _lineRepository.cancelLookup();
+    await _persistPlaybackProgress(force: true);
     await _restoreSystemUi();
     await _player.stop();
     if (mounted) safeNavigateBack(context);
@@ -2725,8 +2973,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
   }
 
-  void _handleWebReady() {
-    if (!mounted) return;
+  void _handleWebReady(int playbackGeneration) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
     _webVideo.cancelStartupWatchdog();
     final current = _line;
     if (current != null) _clearLineFailure(current.id);
@@ -2737,8 +2991,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     });
   }
 
-  void _handleWebError({String? message}) {
-    if (!mounted) return;
+  void _handleWebError(int playbackGeneration, {String? message}) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
     final current = _line;
     if (current == null) return;
     _handleRuntimeLineFailure(
@@ -2747,20 +3007,48 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
   }
 
-  void _handleWebPosition(Duration value) {
-    if (!mounted) return;
+  void _handleWebPosition(int playbackGeneration, Duration value) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    final current = _line;
+    if (webPlaybackHasFirstFrame(position: value) &&
+        current != null &&
+        _firstFrameTraceOpenSerial != _openLineSerial) {
+      _webVideo.cancelStartupWatchdog();
+      _clearLineFailure(current.id);
+      _preferredProviderId = current.providerId;
+      _recordFirstFrame(current);
+      _scheduleSingleBackupLookup();
+      _scheduleNextEpisodePrefetch();
+    }
     _notePlaybackProgress(value);
     setState(() => _position = value);
     _maybeRefreshNextEpisodePrefetch();
   }
 
-  void _handleWebDuration(Duration value) {
-    if (!mounted || value.isNegative) return;
+  void _handleWebDuration(int playbackGeneration, Duration value) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        ) ||
+        value.isNegative) {
+      return;
+    }
     setState(() => _duration = value);
   }
 
-  void _handleWebPlaying(bool value) {
+  void _handleWebPlaying(int playbackGeneration, bool value) {
     if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        ) ||
         _playing == value ||
         !webPlaybackShouldApplyPlayingUpdate(
           loading: _loadingLine,
@@ -2776,18 +3064,23 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       grace: value ? const Duration(seconds: 2) : Duration.zero,
     );
     if (value) {
-      _webVideo.cancelStartupWatchdog();
-      if (_line != null) {
-        _clearLineFailure(_line!.id);
-        _preferredProviderId = _line!.providerId;
-        _recordFirstFrame(_line!);
-      }
-      _scheduleSingleBackupLookup();
-      _scheduleNextEpisodePrefetch();
+      _scheduleControlsHide();
     } else {
+      unawaited(_persistPlaybackProgress(force: true));
       _backupLookupDelayTimer?.cancel();
       _backupLookupDelayTimer = null;
     }
+  }
+
+  void _handleWebEnded(int playbackGeneration) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    _handlePlaybackEnded();
   }
 
   void _showPlayerToast(String message) {

@@ -12,6 +12,7 @@ import 'package:anime/src/data/playback_line_memory_store.dart';
 import 'package:anime/src/data/tmdb_credential_store.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/recommendations/recommendations.dart';
 import 'package:anime/src/sources/source_catalog_models.dart';
 import 'package:anime/src/sources/source_catalog_repository.dart';
 import 'package:anime/src/sync/cloud_sync_transport.dart';
@@ -228,6 +229,39 @@ void main() {
       expect(
         migratedLibrary.containsKey('account.$firstAccountId.offlineTasks'),
         isTrue,
+      );
+
+      await controller.recordRecommendationFirstFrame(_subject, _episode);
+      final recommendationKey =
+          'account.$firstAccountId.$recommendationBehaviorStorageKey';
+      final recommendationPayload = migratedLibrary.get(recommendationKey);
+      expect(recommendationPayload, isA<Map>());
+      expect(
+        ((recommendationPayload as Map)['events'] as List).single['type'],
+        RecommendationEventType.firstFrame.name,
+      );
+      await controller.resetRecommendationPreferences();
+      expect(migratedLibrary.containsKey(recommendationKey), isFalse);
+      expect(
+        container
+            .read(animeControllerProvider)
+            .requireValue
+            .history
+            .single
+            .episode,
+        _episode,
+      );
+      await controller.updateHomePreferences(
+        state.homePreferences.copyWith(personalizedRecommendations: false),
+      );
+      await controller.recordRecommendationEffectiveWatch(_subject, _episode);
+      expect(
+        migratedLibrary.containsKey(recommendationKey),
+        isFalse,
+        reason: '关闭个性化后仍应保存播放进度，但不新增推荐事件',
+      );
+      await controller.updateHomePreferences(
+        state.homePreferences.copyWith(personalizedRecommendations: true),
       );
 
       await controller.registerAccount(

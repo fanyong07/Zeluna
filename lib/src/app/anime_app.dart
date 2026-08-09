@@ -84,7 +84,11 @@ final routerProvider = Provider<GoRouter>((ref) {
     ),
     GoRoute(
       path: '/profile/home-settings',
-      builder: (context, state) => const HomeSettingsPage(),
+      builder: (context, state) => HomeSettingsPage(
+        onResetRecommendationPreferences: () => ref
+            .read(animeControllerProvider.notifier)
+            .resetRecommendationPreferences(),
+      ),
     ),
     GoRoute(
       path: '/profile/appearance',

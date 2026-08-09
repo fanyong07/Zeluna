@@ -5,6 +5,55 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../playback_line_display.dart';
 
+/// Rejects shared media-kit stream events while a media open is being
+/// replaced, and after a newer open has taken ownership of the player.
+final class NativeMediaEventGuard {
+  int? _openSerial;
+  String? _mediaUri;
+  var _ready = false;
+
+  bool get isTransitioning => _openSerial != null && !_ready;
+
+  void beginOpen({required int openSerial, required String mediaUri}) {
+    _openSerial = openSerial;
+    _mediaUri = mediaUri;
+    _ready = false;
+  }
+
+  void finishOpen({required int openSerial}) {
+    if (_openSerial == openSerial) _ready = true;
+  }
+
+  void invalidate() {
+    _openSerial = null;
+    _mediaUri = null;
+    _ready = false;
+  }
+
+  bool isCurrent({
+    required int currentOpenSerial,
+    required String? playerMediaUri,
+  }) {
+    return _ready &&
+        _openSerial == currentOpenSerial &&
+        _mediaUri != null &&
+        _mediaUri == playerMediaUri;
+  }
+
+  bool acceptsValue<T>({
+    required int currentOpenSerial,
+    required String? playerMediaUri,
+    required T eventValue,
+    required T playerStateValue,
+  }) {
+    return isCurrent(
+          currentOpenSerial: currentOpenSerial,
+          playerMediaUri: playerMediaUri,
+        ) &&
+        eventValue == playerStateValue;
+  }
+}
+
 /// Owns delayed native resume seeks and rejects work from stale media opens.
 final class NativeResumeSeekController {
   NativeResumeSeekController({

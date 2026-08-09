@@ -28,6 +28,7 @@ class WebStreamPlayer extends StatelessWidget {
     this.onPosition,
     this.onDuration,
     this.onPlaying,
+    this.onEnded,
   });
 
   final String url;
@@ -43,6 +44,7 @@ class WebStreamPlayer extends StatelessWidget {
   final ValueChanged<Duration>? onPosition;
   final ValueChanged<Duration>? onDuration;
   final ValueChanged<bool>? onPlaying;
+  final VoidCallback? onEnded;
 
   @override
   Widget build(BuildContext context) => const SizedBox.shrink();

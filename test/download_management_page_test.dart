@@ -68,12 +68,13 @@ void main() {
   });
 
   testWidgets(
-    'download does not open an old local file after the account context changes',
+    'download playback defers history until the player reports a first frame',
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
+      _StaleDownloadPageController.historyCalls = 0;
 
       final router = GoRouter(
         routes: [
@@ -105,8 +106,8 @@ void main() {
       await tester.tap(find.byTooltip('播放本地文件'));
       await tester.pumpAndSettle();
 
-      expect(find.text('不应打开的播放页'), findsNothing);
-      expect(find.byType(DownloadManagementPage), findsOneWidget);
+      expect(find.text('不应打开的播放页'), findsOneWidget);
+      expect(_StaleDownloadPageController.historyCalls, 0);
     },
   );
 }
@@ -127,6 +128,7 @@ class _DownloadPageController extends AnimeController {
 }
 
 class _StaleDownloadPageController extends AnimeController {
+  static int historyCalls = 0;
   int _contextVersion = 1;
 
   @override
@@ -152,6 +154,7 @@ class _StaleDownloadPageController extends AnimeController {
     AnimeEpisode? episode, {
     int? expectedAccountContextVersion,
   }) async {
+    historyCalls++;
     _contextVersion++;
     return true;
   }
