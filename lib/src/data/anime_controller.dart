@@ -38,6 +38,7 @@ import 'external_service_repository.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
 import 'playback_line_memory_store.dart';
+import 'playback_prefetch_cache.dart';
 import 'playback_source_repository.dart';
 import 'tmdb_credential_store.dart';
 import 'zeluna_backend_catalog_repository.dart';
@@ -850,6 +851,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       subject,
       episode,
       preferredProviderId: preferred,
+      minValidity: minValidity,
+    );
+  }
+
+  NextEpisodeWarmupBundle? prefetchedWarmupBundleForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    Duration minValidity = const Duration(seconds: 60),
+  }) {
+    if (!(state.value?.settings.rememberLine ?? true)) return null;
+    return _playbackDiscoveryDomain.prefetchedWarmupBundleForEpisode(
+      subject,
+      episode,
       minValidity: minValidity,
     );
   }

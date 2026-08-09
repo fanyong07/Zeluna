@@ -27,6 +27,7 @@ import 'gestures/player_gesture_controller.dart';
 import 'lines/playback_line_controller.dart';
 import 'lines/playback_line_repository.dart';
 import 'lines/playback_recovery_controller.dart';
+import 'playback_continuity.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
@@ -42,6 +43,8 @@ part 'ui/player_chrome.dart';
 part 'ui/player_panels.dart';
 part 'ui/player_mobile_layout.dart';
 part 'ui/player_desktop_layout.dart';
+
+const _episodeTransitionSafetyMargin = Duration(seconds: 30);
 
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key, required this.request});
@@ -112,6 +115,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   DateTime? _nextEpisodePrefetchStartedAt;
   var _nextEpisodePrefetchStarted = false;
   var _nextEpisodePrefetchRefreshRequested = false;
+  String? _warmupTransitionPrimaryLineId;
+  String? _warmupTransitionFallbackLineId;
+  var _openingWarmupTransitionPrimary = false;
   var _accountContextVersion = 0;
 
   Player get _player => _nativeVideo.player;
@@ -344,6 +350,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
       _scheduleNextEpisodePrefetch();
     }
+    if (line.id == _warmupTransitionPrimaryLineId ||
+        line.id == _warmupTransitionFallbackLineId) {
+      _clearWarmupTransitionState();
+    }
+  }
+
+  void _clearWarmupTransitionState() {
+    _warmupTransitionPrimaryLineId = null;
+    _warmupTransitionFallbackLineId = null;
+    _openingWarmupTransitionPrimary = false;
   }
 
   AnimeEpisode? get _nextEpisode {
@@ -376,13 +392,17 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final next = _nextEpisode;
     if (next == null) return false;
     final controller = ref.read(animeControllerProvider.notifier);
-    final preferredProviderId =
-        _preferredProviderId ??
-        controller.rememberedPlaybackProvider(widget.request.subject);
-    return controller.prefetchedLineForEpisode(
+    final requiredValidity =
+        calculateRequiredWarmupValidity(
+          duration: _duration,
+          position: _position,
+          safetyMargin: _episodeTransitionSafetyMargin,
+        ) ??
+        const Duration(seconds: 60);
+    return controller.prefetchedWarmupBundleForEpisode(
           widget.request.subject,
           next,
-          preferredProviderId: preferredProviderId,
+          minValidity: requiredValidity,
         ) !=
         null;
   }
@@ -563,6 +583,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _cancelNextEpisodePrefetch();
     _nextEpisodePrefetchStarted = false;
     _nextEpisodePrefetchRefreshRequested = false;
+    if (strategy == 'auto_switch' &&
+        previous?.id == _warmupTransitionPrimaryLineId &&
+        target.id == _warmupTransitionFallbackLineId) {
+      _playbackTrace.record(
+        'episode_transition_fallback_hit',
+        fields: <String, Object?>{'provider': target.providerId},
+      );
+    }
     if (strategy == 'auto_switch' && previous?.id != target.id) {
       _sessionController.dispatch(
         PlaybackSessionEvent.alternativeSelected(target.id),
@@ -1202,6 +1230,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _nextEpisodePrefetchStarted = false;
       _nextEpisodePrefetchRefreshRequested = false;
       _preferredProviderId = null;
+      _clearWarmupTransitionState();
     }
     final volumeSettingChanged =
         _currentSettings.volumeBoost != settings.volumeBoost;
@@ -1216,6 +1245,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _cancelNextEpisodePrefetch();
       _nextEpisodePrefetchStarted = false;
       _nextEpisodePrefetchRefreshRequested = false;
+      _clearWarmupTransitionState();
     }
     if (volumeSettingChanged) _manualVolumeOverride = false;
     final targetRate = settings.speed <= 0 ? 1.0 : settings.speed;
@@ -1792,13 +1822,43 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _webVideo.cancelStartupWatchdog();
     _nativeVideo.cancelFirstFrameWatchdog();
     final resumePosition = _currentRecoveryPosition;
-    final hasAlternative = _nextPlayableLine() != null;
+    final nextAlternative = _nextPlayableLine();
+    final hasAlternative = nextAlternative != null;
+    final hasWarmupFallback = warmupFallbackReadyForImmediateRecovery(
+      nextAlternative,
+      expectedLineId: _warmupTransitionFallbackLineId,
+      now: DateTime.now(),
+      minValidity: const Duration(seconds: 5),
+    );
+    final warmupPrimaryFailed =
+        line.id == _warmupTransitionPrimaryLineId && hasWarmupFallback;
+    if (warmupPrimaryFailed) {
+      _playbackTrace.record(
+        'episode_transition_primary_failed',
+        fields: <String, Object?>{
+          'provider': line.providerId,
+          'fallback_count': 1,
+          'reason_code': 'runtime_failure',
+        },
+      );
+    } else if (line.id == _warmupTransitionFallbackLineId) {
+      _playbackTrace.record(
+        'episode_transition_fallback_failed',
+        fields: <String, Object?>{
+          'provider': line.providerId,
+          'reason_code': 'runtime_failure',
+        },
+      );
+      _warmupTransitionFallbackLineId = null;
+    }
     final shouldSwitch = _markLineFailure(
       line,
-      definitive: shouldSwitchAfterPlaybackInterruption(
-        position: resumePosition,
-        hasAlternative: hasAlternative,
-      ),
+      definitive:
+          warmupPrimaryFailed ||
+          shouldSwitchAfterPlaybackInterruption(
+            position: resumePosition,
+            hasAlternative: hasAlternative,
+          ),
     );
     _sessionController.dispatch(
       PlaybackSessionEvent.lineFailed(
@@ -1853,7 +1913,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (!_currentSettings.autoSwitchLine) {
       _recordFinalPlaybackFailure(reason: 'auto_switch_disabled');
     }
-    _startExpandedLineLookup(autoplay: true);
+    if (_openingWarmupTransitionPrimary &&
+        warmupPrimaryFailed &&
+        _currentSettings.autoSwitchLine) {
+      return;
+    }
+    if (!hasWarmupFallback || !_currentSettings.autoSwitchLine) {
+      _startExpandedLineLookup(autoplay: true);
+    }
     unawaited(_tryAutoSwitchLine(resumePosition: resumePosition));
   }
 
@@ -2094,17 +2161,27 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
     final controller = ref.read(animeControllerProvider.notifier);
-    final preferredProviderId = _currentSettings.rememberLine
-        ? (_preferredProviderId ??
-              controller.rememberedPlaybackProvider(widget.request.subject))
-        : null;
-    final preparedLine = _currentSettings.rememberLine
-        ? controller.prefetchedLineForEpisode(
+    final preparedBundle = _currentSettings.rememberLine
+        ? controller.prefetchedWarmupBundleForEpisode(
             widget.request.subject,
             episode,
-            preferredProviderId: preferredProviderId,
+            minValidity: _episodeTransitionSafetyMargin,
           )
         : null;
+    final preparedLines = preparedBundle == null
+        ? const <PlaybackLine>[]
+        : buildWarmupTransitionInventory(
+            preparedBundle,
+            expectedEpisodeIdentity: episode.identityKey(
+              subjectKey: widget.request.subject.identityKey,
+            ),
+            now: DateTime.now(),
+            minValidity: _episodeTransitionSafetyMargin,
+          );
+    final preparedLine = preparedLines.firstOrNull;
+    _warmupTransitionPrimaryLineId = preparedLine?.id;
+    _warmupTransitionFallbackLineId = preparedLines.skip(1).firstOrNull?.id;
+    _openingWarmupTransitionPrimary = false;
     _cancelNextEpisodePrefetch();
     _nextEpisodePrefetchStarted = false;
     _nextEpisodePrefetchRefreshRequested = false;
@@ -2117,8 +2194,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_lineRepository.cancelLookup());
     _lineRepository.resetForEpisode(
       episodeId: episode.id,
-      initialLines: preparedLine == null ? const [] : [preparedLine],
-      lookupInProgress: preparedLine == null,
+      initialLines: preparedLines,
+      lookupInProgress: preparedLines.isEmpty,
     );
     _resetPlaybackStallWatchdog(
       position: Duration.zero,
@@ -2145,11 +2222,34 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     });
     _startPlaybackTrace();
     if (preparedLine != null) {
+      final cacheAge = DateTime.now().difference(preparedBundle!.preparedAt);
       _playbackTrace.record(
         'next_line_prefetch_cache_hit',
         fields: <String, Object?>{
           'episode_number': episode.number,
           'provider': preparedLine.providerId,
+        },
+      );
+      _playbackTrace.record(
+        'episode_transition_warmup_hit',
+        fields: <String, Object?>{
+          'provider': preparedLine.providerId,
+          if (preparedBundle.preferredProviderId != null)
+            'preferred_provider': preparedBundle.preferredProviderId,
+          'line_count': preparedLines.length,
+          'fallback_count': math.max(0, preparedLines.length - 1),
+          'cache_age_ms': math.max(0, cacheAge.inMilliseconds),
+        },
+      );
+    } else {
+      _playbackTrace.record(
+        'episode_transition_warmup_miss',
+        fields: <String, Object?>{
+          'reason_code': !_currentSettings.rememberLine
+              ? 'disabled'
+              : preparedBundle == null
+              ? 'not_found_or_stale'
+              : 'invalid_transition_inventory',
         },
       );
     }
@@ -2158,6 +2258,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         episodeId: episode.id,
         playbackSerial: playbackSerial,
         preparedLine: preparedLine,
+        hasWarmupFallback: preparedLines.length > 1,
       ),
     );
   }
@@ -2166,6 +2267,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     required int episodeId,
     required int playbackSerial,
     PlaybackLine? preparedLine,
+    bool hasWarmupFallback = false,
   }) async {
     try {
       await _player.stop();
@@ -2178,8 +2280,28 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     if (preparedLine != null && _isPlayableLine(preparedLine)) {
-      await _openLine(preparedLine, force: true);
+      _playbackTrace.record(
+        'episode_transition_primary_open',
+        fields: <String, Object?>{'provider': preparedLine.providerId},
+      );
+      _openingWarmupTransitionPrimary =
+          hasWarmupFallback && _currentSettings.autoSwitchLine;
+      try {
+        await _openLine(preparedLine, force: true);
+      } finally {
+        _openingWarmupTransitionPrimary = false;
+      }
       if (!mounted || _episode.id != episodeId) return;
+      if (_playbackFailed &&
+          warmupFallbackReadyForImmediateRecovery(
+            _nextPlayableLine(),
+            expectedLineId: _warmupTransitionFallbackLineId,
+            now: DateTime.now(),
+            minValidity: const Duration(seconds: 5),
+          )) {
+        await _tryAutoSwitchLine(resumePosition: _currentRecoveryPosition);
+        if (!mounted || _episode.id != episodeId) return;
+      }
       await _resolveLinesForCurrentEpisode(
         autoplay: _playbackFailed || !_isPlayableLine(_line),
       );
@@ -2193,6 +2315,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _cancelNextEpisodePrefetch();
     _nextEpisodePrefetchStarted = false;
     _nextEpisodePrefetchRefreshRequested = false;
+    _clearWarmupTransitionState();
     if (_line?.id != line.id) {
       _sessionController.dispatch(
         PlaybackSessionEvent.alternativeSelected(line.id),

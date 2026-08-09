@@ -29,6 +29,23 @@ void main() {
     expect(source, contains('_SuperResolutionPanelNotice(message: notice)'));
   });
 
+  test('episode transitions consume the verified warmup bundle first', () {
+    final controllerSource = File(
+      'lib/src/data/anime_controller.dart',
+    ).readAsStringSync();
+    final playerSource = File(
+      'lib/src/player/player_page.dart',
+    ).readAsStringSync();
+
+    expect(controllerSource, contains('prefetchedWarmupBundleForEpisode('));
+    expect(playerSource, contains('buildWarmupTransitionInventory('));
+    expect(playerSource, contains('initialLines: preparedLines'));
+    expect(playerSource, contains('episode_transition_warmup_hit'));
+    expect(playerSource, contains('episode_transition_warmup_miss'));
+    expect(playerSource, contains('_openingWarmupTransitionPrimary'));
+    expect(playerSource, contains('warmupFallbackReadyForImmediateRecovery('));
+  });
+
   test(
     'playback source framework returns lines for one episode only',
     () async {
