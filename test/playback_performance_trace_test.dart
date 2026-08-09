@@ -99,6 +99,32 @@ void main() {
     expect(events.single['elapsed_ms'], 0);
   });
 
+  test('playback trace drops signed queries and credential-shaped strings', () {
+    final events = <Map<String, Object?>>[];
+    final trace = PlaybackPerformanceTrace(
+      attemptId: 'attempt-query-redaction',
+      clock: () => DateTime.utc(2026, 8, 1, 12),
+      sink: events.add,
+    );
+
+    trace.record(
+      'warmup_failed',
+      fields: const <String, Object?>{
+        'reason_code': '/video.m3u8?expires=123&signature=private',
+        'detail_code': 'Bearer private-credential',
+        'status_code': 'https%3A%2F%2Fsigned.example%2Fvideo',
+        'raw_exception': 'ClientException: token=private',
+        'line_count': 2,
+      },
+    );
+
+    expect(events.single, isNot(contains('reason_code')));
+    expect(events.single, isNot(contains('detail_code')));
+    expect(events.single, isNot(contains('status_code')));
+    expect(events.single, isNot(contains('raw_exception')));
+    expect(events.single['line_count'], 2);
+  });
+
   test('playback trace can be disabled and is bounded per attempt', () {
     final events = <Map<String, Object?>>[];
     final trace = PlaybackPerformanceTrace(

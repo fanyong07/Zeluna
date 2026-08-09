@@ -83,6 +83,10 @@ class PlaybackPerformanceTrace {
       'secret',
       'private',
       'title',
+      'credential',
+      'exception',
+      'message',
+      'stack',
     };
     final safe = <String, Object?>{};
     for (final entry in fields.entries) {
@@ -92,7 +96,7 @@ class PlaybackPerformanceTrace {
       final value = entry.value;
       if (value is String) {
         final normalizedValue = value.trim();
-        if (normalizedValue.contains('://')) continue;
+        if (_containsSensitiveValue(normalizedValue)) continue;
         safe[key] = normalizedValue.length <= 160
             ? normalizedValue
             : normalizedValue.substring(0, 160);
@@ -101,6 +105,20 @@ class PlaybackPerformanceTrace {
       }
     }
     return safe;
+  }
+
+  static bool _containsSensitiveValue(String value) {
+    final normalized = value.toLowerCase();
+    if (normalized.contains('://') ||
+        normalized.contains('http%3a%2f%2f') ||
+        normalized.contains('https%3a%2f%2f')) {
+      return true;
+    }
+    if (RegExp(r'[?&][^&=\s]+=').hasMatch(value)) return true;
+    return RegExp(
+      r'(^|[\s,;])(?:bearer\s+|(?:access[_-]?token|refresh[_-]?token|authorization|cookie|password|secret|signature)\s*[:=])',
+      caseSensitive: false,
+    ).hasMatch(value);
   }
 
   static String _nextAttemptId(DateTime Function() clock) {
