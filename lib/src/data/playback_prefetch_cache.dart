@@ -64,6 +64,8 @@ class PlaybackPrefetchCache {
 
   void clear() => _entries.clear();
 
+  void remove(String key) => _entries.remove(key);
+
   int get length => _entries.length;
 
   void _removeExpiredEntries(DateTime now) {

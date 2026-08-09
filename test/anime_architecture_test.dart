@@ -429,6 +429,637 @@ void main() {
   );
 
   test(
+    'provider-aware warmup lets verified fallback finish before a slow preferred provider',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final preferred = _animekoLookupRule(
+        id: 'custom:animeko:warmup-preferred-slow',
+        name: 'Warmup preferred',
+        host: 'warmup-preferred.example',
+        groupId: 'warmup:preferred',
+        priority: 0,
+      );
+      final fallback = _animekoLookupRule(
+        id: 'custom:animeko:warmup-fallback-fast',
+        name: 'Warmup fallback',
+        host: 'warmup-fallback.example',
+        groupId: 'warmup:fallback',
+        priority: 1,
+      );
+      final resolver = _ProviderAwareRulePlaybackResolver(
+        delays: {
+          preferred.id: const Duration(milliseconds: 120),
+          fallback.id: const Duration(milliseconds: 10),
+        },
+        availableRuleIds: {preferred.id, fallback.id},
+        preferredProviderId: preferred.id,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [preferred, fallback]),
+        ruleState: _approvedRuleState([preferred, fallback]),
+        resolver: resolver,
+        cacheNamespace: 'provider-aware-independent-results',
+      );
+
+      var preferredCompleted = false;
+      final preferredFuture = source
+          .verifiedLinesForProvider(
+            _animeSubject,
+            _episode,
+            providerId: preferred.id,
+          )
+          .then((lines) {
+            preferredCompleted = true;
+            return lines;
+          });
+      final fallbackFuture = source.verifiedFallbackLinesExcludingProvider(
+        _animeSubject,
+        _episode,
+        excludedProviderId: preferred.id,
+      );
+
+      final fallbackLines = await fallbackFuture;
+      expect(preferredCompleted, isFalse);
+      expect(fallbackLines, hasLength(1));
+      expect(fallbackLines.single.providerId, fallback.id);
+      final preferredLines = await preferredFuture;
+      expect(preferredLines, hasLength(1));
+      expect(preferredLines.single.providerId, preferred.id);
+      for (final line in <PlaybackLine>[...preferredLines, ...fallbackLines]) {
+        expect(line.available, isTrue);
+        expect(line.clientVerified || line.serverVerified, isTrue);
+      }
+    },
+  );
+
+  test(
+    'provider-aware warmup partitions rules and bounds verified fallback work',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rules = List.generate(
+        8,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:provider-aware-$index',
+          name: 'Provider aware $index',
+          host: 'provider-aware-$index.example',
+          groupId: 'provider-aware-group:$index',
+          priority: index,
+        ),
+      );
+      final preferred = rules.first;
+      final verifiedFallback = rules[5];
+      final resolver = _ProviderAwareRulePlaybackResolver(
+        delays: {
+          preferred.id: const Duration(milliseconds: 80),
+          for (final rule in rules.skip(1).take(4))
+            rule.id: const Duration(milliseconds: 25),
+          verifiedFallback.id: const Duration(milliseconds: 5),
+          for (final rule in rules.skip(6))
+            rule.id: const Duration(milliseconds: 80),
+        },
+        availableRuleIds: {preferred.id, verifiedFallback.id},
+        preferredProviderId: preferred.id,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: _approvedRuleState(rules),
+        resolver: resolver,
+        cacheNamespace: 'provider-aware-partition',
+      );
+
+      final results = await Future.wait(<Future<List<PlaybackLine>>>[
+        source.verifiedLinesForProvider(
+          _animeSubject,
+          _episode,
+          providerId: preferred.id,
+        ),
+        source.verifiedFallbackLinesExcludingProvider(
+          _animeSubject,
+          _episode,
+          excludedProviderId: preferred.id,
+        ),
+      ]);
+
+      expect(results.first.single.providerId, preferred.id);
+      expect(results.last, hasLength(1));
+      expect(results.last.single.providerId, verifiedFallback.id);
+      expect(resolver.maxFallbackActive, lessThanOrEqualTo(4));
+      expect(resolver.callCounts[preferred.id], 1);
+      expect(resolver.callCounts.values, everyElement(lessThanOrEqualTo(1)));
+      expect(resolver.verifyPlayableCalls, everyElement(isTrue));
+    },
+  );
+
+  test(
+    'provider-aware lookup includes enabled built-ins when custom rules are empty',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      const inventory = RulePluginRepository();
+      final state = inventory.defaultState();
+      final builtIns = inventory.playbackRulesFor(state, RuleContentType.anime);
+      final preferred = builtIns.first;
+      final fallback = builtIns.last;
+      final resolver = _ProviderAwareRulePlaybackResolver(
+        delays: <String, Duration>{
+          preferred.id: Duration.zero,
+          fallback.id: Duration.zero,
+        },
+        availableRuleIds: <String>{preferred.id, fallback.id},
+        preferredProviderId: preferred.id,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: inventory,
+        ruleState: state,
+        resolver: resolver,
+        cacheNamespace: 'provider-aware-built-ins',
+      );
+
+      expect(state.customRules, isEmpty);
+      expect(
+        source.canResolveProvider(_animeSubject, providerId: preferred.id),
+        isTrue,
+      );
+      final preferredLines = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: preferred.id,
+      );
+      final fallbackLines = await source.verifiedFallbackLinesExcludingProvider(
+        _animeSubject,
+        _episode,
+        excludedProviderId: preferred.id,
+      );
+
+      expect(preferredLines.single.providerId, preferred.id);
+      expect(fallbackLines.single.providerId, fallback.id);
+
+      final disabledState = state.copyWith(
+        enabledIds: <String>{...state.enabledIds}..remove(preferred.id),
+      );
+      final disabledSource = RulePlaybackSourceRepository(
+        repository: inventory,
+        ruleState: disabledState,
+        resolver: resolver,
+        cacheNamespace: 'provider-aware-disabled-built-in',
+      );
+      final callsBeforeDisabledLookup = resolver.calls.length;
+      expect(
+        disabledSource.canResolveProvider(
+          _animeSubject,
+          providerId: preferred.id,
+        ),
+        isFalse,
+      );
+      expect(
+        await disabledSource.verifiedLinesForProvider(
+          _animeSubject,
+          _episode,
+          providerId: preferred.id,
+        ),
+        isEmpty,
+      );
+      expect(resolver.calls, hasLength(callsBeforeDisabledLookup));
+    },
+  );
+
+  test(
+    'real rule probe remains verified through provider-aware filtering and force refresh',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:real-provider-refresh',
+        name: 'Real provider refresh',
+        host: 'rule-refresh.example',
+        groupId: 'real-provider-refresh',
+        priority: 0,
+      );
+      var playPageRequests = 0;
+      final requestedUris = <Uri>[];
+      final resolver = RulePlaybackResolver(
+        client: MockClient((request) async {
+          requestedUris.add(request.url);
+          switch (request.url.path) {
+            case '/search':
+              return http.Response.bytes(
+                utf8.encode(
+                  '<div class="result"><a title="${_animeSubject.title}" '
+                  'href="/detail">${_animeSubject.title}</a></div>',
+                ),
+                200,
+                headers: const <String, String>{
+                  'content-type': 'text/html; charset=utf-8',
+                },
+              );
+            case '/detail':
+              return http.Response.bytes(
+                utf8.encode(
+                  '<div class="playlist"><a href="/play/1">1</a></div>',
+                ),
+                200,
+                headers: const <String, String>{
+                  'content-type': 'text/html; charset=utf-8',
+                },
+              );
+            case '/play/1':
+              playPageRequests++;
+              return http.Response.bytes(
+                utf8.encode(
+                  '<script>window.player={url:'
+                  '"https://rule-refresh.example/video-$playPageRequests.mp4"};'
+                  '</script>',
+                ),
+                200,
+                headers: const <String, String>{
+                  'content-type': 'text/html; charset=utf-8',
+                },
+              );
+            case '/video-1.mp4':
+            case '/video-2.mp4':
+              return http.Response.bytes(
+                <int>[
+                  0,
+                  0,
+                  0,
+                  24,
+                  ...ascii.encode('ftyp'),
+                  ...List<int>.filled(16, 0),
+                ],
+                206,
+                headers: const <String, String>{
+                  'content-type': 'video/mp4',
+                  'content-range': 'bytes 0-23/24',
+                },
+              );
+          }
+          return http.Response('not found', 404);
+        }),
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: <RulePlugin>[rule]),
+        ruleState: _approvedRuleState(<RulePlugin>[rule]),
+        resolver: resolver,
+        cacheNamespace: 'real-provider-refresh',
+      );
+
+      final first = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+      final cached = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+      final refreshed = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+        forceRefresh: true,
+      );
+
+      expect(first, isNotEmpty, reason: 'requests: $requestedUris');
+      expect(first.single.clientVerified, isTrue);
+      expect(cached.single.url, endsWith('/video-1.mp4'));
+      expect(refreshed.single.url, endsWith('/video-2.mp4'));
+      expect(refreshed.single.clientVerified, isTrue);
+      expect(playPageRequests, 2);
+    },
+  );
+
+  test('force refresh replaces a stale-soon rule cache entry', () async {
+    RulePlaybackSourceRepository.clearRuntimeCaches();
+    addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+    final rule = _animekoLookupRule(
+      id: 'custom:animeko:stale-force-refresh',
+      name: 'Stale force refresh',
+      host: 'stale-force-refresh.example',
+      groupId: 'stale-force-refresh',
+      priority: 0,
+    );
+    final resolver = _SequencedVerifiedRulePlaybackResolver(<
+      Future<List<PlaybackLine>> Function(
+        RulePlugin,
+        AnimeSubject,
+        AnimeEpisode,
+      )
+    >[
+      (rule, _, episode) async => <PlaybackLine>[
+        _verifiedRuleLine(
+          rule,
+          episode,
+          'https://media.example/old.m3u8',
+          expiresAt: DateTime.now().add(const Duration(seconds: 10)),
+        ),
+      ],
+      (rule, _, episode) async => <PlaybackLine>[
+        _verifiedRuleLine(
+          rule,
+          episode,
+          'https://media.example/fresh.m3u8',
+          expiresAt: DateTime.now().add(const Duration(minutes: 10)),
+        ),
+      ],
+    ]);
+    final source = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(extraRules: <RulePlugin>[rule]),
+      ruleState: _approvedRuleState(<RulePlugin>[rule]),
+      resolver: resolver,
+      cacheNamespace: 'stale-force-refresh',
+    );
+
+    final old = await source.verifiedLinesForProvider(
+      _animeSubject,
+      _episode,
+      providerId: rule.id,
+    );
+    final cachedOld = await source.verifiedLinesForProvider(
+      _animeSubject,
+      _episode,
+      providerId: rule.id,
+    );
+    final fresh = await source.verifiedLinesForProvider(
+      _animeSubject,
+      _episode,
+      providerId: rule.id,
+      forceRefresh: true,
+    );
+    final cachedFresh = await source.verifiedLinesForProvider(
+      _animeSubject,
+      _episode,
+      providerId: rule.id,
+    );
+
+    expect(old.single.url, endsWith('/old.m3u8'));
+    expect(cachedOld.single.url, endsWith('/old.m3u8'));
+    expect(fresh.single.url, endsWith('/fresh.m3u8'));
+    expect(cachedFresh.single.url, endsWith('/fresh.m3u8'));
+    expect(resolver.calls, 2);
+  });
+
+  test(
+    'late pre-refresh rule result cannot overwrite the refreshed cache',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:late-force-refresh',
+        name: 'Late force refresh',
+        host: 'late-force-refresh.example',
+        groupId: 'late-force-refresh',
+        priority: 0,
+      );
+      final oldResult = Completer<List<PlaybackLine>>();
+      final resolver = _SequencedVerifiedRulePlaybackResolver(<
+        Future<List<PlaybackLine>> Function(
+          RulePlugin,
+          AnimeSubject,
+          AnimeEpisode,
+        )
+      >[
+        (_, _, _) => oldResult.future,
+        (rule, _, episode) async => <PlaybackLine>[
+          _verifiedRuleLine(
+            rule,
+            episode,
+            'https://media.example/fresh-first.m3u8',
+          ),
+        ],
+      ]);
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: <RulePlugin>[rule]),
+        ruleState: _approvedRuleState(<RulePlugin>[rule]),
+        resolver: resolver,
+        cacheNamespace: 'late-force-refresh',
+      );
+
+      final oldLookup = source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+      await resolver.firstCall.future;
+      final fresh = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+        forceRefresh: true,
+      );
+      oldResult.complete(<PlaybackLine>[
+        _verifiedRuleLine(
+          rule,
+          _episode,
+          'https://media.example/late-old.m3u8',
+        ),
+      ]);
+      final lateOld = await oldLookup;
+      final cached = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+
+      expect(fresh.single.url, endsWith('/fresh-first.m3u8'));
+      expect(lateOld.single.url, endsWith('/late-old.m3u8'));
+      expect(cached.single.url, endsWith('/fresh-first.m3u8'));
+      expect(resolver.calls, 2);
+    },
+  );
+
+  test(
+    'force refresh invalidates every cached title alias for the episode',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:title-alias-refresh',
+        name: 'Title alias refresh',
+        host: 'title-alias-refresh.example',
+        groupId: 'title-alias-refresh',
+        priority: 0,
+      );
+      final resolver = _SequencedVerifiedRulePlaybackResolver(<
+        Future<List<PlaybackLine>> Function(
+          RulePlugin,
+          AnimeSubject,
+          AnimeEpisode,
+        )
+      >[
+        (rule, _, episode) async => <PlaybackLine>[
+          _verifiedRuleLine(
+            rule,
+            episode,
+            'https://media.example/title-a-old.m3u8',
+          ),
+        ],
+        (_, _, _) async => const <PlaybackLine>[],
+        (rule, _, episode) async => <PlaybackLine>[
+          _verifiedRuleLine(
+            rule,
+            episode,
+            'https://media.example/title-a-new.m3u8',
+          ),
+        ],
+      ]);
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: <RulePlugin>[rule]),
+        ruleState: _approvedRuleState(<RulePlugin>[rule]),
+        resolver: resolver,
+        cacheNamespace: 'title-alias-refresh',
+      );
+      final enrichedTitle = AnimeSubject.fromJson(<String, dynamic>{
+        ..._animeSubject.toJson(),
+        'title': '${_animeSubject.title} enriched',
+      });
+
+      final old = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+      final unavailableRefresh = await source.verifiedLinesForProvider(
+        enrichedTitle,
+        _episode,
+        providerId: rule.id,
+        forceRefresh: true,
+      );
+      final afterRefresh = await source.verifiedLinesForProvider(
+        _animeSubject,
+        _episode,
+        providerId: rule.id,
+      );
+
+      expect(old.single.url, endsWith('/title-a-old.m3u8'));
+      expect(unavailableRefresh, isEmpty);
+      expect(afterRefresh.single.url, endsWith('/title-a-new.m3u8'));
+      expect(resolver.calls, 3);
+    },
+  );
+
+  test(
+    'one force-refresh operation clears shared resolver caches only once',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final preferred = _animekoLookupRule(
+        id: 'custom:animeko:single-clear-preferred',
+        name: 'Single clear preferred',
+        host: 'single-clear-preferred.example',
+        groupId: 'single-clear-preferred',
+        priority: 0,
+      );
+      final fallback = _animekoLookupRule(
+        id: 'custom:animeko:single-clear-fallback',
+        name: 'Single clear fallback',
+        host: 'single-clear-fallback.example',
+        groupId: 'single-clear-fallback',
+        priority: 1,
+      );
+      final resolver = _ProviderAwareRulePlaybackResolver(
+        delays: <String, Duration>{
+          preferred.id: Duration.zero,
+          fallback.id: Duration.zero,
+        },
+        availableRuleIds: <String>{preferred.id, fallback.id},
+        preferredProviderId: preferred.id,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(
+          extraRules: <RulePlugin>[preferred, fallback],
+        ),
+        ruleState: _approvedRuleState(<RulePlugin>[preferred, fallback]),
+        resolver: resolver,
+        cacheNamespace: 'single-clear-force-refresh',
+      );
+      final operationToken = RulePlaybackCancellationToken();
+
+      final results = await Future.wait(<Future<List<PlaybackLine>>>[
+        source.verifiedLinesForProvider(
+          _animeSubject,
+          _episode,
+          providerId: preferred.id,
+          forceRefresh: true,
+          cancellationToken: operationToken,
+        ),
+        source.verifiedFallbackLinesExcludingProvider(
+          _animeSubject,
+          _episode,
+          excludedProviderId: preferred.id,
+          forceRefresh: true,
+          cancellationToken: operationToken,
+        ),
+      ]);
+
+      expect(results, everyElement(isNotEmpty));
+      expect(resolver.clearCacheCalls, 1);
+      operationToken.cancel();
+    },
+  );
+
+  test(
+    'provider-aware cancellation returns promptly and rejects a late verified result',
+    () async {
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      final rule = _animekoLookupRule(
+        id: 'custom:animeko:provider-aware-cancel',
+        name: 'Provider aware cancel',
+        host: 'provider-aware-cancel.example',
+        groupId: 'provider-aware-cancel',
+        priority: 0,
+      );
+      final delays = <String, Duration>{
+        rule.id: const Duration(milliseconds: 600),
+      };
+      final resolver = _ProviderAwareRulePlaybackResolver(
+        delays: delays,
+        availableRuleIds: {rule.id},
+        preferredProviderId: 'custom:animeko:remembered-provider',
+        completeAfterCancellation: true,
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: _approvedRuleState([rule]),
+        resolver: resolver,
+        cacheNamespace: 'provider-aware-cancellation',
+      );
+      final cancellationToken = RulePlaybackCancellationToken();
+      final stopwatch = Stopwatch()..start();
+
+      final lookup = source.verifiedFallbackLinesExcludingProvider(
+        _animeSubject,
+        _episode,
+        excludedProviderId: 'custom:animeko:remembered-provider',
+        cancellationToken: cancellationToken,
+      );
+      await resolver.firstCall.future.timeout(const Duration(seconds: 1));
+      cancellationToken.cancel();
+      final cancelledLines = await lookup.timeout(
+        const Duration(milliseconds: 300),
+      );
+      stopwatch.stop();
+
+      expect(cancelledLines, isEmpty);
+      expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 300)));
+      expect(resolver.cancellationObserved, contains(rule.id));
+
+      await Future<void>.delayed(const Duration(milliseconds: 650));
+      delays[rule.id] = Duration.zero;
+      final freshLines = await source.verifiedFallbackLinesExcludingProvider(
+        _animeSubject,
+        _episode,
+        excludedProviderId: 'custom:animeko:remembered-provider',
+      );
+      expect(freshLines.single.providerId, rule.id);
+      expect(resolver.callCounts[rule.id], 2);
+    },
+  );
+
+  test(
     'rule playback source preserves public-only safety through latency copy and cache',
     () async {
       RulePlaybackSourceRepository.clearRuntimeCaches();
@@ -1196,6 +1827,143 @@ class _DelayedRulePlaybackResolver extends RulePlaybackResolver {
       ];
     } finally {
       active--;
+    }
+  }
+}
+
+class _SequencedVerifiedRulePlaybackResolver extends RulePlaybackResolver {
+  _SequencedVerifiedRulePlaybackResolver(this._steps);
+
+  final List<
+    Future<List<PlaybackLine>> Function(
+      RulePlugin rule,
+      AnimeSubject subject,
+      AnimeEpisode episode,
+    )
+  >
+  _steps;
+  final Completer<void> firstCall = Completer<void>();
+  int calls = 0;
+
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    final index = calls++;
+    if (!firstCall.isCompleted) firstCall.complete();
+    if (index >= _steps.length) {
+      throw StateError('No resolver response configured for call $index.');
+    }
+    return _steps[index](rule, subject, episode);
+  }
+}
+
+PlaybackLine _verifiedRuleLine(
+  RulePlugin rule,
+  AnimeEpisode episode,
+  String url, {
+  DateTime? expiresAt,
+}) => PlaybackLine(
+  id: '${rule.id}:${episode.id}:${url.hashCode}',
+  episodeId: episode.id,
+  providerId: rule.id,
+  providerName: rule.name,
+  title: episode.displayTitle,
+  quality: '1080P',
+  format: 'HLS',
+  url: url,
+  clientVerified: true,
+  expiresAt: expiresAt,
+  available: true,
+);
+
+class _ProviderAwareRulePlaybackResolver extends RulePlaybackResolver {
+  _ProviderAwareRulePlaybackResolver({
+    required this.delays,
+    required this.availableRuleIds,
+    required this.preferredProviderId,
+    this.completeAfterCancellation = false,
+  });
+
+  final Map<String, Duration> delays;
+  final Set<String> availableRuleIds;
+  final String preferredProviderId;
+  final bool completeAfterCancellation;
+  final List<String> calls = <String>[];
+  final List<bool> verifyPlayableCalls = <bool>[];
+  final Map<String, int> callCounts = <String, int>{};
+  final Set<String> cancellationObserved = <String>{};
+  final Completer<void> firstCall = Completer<void>();
+  int clearCacheCalls = 0;
+  int _activeFallback = 0;
+  int maxFallbackActive = 0;
+
+  @override
+  void clearCaches() {
+    clearCacheCalls++;
+    super.clearCaches();
+  }
+
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    calls.add(rule.id);
+    verifyPlayableCalls.add(verifyPlayable);
+    callCounts.update(rule.id, (count) => count + 1, ifAbsent: () => 1);
+    if (!firstCall.isCompleted) firstCall.complete();
+    final isFallback = rule.id != preferredProviderId;
+    if (isFallback) {
+      _activeFallback++;
+      if (_activeFallback > maxFallbackActive) {
+        maxFallbackActive = _activeFallback;
+      }
+    }
+    final cancelled = Completer<void>();
+    final unlinkCancellation = cancellationToken?.register(() {
+      cancellationObserved.add(rule.id);
+      if (!cancelled.isCompleted) cancelled.complete();
+    });
+    try {
+      final delay = Future<void>.delayed(delays[rule.id] ?? Duration.zero);
+      if (completeAfterCancellation) {
+        await delay;
+      } else {
+        await Future.any<void>(<Future<void>>[delay, cancelled.future]);
+        if (cancellationToken?.isCancelled ?? false) return const [];
+      }
+      final available = availableRuleIds.contains(rule.id);
+      return <PlaybackLine>[
+        PlaybackLine(
+          id: '${rule.id}:${episode.id}',
+          episodeId: episode.id,
+          providerId: rule.id,
+          providerName: rule.name,
+          title: '${subject.title} ${episode.number}',
+          quality: available ? '1080P' : 'unknown',
+          format: available ? 'HLS' : 'unknown',
+          url: available
+              ? 'https://media.example/${Uri.encodeComponent(rule.id)}.m3u8'
+              : null,
+          clientVerified: available && verifyPlayable,
+          expiresAt: available
+              ? DateTime.now().add(const Duration(minutes: 10))
+              : null,
+          available: available,
+          message: available ? null : 'not found',
+        ),
+      ];
+    } finally {
+      unlinkCancellation?.call();
+      if (isFallback) _activeFallback--;
     }
   }
 }

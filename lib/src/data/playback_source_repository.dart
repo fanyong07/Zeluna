@@ -89,6 +89,28 @@ abstract interface class PreferredPlaybackSourceRepository {
   });
 }
 
+/// Optional capability used by background warmup to resolve the remembered
+/// provider independently from a bounded, verified fallback lookup.
+abstract interface class ProviderAwarePlaybackSourceRepository {
+  bool canResolveProvider(AnimeSubject subject, {required String providerId});
+
+  Future<List<PlaybackLine>> verifiedLinesForProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String providerId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+
+  Future<List<PlaybackLine>> verifiedFallbackLinesExcludingProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String excludedProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+}
+
 class InternetArchivePlaybackSourceRepository {
   InternetArchivePlaybackSourceRepository({http.Client? client})
     : _client =
@@ -256,7 +278,10 @@ class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
 }
 
 class RulePlaybackSourceRepository
-    implements PlaybackSourceRepository, PreferredPlaybackSourceRepository {
+    implements
+        PlaybackSourceRepository,
+        PreferredPlaybackSourceRepository,
+        ProviderAwarePlaybackSourceRepository {
   RulePlaybackSourceRepository({
     required RulePluginRepository repository,
     required RulePluginState ruleState,
@@ -302,12 +327,25 @@ class RulePlaybackSourceRepository
   static final LinkedHashMap<String, _RuleHealth> _ruleHealth =
       LinkedHashMap<String, _RuleHealth>();
   static int _runtimeCacheGeneration = 0;
+  static int _ruleForceRefreshGeneration = 0;
+  final Expando<int> _preparedForceRefreshOperations = Expando<int>();
 
   static void clearRuntimeCaches() {
     _runtimeCacheGeneration++;
+    _ruleForceRefreshGeneration++;
     _ruleLookupCache.clear();
     _inFlightRuleLookups.clear();
     _ruleHealth.clear();
+  }
+
+  @override
+  bool canResolveProvider(AnimeSubject subject, {required String providerId}) {
+    final provider = providerId.trim();
+    if (provider.isEmpty) return false;
+    final type = _contentTypeFor(subject);
+    return _repository
+        .playbackRulesFor(_ruleState, type)
+        .any((rule) => rule.id == provider);
   }
 
   @override
@@ -393,6 +431,91 @@ class RulePlaybackSourceRepository
             episode,
             cancellationToken: cancellationToken,
           );
+  }
+
+  @override
+  Future<List<PlaybackLine>> verifiedLinesForProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String providerId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final provider = providerId.trim();
+    if (provider.isEmpty) return const [];
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository
+          .playbackRulesFor(_ruleState, type)
+          .where((rule) => rule.id == provider)
+          .toList(growable: false),
+      expandAll: false,
+    );
+    if (rules.isEmpty) return const [];
+    final forceRefreshGeneration = _prepareForceRefresh(
+      forceRefresh,
+      cancellationToken,
+    );
+
+    final lines = await _resolveQuickRules(
+      rules,
+      subject,
+      episode,
+      verifyPlayable: true,
+      forceRefreshGeneration: forceRefreshGeneration,
+      cancellationToken: cancellationToken,
+    );
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    return List<PlaybackLine>.unmodifiable(
+      lines.where(
+        (line) => line.providerId == provider && _isVerifiedPlayableLine(line),
+      ),
+    );
+  }
+
+  @override
+  Future<List<PlaybackLine>> verifiedFallbackLinesExcludingProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String excludedProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final excludedProvider = excludedProviderId.trim();
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository
+          .playbackRulesFor(_ruleState, type)
+          .where(
+            (rule) => excludedProvider.isEmpty || rule.id != excludedProvider,
+          )
+          .toList(growable: false),
+      expandAll: false,
+    );
+    if (rules.isEmpty) return const [];
+    final forceRefreshGeneration = _prepareForceRefresh(
+      forceRefresh,
+      cancellationToken,
+    );
+
+    final lines = await _resolveQuickRules(
+      rules,
+      subject,
+      episode,
+      verifyPlayable: true,
+      forceRefreshGeneration: forceRefreshGeneration,
+      cancellationToken: cancellationToken,
+    );
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    for (final line in lines) {
+      if ((excludedProvider.isEmpty || line.providerId != excludedProvider) &&
+          _isVerifiedPlayableLine(line)) {
+        return List<PlaybackLine>.unmodifiable(<PlaybackLine>[line]);
+      }
+    }
+    return const [];
   }
 
   @override
@@ -653,6 +776,8 @@ class RulePlaybackSourceRepository
     List<RulePlugin> rules,
     AnimeSubject subject,
     AnimeEpisode episode, {
+    bool verifyPlayable = false,
+    int? forceRefreshGeneration,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final quickToken = RulePlaybackCancellationToken();
@@ -675,6 +800,8 @@ class RulePlaybackSourceRepository
           rules[index],
           subject,
           episode,
+          verifyPlayable: verifyPlayable,
+          forceRefreshGeneration: forceRefreshGeneration,
           cancellationToken: quickToken,
         );
       }
@@ -687,16 +814,21 @@ class RulePlaybackSourceRepository
         final budgetRemaining = _quickLookupBudget - budgetStopwatch.elapsed;
         if (budgetRemaining <= Duration.zero) break;
 
-        final resolution = await _nextResolution(
+        final resolution = await _nextProgressiveResolution(
           pending.values,
           timeout: budgetRemaining,
+          cancellationToken: quickToken,
         );
         if (resolution == null) break;
         pending.remove(resolution.index);
         completed[resolution.index] = resolution.lines;
 
         if (!foundAvailableLine &&
-            resolution.lines.any((line) => line.available)) {
+            resolution.lines.any(
+              verifyPlayable
+                  ? _isVerifiedPlayableLine
+                  : (line) => line.available,
+            )) {
           foundAvailableLine = true;
           break;
         }
@@ -707,6 +839,7 @@ class RulePlaybackSourceRepository
       quickToken.cancel();
       unlinkQuick?.call();
     }
+    if (cancellationToken?.isCancelled ?? false) return const [];
     final orderedIndexes = completed.keys.toList()..sort();
     return [for (final index in orderedIndexes) ...completed[index]!];
   }
@@ -716,6 +849,8 @@ class RulePlaybackSourceRepository
     RulePlugin rule,
     AnimeSubject subject,
     AnimeEpisode episode, {
+    bool verifyPlayable = false,
+    int? forceRefreshGeneration,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final ruleToken = RulePlaybackCancellationToken();
@@ -726,7 +861,8 @@ class RulePlaybackSourceRepository
             rule,
             subject,
             episode,
-            verifyPlayable: false,
+            verifyPlayable: verifyPlayable,
+            forceRefreshGeneration: forceRefreshGeneration,
             cancellationToken: ruleToken,
           ).timeout(
             _quickRuleTimeout,
@@ -738,18 +874,6 @@ class RulePlaybackSourceRepository
       return _RuleResolution(index, lines);
     } finally {
       unlinkRule?.call();
-    }
-  }
-
-  Future<_RuleResolution?> _nextResolution(
-    Iterable<Future<_RuleResolution>> pending, {
-    Duration? timeout,
-  }) async {
-    try {
-      final next = Future.any(pending);
-      return timeout == null ? await next : await next.timeout(timeout);
-    } on TimeoutException {
-      return null;
     }
   }
 
@@ -833,6 +957,7 @@ class RulePlaybackSourceRepository
     AnimeSubject subject,
     AnimeEpisode episode, {
     required bool verifyPlayable,
+    int? forceRefreshGeneration,
     RulePlaybackCancellationToken? cancellationToken,
   }) {
     if (cancellationToken?.isCancelled ?? false) {
@@ -863,17 +988,26 @@ class RulePlaybackSourceRepository
       episode,
       verifyPlayable: verifyPlayable,
     );
-    for (final key in <String>[successfulCacheKey, cacheKey]) {
-      final cached = _ruleLookupCache.remove(key);
-      if (cached != null && cached.expiresAt.isAfter(now)) {
-        _ruleLookupCache[key] = cached;
-        return Future.value(cached.lines);
+    final lookupRefreshGeneration =
+        forceRefreshGeneration ?? _ruleForceRefreshGeneration;
+    if (forceRefreshGeneration != null) {
+      _ruleLookupCache.removeWhere(
+        (_, cached) => cached.successfulCacheKey == successfulCacheKey,
+      );
+    } else {
+      for (final key in <String>[successfulCacheKey, cacheKey]) {
+        final cached = _ruleLookupCache.remove(key);
+        if (cached != null && cached.expiresAt.isAfter(now)) {
+          _ruleLookupCache[key] = cached;
+          return Future.value(cached.lines);
+        }
       }
     }
 
+    final versionedInFlightKey = '$cacheKey|refresh:$lookupRefreshGeneration';
     final inFlightKey = cancellationToken == null
-        ? cacheKey
-        : '$cacheKey|token:${identityHashCode(cancellationToken)}';
+        ? versionedInFlightKey
+        : '$versionedInFlightKey|token:${identityHashCode(cancellationToken)}';
     final inFlight = _inFlightRuleLookups[inFlightKey];
     if (inFlight != null) return inFlight;
 
@@ -893,24 +1027,34 @@ class RulePlaybackSourceRepository
             _withFallbackLatency(lines, stopwatch.elapsed),
           );
           if (cacheGeneration != _runtimeCacheGeneration ||
+              lookupRefreshGeneration != _ruleForceRefreshGeneration ||
               (cancellationToken?.isCancelled ?? false)) {
             return immutableLines;
           }
           final available = immutableLines.any((line) => line.available);
           _rememberRuleHealth(rule, available, stopwatch.elapsed);
-          _storeCachedRuleLookup(
-            cacheKey,
+          final completedAt = DateTime.now();
+          final cacheExpiresAt = _boundedRuleCacheExpiry(
             immutableLines,
-            DateTime.now().add(
+            completedAt.add(
               available ? _availableRuleCacheTtl : _unavailableRuleCacheTtl,
             ),
           );
-          if (available && successfulCacheKey != cacheKey) {
+          if (cacheExpiresAt.isAfter(completedAt)) {
             _storeCachedRuleLookup(
-              successfulCacheKey,
+              cacheKey,
               immutableLines,
-              DateTime.now().add(_availableRuleCacheTtl),
+              cacheExpiresAt,
+              successfulCacheKey: successfulCacheKey,
             );
+            if (available && successfulCacheKey != cacheKey) {
+              _storeCachedRuleLookup(
+                successfulCacheKey,
+                immutableLines,
+                cacheExpiresAt,
+                successfulCacheKey: successfulCacheKey,
+              );
+            }
           }
           return immutableLines;
         })
@@ -924,13 +1068,49 @@ class RulePlaybackSourceRepository
     return lookup;
   }
 
+  int? _prepareForceRefresh(
+    bool forceRefresh,
+    RulePlaybackCancellationToken? cancellationToken,
+  ) {
+    if (!forceRefresh) return null;
+    if (cancellationToken != null) {
+      final prepared = _preparedForceRefreshOperations[cancellationToken];
+      if (prepared == _ruleForceRefreshGeneration) return prepared;
+    }
+    final generation = ++_ruleForceRefreshGeneration;
+    _resolver.clearCaches();
+    if (cancellationToken != null) {
+      _preparedForceRefreshOperations[cancellationToken] = generation;
+    }
+    return generation;
+  }
+
+  DateTime _boundedRuleCacheExpiry(
+    List<PlaybackLine> lines,
+    DateTime defaultExpiry,
+  ) {
+    var expiry = defaultExpiry;
+    for (final line in lines) {
+      final lineExpiry = line.expiresAt;
+      if (line.available && lineExpiry != null && lineExpiry.isBefore(expiry)) {
+        expiry = lineExpiry;
+      }
+    }
+    return expiry;
+  }
+
   void _storeCachedRuleLookup(
     String key,
     List<PlaybackLine> lines,
-    DateTime expiresAt,
-  ) {
+    DateTime expiresAt, {
+    required String successfulCacheKey,
+  }) {
     _ruleLookupCache.remove(key);
-    _ruleLookupCache[key] = _CachedRuleLookup(lines, expiresAt);
+    _ruleLookupCache[key] = _CachedRuleLookup(
+      lines,
+      expiresAt,
+      successfulCacheKey,
+    );
     while (_ruleLookupCache.length > _maxCachedRuleLookups) {
       _ruleLookupCache.remove(_ruleLookupCache.keys.first);
     }
@@ -1030,6 +1210,20 @@ class RulePlaybackSourceRepository
   bool _isValidLookupRule(RulePlugin rule) {
     final endpoint = Uri.tryParse(rule.baseUrl.trim());
     return endpoint != null && endpoint.hasScheme && endpoint.host.isNotEmpty;
+  }
+
+  bool _isVerifiedPlayableLine(PlaybackLine line) {
+    if (!line.available || (!line.serverVerified && !line.clientVerified)) {
+      return false;
+    }
+    final url = Uri.tryParse(line.url?.trim() ?? '');
+    if (url == null ||
+        (url.scheme != 'http' && url.scheme != 'https') ||
+        url.host.isEmpty) {
+      return false;
+    }
+    final expiresAt = line.expiresAt;
+    return expiresAt == null || expiresAt.isAfter(DateTime.now());
   }
 
   int _quickSearchRank(RulePlugin rule) => rule.quickSearch ? 0 : 1;
@@ -1249,10 +1443,11 @@ class _RuleResolution {
 }
 
 class _CachedRuleLookup {
-  const _CachedRuleLookup(this.lines, this.expiresAt);
+  const _CachedRuleLookup(this.lines, this.expiresAt, this.successfulCacheKey);
 
   final List<PlaybackLine> lines;
   final DateTime expiresAt;
+  final String successfulCacheKey;
 }
 
 class _RuleHealth {

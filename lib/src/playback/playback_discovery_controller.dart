@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import '../data/async_single_flight.dart';
 import '../data/playback_prefetch_cache.dart';
 import '../data/playback_source_repository.dart';
 import '../data/zeluna_backend_playback_repository.dart';
@@ -21,6 +20,8 @@ typedef PlaybackLineVerifier =
       RulePlaybackCancellationToken? cancellationToken,
     });
 typedef PlaybackContextGuard = bool Function(int contextVersion);
+
+enum PlaybackLookupIntent { interactive, warmup }
 
 /// Runs every supplied playback probe with a small concurrency window and
 /// emits each result as soon as it finishes. This keeps a large route
@@ -137,12 +138,15 @@ final class PlaybackDiscoveryController {
     required PlaybackContextGuard isContextCurrent,
     required void Function() clearRuleRuntimeCaches,
     DateTime Function()? now,
-  }) : _backendRepository = backendRepository,
+    Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
+  }) : assert(interactivePreferredHeadStart.inMicroseconds > 0),
+       _backendRepository = backendRepository,
        _ruleRepository = ruleRepository,
        _verifyLine = verifyLine,
        _isContextCurrent = isContextCurrent,
        _clearRuleRuntimeCaches = clearRuleRuntimeCaches,
        _now = now ?? DateTime.now,
+       _interactivePreferredHeadStart = interactivePreferredHeadStart,
        _backendCache = PlaybackPrefetchCache(now: now),
        _episodePrefetchCache = PlaybackPrefetchCache(
          ttl: const Duration(minutes: 45),
@@ -156,13 +160,16 @@ final class PlaybackDiscoveryController {
   final PlaybackContextGuard _isContextCurrent;
   final void Function() _clearRuleRuntimeCaches;
   final DateTime Function() _now;
+  final Duration _interactivePreferredHeadStart;
   final PlaybackPrefetchCache _backendCache;
   final PlaybackPrefetchCache _episodePrefetchCache;
-  final AsyncSingleFlight<String, List<PlaybackLine>> _backendLookups =
-      AsyncSingleFlight<String, List<PlaybackLine>>();
+  final Map<String, _BackendLookupOperation> _backendLookups =
+      <String, _BackendLookupOperation>{};
   final Map<String, Future<void>> _prefetches = <String, Future<void>>{};
   final Map<String, RulePlaybackCancellationToken> _prefetchTokens =
       <String, RulePlaybackCancellationToken>{};
+  final Set<RulePlaybackCancellationToken> _activeLookupTokens =
+      <RulePlaybackCancellationToken>{};
 
   String? _accountId;
   var _contextVersion = 0;
@@ -234,12 +241,14 @@ final class PlaybackDiscoveryController {
     bool forceRefresh = false,
     String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
+    PlaybackLookupIntent lookupIntent = PlaybackLookupIntent.interactive,
   }) => linesForEpisodeMode(
     subject,
     episode,
     forceRefresh: forceRefresh,
     preferredProviderId: preferredProviderId,
     cancellationToken: cancellationToken,
+    lookupIntent: lookupIntent,
   );
 
   Future<PlaybackLine> verifyPlaybackLine(
@@ -267,32 +276,92 @@ final class PlaybackDiscoveryController {
     bool forceRefresh = false,
     String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
+    PlaybackLookupIntent lookupIntent = PlaybackLookupIntent.interactive,
   }) async {
     final scope = _scope();
     if (cancellationToken?.isCancelled ?? false) return const [];
     final preferred = preferredProviderId?.trim();
-    final wantsPreferred = preferred?.isNotEmpty == true;
+    if ((preferred == null || preferred.isEmpty) &&
+        lookupIntent == PlaybackLookupIntent.interactive) {
+      return _linesForEpisodeWithoutPreference(
+        scope,
+        subject,
+        episode,
+        expandAll: expandAll,
+        forceRefresh: forceRefresh,
+        cancellationToken: cancellationToken,
+      );
+    }
+    return _linesForEpisodeWithPreference(
+      scope,
+      subject,
+      episode,
+      expandAll: expandAll,
+      forceRefresh: forceRefresh,
+      preferredProviderId: preferred,
+      lookupIntent: lookupIntent,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  Future<List<PlaybackLine>> _linesForEpisodeWithoutPreference(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool expandAll,
+    required bool forceRefresh,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final lookupWorkToken = RulePlaybackCancellationToken();
+    _activeLookupTokens.add(lookupWorkToken);
+    final unlinkLookupWork = cancellationToken?.register(
+      lookupWorkToken.cancel,
+    );
+    final cancelled = Completer<({String kind, List<PlaybackLine> lines})>();
+    final unlinkCancellation = lookupWorkToken.register(() {
+      if (!cancelled.isCompleted) {
+        cancelled.complete((kind: 'cancelled', lines: const <PlaybackLine>[]));
+      }
+    });
+    var lookupWorkStopped = false;
     var backendLines = const <PlaybackLine>[];
     var probedBackendLines = const <PlaybackLine>[];
     var ruleLines = const <PlaybackLine>[];
+
+    List<PlaybackLine> finish(List<PlaybackLine> lines) {
+      if (!lookupWorkStopped) {
+        lookupWorkStopped = true;
+        _activeLookupTokens.remove(lookupWorkToken);
+        lookupWorkToken.cancel();
+        unlinkCancellation();
+        unlinkLookupWork?.call();
+      }
+      return lines;
+    }
 
     bool isCurrentRequest() =>
         _isCurrent(scope) && !(cancellationToken?.isCancelled ?? false);
     bool hasPlayableLine(Iterable<PlaybackLine> lines) => lines.any(
       (line) => line.available && (line.url?.trim().isNotEmpty ?? false),
     );
-    bool hasPreferredPlayableLine(Iterable<PlaybackLine> lines) =>
-        wantsPreferred &&
-        lines.any(
-          (line) =>
-              line.providerId == preferred &&
-              line.available &&
-              (line.url?.trim().isNotEmpty ?? false),
-        );
+    List<PlaybackLine> currentLines() {
+      return mergePlaybackLines(<PlaybackLine>[
+        ...backendLines,
+        ...probedBackendLines,
+        ...ruleLines,
+      ]);
+    }
+
     Future<({String kind, List<PlaybackLine> lines})> tagged(
       String kind,
       Future<List<PlaybackLine>> future,
-    ) async => (kind: kind, lines: await future);
+    ) async {
+      try {
+        return (kind: kind, lines: await future);
+      } catch (_) {
+        return (kind: kind, lines: const <PlaybackLine>[]);
+      }
+    }
 
     final backendEvent = tagged(
       'backend',
@@ -301,21 +370,12 @@ final class PlaybackDiscoveryController {
         subject,
         episode,
         forceRefresh: forceRefresh,
-        cancellationToken: cancellationToken,
+        cancellationToken: lookupWorkToken,
       ).timeout(
         const Duration(seconds: 6),
         onTimeout: () => const <PlaybackLine>[],
       ),
     );
-    final firstEvent = await Future.any([
-      backendEvent,
-      Future<({String kind, List<PlaybackLine> lines})>.delayed(
-        const Duration(milliseconds: 900),
-        () => (kind: 'hedge', lines: const <PlaybackLine>[]),
-      ),
-    ]);
-    if (!isCurrentRequest()) return const <PlaybackLine>[];
-
     final pending =
         <String, Future<({String kind, List<PlaybackLine> lines})>>{};
 
@@ -329,8 +389,7 @@ final class PlaybackDiscoveryController {
             subject,
             episode,
             expandAll: expandAll,
-            preferredProviderId: preferred,
-            cancellationToken: cancellationToken,
+            cancellationToken: lookupWorkToken,
           ),
         ),
       );
@@ -343,67 +402,382 @@ final class PlaybackDiscoveryController {
         _probeBackendClientCandidates(
           scope,
           backendLines,
-          cancellationToken: cancellationToken,
+          cancellationToken: lookupWorkToken,
         ).onError((_, _) => const <PlaybackLine>[]),
       );
     }
 
-    if (firstEvent.kind == 'backend') {
-      backendLines = firstEvent.lines;
-      if (hasPlayableLine(backendLines) &&
-          (!wantsPreferred || hasPreferredPlayableLine(backendLines))) {
-        return mergePlaybackLines(backendLines);
+    try {
+      final firstEvent = await Future.any([
+        backendEvent,
+        Future<({String kind, List<PlaybackLine> lines})>.delayed(
+          const Duration(milliseconds: 900),
+          () => (kind: 'hedge', lines: const <PlaybackLine>[]),
+        ),
+        cancelled.future,
+      ]);
+      if (!isCurrentRequest() || firstEvent.kind == 'cancelled') {
+        return finish(const <PlaybackLine>[]);
       }
-      startBackendCandidateProbe();
-      startRules();
-    } else {
-      pending['backend'] = backendEvent;
-      startRules();
+      if (firstEvent.kind == 'backend') {
+        backendLines = firstEvent.lines;
+        final merged = currentLines();
+        if (hasPlayableLine(merged)) return finish(merged);
+        startBackendCandidateProbe();
+        startRules();
+      } else {
+        pending['backend'] = backendEvent;
+        startRules();
+      }
+
+      while (pending.isNotEmpty) {
+        final event = await Future.any([...pending.values, cancelled.future]);
+        if (event.kind == 'cancelled') return finish(const <PlaybackLine>[]);
+        pending.remove(event.kind);
+        if (!isCurrentRequest()) return finish(const <PlaybackLine>[]);
+        switch (event.kind) {
+          case 'backend':
+            backendLines = event.lines;
+            startBackendCandidateProbe();
+          case 'probe':
+            probedBackendLines = event.lines;
+            if (hasPlayableLine(probedBackendLines)) {
+              _cacheBackendPlaybackLines(
+                scope,
+                subject,
+                episode,
+                mergePlaybackLines(<PlaybackLine>[
+                  ...backendLines,
+                  ...probedBackendLines,
+                ]),
+                expandAll: expandAll,
+              );
+            }
+          case 'rules':
+            ruleLines = event.lines;
+        }
+        final merged = currentLines();
+        if (hasPlayableLine(merged)) return finish(merged);
+      }
+
+      return finish(
+        isCurrentRequest() ? currentLines() : const <PlaybackLine>[],
+      );
+    } finally {
+      finish(const <PlaybackLine>[]);
+    }
+  }
+
+  Future<List<PlaybackLine>> _linesForEpisodeWithPreference(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool expandAll,
+    required bool forceRefresh,
+    required String? preferredProviderId,
+    required PlaybackLookupIntent lookupIntent,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final workToken = RulePlaybackCancellationToken();
+    _activeLookupTokens.add(workToken);
+    final unlinkCaller = cancellationToken?.register(workToken.cancel);
+    final cancelled = Completer<({String kind, List<PlaybackLine> lines})>();
+    final unlinkCancellation = workToken.register(() {
+      if (!cancelled.isCompleted) {
+        cancelled.complete((kind: 'cancelled', lines: const <PlaybackLine>[]));
+      }
+    });
+    var stopped = false;
+    var preferredHeadStartElapsed = lookupIntent == PlaybackLookupIntent.warmup;
+    var fallbackWorkStarted = false;
+    var backendStarted = false;
+    var backendLines = const <PlaybackLine>[];
+    var probedBackendLines = const <PlaybackLine>[];
+    var preferredRuleLines = const <PlaybackLine>[];
+    var fallbackRuleLines = const <PlaybackLine>[];
+    var genericRuleLines = const <PlaybackLine>[];
+
+    List<PlaybackLine> finish(List<PlaybackLine> lines) {
+      if (!stopped) {
+        stopped = true;
+        _activeLookupTokens.remove(workToken);
+        workToken.cancel();
+        unlinkCancellation();
+        unlinkCaller?.call();
+      }
+      return lines;
     }
 
-    while (pending.isNotEmpty) {
-      final event = await Future.any(pending.values);
-      pending.remove(event.kind);
-      if (!isCurrentRequest()) return const <PlaybackLine>[];
-      switch (event.kind) {
-        case 'backend':
-          backendLines = event.lines;
-          startBackendCandidateProbe();
-        case 'probe':
-          probedBackendLines = event.lines;
-          if (hasPlayableLine(probedBackendLines)) {
-            _cacheBackendPlaybackLines(
-              scope,
+    bool isCurrentRequest() =>
+        _isCurrent(scope) && !(cancellationToken?.isCancelled ?? false);
+    Future<({String kind, List<PlaybackLine> lines})> tagged(
+      String kind,
+      Future<List<PlaybackLine>> future,
+    ) async {
+      try {
+        return (kind: kind, lines: await future);
+      } catch (_) {
+        return (kind: kind, lines: const <PlaybackLine>[]);
+      }
+    }
+
+    Future<List<PlaybackLine>> guardedRuleLookup(
+      FutureOr<List<PlaybackLine>> Function() start,
+    ) => Future<List<PlaybackLine>>.sync(start)
+        .timeout(
+          const Duration(seconds: 12),
+          onTimeout: () => const <PlaybackLine>[],
+        )
+        .onError((_, _) => const <PlaybackLine>[]);
+
+    final pending =
+        <String, Future<({String kind, List<PlaybackLine> lines})>>{};
+    final hasPreferredSignal = preferredProviderId?.isNotEmpty == true;
+    PlaybackSourceRepository? ruleRepository;
+    if (_mayHaveRuleProviders(_ruleState)) {
+      try {
+        ruleRepository = _ruleRepository(_ruleState);
+      } catch (_) {
+        ruleRepository = null;
+      }
+    }
+    final providerAware =
+        ruleRepository is ProviderAwarePlaybackSourceRepository
+        ? ruleRepository as ProviderAwarePlaybackSourceRepository
+        : null;
+    ProviderAwarePlaybackSourceRepository? preferredRuleRepository;
+    if (hasPreferredSignal && providerAware != null) {
+      try {
+        if (providerAware.canResolveProvider(
+          subject,
+          providerId: preferredProviderId!,
+        )) {
+          preferredRuleRepository = providerAware;
+        }
+      } catch (_) {
+        preferredRuleRepository = null;
+      }
+    }
+    final hasRuleProvider = preferredRuleRepository != null;
+
+    void startBackend() {
+      if (backendStarted) return;
+      backendStarted = true;
+      pending.putIfAbsent(
+        'backend',
+        () => tagged(
+          'backend',
+          _backendLinesForEpisode(
+            scope,
+            subject,
+            episode,
+            expandAll: expandAll,
+            forceRefresh: forceRefresh,
+            cancellationToken: workToken,
+          ).timeout(
+            const Duration(seconds: 6),
+            onTimeout: () => const <PlaybackLine>[],
+          ),
+        ),
+      );
+    }
+
+    void startPreferredRule() {
+      final preferredRepository = preferredRuleRepository;
+      final preferred = preferredProviderId;
+      if (preferredRepository == null || preferred == null) return;
+      pending.putIfAbsent(
+        'preferred-rule',
+        () => tagged(
+          'preferred-rule',
+          guardedRuleLookup(
+            () => preferredRepository.verifiedLinesForProvider(
               subject,
               episode,
-              mergePlaybackLines(<PlaybackLine>[
-                ...backendLines,
-                ...probedBackendLines,
-              ]),
-              expandAll: expandAll,
-            );
-          }
-        case 'rules':
-          ruleLines = event.lines;
-      }
-      final merged = mergePlaybackLines(<PlaybackLine>[
-        ...backendLines,
-        ...probedBackendLines,
-        ...ruleLines,
-      ]);
-      if (hasPlayableLine(merged) &&
-          (!wantsPreferred || hasPreferredPlayableLine(merged))) {
-        return merged;
-      }
+              providerId: preferred,
+              forceRefresh: forceRefresh,
+              cancellationToken: workToken,
+            ),
+          ),
+        ),
+      );
     }
 
-    return isCurrentRequest()
-        ? mergePlaybackLines(<PlaybackLine>[
-            ...backendLines,
-            ...probedBackendLines,
-            ...ruleLines,
-          ])
-        : const <PlaybackLine>[];
+    void startFallbackRules() {
+      if (ruleRepository == null) return;
+      pending.putIfAbsent(
+        'fallback-rules',
+        () => tagged(
+          'fallback-rules',
+          guardedRuleLookup(
+            () => providerAware == null
+                ? _ruleLinesForEpisode(
+                    scope,
+                    subject,
+                    episode,
+                    expandAll: expandAll,
+                    cancellationToken: workToken,
+                  )
+                : providerAware.verifiedFallbackLinesExcludingProvider(
+                    subject,
+                    episode,
+                    excludedProviderId: preferredProviderId ?? '',
+                    forceRefresh: forceRefresh,
+                    cancellationToken: workToken,
+                  ),
+          ),
+        ),
+      );
+    }
+
+    void startFallbackWork() {
+      if (fallbackWorkStarted) return;
+      fallbackWorkStarted = true;
+      startBackend();
+      startFallbackRules();
+    }
+
+    void startBackendCandidateProbe() {
+      if (backendLines.isEmpty || pending.containsKey('probe')) return;
+      pending['probe'] = tagged(
+        'probe',
+        _probeBackendClientCandidates(
+          scope,
+          backendLines,
+          maxCandidates: 2,
+          cancellationToken: workToken,
+        ).onError((_, _) => const <PlaybackLine>[]),
+      );
+    }
+
+    List<PlaybackLine> currentVerifiedLines() {
+      final minExpiry = _now().add(const Duration(seconds: 15));
+      final merged = mergePlaybackLines(<PlaybackLine>[
+        ...preferredRuleLines,
+        ...fallbackRuleLines,
+        ...genericRuleLines,
+        ...probedBackendLines,
+        ...backendLines,
+      ]).where((line) => _isVerifiedLookupLine(line, minExpiry)).toList();
+      if (!hasPreferredSignal) {
+        return List<PlaybackLine>.unmodifiable(
+          rankPlaybackLinesForStartup(merged).take(2),
+        );
+      }
+      final preferred = rankPlaybackLinesForStartup(
+        merged.where((line) => line.providerId == preferredProviderId),
+      );
+      final fallbacks = rankPlaybackLinesForStartup(
+        merged.where((line) => line.providerId != preferredProviderId),
+      );
+      return List<PlaybackLine>.unmodifiable(<PlaybackLine>[
+        ...preferred.take(1),
+        ...fallbacks.take(1),
+      ]);
+    }
+
+    bool shouldReturn(List<PlaybackLine> lines) {
+      if (!hasPreferredSignal) return lines.length >= 2;
+      final hasPreferred = lines.any(
+        (line) => line.providerId == preferredProviderId,
+      );
+      final hasFallback = lines.any(
+        (line) => line.providerId != preferredProviderId,
+      );
+      if (lookupIntent == PlaybackLookupIntent.warmup) {
+        return hasPreferred && hasFallback;
+      }
+      return hasPreferred || (preferredHeadStartElapsed && hasFallback);
+    }
+
+    try {
+      if (lookupIntent == PlaybackLookupIntent.warmup) {
+        startPreferredRule();
+        startFallbackWork();
+      } else {
+        startPreferredRule();
+        if (!hasRuleProvider) startBackend();
+        pending['preferred-head-start'] = tagged(
+          'preferred-head-start',
+          Future<List<PlaybackLine>>.delayed(
+            _interactivePreferredHeadStart,
+            () => const <PlaybackLine>[],
+          ),
+        );
+      }
+
+      while (pending.isNotEmpty) {
+        final event = await Future.any([...pending.values, cancelled.future]);
+        if (event.kind == 'cancelled' || !isCurrentRequest()) {
+          return finish(const <PlaybackLine>[]);
+        }
+        pending.remove(event.kind);
+        switch (event.kind) {
+          case 'backend':
+            backendLines = event.lines;
+            startBackendCandidateProbe();
+          case 'probe':
+            probedBackendLines = event.lines;
+            if (probedBackendLines.isNotEmpty) {
+              var verifiedBackendLines = backendLines;
+              for (final line in probedBackendLines) {
+                verifiedBackendLines = replacePlaybackLine(
+                  verifiedBackendLines,
+                  line,
+                );
+              }
+              _cacheBackendPlaybackLines(
+                scope,
+                subject,
+                episode,
+                verifiedBackendLines,
+                expandAll: expandAll,
+              );
+            }
+          case 'preferred-rule':
+            preferredRuleLines = event.lines;
+            if (preferredProviderId != null &&
+                event.lines.every(
+                  (line) => line.providerId != preferredProviderId,
+                )) {
+              preferredHeadStartElapsed = true;
+              pending.remove('preferred-head-start');
+              startFallbackWork();
+            }
+          case 'fallback-rules':
+            if (providerAware == null) {
+              genericRuleLines = event.lines;
+            } else {
+              fallbackRuleLines = event.lines;
+            }
+          case 'preferred-head-start':
+            preferredHeadStartElapsed = true;
+            startFallbackWork();
+        }
+        final lines = currentVerifiedLines();
+        if (shouldReturn(lines)) return finish(lines);
+      }
+
+      return finish(
+        isCurrentRequest() ? currentVerifiedLines() : const <PlaybackLine>[],
+      );
+    } finally {
+      finish(const <PlaybackLine>[]);
+    }
+  }
+
+  static bool _isVerifiedLookupLine(PlaybackLine line, DateTime minExpiry) {
+    if (!line.available || (!line.serverVerified && !line.clientVerified)) {
+      return false;
+    }
+    final url = Uri.tryParse(line.url?.trim() ?? '');
+    if (url == null ||
+        (url.scheme != 'http' && url.scheme != 'https') ||
+        url.host.isEmpty) {
+      return false;
+    }
+    final expiresAt = line.expiresAt;
+    return expiresAt == null || expiresAt.isAfter(minExpiry);
   }
 
   PlaybackLine? prefetchedLineForEpisode(
@@ -573,7 +947,7 @@ final class PlaybackDiscoveryController {
     }
     if (!_isCurrent(scope) || token.isCancelled) return;
     final ruleState = _ruleState;
-    if (ruleState.customRules.isEmpty) {
+    if (!_mayHaveRuleProviders(ruleState)) {
       yield PlaybackLineLookupUpdate(
         lines: clientCheckedBaseLines,
         completedRules: backendProbeTotal,
@@ -737,6 +1111,7 @@ final class PlaybackDiscoveryController {
       forceRefresh: forceRefresh,
       preferredProviderId: preferredProviderId,
       cancellationToken: cancellationToken,
+      lookupIntent: PlaybackLookupIntent.warmup,
     );
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final preferred = preferredProviderId?.trim();
@@ -813,30 +1188,89 @@ final class PlaybackDiscoveryController {
       expandAll: expandAll,
     );
     if (lookupKey == null) return Future.value(const <PlaybackLine>[]);
-    if (!forceRefresh) {
+    if (forceRefresh) {
+      _backendLookups.remove(lookupKey)?.cancel();
+      _backendCache.remove(lookupKey);
+    }
+
+    var operation = _backendLookups[lookupKey];
+    if (operation == null && !forceRefresh) {
       final cached = _backendCache.read(lookupKey);
       if (cached != null) return Future.value(cached);
-    } else {
-      _backendLookups.remove(lookupKey);
     }
-    final pending = _backendLookups.run(lookupKey, () {
-      final repository = _backendRepository(services);
-      if (repository == null) return Future.value(const <PlaybackLine>[]);
-      return repository
-          .linesForEpisodeMode(subject, episode, expandAll: expandAll)
-          .timeout(
-            const Duration(seconds: 20),
-            onTimeout: () => const <PlaybackLine>[],
-          )
-          .onError((_, _) => const <PlaybackLine>[]);
-    });
-    return pending.then((lines) {
-      if (!_isCurrent(scope) || cancellationToken?.isCancelled == true) {
-        return const <PlaybackLine>[];
+    if (operation == null) {
+      operation = _BackendLookupOperation();
+      _backendLookups[lookupKey] = operation;
+      final ownedOperation = operation;
+      ownedOperation.future =
+          Future<List<PlaybackLine>>.sync(() {
+                final repository = _backendRepository(services);
+                if (repository == null) return const <PlaybackLine>[];
+                return repository.linesForEpisodeMode(
+                  subject,
+                  episode,
+                  expandAll: expandAll,
+                  cancellationToken: ownedOperation.token,
+                );
+              })
+              .timeout(
+                const Duration(seconds: 20),
+                onTimeout: () {
+                  ownedOperation.token.cancel();
+                  return const <PlaybackLine>[];
+                },
+              )
+              .onError((_, _) => const <PlaybackLine>[])
+              .then((lines) {
+                ownedOperation.settled = true;
+                if (identical(_backendLookups[lookupKey], ownedOperation)) {
+                  _backendLookups.remove(lookupKey);
+                  if (_isCurrent(scope) && !ownedOperation.token.isCancelled) {
+                    _backendCache.write(lookupKey, lines);
+                  }
+                }
+                return List<PlaybackLine>.unmodifiable(lines);
+              });
+    }
+
+    return _subscribeToBackendOperation(
+      lookupKey,
+      operation,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  Future<List<PlaybackLine>> _subscribeToBackendOperation(
+    String lookupKey,
+    _BackendLookupOperation operation, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled == true) {
+      return const <PlaybackLine>[];
+    }
+    operation.subscribers++;
+    final callerCancelled = Completer<List<PlaybackLine>>();
+    final unlinkCaller = cancellationToken?.register(() {
+      if (!callerCancelled.isCompleted) {
+        callerCancelled.complete(const <PlaybackLine>[]);
       }
-      _backendCache.write(lookupKey, lines);
-      return lines;
     });
+    try {
+      return await Future.any<List<PlaybackLine>>(<Future<List<PlaybackLine>>>[
+        operation.future,
+        operation.stopped.future.then((_) => const <PlaybackLine>[]),
+        if (cancellationToken != null) callerCancelled.future,
+      ]);
+    } finally {
+      unlinkCaller?.call();
+      operation.subscribers--;
+      if (operation.subscribers == 0 && !operation.settled) {
+        if (identical(_backendLookups[lookupKey], operation)) {
+          _backendLookups.remove(lookupKey);
+        }
+        operation.cancel();
+      }
+    }
   }
 
   Future<List<PlaybackLine>> _ruleLinesForEpisode(
@@ -847,7 +1281,9 @@ final class PlaybackDiscoveryController {
     String? preferredProviderId,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
-    if (!_isCurrent(scope) || _ruleState.customRules.isEmpty) return const [];
+    if (!_isCurrent(scope) || !_mayHaveRuleProviders(_ruleState)) {
+      return const [];
+    }
     final repository = _ruleRepository(_ruleState);
     final preferred = preferredProviderId?.trim();
     final preferredRepository = repository is PreferredPlaybackSourceRepository
@@ -879,9 +1315,13 @@ final class PlaybackDiscoveryController {
         : const <PlaybackLine>[];
   }
 
+  static bool _mayHaveRuleProviders(RulePluginState state) =>
+      state.enabledIds.isNotEmpty || state.customRules.isNotEmpty;
+
   Future<List<PlaybackLine>> _probeBackendClientCandidates(
     _PlaybackDiscoveryScope scope,
     List<PlaybackLine> lines, {
+    int maxCandidates = 4,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final now = DateTime.now();
@@ -895,7 +1335,7 @@ final class PlaybackDiscoveryController {
                     now.add(const Duration(seconds: 15)),
                   )),
         )
-        .take(4)
+        .take(maxCandidates)
         .toList(growable: false);
     if (candidates.isEmpty || cancellationToken?.isCancelled == true) {
       return const <PlaybackLine>[];
@@ -903,7 +1343,7 @@ final class PlaybackDiscoveryController {
     final checked = <PlaybackLine>[];
     await for (final line in probePlaybackLinesProgressively(
       candidates,
-      maxConcurrent: 4,
+      maxConcurrent: maxCandidates,
       cancellationToken: cancellationToken,
       verify: (line) => verifyPlaybackLine(
         line,
@@ -1034,6 +1474,13 @@ final class PlaybackDiscoveryController {
     }
     _prefetchTokens.clear();
     _prefetches.clear();
+    for (final token in _activeLookupTokens.toList(growable: false)) {
+      token.cancel();
+    }
+    _activeLookupTokens.clear();
+    for (final operation in _backendLookups.values.toList(growable: false)) {
+      operation.cancel();
+    }
     _backendLookups.clear();
     _backendCache.clear();
     _episodePrefetchCache.clear();
@@ -1108,6 +1555,19 @@ List<PlaybackLine> replacePlaybackLine(
   }
   if (!replaced) result.add(replacement);
   return List<PlaybackLine>.unmodifiable(result);
+}
+
+final class _BackendLookupOperation {
+  final RulePlaybackCancellationToken token = RulePlaybackCancellationToken();
+  final Completer<void> stopped = Completer<void>();
+  late Future<List<PlaybackLine>> future;
+  int subscribers = 0;
+  bool settled = false;
+
+  void cancel() {
+    token.cancel();
+    if (!stopped.isCompleted) stopped.complete();
+  }
 }
 
 final class _PlaybackDiscoveryScope {

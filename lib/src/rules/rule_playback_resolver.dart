@@ -2021,6 +2021,7 @@ class RulePlaybackResolver {
       isLive: probe.isLive,
       adaptive: probe.adaptive,
       publicHttpOnly: publicHttpOnly,
+      clientVerified: probe.available,
       startupProfile: probe.startupProfile,
       available: true,
       message: '已解析到当前集的播放地址。',

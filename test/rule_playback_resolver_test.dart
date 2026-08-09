@@ -124,6 +124,7 @@ void main() {
 
     expect(quickLines, hasLength(1));
     expect(quickLines.every((line) => line.available), isTrue);
+    expect(quickLines.every((line) => line.clientVerified), isTrue);
     expect(playPageRequests, 1);
     expect(probeRequests, 1);
 
@@ -135,6 +136,7 @@ void main() {
 
     expect(lines, hasLength(2));
     expect(lines.first.available, isTrue);
+    expect(lines.every((line) => line.clientVerified), isTrue);
     expect(lines.first.url, 'https://cdn.example.com/test/01.m3u8');
     expect(lines.first.format, 'HLS');
     expect(lines.first.sizeLabel, isNull);
@@ -1726,6 +1728,7 @@ segment-1.ts
 
     expect(lines, hasLength(1));
     expect(lines.single.available, isTrue);
+    expect(lines.single.clientVerified, isTrue);
     expect(lines.single.url, 'https://cdn.example.com/movie.mp4');
     expect(lines.single.providerId, _xbpqRule.id);
   });
@@ -2004,6 +2007,7 @@ segment-1.ts
     expect(lines, hasLength(1));
     expect(lines.single.available, isTrue);
     expect(lines.single.url, 'https://cdn.example.com/anime/02.m3u8');
+    expect(lines.single.clientVerified, isTrue);
     expect(lines.single.quality, '1080P');
     expect(lines.single.headers['Cookie'], 'quality=1080');
   });
