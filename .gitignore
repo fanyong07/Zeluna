@@ -49,6 +49,8 @@ app.*.map.json
 *.keystore
 
 # Local agent, browser and verification artifacts
+/.diff_namestat.txt
+/_branch_log.txt
 .claude/
 .codex/
 .codex_tmp/

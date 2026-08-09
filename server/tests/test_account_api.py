@@ -781,6 +781,27 @@ def test_weak_or_historical_signing_keys_are_rejected(value, monkeypatch):
         auth.signing_key()
 
 
+def test_issue_credentials_reports_utf8_auth_configuration_error(monkeypatch):
+    async def reject_credentials(*_args, **_kwargs):
+        raise AuthConfigurationError("missing signing key")
+
+    monkeypatch.setattr(account_api, "issue_session_credentials", reject_credentials)
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            account_api._issue_credentials(
+                object(),
+                User(id=7),
+                device_id="test-device",
+                device_name="Test Device",
+                platform="test",
+            )
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "账号服务安全配置不可用"
+
+
 def test_missing_or_weak_signing_key_fails_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "SECRET_KEY", "")
     with pytest.raises(AuthConfigurationError):

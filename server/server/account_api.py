@@ -287,7 +287,7 @@ async def _issue_credentials(
     except AuthConfigurationError as error:
         raise HTTPException(
             status_code=503,
-            detail="璐﹀彿鏈嶅姟瀹夊叏閰嶇疆涓嶅彲鐢?",
+            detail="账号服务安全配置不可用",
         ) from error
     await session.commit()
     return credentials
