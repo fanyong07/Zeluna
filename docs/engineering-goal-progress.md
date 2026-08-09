@@ -2191,14 +2191,26 @@ Status: in_progress (foundations completed; production wiring pending)
 - `NextEpisodeWarmupBundle` and its bounded runtime cache model a verified
   primary plus at most one verified fallback, Provider preference, preparation
   time, and earliest route expiry. No media URL or credential is persisted.
+- `PlaybackDiscoveryController` now produces that bundle on the real
+  next-episode prefetch path and exposes a freshness-aware bundle read while
+  preserving the existing single-line detail-page API. Force refresh removes
+  the old episode bundle before starting replacement work, and scope
+  invalidation clears every runtime warmup entry.
 - Transition helpers compute remaining-time plus safety-margin validity, reject
   expired or stale-soon routes, promote a valid fallback when needed, and
   produce an immutable primary-first transition inventory.
-- Focused foundation regression: 23 passed; static analysis of the four bundle
-  and continuity implementation/test files reported no issues.
+- Focused foundation regression: 23 cache/transition tests plus 24 discovery
+  controller tests passed; static analysis of the touched bundle, continuity,
+  and controller files reported no issues.
 
 Commits: `65876df feat: cache next episode warmup bundles`,
-`41a3717 perf: validate warmup transition freshness`
+`41a3717 perf: validate warmup transition freshness`,
+`1051529 feat: produce next episode warmup bundles`
+
+- The broader `anime_controller_playback_hedge_test.dart` is not claimed as
+  passing in the current dirty integration worktree: cancellation request
+  counting and detail-prefetch completion currently have two failures. They
+  remain part of the pending C6 integration/regression work.
 
 Next required stage: wire bundle production and consumption through the
 existing discovery/controller/player paths, then complete lifecycle recovery,
