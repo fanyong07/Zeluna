@@ -99,6 +99,94 @@ def test_refresh_rotates_opaque_token_and_reuse_revokes_family(tmp_path, monkeyp
     asyncio.run(engine.dispose())
 
 
+def test_concurrent_refresh_uses_database_claim_and_revokes_new_chain(
+    tmp_path, monkeypatch
+):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'f2-concurrent.db').as_posix()}"
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(auth, "SECRET_KEY", _TEST_SECRET)
+
+    async def exercise():
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with sessions() as session:
+            user = User(
+                email="concurrent-f2@example.com",
+                name="concurrent-f2",
+                password_hash=auth.hash_password("password-123"),
+            )
+            session.add(user)
+            await session.flush()
+            credentials = await account_api._issue_credentials(
+                session,
+                user,
+                device_id="shared-device",
+            )
+
+        ready = asyncio.Event()
+        waiting = 0
+
+        async def rotate_once():
+            nonlocal waiting
+            async with sessions() as session:
+                waiting += 1
+                if waiting == 2:
+                    ready.set()
+                await ready.wait()
+                try:
+                    return await auth.rotate_refresh_token(
+                        session, credentials.refresh_token
+                    )
+                except auth.RefreshTokenReuseDetected as error:
+                    return error
+
+        first, second = await asyncio.gather(rotate_once(), rotate_once())
+        results = (first, second)
+        rotations = [
+            result for result in results if isinstance(result, auth.SessionCredentials)
+        ]
+        reuses = [
+            result
+            for result in results
+            if isinstance(result, auth.RefreshTokenReuseDetected)
+        ]
+        assert len(rotations) == 1
+        assert len(reuses) == 1
+
+        rotated = rotations[0]
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(UserToken).where(
+                    UserToken.session_id == credentials.session_id
+                )
+            )
+            histories = list(
+                await session.scalars(
+                    select(RefreshTokenHistory).where(
+                        RefreshTokenHistory.session_id == credentials.session_id
+                    )
+                )
+            )
+        assert stored is not None
+        assert stored.revoked_at > 0
+        assert len(histories) == 2
+        assert sum(row.used_at > 0 for row in histories) == 1
+        assert sum(row.reuse_detected_at > 0 for row in histories) == 1
+
+        async with sessions() as session:
+            try:
+                await auth.rotate_refresh_token(session, rotated.refresh_token)
+            except auth.RefreshTokenRejected:
+                pass
+            else:
+                raise AssertionError("revoked token family produced a valid chain")
+
+    asyncio.run(exercise())
+    asyncio.run(engine.dispose())
+
+
 def test_session_list_and_revoke_are_account_scoped(tmp_path, monkeypatch):
     engine = create_async_engine(f"sqlite+aiosqlite:///{(tmp_path / 'f2-idors.db').as_posix()}")
     sessions = async_sessionmaker(engine, expire_on_commit=False)

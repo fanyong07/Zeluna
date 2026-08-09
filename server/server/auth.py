@@ -2,7 +2,6 @@
 JWT 认证 + Protobuf token 解析
 """
 
-import asyncio
 import hashlib
 import secrets
 import struct
@@ -229,9 +228,6 @@ def bind_session_claims(stored: UserToken, claims: dict) -> bool:
     return changed
 
 
-_REFRESH_LOCK = asyncio.Lock()
-
-
 async def issue_session_credentials(
     session: AsyncSession,
     user_id: int,
@@ -309,73 +305,94 @@ async def rotate_refresh_token(
     digest = token_digest(refresh_token.strip())
     if not refresh_token.strip():
         raise RefreshTokenRejected("refresh token is empty")
-    async with _REFRESH_LOCK:
+    now = time.time()
+    claimed = (
+        await session.execute(
+            update(RefreshTokenHistory)
+            .where(
+                RefreshTokenHistory.digest == digest,
+                RefreshTokenHistory.used_at == 0,
+            )
+            .values(used_at=now)
+            .returning(
+                RefreshTokenHistory.id,
+                RefreshTokenHistory.user_id,
+                RefreshTokenHistory.session_id,
+                RefreshTokenHistory.token_family_id,
+            )
+        )
+    ).mappings().one_or_none()
+    if claimed is None:
         history = await session.scalar(
             select(RefreshTokenHistory).where(RefreshTokenHistory.digest == digest)
         )
         if history is None:
             raise RefreshTokenRejected("refresh token is invalid")
-        if history.used_at > 0:
-            now = time.time()
-            history.reuse_detected_at = now
-            await session.execute(
-                update(UserToken)
-                .where(UserToken.token_family_id == history.token_family_id)
-                .values(revoked_at=now)
-            )
-            await session.commit()
-            raise RefreshTokenReuseDetected("refresh token reuse detected")
-
-        current = await session.scalar(
-            select(UserToken).where(
-                UserToken.session_id == history.session_id,
-                UserToken.token == digest,
-            )
-        )
-        now = time.time()
-        if (
-            current is None
-            or current.revoked_at > 0
-            or current.expires_at <= now
-            or current.token_family_id != history.token_family_id
-        ):
-            raise RefreshTokenRejected("refresh session is invalid")
-
-        user = await session.get(User, current.user_id)
-        if user is None:
-            raise RefreshTokenRejected("refresh session is invalid")
-        new_refresh = secrets.token_urlsafe(48)
-        new_digest = token_digest(new_refresh)
-        access_token = create_jwt(user.id, current.session_id)
-        claims = decode_jwt(access_token)
-        if claims is None:
-            raise AuthConfigurationError("rotated access token could not be decoded")
-        history.used_at = now
-        history.replaced_by_digest = new_digest
-        current.token = new_digest
-        current.token_id = str(claims["jti"])
-        current.last_used_at = now
-        current.refresh_rotated_at = now
-        session.add(
-            RefreshTokenHistory(
-                user_id=current.user_id,
-                session_id=current.session_id or "",
-                token_family_id=current.token_family_id,
-                digest=new_digest,
-                created_at=now,
-            )
+        history.reuse_detected_at = now
+        await session.execute(
+            update(UserToken)
+            .where(UserToken.token_family_id == history.token_family_id)
+            .values(revoked_at=now)
         )
         await session.commit()
-        return SessionCredentials(
-            access_token=access_token,
-            refresh_token=new_refresh,
-            session_id=current.session_id or "",
-            device_id=current.device_id,
-            device_name=current.device_name,
-            platform=current.platform,
-            access_expires_at=float(claims["exp"]),
-            refresh_expires_at=current.expires_at,
+        raise RefreshTokenReuseDetected("refresh token reuse detected")
+
+    current = await session.scalar(
+        select(UserToken).where(
+            UserToken.session_id == claimed["session_id"],
+            UserToken.token == digest,
+            UserToken.token_family_id == claimed["token_family_id"],
         )
+    )
+    if (
+        current is None
+        or current.revoked_at > 0
+        or current.expires_at <= now
+        or current.user_id != claimed["user_id"]
+    ):
+        await session.rollback()
+        raise RefreshTokenRejected("refresh session is invalid")
+
+    user = await session.get(User, current.user_id)
+    if user is None:
+        await session.rollback()
+        raise RefreshTokenRejected("refresh session is invalid")
+    new_refresh = secrets.token_urlsafe(48)
+    new_digest = token_digest(new_refresh)
+    access_token = create_jwt(user.id, current.session_id)
+    claims = decode_jwt(access_token)
+    if claims is None:
+        await session.rollback()
+        raise AuthConfigurationError("rotated access token could not be decoded")
+    await session.execute(
+        update(RefreshTokenHistory)
+        .where(RefreshTokenHistory.id == claimed["id"])
+        .values(replaced_by_digest=new_digest)
+    )
+    current.token = new_digest
+    current.token_id = str(claims["jti"])
+    current.last_used_at = now
+    current.refresh_rotated_at = now
+    session.add(
+        RefreshTokenHistory(
+            user_id=current.user_id,
+            session_id=current.session_id or "",
+            token_family_id=current.token_family_id,
+            digest=new_digest,
+            created_at=now,
+        )
+    )
+    await session.commit()
+    return SessionCredentials(
+        access_token=access_token,
+        refresh_token=new_refresh,
+        session_id=current.session_id or "",
+        device_id=current.device_id,
+        device_name=current.device_name,
+        platform=current.platform,
+        access_expires_at=float(claims["exp"]),
+        refresh_expires_at=current.expires_at,
+    )
 
 
 def generate_verify_code() -> str:
