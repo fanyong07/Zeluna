@@ -2186,7 +2186,8 @@ Commit: `8107f30 refactor: harden provider-aware playback lookup`
 
 ### C3/C5/C6 - Warmup bundle and transition-freshness foundations
 
-Status: in_progress (foundations completed; production wiring pending)
+Status: in_progress (production and transition consumption completed; final
+player/telemetry regression pending)
 
 - `NextEpisodeWarmupBundle` and its bounded runtime cache model a verified
   primary plus at most one verified fallback, Provider preference, preparation
@@ -2227,6 +2228,22 @@ Commits: `65876df feat: cache next episode warmup bundles`,
 
 Commit: `512fcb6 fix: isolate cancelled playback lookups`
 
+- Episode transition now reads the bounded warmup bundle with a 30-second
+  transition margin, installs the primary plus at most one fallback, opens the
+  primary immediately, and revalidates the expected fallback with a 5-second
+  margin before using it ahead of cold discovery.
+- Account-context changes, remember-line disablement, manual line selection,
+  and successful warmup first frame clear transition-only state. Primary and
+  fallback transition outcomes emit low-cardinality events without media URLs
+  or request credentials.
+- The three overlapping integration files were composed as UTF-8 Git index
+  blobs over `HEAD`, with recommendation/personalization markers absent from
+  the staged diff. The exact index tree passed 131 focused playback tests and
+  full Flutter static analysis; the shared recommendation worktree separately
+  passed its complete 743-test Flutter run before this commit.
+
+Commit: `2019ce8 feat: consume warmup fallback on episode transition`
+
 ### C7 - Warmup cancellation and scope safety
 
 Status: in_progress (controller scope matrix completed; player integration pending)
@@ -2258,8 +2275,8 @@ Status: in_progress (redaction completed; event wiring pending)
 
 Commit: `8e12736 security: redact playback trace credentials`
 
-Next required stage: wire bundle production and consumption through the
-existing discovery/controller/player paths, then complete lifecycle recovery,
-telemetry, and the remaining C1-C7 regression matrix. Full regression,
-platform builds, migrations, supply-chain gates, and the exact final-main
-GitHub run remain pending and must not be inferred from these focused results.
+Next required stage: complete exact continuity telemetry wiring and the
+remaining C1-C7 player regression matrix. Full regression on the resulting
+main SHA, platform builds, migrations, supply-chain gates, and the exact
+final-main GitHub run remain pending and must not be inferred from these
+focused or pre-integration results.
