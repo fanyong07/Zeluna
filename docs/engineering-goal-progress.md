@@ -2312,6 +2312,63 @@ Commits: `8e12736 security: redact playback trace credentials`,
 `26c9d24 feat: constrain playback continuity telemetry`,
 `f5d1aff feat: emit playback continuity telemetry`
 
-Next required stage: V1 full regression on the resulting main SHA, platform
-builds, migrations, and supply-chain gates. The exact final-main V2 GitHub run
-also remains pending and must not be inferred from the focused C1-C7 results.
+### V1 - Full validation
+
+Status: completed
+
+- Validation used a Git archive of exact main SHA
+  `fbef03a1229842b852c9df4234198692167eab22`: 766 tracked files; archive
+  SHA-256 `EFC834FFD0D9733FB6F7B5D86FECEE7F726EA8639F7DC7BE8C901849F3B9A17D`.
+  This was a plain temporary snapshot, not a worktree, so the shared
+  recommendation worktree remained untouched.
+- `flutter pub get --enforce-lockfile` passed. The repository Quality Gates
+  format scope (`lib test integration_test tool`) checked 221 files with zero
+  changes; full Flutter static analysis reported no issues.
+- The literal task command `dart format --output=none --set-exit-if-changed .`
+  was also run and reported only four upstream WebView example/test files under
+  `third_party`. Those vendored files remain byte-preserved as required by the
+  repository workflow instead of being reformatted to manufacture a pass.
+- Full Flutter regression passed 690 tests with 26 intentional platform skips
+  and zero failures. The initial Windows archive run exposed a real
+  line-ending-sensitive hls.js byte assertion; the test now normalizes CRLF to
+  LF before checking the pinned 414,359-byte payload and official SHA-256.
+- Server validation passed 193 tests plus 3 subtests with one upstream
+  Starlette deprecation warning. Ruff, Python compileall, and strict pip-audit
+  passed; pip-audit reported no known vulnerabilities.
+- Alembic exercised `0001_baseline -> head`, `head -> base`, and `base -> head`
+  against a disposable SQLite database. Final revision was
+  `0010_account_deletion_retry_state`; both final `alembic check` runs reported
+  no new upgrade operations.
+- Repository secret/artifact policy and dependency policy gates passed. The
+  latter audited 159 Dart and 72 Python packages and generated both SBOMs.
+- Android Debug built successfully: `app-debug.apk` 236,122,626 bytes,
+  SHA-256 `6E996AA434F46740D4F35692AB406C969AD0AA6F54C27772FD43544E3372FBBB`.
+- Windows Release and release-immutability checks passed: `Zeluna.exe` 197,120
+  bytes, SHA-256 `13806B616C278882C1DD17367E016D292ED72ED8DB7CA652EDCF045089843C3C`;
+  `data/app.so` 13,796,272 bytes, SHA-256
+  `2B808C86C845C87135577096BBDF842E7C1CBA3107C09A7AAAF6C5E7ACB4772F`.
+- The Windows WebView integration executable ran both loopback refusal and
+  task-storage cleanup tests successfully on Windows.
+- Web Release built successfully and its Wasm dry run succeeded:
+  `main.dart.js` 4,946,158 bytes, SHA-256
+  `20070B70C63BE59B88044611B43627A705EFAFE5A796FF5B8A1328B9F920AA55`.
+
+Commit: `fbef03a test: normalize pinned hls bundle line endings`
+
+### V2 - GitHub Quality Gates
+
+Status: in_progress (code checkpoint passed; final documentation SHA pending)
+
+- Quality Gates run `31300413565` (#194) completed successfully for exact main
+  SHA `fbef03a1229842b852c9df4234198692167eab22` in 13m24s.
+- Flutter, Android, Windows/WebView, Web, Python/Alembic/Audit, and
+  Secrets/Licenses/SBOM were all successful. The supply-chain report artifact
+  digest was
+  `EFA9975F1CD0828EA83163D7258DAB67BF0913ED42DB3D689ABDF9AC0A90828F`.
+- This evidence update creates a new documentation-only main SHA. Its own
+  exact-head Quality Gates run must pass before the overall status can be
+  changed from `in_progress` to `completed`.
+
+Next required stage: push this evidence checkpoint, confirm that its exact main
+SHA has all six V2 jobs successful, then record final completion without
+inferring success from the preceding SHA.
