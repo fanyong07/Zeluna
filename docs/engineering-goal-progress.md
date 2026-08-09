@@ -2088,7 +2088,7 @@ Status: in_progress
 Task source inventory:
 
 - `D:\下载\Zeluna_Post_G14_Playback_Continuity_Goal.md` was read completely as
-  UTF-8: 22,904 bytes, 1,215 lines, SHA-256
+  UTF-8: 22,904 bytes, 1,425 logical lines, SHA-256
   `DADD1555165C04097F8D1A1C889C116BC84C907ADD8DAC8B771A4D3EFD33B396`.
 - Starting `main` and `origin/main`: `d1a22dcdfb390f4c21f384297ccbffd8489e3bd5`.
 - Starting working tree: clean.
@@ -2158,6 +2158,50 @@ Status: completed
 
 Commit: `75ff322 chore: remove repository audit artifacts`
 
-Next required stage: C1-C7 playback continuity. Full regression, platform
-builds, migrations, supply-chain gates, and the exact final-main GitHub run
-remain pending and must not be inferred from these focused results.
+### C2/C4 - Interactive and warmup lookup policy
+
+Status: in_progress (lookup-policy slice completed)
+
+- Interactive and background-warmup lookups now have separate completion
+  policies. The remembered Provider receives a bounded 750 ms interactive
+  head start, while warmup can prepare the preferred primary and at most one
+  verified fallback without making the preference a hard gate.
+- Provider capability is derived from the active rule repository, so enabled
+  built-in Providers are not hidden by an empty custom-rule list. Successful
+  real media probes are marked client-verified without weakening the existing
+  HTTP(S), freshness, availability, or verification filters.
+- Provider-aware preferred/fallback lookup supports force refresh. Resolver
+  response/probe caches are cleared once per production operation, monotonic
+  generations and successful-key aliases reject old results, and backend
+  single-flight work is owned by an operation-level cancellation token.
+- Force refresh now removes the old backend cache and supersedes an older
+  operation. An ordinary caller joins the in-flight forced operation instead
+  of republishing stale cached data; late old operations cannot overwrite the
+  refreshed cache.
+- Focused regression: 114 passed across playback discovery, architecture, and
+  rule resolver tests. Static analysis of the seven touched implementation and
+  test files reported no issues; scoped diff and secret-pattern checks passed.
+
+Commit: `8107f30 refactor: harden provider-aware playback lookup`
+
+### C3/C5/C6 - Warmup bundle and transition-freshness foundations
+
+Status: in_progress (foundations completed; production wiring pending)
+
+- `NextEpisodeWarmupBundle` and its bounded runtime cache model a verified
+  primary plus at most one verified fallback, Provider preference, preparation
+  time, and earliest route expiry. No media URL or credential is persisted.
+- Transition helpers compute remaining-time plus safety-margin validity, reject
+  expired or stale-soon routes, promote a valid fallback when needed, and
+  produce an immutable primary-first transition inventory.
+- Focused foundation regression: 23 passed; static analysis of the four bundle
+  and continuity implementation/test files reported no issues.
+
+Commits: `65876df feat: cache next episode warmup bundles`,
+`41a3717 perf: validate warmup transition freshness`
+
+Next required stage: wire bundle production and consumption through the
+existing discovery/controller/player paths, then complete lifecycle recovery,
+telemetry, and the remaining C1-C7 regression matrix. Full regression,
+platform builds, migrations, supply-chain gates, and the exact final-main
+GitHub run remain pending and must not be inferred from these focused results.
