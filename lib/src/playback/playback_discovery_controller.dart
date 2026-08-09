@@ -1127,7 +1127,9 @@ final class PlaybackDiscoveryController {
       forceRefresh: forceRefresh,
       preferredProviderId: preferredProviderId,
       cancellationToken: cancellationToken,
-      lookupIntent: PlaybackLookupIntent.warmup,
+      lookupIntent: cacheEpisode
+          ? PlaybackLookupIntent.warmup
+          : PlaybackLookupIntent.interactive,
     );
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final preferred = preferredProviderId?.trim();
@@ -1271,6 +1273,12 @@ final class PlaybackDiscoveryController {
     operation.subscribers++;
     final callerCancelled = Completer<List<PlaybackLine>>();
     final unlinkCaller = cancellationToken?.register(() {
+      if (operation.subscribers == 1 &&
+          !operation.settled &&
+          identical(_backendLookups[lookupKey], operation)) {
+        _backendLookups.remove(lookupKey);
+        operation.cancel();
+      }
       if (!callerCancelled.isCompleted) {
         callerCancelled.complete(const <PlaybackLine>[]);
       }
