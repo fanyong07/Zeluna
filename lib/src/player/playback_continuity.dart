@@ -71,6 +71,24 @@ List<PlaybackLine> buildWarmupTransitionInventory(
   );
 }
 
+/// Re-checks the prepared fallback immediately before recovery.
+///
+/// The expected id prevents a newly discovered line from being mistaken for
+/// the bounded warmup fallback, while the route checks prevent an expired or
+/// unverified cached line from delaying cold discovery.
+bool warmupFallbackReadyForImmediateRecovery(
+  PlaybackLine? line, {
+  required String? expectedLineId,
+  required DateTime now,
+  Duration minValidity = Duration.zero,
+}) {
+  _requireNonNegative(minValidity, 'minValidity');
+  final expected = expectedLineId?.trim() ?? '';
+  return expected.isNotEmpty &&
+      line?.id == expected &&
+      _isVerifiedRouteValidBeyond(line!, now, minValidity);
+}
+
 bool _matchesEpisodeIdentity(
   NextEpisodeWarmupBundle bundle,
   String expectedEpisodeIdentity,

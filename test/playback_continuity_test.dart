@@ -359,4 +359,58 @@ void main() {
       );
     });
   });
+
+  group('warmup fallback immediate recovery', () {
+    test('accepts only the expected verified and fresh fallback', () {
+      final fallback = line(
+        id: 'fallback',
+        expiresAt: preparedAt.add(const Duration(minutes: 2)),
+      );
+
+      expect(
+        warmupFallbackReadyForImmediateRecovery(
+          fallback,
+          expectedLineId: 'fallback',
+          now: preparedAt,
+          minValidity: const Duration(seconds: 30),
+        ),
+        isTrue,
+      );
+      expect(
+        warmupFallbackReadyForImmediateRecovery(
+          fallback,
+          expectedLineId: 'another-line',
+          now: preparedAt,
+        ),
+        isFalse,
+      );
+    });
+
+    test('rejects an expired, unverified, or missing fallback', () {
+      expect(
+        warmupFallbackReadyForImmediateRecovery(
+          line(id: 'expired', expiresAt: preparedAt),
+          expectedLineId: 'expired',
+          now: preparedAt,
+        ),
+        isFalse,
+      );
+      expect(
+        warmupFallbackReadyForImmediateRecovery(
+          line(id: 'unverified', expiresAt: null, serverVerified: false),
+          expectedLineId: 'unverified',
+          now: preparedAt,
+        ),
+        isFalse,
+      );
+      expect(
+        warmupFallbackReadyForImmediateRecovery(
+          null,
+          expectedLineId: 'fallback',
+          now: preparedAt,
+        ),
+        isFalse,
+      );
+    });
+  });
 }
