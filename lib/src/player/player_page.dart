@@ -65,6 +65,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlaybackLineController _lineController;
   late final PlaybackLineRepository _lineRepository;
   late final PlaybackRecoveryController _recoveryController;
+  late final NextEpisodeWarmupCoordinator _nextEpisodeWarmupCoordinator;
   late final DanmakuController _danmakuController;
   late final SubtitleController _subtitleController;
   late final Anime4KController _anime4kController;
@@ -110,11 +111,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
   bool _theaterMode = false;
-  Timer? _nextEpisodePrefetchTimer;
   RulePlaybackCancellationToken? _nextEpisodePrefetchCancellation;
   DateTime? _nextEpisodePrefetchStartedAt;
-  var _nextEpisodePrefetchStarted = false;
-  var _nextEpisodePrefetchRefreshRequested = false;
   String? _warmupTransitionPrimaryLineId;
   String? _warmupTransitionFallbackLineId;
   var _openingWarmupTransitionPrimary = false;
@@ -155,6 +153,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeVideo = NativeVideoController(readOpenSerial: () => _openLineSerial);
     _webVideo = WebVideoController();
     _gestureController = PlayerGestureController();
+    _nextEpisodeWarmupCoordinator = NextEpisodeWarmupCoordinator();
     _episode = widget.request.episode;
     _accountContextVersion = ref
         .read(animeControllerProvider.notifier)
@@ -415,32 +414,30 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         !_isPrefetchableLine(_line) ||
         !_appInForeground ||
         _nextEpisode == null ||
-        _nextEpisodePrefetchStarted ||
-        _nextEpisodePrefetchTimer != null) {
+        _nextEpisodeWarmupCoordinator.lookupStarted ||
+        _nextEpisodeWarmupCoordinator.initialDelayScheduled) {
       return;
     }
     if (_hasUsableNextEpisodePrefetch()) {
-      _nextEpisodePrefetchStarted = true;
+      _nextEpisodeWarmupCoordinator.markLookupStarted();
       return;
     }
-    _nextEpisodePrefetchTimer = Timer(const Duration(seconds: 3), () {
-      _nextEpisodePrefetchTimer = null;
-      if (!mounted ||
-          !_currentSettings.rememberLine ||
-          !_appInForeground ||
-          !_isPrefetchableLine(_line) ||
-          !_playing ||
-          _buffering ||
-          _loadingLine ||
-          _playbackFailed ||
-          _pendingRecoveryLineId != null ||
-          _nativeVideo.resumeSeek.isPending ||
-          _nativeVideo.resumeSeek.isSeeking ||
-          _nextEpisode == null) {
-        return;
-      }
-      _startNextEpisodePrefetch();
-    });
+    _nextEpisodeWarmupCoordinator.scheduleInitial(
+      canStart: () =>
+          mounted &&
+          _currentSettings.rememberLine &&
+          _appInForeground &&
+          _isPrefetchableLine(_line) &&
+          _playing &&
+          !_buffering &&
+          !_loadingLine &&
+          !_playbackFailed &&
+          _pendingRecoveryLineId == null &&
+          !_nativeVideo.resumeSeek.isPending &&
+          !_nativeVideo.resumeSeek.isSeeking &&
+          _nextEpisode != null,
+      onStart: _startNextEpisodePrefetch,
+    );
   }
 
   void _startNextEpisodePrefetch({bool forceRefresh = false}) {
@@ -462,13 +459,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     if (forceRefresh) {
       _cancelNextEpisodePrefetch();
-    } else if (_nextEpisodePrefetchStarted) {
+    }
+    if (!_nextEpisodeWarmupCoordinator.markLookupStarted(
+      forceRefresh: forceRefresh,
+    )) {
       return;
     }
     final token = RulePlaybackCancellationToken();
     _nextEpisodePrefetchCancellation = token;
     _nextEpisodePrefetchStartedAt = DateTime.now();
-    _nextEpisodePrefetchStarted = true;
     final controller = ref.read(animeControllerProvider.notifier);
     final preferredProviderId =
         _preferredProviderId ??
@@ -573,23 +572,25 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _maybeRefreshNextEpisodePrefetch() {
     if (_nextEpisode == null ||
         !_isPrefetchableLine(_line) ||
-        !_nextEpisodePrefetchStarted ||
-        _nextEpisodePrefetchRefreshRequested ||
+        !_nextEpisodeWarmupCoordinator.lookupStarted ||
+        _nextEpisodeWarmupCoordinator.refreshRequested ||
         !_playing ||
         _buffering ||
         _loadingLine ||
         _duration <= Duration.zero) {
       return;
     }
-    final remaining = _duration - _position;
-    if (remaining > const Duration(minutes: 3)) return;
-    _nextEpisodePrefetchRefreshRequested = true;
+    if (!_nextEpisodeWarmupCoordinator.requestNearTransitionRefresh(
+      duration: _duration,
+      position: _position,
+    )) {
+      return;
+    }
     _startNextEpisodePrefetch(forceRefresh: true);
   }
 
   void _cancelNextEpisodePrefetch() {
-    _nextEpisodePrefetchTimer?.cancel();
-    _nextEpisodePrefetchTimer = null;
+    _nextEpisodeWarmupCoordinator.cancelInitialDelay();
     final token = _nextEpisodePrefetchCancellation;
     if (token != null && !token.isCancelled) {
       final startedAt = _nextEpisodePrefetchStartedAt;
@@ -606,15 +607,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nextEpisodePrefetchStartedAt = null;
   }
 
+  void _resetNextEpisodePrefetch() {
+    _cancelNextEpisodePrefetch();
+    _nextEpisodeWarmupCoordinator.reset();
+  }
+
   void _beginPlaybackRecovery(
     PlaybackLine target, {
     required String strategy,
     PlaybackLine? previous,
     Duration position = Duration.zero,
   }) {
-    _cancelNextEpisodePrefetch();
-    _nextEpisodePrefetchStarted = false;
-    _nextEpisodePrefetchRefreshRequested = false;
+    _resetNextEpisodePrefetch();
     if (strategy == 'auto_switch' &&
         previous?.id == _warmupTransitionPrimaryLineId &&
         target.id == _warmupTransitionFallbackLineId) {
@@ -711,9 +715,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _scheduleNextEpisodePrefetch();
     } else {
       if (!inForeground) {
-        _cancelNextEpisodePrefetch();
-        _nextEpisodePrefetchStarted = false;
-        _nextEpisodePrefetchRefreshRequested = false;
+        _resetNextEpisodePrefetch();
       }
       _backupLookupDelayTimer?.cancel();
       _backupLookupDelayTimer = null;
@@ -1203,9 +1205,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             buffering: value,
           );
           if (value) {
-            _cancelNextEpisodePrefetch();
-            _nextEpisodePrefetchStarted = false;
-            _nextEpisodePrefetchRefreshRequested = false;
+            _resetNextEpisodePrefetch();
             _backupLookupDelayTimer?.cancel();
             _backupLookupDelayTimer = null;
           } else if (_playing) {
@@ -1258,9 +1258,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         .accountContextVersion;
     if (accountContextVersion != _accountContextVersion) {
       _accountContextVersion = accountContextVersion;
-      _cancelNextEpisodePrefetch();
-      _nextEpisodePrefetchStarted = false;
-      _nextEpisodePrefetchRefreshRequested = false;
+      _resetNextEpisodePrefetch();
       _preferredProviderId = null;
       _clearWarmupTransitionState();
     }
@@ -1274,9 +1272,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _scheduleNextEpisodePrefetch();
     } else {
       _preferredProviderId = null;
-      _cancelNextEpisodePrefetch();
-      _nextEpisodePrefetchStarted = false;
-      _nextEpisodePrefetchRefreshRequested = false;
+      _resetNextEpisodePrefetch();
       _clearWarmupTransitionState();
     }
     if (volumeSettingChanged) _manualVolumeOverride = false;
@@ -1627,9 +1623,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     bool force = false,
     Duration? resumePosition,
   }) async {
-    _cancelNextEpisodePrefetch();
-    _nextEpisodePrefetchStarted = false;
-    _nextEpisodePrefetchRefreshRequested = false;
+    _resetNextEpisodePrefetch();
     var line = requestedLine;
     _recoveryController.cancelCurrentLineRetry();
     if (!_isPlayableLine(line)) {
@@ -2214,9 +2208,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _warmupTransitionPrimaryLineId = preparedLine?.id;
     _warmupTransitionFallbackLineId = preparedLines.skip(1).firstOrNull?.id;
     _openingWarmupTransitionPrimary = false;
-    _cancelNextEpisodePrefetch();
-    _nextEpisodePrefetchStarted = false;
-    _nextEpisodePrefetchRefreshRequested = false;
+    _resetNextEpisodePrefetch();
     _danmakuController.changeEpisode();
     _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
@@ -2344,9 +2336,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _selectLine(PlaybackLine line) {
     _revealPlayerControls();
-    _cancelNextEpisodePrefetch();
-    _nextEpisodePrefetchStarted = false;
-    _nextEpisodePrefetchRefreshRequested = false;
+    _resetNextEpisodePrefetch();
     _clearWarmupTransitionState();
     if (_line?.id != line.id) {
       _sessionController.dispatch(

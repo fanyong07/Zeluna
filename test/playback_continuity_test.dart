@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:anime/src/data/playback_prefetch_cache.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/playback_continuity.dart';
@@ -109,6 +111,112 @@ void main() {
           safetyMargin: const Duration(seconds: -1),
         ),
         throwsArgumentError,
+      );
+    });
+  });
+
+  group('next-episode warmup schedule', () {
+    test('delays and coalesces the stable-play warmup', () {
+      final timers = <_ManualTimer>[];
+      final delays = <Duration>[];
+      final coordinator = NextEpisodeWarmupCoordinator(
+        timerFactory: (delay, callback) {
+          delays.add(delay);
+          final timer = _ManualTimer(callback);
+          timers.add(timer);
+          return timer;
+        },
+      );
+      var starts = 0;
+
+      bool schedule() => coordinator.scheduleInitial(
+        canStart: () => true,
+        onStart: () {
+          expect(coordinator.markLookupStarted(), isTrue);
+          starts += 1;
+        },
+      );
+
+      expect(schedule(), isTrue);
+      expect(schedule(), isFalse);
+      expect(starts, 0);
+      expect(delays, [NextEpisodeWarmupCoordinator.stablePlaybackDelay]);
+
+      timers.single.fire();
+
+      expect(starts, 1);
+      expect(coordinator.lookupStarted, isTrue);
+      expect(coordinator.initialDelayScheduled, isFalse);
+      expect(schedule(), isFalse);
+    });
+
+    test('reset cancels a delayed callback and permits a new cycle', () {
+      final timers = <_ManualTimer>[];
+      final coordinator = NextEpisodeWarmupCoordinator(
+        timerFactory: (_, callback) {
+          final timer = _ManualTimer(callback);
+          timers.add(timer);
+          return timer;
+        },
+      );
+      var starts = 0;
+
+      expect(
+        coordinator.scheduleInitial(
+          canStart: () => true,
+          onStart: () => starts += 1,
+        ),
+        isTrue,
+      );
+      coordinator.reset();
+      timers.single.fire();
+
+      expect(starts, 0);
+      expect(coordinator.lookupStarted, isFalse);
+      expect(
+        coordinator.scheduleInitial(
+          canStart: () => true,
+          onStart: () => starts += 1,
+        ),
+        isTrue,
+      );
+    });
+
+    test('requests exactly one refresh inside the transition window', () {
+      final coordinator = NextEpisodeWarmupCoordinator();
+      expect(coordinator.markLookupStarted(), isTrue);
+
+      expect(
+        coordinator.requestNearTransitionRefresh(
+          duration: const Duration(minutes: 24),
+          position: const Duration(minutes: 20, seconds: 59),
+        ),
+        isFalse,
+      );
+      expect(
+        coordinator.requestNearTransitionRefresh(
+          duration: const Duration(minutes: 24),
+          position: const Duration(minutes: 21),
+        ),
+        isTrue,
+      );
+      expect(
+        coordinator.requestNearTransitionRefresh(
+          duration: const Duration(minutes: 24),
+          position: const Duration(minutes: 23),
+        ),
+        isFalse,
+      );
+      expect(coordinator.refreshRequested, isTrue);
+
+      coordinator.reset();
+      expect(coordinator.refreshRequested, isFalse);
+      expect(
+        coordinator.requestNearTransitionRefresh(
+          duration: const Duration(minutes: 24),
+          position: const Duration(minutes: 23),
+        ),
+        isFalse,
       );
     });
   });
@@ -413,4 +521,28 @@ void main() {
       );
     });
   });
+}
+
+final class _ManualTimer implements Timer {
+  _ManualTimer(this._callback);
+
+  final void Function() _callback;
+  var _active = true;
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  int get tick => _active ? 0 : 1;
+
+  @override
+  void cancel() {
+    _active = false;
+  }
+
+  void fire() {
+    if (!_active) return;
+    _active = false;
+    _callback();
+  }
 }

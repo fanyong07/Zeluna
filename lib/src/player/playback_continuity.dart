@@ -1,5 +1,85 @@
+import 'dart:async';
+
 import '../data/playback_prefetch_cache.dart';
 import '../domain/anime_models.dart';
+
+typedef NextEpisodeWarmupTimerFactory =
+    Timer Function(Duration delay, void Function() callback);
+
+/// Owns the bounded two-stage warmup schedule for one playback cycle.
+///
+/// Network work remains owned by the player/discovery controllers. This class
+/// only coalesces the delayed initial trigger and guarantees that the
+/// near-transition force refresh is requested at most once before [reset].
+final class NextEpisodeWarmupCoordinator {
+  NextEpisodeWarmupCoordinator({NextEpisodeWarmupTimerFactory? timerFactory})
+    : _timerFactory = timerFactory ?? Timer.new;
+
+  static const stablePlaybackDelay = Duration(seconds: 3);
+  static const nearTransitionRefreshWindow = Duration(minutes: 3);
+
+  final NextEpisodeWarmupTimerFactory _timerFactory;
+  Timer? _initialDelayTimer;
+  var _lookupStarted = false;
+  var _refreshRequested = false;
+
+  bool get initialDelayScheduled => _initialDelayTimer != null;
+  bool get lookupStarted => _lookupStarted;
+  bool get refreshRequested => _refreshRequested;
+
+  bool scheduleInitial({
+    required bool Function() canStart,
+    required void Function() onStart,
+    Duration delay = stablePlaybackDelay,
+  }) {
+    _requireNonNegative(delay, 'delay');
+    if (_lookupStarted || _initialDelayTimer != null) return false;
+
+    late final Timer timer;
+    timer = _timerFactory(delay, () {
+      if (!identical(_initialDelayTimer, timer)) return;
+      _initialDelayTimer = null;
+      if (canStart()) onStart();
+    });
+    _initialDelayTimer = timer;
+    return true;
+  }
+
+  bool markLookupStarted({bool forceRefresh = false}) {
+    if (_lookupStarted && !forceRefresh) return false;
+    _lookupStarted = true;
+    return true;
+  }
+
+  bool requestNearTransitionRefresh({
+    required Duration duration,
+    required Duration position,
+  }) {
+    if (!_lookupStarted || _refreshRequested || duration <= Duration.zero) {
+      return false;
+    }
+    final normalizedPosition = position < Duration.zero
+        ? Duration.zero
+        : position > duration
+        ? duration
+        : position;
+    final remaining = duration - normalizedPosition;
+    if (remaining > nearTransitionRefreshWindow) return false;
+    _refreshRequested = true;
+    return true;
+  }
+
+  void cancelInitialDelay() {
+    _initialDelayTimer?.cancel();
+    _initialDelayTimer = null;
+  }
+
+  void reset() {
+    cancelInitialDelay();
+    _lookupStarted = false;
+    _refreshRequested = false;
+  }
+}
 
 /// Calculates how long a warmed route must remain valid before it can be used
 /// for the expected episode transition.
