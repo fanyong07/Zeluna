@@ -711,7 +711,11 @@ def test_tokens_are_unique_and_long_unicode_passwords_are_supported():
     assert not verify_password(password + "错误", hashed)
 
 
-def test_legacy_signed_session_without_issuer_remains_temporarily_compatible():
+def test_legacy_jwt_compatibility_is_disabled_by_default():
+    assert auth.LEGACY_JWT_COMPATIBILITY_ENABLED is False
+
+
+def test_legacy_signed_session_can_be_enabled_for_migration(monkeypatch):
     now = int(time.time())
     legacy = jwt.encode(
         {
@@ -736,6 +740,8 @@ def test_legacy_signed_session_without_issuer_remains_temporarily_compatible():
         _TEST_SECRET,
         algorithm="HS256",
     )
+
+    monkeypatch.setattr(auth, "LEGACY_JWT_COMPATIBILITY_ENABLED", True)
 
     assert decode_jwt(legacy)["user_id"] == 7
     assert decode_jwt(wrong_issuer) is None

@@ -65,7 +65,7 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。
 - `CORS_ORIGINS`：只填写正式 Web 客户端域名；安卓和 Windows 客户端不受此项影响。
 - `LEGACY_ACCOUNT_API_ENABLED`：正式环境保持 `false`，避免旧兼容注册接口绕过邮件验证。
-- `LEGACY_JWT_COMPATIBILITY_ENABLED`：迁移期默认 `true`，只兼容签名有效且完全没有 issuer/audience 的旧会话。新版本上线满一个最长会话周期（当前 30 天）后改为 `false`，随后保持关闭。
+- `LEGACY_JWT_COMPATIBILITY_ENABLED`：默认 `false`。只有仍处于旧会话迁移期的环境才可显式设为 `true`，并且只兼容签名有效且完全没有 issuer/audience 的旧会话；迁移窗口结束后必须恢复关闭。
 - `ACCOUNT_TRUSTED_PROXY_CIDRS`：仅填写会重写 `X-Real-IP` 的直属反向代理 IP/CIDR；默认留空时完全忽略该请求头。不要填写客户端网段或公网通配网段。
 - `ACCOUNT_RATE_LIMIT_MAX_KEYS`：进程内账号限流表的硬容量，默认 `10000`；容量耗尽时对新键 fail-closed，而不是淘汰仍有效的限制。多实例部署仍必须在网关配置共享限流。
 - `run_prod.py` 显式关闭 Uvicorn 的隐式代理头处理。若改用 Uvicorn CLI，也必须带 `--no-proxy-headers`，由 Zeluna 仅按上面的直属代理配置读取 `X-Real-IP`。
