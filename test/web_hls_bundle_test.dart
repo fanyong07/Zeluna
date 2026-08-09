@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -41,9 +42,12 @@ void main() {
       final license = File('web/vendor/hls.LICENSE.txt');
 
       expect(bundle.existsSync(), isTrue);
-      expect(bundle.lengthSync(), 414359);
+      final normalizedBundle = utf8.encode(
+        utf8.decode(bundle.readAsBytesSync()).replaceAll('\r\n', '\n'),
+      );
+      expect(normalizedBundle.length, 414359);
       expect(
-        sha256.convert(bundle.readAsBytesSync()).toString(),
+        sha256.convert(normalizedBundle).toString(),
         '5ff2d714de30be428fc77b13e01db9a4b4cf015e9b4d6b3e8864b65d3d7d3ed7',
       );
       expect(license.readAsStringSync(), contains('Apache License'));
