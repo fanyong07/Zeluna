@@ -2245,6 +2245,19 @@ Status: in_progress (controller scope matrix completed; player integration pendi
 
 Commit: `a2a87e5 test: cover warmup scope invalidation`
 
+### C7 - Continuity telemetry safety
+
+Status: in_progress (redaction completed; event wiring pending)
+
+- Playback trace redaction now rejects credential/exception/message/stack
+  fields, URL-shaped and URL-encoded values, signed-query fragments, and
+  Bearer/Cookie/Token/Signature-shaped strings before they reach a sink.
+- The redaction regression passed 5/5 and focused static analysis reported no
+  issues. Exact warmup-ready/transition event wiring remains coupled to the
+  pending player bundle-consumption integration and is not marked complete.
+
+Commit: `8e12736 security: redact playback trace credentials`
+
 Next required stage: wire bundle production and consumption through the
 existing discovery/controller/player paths, then complete lifecycle recovery,
 telemetry, and the remaining C1-C7 regression matrix. Full regression,
