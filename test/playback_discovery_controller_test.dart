@@ -267,6 +267,144 @@ void main() {
     expect(calls, 2);
   });
 
+  final warmupInvalidationCases =
+      <
+        ({
+          String name,
+          void Function(PlaybackDiscoveryController controller) invalidate,
+        })
+      >[
+        (
+          name: 'remember-line cache clear',
+          invalidate: (controller) => controller.clearCaches(),
+        ),
+        (
+          name: 'backend configuration change',
+          invalidate: (controller) => controller.applyServices(
+            const ExternalServiceSettings(
+              playbackBackendEnabled: true,
+              playbackBackendEndpoint: 'https://backend-2.example',
+            ),
+            contextVersion: 1,
+          ),
+        ),
+        (
+          name: 'rule configuration change',
+          invalidate: (controller) => controller.applyRuleState(
+            const RulePluginState(installedIds: <String>{'rule:new'}),
+            contextVersion: 1,
+          ),
+        ),
+        (
+          name: 'controller dispose',
+          invalidate: (controller) => controller.dispose(),
+        ),
+      ];
+  for (final invalidationCase in warmupInvalidationCases) {
+    test(
+      '${invalidationCase.name} rejects an in-flight warmup result',
+      () async {
+        final verification = Completer<void>();
+        var verifyCalls = 0;
+        RulePlaybackCancellationToken? verificationToken;
+        final nextEpisode = _episodeFor(2);
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, episode, {required expandAll, cancellationToken}) async =>
+                <PlaybackLine>[
+                  _line(
+                    'late-warmup',
+                    episodeId: episode.id,
+                    serverVerified: true,
+                  ),
+                ],
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                verifyCalls++;
+                verificationToken = cancellationToken;
+                await verification.future;
+                return _verified(line);
+              },
+        );
+        addTearDown(() {
+          if (!verification.isCompleted) verification.complete();
+          controller.dispose();
+        });
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        final prefetch = controller.prefetchPlaybackForEpisode(
+          _subject,
+          nextEpisode,
+        );
+        await _waitUntil(() => verifyCalls == 1);
+
+        invalidationCase.invalidate(controller);
+        expect(verificationToken?.isCancelled, isTrue);
+        verification.complete();
+        await prefetch;
+
+        expect(controller.cachedWarmupEntries, 0);
+      },
+    );
+  }
+
+  test('caller cancellation rejects an in-flight warmup result', () async {
+    final verification = Completer<void>();
+    var verifyCalls = 0;
+    RulePlaybackCancellationToken? verificationToken;
+    final nextEpisode = _episodeFor(2);
+    final controller = _controller(
+      backend: _FakePlaybackRepository(
+        load: (_, episode, {required expandAll, cancellationToken}) async =>
+            <PlaybackLine>[
+              _line(
+                'cancelled-warmup',
+                episodeId: episode.id,
+                serverVerified: true,
+              ),
+            ],
+      ),
+      activeVersion: () => 1,
+      verify:
+          (
+            line, {
+            enrichMetadata = true,
+            forceRefresh = false,
+            cancellationToken,
+          }) async {
+            verifyCalls++;
+            verificationToken = cancellationToken;
+            await verification.future;
+            return _verified(line);
+          },
+    );
+    addTearDown(() {
+      if (!verification.isCompleted) verification.complete();
+      controller.dispose();
+    });
+    _load(controller, accountId: 'account-a', contextVersion: 1);
+    final token = RulePlaybackCancellationToken();
+    final prefetch = controller.prefetchPlaybackForEpisode(
+      _subject,
+      nextEpisode,
+      cancellationToken: token,
+    );
+    await _waitUntil(() => verifyCalls == 1);
+
+    token.cancel();
+    expect(verificationToken?.isCancelled, isTrue);
+    verification.complete();
+    await prefetch;
+
+    expect(controller.cachedWarmupEntries, 0);
+  });
+
   test(
     'next-episode prefetch deduplicates and verifies at most two preferred candidates',
     () async {
