@@ -2216,10 +2216,16 @@ Commits: `65876df feat: cache next episode warmup bundles`,
   helper and its test reported no issues, and scoped diff/encoding/secret
   checks passed.
 
-- The broader `anime_controller_playback_hedge_test.dart` is not claimed as
-  passing in the current dirty integration worktree: cancellation request
-  counting and detail-prefetch completion currently have two failures. They
-  remain part of the pending C6 integration/regression work.
+- The cancelled-backend race now synchronously retires the owned operation
+  when its last subscriber cancels, preventing a simultaneous late response
+  from entering the cache. Shared operations remain alive for other callers.
+- Legacy detail-page prefetch keeps its three-candidate startup probe, while
+  next-episode bundle production retains the bounded two-line warmup policy.
+- Regression after the C6 repair: `anime_controller_playback_hedge_test.dart`
+  passed 9/9 and `playback_discovery_controller_test.dart` passed 24/24;
+  static analysis of the controller and both test files reported no issues.
+
+Commit: `512fcb6 fix: isolate cancelled playback lookups`
 
 Next required stage: wire bundle production and consumption through the
 existing discovery/controller/player paths, then complete lifecycle recovery,
