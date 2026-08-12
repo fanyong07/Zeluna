@@ -47,9 +47,9 @@ jobs:
         run: flutter test --reporter compact
 
   android:
-    name: Android debug build
+    name: Android build and emulator smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -59,6 +59,60 @@ jobs:
           cache: true
       - run: flutter pub get --enforce-lockfile
       - run: flutter build apk --debug --suppress-analytics
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Launch debug APK on Android 35
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          cores: 2
+          ram-size: 3072M
+          emulator-boot-timeout: 300
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            set -eux
+            adb shell wm size 1080x2400
+            adb shell wm density 420
+            adb install -r build/app/outputs/flutter-apk/app-debug.apk
+            adb shell monkey -p app.anime.anime -c android.intent.category.LAUNCHER 1
+            for attempt in $(seq 1 30); do
+              adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt || true
+              if grep -q 'app.anime.anime/.MainActivity' resumed-activity.txt; then
+                break
+              fi
+              sleep 1
+            done
+            grep -q 'app.anime.anime/.MainActivity' resumed-activity.txt
+            adb shell dumpsys package app.anime.anime | grep -E 'versionName|versionCode' > app-version.txt
+            app_pid="$(adb shell pidof app.anime.anime | tr -d '\r')"
+            test -n "$app_pid"
+            adb logcat -d --pid="$app_pid" > android-app-logcat.txt || true
+            if grep -E 'FATAL EXCEPTION|ANR in app\.anime\.anime' android-app-logcat.txt; then
+              exit 1
+            fi
+            adb exec-out screencap -p > zeluna-android-emulator.png
+            test -s zeluna-android-emulator.png
+      - name: Upload Android runtime evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-emulator-runtime
+          path: |
+            resumed-activity.txt
+            app-version.txt
+            android-app-logcat.txt
+            zeluna-android-emulator.png
+          if-no-files-found: warn
+          retention-days: 7
 
   windows:
     name: Windows build and WebView fork
