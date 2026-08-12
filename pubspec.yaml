@@ -41,7 +41,7 @@ dependencies:
   hive_ce: ^2.19.3
   path_provider: ^2.1.5
   url_launcher: ^6.3.2
-  file_picker: 10.3.3
+  file_picker: 11.0.3
   flutter_secure_storage: ^10.3.1
   package_info_plus: ^9.0.1
   wakelock_plus: ^1.5.2

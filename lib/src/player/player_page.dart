@@ -2603,7 +2603,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _pickLocalPlaybackFile() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: const [
         'mp4',
@@ -2878,7 +2878,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         RegExp(r'[\\/:*?"<>|]'),
         '_',
       );
-      final path = await FilePicker.platform.saveFile(
+      final path = await FilePicker.saveFile(
         dialogTitle: '保存视频截图',
         fileName:
             '${safeTitle}_EP${_episode.number}_${DateTime.now().millisecondsSinceEpoch}.png',
