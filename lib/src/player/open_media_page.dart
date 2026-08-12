@@ -133,7 +133,7 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
   Future<void> _pickLocalFile() async {
     setState(() => _opening = true);
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: const [
           'mp4',

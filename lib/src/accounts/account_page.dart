@@ -1125,7 +1125,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
           .read(animeControllerProvider.notifier)
           .exportCurrentAccountData();
       final day = DateTime.now().toUtc().toIso8601String().substring(0, 10);
-      final savedPath = await FilePicker.platform.saveFile(
+      final savedPath = await FilePicker.saveFile(
         dialogTitle: '导出 Zeluna 账号数据',
         fileName: 'zeluna-account-data-$day.json',
         type: FileType.custom,
