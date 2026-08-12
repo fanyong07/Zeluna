@@ -244,7 +244,10 @@ class _PlayerBottomBar extends StatelessWidget {
     final safePadding = MediaQuery.paddingOf(context);
     final compact = _isMobilePlayerLayout(context);
     final mobileLandscape = compact && size.width > size.height;
-    final portraitMobile = compact && !mobileLandscape;
+    final portraitMobile = usesCompactPlayerBottomControlsForSize(
+      size,
+      defaultTargetPlatform,
+    );
     final progress = _progress(position, duration);
     final bufferProgress = _progress(
       buffer > position ? buffer : position,
@@ -258,7 +261,7 @@ class _PlayerBottomBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (compact)
+          if (portraitMobile)
             Text(
               '${_durationLabel(position)} / ${_durationLabel(duration)}',
               style: Theme.of(context).textTheme.titleSmall?.copyWith(
@@ -285,8 +288,8 @@ class _PlayerBottomBar extends StatelessWidget {
             ),
           ),
           SizedBox(
-            height: portraitMobile ? 36 : (compact ? 42 : 52),
-            child: compact
+            height: portraitMobile ? 36 : 52,
+            child: portraitMobile
                 ? _MobilePlayerControls(
                     playing: playing,
                     buffering: buffering,
@@ -297,7 +300,7 @@ class _PlayerBottomBar extends StatelessWidget {
                     onNextEpisode: onNextEpisode,
                     onFullscreen: onFullscreen,
                     onSubtitlePanel: onSubtitlePanel,
-                    landscape: mobileLandscape,
+                    landscape: false,
                   )
                 : Row(
                     children: [

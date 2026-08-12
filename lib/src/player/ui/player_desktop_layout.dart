@@ -79,6 +79,15 @@ bool usesMobilePlayerLayoutForSize(Size size, TargetPlatform platform) {
 }
 
 @visibleForTesting
+bool usesCompactPlayerBottomControlsForSize(
+  Size size,
+  TargetPlatform platform,
+) {
+  return size.height > size.width &&
+      usesMobilePlayerLayoutForSize(size, platform);
+}
+
+@visibleForTesting
 bool usesPortraitPlayerPageLayoutForSize(
   Size size,
   TargetPlatform platform, {

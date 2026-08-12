@@ -47,6 +47,23 @@ void main() {
     );
   });
 
+  test('only portrait mobile player uses the reduced bottom controls', () {
+    expect(
+      usesCompactPlayerBottomControlsForSize(
+        const Size(430, 900),
+        TargetPlatform.android,
+      ),
+      isTrue,
+    );
+    expect(
+      usesCompactPlayerBottomControlsForSize(
+        const Size(800, 360),
+        TargetPlatform.android,
+      ),
+      isFalse,
+    );
+  });
+
   test('portrait mobile player keeps video above a details surface', () {
     expect(
       usesPortraitPlayerPageLayoutForSize(
