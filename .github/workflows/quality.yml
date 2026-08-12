@@ -79,26 +79,18 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
           disable-animations: true
           script: |
-            set -eux
             adb shell wm size 1080x2400
             adb shell wm density 420
             adb install -r build/app/outputs/flutter-apk/app-debug.apk
-            adb shell monkey -p app.anime.anime -c android.intent.category.LAUNCHER 1
-            for attempt in $(seq 1 30); do
-              adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt || true
-              if grep -q 'app.anime.anime/.MainActivity' resumed-activity.txt; then
-                break
-              fi
-              sleep 1
-            done
+            adb shell am start -W -n app.anime.anime/.MainActivity > app-launch.txt
+            sleep 5
+            adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt
             grep -q 'app.anime.anime/.MainActivity' resumed-activity.txt
             adb shell dumpsys package app.anime.anime | grep -E 'versionName|versionCode' > app-version.txt
-            app_pid="$(adb shell pidof app.anime.anime | tr -d '\r')"
-            test -n "$app_pid"
-            adb logcat -d --pid="$app_pid" > android-app-logcat.txt || true
-            if grep -E 'FATAL EXCEPTION|ANR in app\.anime\.anime' android-app-logcat.txt; then
-              exit 1
-            fi
+            adb shell pidof app.anime.anime | tr -d '\r' > app-pid.txt
+            grep -Eq '[0-9]+' app-pid.txt
+            bash -lc 'app_pid="$(tr -d "\r\n" < app-pid.txt)"; adb logcat -d --pid="$app_pid" > android-app-logcat.txt || true'
+            bash -lc '! grep -E "FATAL EXCEPTION|ANR in app\\.anime\\.anime" android-app-logcat.txt'
             adb exec-out screencap -p > zeluna-android-emulator.png
             test -s zeluna-android-emulator.png
       - name: Upload Android runtime evidence
@@ -107,8 +99,10 @@ jobs:
         with:
           name: android-emulator-runtime
           path: |
+            app-launch.txt
             resumed-activity.txt
             app-version.txt
+            app-pid.txt
             android-app-logcat.txt
             zeluna-android-emulator.png
           if-no-files-found: warn
