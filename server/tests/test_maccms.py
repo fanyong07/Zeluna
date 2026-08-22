@@ -26,6 +26,54 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed[0][1]["name"], "第2集")
         self.assertEqual(parsed[1][0]["url"], "https://cdn.example/movie.mp4")
 
+    def test_parse_vod_play_url_rejects_obvious_player_pages(self):
+        parsed = parse_vod_play_url(
+            "播放页$https://source.example/player.html?url=abc"
+            "#嵌入页$https://source.example/embed/123"
+            "#无扩展直链$https://cdn.example/media/opaque-token"
+        )
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(len(parsed[0]), 1)
+        self.assertEqual(
+            parsed[0][0]["url"],
+            "https://cdn.example/media/opaque-token",
+        )
+
+    async def test_unknown_url_is_not_labeled_mp4_and_safe_site_headers_survive(self):
+        self.scraper._sites = [{
+            "name": "测试站",
+            "api": "https://source.example/api.php/provide/vod",
+            "headers": {
+                "Referer": "https://source.example/",
+                "Origin": "https://source.example",
+                "Authorization": "must-not-leave-config",
+            },
+        }]
+        self.scraper._client.get = AsyncMock(return_value=httpx.Response(
+            200,
+            json={
+                "list": [{
+                    "vod_play_url": (
+                        "第1集$https://cdn.example/media/opaque-token"
+                    ),
+                }],
+            },
+            request=httpx.Request(
+                "GET",
+                "https://source.example/api.php/provide/vod",
+            ),
+        ))
+
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 1)
+
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].format, "auto")
+        self.assertEqual(lines[0].headers, {
+            "Referer": "https://source.example/",
+            "Origin": "https://source.example",
+        })
+
     async def test_search_interleaves_sites_by_priority(self):
         high = {"name": "高优先", "api": "https://high.example", "weight": 100}
         low = {"name": "低优先", "api": "https://low.example", "weight": 10}

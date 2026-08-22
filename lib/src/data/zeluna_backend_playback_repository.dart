@@ -198,6 +198,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final json = item.cast<Object?, Object?>();
         final url = json['url']?.toString().trim() ?? '';
         final mediaUri = Uri.tryParse(url);
+        if (mediaUri != null && _isObviousPlaybackPageUri(mediaUri)) {
+          continue;
+        }
         final hasPlayableUrl =
             mediaUri != null &&
             mediaUri.hasAuthority &&
@@ -346,6 +349,38 @@ DateTime? _epochDateTime(Object? value) {
   if (raw == null || raw <= 0) return null;
   final milliseconds = raw > 10000000000 ? raw : raw * 1000;
   return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+}
+
+bool _isObviousPlaybackPageUri(Uri uri) {
+  final path = uri.path.toLowerCase().replaceFirst(RegExp(r'/+$'), '');
+  const mediaSuffixes = <String>{
+    '.m3u8',
+    '.mpd',
+    '.mp4',
+    '.m4v',
+    '.mov',
+    '.mkv',
+    '.flv',
+    '.webm',
+  };
+  if (mediaSuffixes.any(path.endsWith)) return false;
+  if (const <String>{'.html', '.htm', '.shtml', '.xhtml'}.any(path.endsWith)) {
+    return true;
+  }
+  final segments = uri.pathSegments
+      .map((segment) => segment.trim().toLowerCase())
+      .where((segment) => segment.isNotEmpty)
+      .toList(growable: false);
+  if (segments.any(const <String>{'embed', 'iframe', 'player'}.contains)) {
+    return true;
+  }
+  final last = segments.isEmpty ? '' : segments.last;
+  return last.startsWith('player.') ||
+      last.startsWith('player-') ||
+      last.startsWith('player_') ||
+      last.startsWith('embed.') ||
+      last.startsWith('embed-') ||
+      last.startsWith('embed_');
 }
 
 String? _stableSubjectId(AnimeSubject subject) {

@@ -2,7 +2,8 @@
 param(
     [switch]$SkipBuild,
     [switch]$UseLegacyDebugSigning,
-    [string]$DeliveryDirectory
+    [string]$DeliveryDirectory,
+    [string]$GateReceiptPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,10 @@ foreach ($outputPath in @($deliveryPath, $checksumPath)) {
     }
 }
 
+. (Join-Path $PSScriptRoot 'release_gate.ps1')
+Assert-ZelunaCleanWorktree $projectRootFull
+$gate = Read-ZelunaReleaseGate $projectRootFull $GateReceiptPath
+
 if (-not $SkipBuild) {
     $buildArguments = @('build', 'apk', '--release', '--suppress-analytics')
     if ($UseLegacyDebugSigning) {
@@ -70,5 +75,7 @@ $checksum = (Get-FileHash -LiteralPath $deliveryPath -Algorithm SHA256).Hash.ToL
     [System.Text.UTF8Encoding]::new($false)
 )
 Write-Output "Version: $version"
+Write-Output "Git SHA: $($gate.git_sha)"
+Write-Output "CI run: $($gate.ci_run_id)"
 Write-Output "SHA-256: $checksum"
 Write-Output "Checksum file: $checksumPath"

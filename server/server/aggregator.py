@@ -33,7 +33,13 @@ from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
-from .scrapers.base import SubjectResult
+from .scrapers.base import (
+    DIRECT_MEDIA_URL,
+    INVALID_MEDIA_URL,
+    PLAYER_PAGE_URL,
+    SubjectResult,
+    classify_media_url,
+)
 from .config import (
     M3U8_SEARCH_ENABLED,
     PLAYBACK_PROVIDER_IDS,
@@ -56,6 +62,7 @@ DNS_FAILURE = "dns_failure"
 CONNECT_TIMEOUT = "connect_timeout"
 READ_TIMEOUT = "read_timeout"
 RESTRICTED = "restricted"
+NON_PUBLIC_TARGET = "non_public_target"
 STALE_ROUTE = "stale_route"
 MALFORMED_MANIFEST = "malformed_manifest"
 EMPTY_MEDIA = "empty_media"
@@ -69,6 +76,7 @@ _ERROR_CATEGORY_PRIORITY = {
     RATE_LIMITED: 20,
     RESTRICTED: 30,
     DNS_FAILURE: 40,
+    NON_PUBLIC_TARGET: 45,
     CONNECT_TIMEOUT: 50,
     READ_TIMEOUT: 60,
     UNKNOWN_EXCEPTION: 70,
@@ -183,13 +191,15 @@ async def _is_public_http_url(url: str) -> bool:
     return _is_public_ip(host)
 
 
-def _is_client_probe_candidate_url(url: str) -> bool:
+def _is_client_probe_candidate_url(url: str, declared_format: str = "") -> bool:
     """Allow only HTTP(S) candidates that cannot directly name local hosts.
 
     DNS is deliberately re-checked by the client's public-only HTTP stack.
     This keeps Clash/TUN fake-IP environments usable without allowing a source
     adapter to hand the player a literal loopback or private address.
     """
+    if classify_media_url(url, declared_format) != DIRECT_MEDIA_URL:
+        return False
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return False
@@ -826,7 +836,7 @@ class ContentAggregator:
                             startup_profile=_declared_startup_profile(line),
                         )
                         for line in raw_lines
-                        if _is_client_probe_candidate_url(line.url)
+                        if _is_client_probe_candidate_url(line.url, line.format)
                     ]
                     return SourceResolutionOutcome(
                         match=match,
@@ -876,7 +886,7 @@ class ContentAggregator:
                             ))
                         elif (
                             status == CLIENT_PROBE_REQUIRED
-                            and _is_client_probe_candidate_url(line.url)
+                            and _is_client_probe_candidate_url(line.url, line.format)
                         ):
                             lines.append(replace(
                                 line,
@@ -1363,8 +1373,11 @@ class ContentAggregator:
             return finish(UNAVAILABLE, UNKNOWN_EXCEPTION)
 
         url = line.url
-        if not url.lower().startswith(("http://", "https://")):
+        initial_classification = classify_media_url(url, line.format)
+        if initial_classification == INVALID_MEDIA_URL:
             return finish(UNAVAILABLE, STALE_ROUTE)
+        if initial_classification == PLAYER_PAGE_URL:
+            return finish(UNAVAILABLE, PARSER_MISMATCH)
         headers = {"User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
@@ -1425,12 +1438,14 @@ class ContentAggregator:
                             SERVER_BLOCKED_CLIENT_CANDIDATE,
                         )
                     if response is unsafe_target_sentinel:
-                        return finish(UNAVAILABLE, PARSER_MISMATCH)
+                        return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                     if response is stale_redirect_sentinel:
                         return finish(UNAVAILABLE, STALE_ROUTE)
                     response_url, status, content_type, body = response
                     if status >= 400:
                         return finish_http_failure(status)
+                    if classify_media_url(response_url, line.format) == PLAYER_PAGE_URL:
+                        return finish(UNAVAILABLE, PARSER_MISMATCH)
                     body_head = body[:512].decode("utf-8", errors="ignore").lstrip()
                     looks_html = (
                         "text/html" in content_type
@@ -1512,7 +1527,7 @@ class ContentAggregator:
                                 SERVER_BLOCKED_CLIENT_CANDIDATE,
                             )
                         if key_response is unsafe_target_sentinel:
-                            return finish(UNAVAILABLE, PARSER_MISMATCH)
+                            return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                         if key_response is stale_redirect_sentinel:
                             return finish(UNAVAILABLE, STALE_ROUTE)
                         _, key_status, key_type, key_body = key_response
@@ -1534,7 +1549,7 @@ class ContentAggregator:
                             SERVER_BLOCKED_CLIENT_CANDIDATE,
                         )
                     if sample is unsafe_target_sentinel:
-                        return finish(UNAVAILABLE, PARSER_MISMATCH)
+                        return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                     if sample is stale_redirect_sentinel:
                         return finish(UNAVAILABLE, STALE_ROUTE)
                     _, sample_status, sample_type, sample_body = sample

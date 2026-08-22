@@ -77,6 +77,47 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `M3U8_SEARCH_ENABLED`：通用 M3U8 搜索回退，正式环境默认 `false`。只有完成独立安全评审并明确批准时才可启用。
 - `PRECACHE_ENABLED`：只有 `PLAYBACK_PROVIDER_IDS` 已显式配置且预热流量已获批准时才可设为 `true`。
 
+当前代码接受的播放 provider ID：
+
+- 聚合：`aggregate.maccms`、`aggregate.tvbox`、`aggregate.vod`
+- 独立抓取器：`crawler.age`、`crawler.dm706`、`crawler.girigiri`、`crawler.xgcartoon`、`crawler.jibi`、`crawler.yinghua2`、`crawler.wedm`、`crawler.nivod`、`crawler.ppnix`、`crawler.dbku`
+
+“代码支持”不代表“已经合规批准或在当前出口可播”。其中 `aggregate.maccms` 会启用 `maccms_sites.py` 当前表内全部站点的按需查询；`precache` 字段只控制 MacCMS 后台预爬范围，不是站点启用开关。未知 provider ID 会让服务拒绝启动，避免拼写错误被静默忽略。
+
+### 播放 provider 启用流程
+
+1. 在目标 VPS 的 `server/` 目录运行现有站表探针并保留脱敏结果：
+
+   ```bash
+   /opt/zeluna/venv/bin/python tools/probe_maccms.py \
+     --json-output probe-results/maccms-$(date -u +%Y%m%dT%H%M%SZ).json
+   ```
+
+2. 需要新增采集站时，先把候选写成 JSON 数据实测，不要先改 `maccms_sites.py`：
+
+   ```bash
+   /opt/zeluna/venv/bin/python tools/probe_maccms.py \
+     --candidates candidates.json \
+     --json-output probe-results/candidates-$(date -u +%Y%m%dT%H%M%SZ).json
+   ```
+
+   `candidates.json` 形如 `[{"name": "站名", "api": "https://.../api.php/provide/vod"}]`；
+   非 http(s)、带凭据或与现有表重复的条目会被直接拒绝。只有在目标出口真正完成媒体验证
+   （报告里 `origin` 为 `candidate` 且 `playable` 非空）并通过合规审核的站，才可写入
+   `maccms_sites.py`，且首次写入保持 `precache: False`。
+
+3. 审核合规性和目标出口探针结果后，在 `/etc/zeluna/zeluna.env` 中只填写获准 ID。首次启用保持 `PRECACHE_ENABLED=false`，例如：
+
+   ```dotenv
+   PLAYBACK_PROVIDER_IDS=aggregate.maccms
+   PRECACHE_ENABLED=false
+   M3U8_SEARCH_ENABLED=false
+   ```
+
+4. 按本文件的备份、迁移和重启流程部署，然后检查 `/api/v3/status` 的 `playback_providers.enabled_ids` 与预期完全一致。
+5. 分别完成番剧、剧集、电影的搜索、详情、播放清单、AES key（如有）、首分片和真实客户端播放验证；第二次请求还应验证缓存命中。
+6. 只有确认流量和资源预算后，才单独批准并开启 `PRECACHE_ENABLED=true`。
+
 ## 数据库升级（启动服务前执行）
 
 首次使用此版本或以后存在新迁移时，先停止服务，再显式升级数据库：
@@ -153,6 +194,7 @@ curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&tit
 验收要求：
 
 - `/api/v3/status` 返回 `version: 3`，TMDB 配置状态为 true。
+- `/api/v3/status` 的 `playback_providers.enabled_ids` 与部署审核的 allowlist 一致。
 - 搜索结果只返回稳定作品 ID，不出现采集站内部 ID。
 - 第一次播放完成验证并写缓存；第二次请求返回 `cached: true`。
 - 热缓存快速接口应立即返回主线路，并尽量附带两个不同域名的备用线路；`stale: true` 表示旧线路仍可播且后台正在刷新。

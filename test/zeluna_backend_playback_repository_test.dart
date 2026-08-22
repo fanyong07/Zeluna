@@ -277,6 +277,43 @@ void main() {
     expect(verified.sourceErrorCategory, 'server_blocked_client_candidate');
   });
 
+  test('客户端拒绝后端误返回的 HTML 和 embed 播放页', () async {
+    final client = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'https://source.example/player.html?url=video',
+          'format': 'hls',
+          'source': 'maccms:错误页',
+          'status': 'server_verified',
+        },
+        {
+          'url': 'https://source.example/embed/123',
+          'format': 'hls',
+          'source': 'maccms:嵌入页',
+          'available': false,
+          'status': 'client_probe_required',
+        },
+        {
+          'url': 'https://cdn.example/media/opaque-token',
+          'format': 'auto',
+          'source': 'maccms:无扩展直链',
+          'status': 'server_verified',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.url, 'https://cdn.example/media/opaque-token');
+    expect(lines.single.serverVerified, isTrue);
+  });
+
   test('不受支持的旧来源不会再触发后端或本地规则查源', () async {
     var requests = 0;
     final client = MockClient((request) async {

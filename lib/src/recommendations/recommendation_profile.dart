@@ -14,6 +14,17 @@ const recommendationEventWeights = <RecommendationEventType, double>{
   RecommendationEventType.firstFrame: 1,
 };
 
+double recommendationFeatureStrength(String feature) {
+  final separator = feature.indexOf(':');
+  final kind = separator < 0 ? feature : feature.substring(0, separator);
+  return switch (kind) {
+    'category' || 'tag' => 1.0,
+    'language' || 'region' => 0.6,
+    'platform' || 'year' => 0.25,
+    _ => 0.5,
+  };
+}
+
 enum RecommendationProfileStage { cold, warming, mature }
 
 class RecommendationProfile {
@@ -76,10 +87,11 @@ class RecommendationProfile {
         case RecommendationEventType.unfavorited:
           activeFavorites.remove(event.workKey);
         case RecommendationEventType.completed ||
-            RecommendationEventType.effectiveWatch ||
-            RecommendationEventType.firstFrame:
+            RecommendationEventType.effectiveWatch:
           milestones.add(event);
           latestExplicitPositive[event.workKey] = event.occurredAt;
+        case RecommendationEventType.firstFrame:
+          milestones.add(event);
         case RecommendationEventType.notInterested:
           notInterested[event.workKey] = event;
       }
@@ -95,7 +107,7 @@ class RecommendationProfile {
     final contentTypeWeights = <SubjectContentType, double>{};
     final knownWorkKeys = <String>{};
     final strongWorkKeys = <String>{};
-    final effectiveSessions = <String>{};
+    final effectiveWorkKeys = <String>{};
 
     for (final event in positiveEvents) {
       final baseWeight = recommendationEventWeights[event.type];
@@ -114,22 +126,23 @@ class RecommendationProfile {
         ifAbsent: () => weight,
       );
       for (final feature in event.features) {
+        final featureWeight = weight * recommendationFeatureStrength(feature);
         featureWeights.update(
           feature,
-          (value) => value + weight,
-          ifAbsent: () => weight,
+          (value) => value + featureWeight,
+          ifAbsent: () => featureWeight,
         );
       }
-      knownWorkKeys.add(event.workKey);
+      if (event.type != RecommendationEventType.firstFrame) {
+        knownWorkKeys.add(event.workKey);
+      }
       if (event.type == RecommendationEventType.following ||
           event.type == RecommendationEventType.favorite) {
         strongWorkKeys.add(event.workKey);
       }
       if (event.type == RecommendationEventType.completed ||
           event.type == RecommendationEventType.effectiveWatch) {
-        effectiveSessions.add(
-          '${event.workKey}|${event.sessionId ?? event.id}',
-        );
+        effectiveWorkKeys.add(event.workKey);
       }
     }
 
@@ -171,7 +184,7 @@ class RecommendationProfile {
       servedCounts: servedCounts,
       lastServedAt: lastServedAt,
       strongSignalCount: strongWorkKeys.length,
-      effectiveSignalCount: effectiveSessions.length,
+      effectiveSignalCount: effectiveWorkKeys.length,
     );
   }
 
@@ -210,7 +223,8 @@ class RecommendationProfile {
       for (final feature in candidate.features) {
         final weight = featureWeights[feature];
         if (weight == null) continue;
-        featureScore += weight / maxFeature;
+        featureScore +=
+            (weight / maxFeature) * recommendationFeatureStrength(feature);
         matched++;
       }
     }

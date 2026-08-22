@@ -7,6 +7,85 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
+from urllib.parse import unquote, urlparse
+
+
+DIRECT_MEDIA_URL = "direct"
+UNKNOWN_MEDIA_URL = "unknown"
+PLAYER_PAGE_URL = "player_page"
+INVALID_MEDIA_URL = "invalid"
+
+_MEDIA_FORMATS = frozenset({
+    "hls",
+    "m3u8",
+    "dash",
+    "mpd",
+    "mp4",
+    "m4v",
+    "mov",
+    "mkv",
+    "flv",
+    "webm",
+})
+_PLAYER_PAGE_SUFFIXES = (".html", ".htm", ".shtml", ".xhtml")
+_PLAYER_PAGE_SEGMENTS = frozenset({"embed", "iframe", "player"})
+
+
+def media_format_from_url(value: str) -> str:
+    """Infer only formats made explicit by the URL path."""
+    try:
+        path = unquote(urlparse(value).path).lower()
+    except ValueError:
+        return "auto"
+    if path.endswith(".m3u8"):
+        return "hls"
+    if path.endswith(".mpd"):
+        return "dash"
+    for suffix in ("mp4", "m4v", "mov", "mkv", "flv", "webm"):
+        if path.endswith(f".{suffix}"):
+            return suffix
+    return "auto"
+
+
+def classify_media_url(value: str, declared_format: str = "") -> str:
+    """Classify a candidate without fetching it.
+
+    Extensionless URLs intentionally remain ``unknown`` so the full server
+    verifier can content-sniff them. Obvious browser/embed pages are rejected
+    even when a source incorrectly labels them as HLS or MP4.
+    """
+    try:
+        parsed = urlparse((value or "").strip())
+    except ValueError:
+        return INVALID_MEDIA_URL
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return INVALID_MEDIA_URL
+
+    inferred_format = media_format_from_url(value)
+    if inferred_format != "auto":
+        return DIRECT_MEDIA_URL
+
+    path = unquote(parsed.path).lower().rstrip("/")
+    segments = tuple(segment for segment in path.split("/") if segment)
+    last_segment = segments[-1] if segments else ""
+    if path.endswith(_PLAYER_PAGE_SUFFIXES):
+        return PLAYER_PAGE_URL
+    if (
+        any(segment in _PLAYER_PAGE_SEGMENTS for segment in segments)
+        or last_segment.startswith(("player.", "player-", "player_"))
+        or last_segment.startswith(("embed.", "embed-", "embed_"))
+    ):
+        return PLAYER_PAGE_URL
+
+    normalized_format = (declared_format or "").strip().lower()
+    if normalized_format in _MEDIA_FORMATS:
+        return DIRECT_MEDIA_URL
+    return UNKNOWN_MEDIA_URL
 
 
 @dataclass

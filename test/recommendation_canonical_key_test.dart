@@ -28,7 +28,7 @@ AnimeSubject _subject({
 );
 
 void main() {
-  test('provider stable identity precedes title and year fallback', () {
+  test('title and year unify the same work across stable providers', () {
     final bangumi = _subject(
       id: 1,
       title: '葬送的芙莉莲',
@@ -44,7 +44,7 @@ void main() {
       source: 'tmdb:tv:209867',
     );
 
-    expect(canonicalWorkKey(bangumi), isNot(canonicalWorkKey(tmdb)));
+    expect(canonicalWorkKey(bangumi), canonicalWorkKey(tmdb));
   });
 
   test(

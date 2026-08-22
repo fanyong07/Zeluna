@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -414,6 +415,52 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache_state, "fresh")
         self.assertEqual(cached[0]["startup_profile"], STARTUP_MP4_FASTSTART)
         self.assertEqual(cached[0]["startup_latency_ms"], 143)
+
+    async def test_cache_drops_player_pages_and_unverified_opaque_urls(self):
+        async with self.sessions() as session:
+            session.add(
+                PlaybackCache(
+                    subject_id="bangumi:cache-hygiene",
+                    episode=1,
+                    title="Cache hygiene",
+                    lines_json=json.dumps([
+                        {
+                            "url": "https://source.example/player.html?url=video",
+                            "format": "hls",
+                            "available": True,
+                            "status": SERVER_VERIFIED,
+                        },
+                        {
+                            "url": "https://cdn.example/media/opaque-token",
+                            "format": "auto",
+                            "available": False,
+                            "status": CLIENT_PROBE_REQUIRED,
+                        },
+                        {
+                            "url": "https://cdn.example/media/verified-token",
+                            "format": "auto",
+                            "available": True,
+                            "status": SERVER_VERIFIED,
+                        },
+                    ]),
+                    line_count=2,
+                    verified_at=time.time(),
+                )
+            )
+            await session.commit()
+
+        async with self.sessions() as session:
+            cache_state, cached = await self.service._cache_lookup(
+                session,
+                "bangumi:cache-hygiene",
+                1,
+            )
+
+        self.assertEqual(cache_state, "fresh")
+        self.assertEqual(
+            [item.get("url") for item in cached if item.get("url")],
+            ["https://cdn.example/media/verified-token"],
+        )
 
     def test_playable_statistics_ignore_placeholder_only_inventory(self):
         placeholders = [

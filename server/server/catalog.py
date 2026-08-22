@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -22,6 +23,7 @@ from .config import (
     CATALOG_CACHE_HOURS,
     TMDB_READ_ACCESS_TOKEN,
 )
+from .database import async_session
 from .repositories.catalog import (
     CatalogRepository,
     CatalogWrite,
@@ -271,10 +273,14 @@ class CatalogService:
         repository_factory: Callable[[AsyncSession], CatalogRepository] = (
             SqlCatalogRepository
         ),
+        session_factory: Callable[
+            [], AbstractAsyncContextManager[AsyncSession]
+        ] = async_session,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self._repository_factory = repository_factory
+        self._session_factory = session_factory
         self._clock = clock
         self._sleep = sleep
         self._provider_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -305,35 +311,42 @@ class CatalogService:
             "tmdb": bool(TMDB_READ_ACCESS_TOKEN),
         }
 
-    async def _home_candidates_singleflight(
-        self,
-        media_type: str,
-        repository: CatalogRepository,
-    ) -> list[dict]:
+    def _ensure_home_refresh(self, media_type: str) -> asyncio.Task[list[dict]]:
         task = self._home_refreshes.get(media_type)
         if task is None:
-            task = asyncio.create_task(
-                self._refresh_home_candidates(media_type, repository)
-            )
+            task = asyncio.create_task(self._refresh_home_candidates(media_type))
             self._home_refreshes[media_type] = task
 
             def remove(completed: asyncio.Task[list[dict]]) -> None:
                 if self._home_refreshes.get(media_type) is completed:
                     self._home_refreshes.pop(media_type, None)
+                if completed.cancelled():
+                    return
+                error = completed.exception()
+                if error is not None:
+                    logger.warning(
+                        "Metadata home refresh failed for %s: %s",
+                        media_type,
+                        type(error).__name__,
+                    )
 
             task.add_done_callback(remove)
-        return await asyncio.shield(task)
+        return task
+
+    async def _home_candidates_singleflight(self, media_type: str) -> list[dict]:
+        return await asyncio.shield(self._ensure_home_refresh(media_type))
 
     async def _refresh_home_candidates(
         self,
         media_type: str,
-        repository: CatalogRepository,
     ) -> list[dict]:
         items = (
             await self._load_home_candidates(media_type, _HOME_REFRESH_TARGET)
         )[:_HOME_REFRESH_TARGET]
         if items:
-            await self._persist_many(repository, items)
+            async with self._session_factory() as session:
+                repository = self._repository_factory(session)
+                await self._persist_many(repository, items)
         return items
 
     async def _load_home_candidates(
@@ -463,11 +476,15 @@ class CatalogService:
             fresh_after=now - _HOME_RANKING_STALE_SECONDS,
             limit=requested_limit,
         )
-        try:
-            items = await self._home_candidates_singleflight(
-                media_type,
-                repository,
+        if stale:
+            self._ensure_home_refresh(media_type)
+            return _merge_ranked_candidates(
+                fresh,
+                stale,
+                limit=requested_limit,
             )
+        try:
+            items = await self._home_candidates_singleflight(media_type)
         except Exception as error:
             logger.warning(
                 "Metadata home refresh failed for %s: %s",

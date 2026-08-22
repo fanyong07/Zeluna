@@ -13,6 +13,12 @@ hand-edit artifact names or inject a second version source. The release commit,
 version, CI run, artifact sizes, and SHA-256 values are written by
 `tool/create_release_manifest.ps1`.
 
+Before packaging, push the release commit and wait for the `Quality Gates`
+workflow on that exact 40-character SHA to pass. Then run
+`tool/verify_release_head.ps1`; its immutable receipt is required by both
+packaging helpers and the manifest generator. A successful run on an older or
+newer commit never authorizes the current checkout.
+
 ## Platform packaging
 
 1. Android: build the signed AAB/APK only with a private production keystore

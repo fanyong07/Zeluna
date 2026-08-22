@@ -179,8 +179,9 @@ class _PlayerHeader extends StatelessWidget {
   }
 }
 
-class _PlayerBottomBar extends StatelessWidget {
-  const _PlayerBottomBar({
+class PlayerBottomBar extends StatelessWidget {
+  const PlayerBottomBar({
+    super.key,
     required this.line,
     required this.settings,
     required this.services,
@@ -301,6 +302,31 @@ class _PlayerBottomBar extends StatelessWidget {
                     onFullscreen: onFullscreen,
                     onSubtitlePanel: onSubtitlePanel,
                     landscape: false,
+                  )
+                : mobileLandscape
+                ? _LandscapeMobilePlayerControls(
+                    line: line,
+                    settings: settings,
+                    services: services,
+                    position: position,
+                    duration: duration,
+                    volume: volume,
+                    playing: playing,
+                    buffering: buffering,
+                    loadingLine: loadingLine,
+                    fullscreen: fullscreen,
+                    muted: muted,
+                    onPlayPause: onPlayPause,
+                    onPreviousEpisode: onPreviousEpisode,
+                    onNextEpisode: onNextEpisode,
+                    onMute: onMute,
+                    onVolumeChanged: onVolumeChanged,
+                    onSpeedSelected: onSpeedSelected,
+                    onFullscreen: onFullscreen,
+                    onSubtitlePanel: onSubtitlePanel,
+                    onDanmakuPanel: onDanmakuPanel,
+                    onEpisodePanel: onEpisodePanel,
+                    onLinePanel: onLinePanel,
                   )
                 : Row(
                     children: [
@@ -485,13 +511,167 @@ class _PlayerBottomBar extends StatelessWidget {
   }
 }
 
+class _LandscapeMobilePlayerControls extends StatelessWidget {
+  const _LandscapeMobilePlayerControls({
+    required this.line,
+    required this.settings,
+    required this.services,
+    required this.position,
+    required this.duration,
+    required this.volume,
+    required this.playing,
+    required this.buffering,
+    required this.loadingLine,
+    required this.fullscreen,
+    required this.muted,
+    required this.onPlayPause,
+    required this.onPreviousEpisode,
+    required this.onNextEpisode,
+    required this.onMute,
+    required this.onVolumeChanged,
+    required this.onSpeedSelected,
+    required this.onFullscreen,
+    required this.onSubtitlePanel,
+    required this.onDanmakuPanel,
+    required this.onEpisodePanel,
+    required this.onLinePanel,
+  });
+
+  final PlaybackLine? line;
+  final PlaybackSettings settings;
+  final ExternalServiceSettings services;
+  final Duration position;
+  final Duration duration;
+  final double volume;
+  final bool playing;
+  final bool buffering;
+  final bool loadingLine;
+  final bool fullscreen;
+  final bool muted;
+  final Future<void> Function() onPlayPause;
+  final Future<void> Function()? onPreviousEpisode;
+  final Future<void> Function()? onNextEpisode;
+  final Future<void> Function() onMute;
+  final ValueChanged<double> onVolumeChanged;
+  final ValueChanged<double> onSpeedSelected;
+  final Future<void> Function() onFullscreen;
+  final VoidCallback onSubtitlePanel;
+  final VoidCallback onDanmakuPanel;
+  final VoidCallback onEpisodePanel;
+  final VoidCallback onLinePanel;
+
+  @override
+  Widget build(BuildContext context) {
+    const controlSize = 34.0;
+    _ControlIconButton action({
+      required IconData icon,
+      required String tooltip,
+      required Future<void> Function()? onPressed,
+      double size = 22,
+      bool busy = false,
+    }) => _ControlIconButton(
+      icon: icon,
+      tooltip: tooltip,
+      onPressed: onPressed,
+      size: size,
+      busy: busy,
+      compact: true,
+      compactSize: controlSize,
+    );
+
+    return Row(
+      children: [
+        action(
+          icon: Icons.skip_previous_rounded,
+          tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
+          onPressed: onPreviousEpisode,
+        ),
+        action(
+          icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+          tooltip: playing ? '暂停' : '播放',
+          onPressed: onPlayPause,
+          size: 28,
+          busy: loadingLine || buffering,
+        ),
+        action(
+          icon: Icons.skip_next_rounded,
+          tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
+          onPressed: onNextEpisode,
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: Text(
+            '${_durationLabel(position)} / ${_durationLabel(duration)}',
+            maxLines: 1,
+            overflow: TextOverflow.fade,
+            softWrap: false,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: AppColors.theaterMuted,
+              fontWeight: FontWeight.w600,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+        action(
+          icon: Icons.comment_outlined,
+          tooltip:
+              services.dandanplayDanmakuEnabled ||
+                  services.bilibiliDanmakuEnabled
+              ? '弹幕源与显示设置'
+              : '弹幕源已关闭',
+          onPressed: () async => onDanmakuPanel(),
+        ),
+        action(
+          icon: Icons.subtitles_outlined,
+          tooltip: '字幕',
+          onPressed: () async => onSubtitlePanel(),
+        ),
+        action(
+          icon: Icons.video_library_outlined,
+          tooltip: '选集',
+          onPressed: () async => onEpisodePanel(),
+        ),
+        _SpeedMenuButton(
+          current: settings.speed,
+          onSelected: onSpeedSelected,
+          compact: true,
+        ),
+        action(
+          icon: Icons.alt_route_rounded,
+          tooltip: line == null ? '线路' : playbackLineProviderLabel(line!),
+          onPressed: () async => onLinePanel(),
+        ),
+        _VolumeButton(
+          volume: volume,
+          muted: muted,
+          onMute: onMute,
+          onVolumeChanged: onVolumeChanged,
+          compact: true,
+        ),
+        action(
+          icon: fullscreen
+              ? Icons.fullscreen_exit_rounded
+              : Icons.fullscreen_rounded,
+          tooltip: fullscreen ? '退出全屏' : '全屏',
+          onPressed: onFullscreen,
+        ),
+      ],
+    );
+  }
+}
+
 class _SpeedMenuButton extends StatelessWidget {
-  const _SpeedMenuButton({required this.current, required this.onSelected});
+  const _SpeedMenuButton({
+    required this.current,
+    required this.onSelected,
+    this.compact = false,
+  });
 
   static const _speeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
 
   final double current;
   final ValueChanged<double> onSelected;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -519,7 +699,7 @@ class _SpeedMenuButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(999),
             onTap: () =>
                 controller.isOpen ? controller.close() : controller.open(),
-            child: SmallBadge(label: _speedLabel(current)),
+            child: SmallBadge(label: _speedLabel(current), compact: compact),
           ),
         );
       },
@@ -533,12 +713,14 @@ class _VolumeButton extends StatefulWidget {
     required this.muted,
     required this.onMute,
     required this.onVolumeChanged,
+    this.compact = false,
   });
 
   final double volume;
   final bool muted;
   final Future<void> Function() onMute;
   final ValueChanged<double> onVolumeChanged;
+  final bool compact;
 
   @override
   State<_VolumeButton> createState() => _VolumeButtonState();
@@ -613,6 +795,10 @@ class _VolumeButtonState extends State<_VolumeButton> {
             child: IconButton(
               onPressed: widget.onMute,
               padding: EdgeInsets.zero,
+              constraints: widget.compact
+                  ? const BoxConstraints.tightFor(width: 34, height: 34)
+                  : null,
+              visualDensity: widget.compact ? VisualDensity.compact : null,
               icon: Icon(
                 widget.muted || widget.volume <= 0
                     ? Icons.volume_off_rounded

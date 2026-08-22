@@ -1,5 +1,6 @@
 import asyncio
 from collections import Counter
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -77,6 +78,23 @@ def test_application_factory_owns_metadata_cors_and_account_router():
     assert endpoint_modules["/bangumi/search"] == "server.routers.legacy_lookup"
     openapi_paths = app.openapi()["paths"].keys()
     assert {path.replace(":path}", "}") for path in endpoint_modules} <= openapi_paths
+
+
+def test_status_exposes_only_actually_enabled_playback_provider_ids():
+    provider_metadata = (
+        SimpleNamespace(provider_id="aggregate.maccms", enabled=True),
+        SimpleNamespace(provider_id="crawler.nivod", enabled=False),
+    )
+    fake_aggregator = SimpleNamespace(
+        provider_metadata=provider_metadata,
+    )
+    with patch("server.routers.health.aggregator", fake_aggregator):
+        response = TestClient(create_app()).get("/api/v3/status")
+
+    assert response.status_code == 200
+    assert response.json()["playback_providers"] == {
+        "enabled_ids": ["aggregate.maccms"],
+    }
 
 
 def test_route_table_has_no_duplicate_method_path_pairs():

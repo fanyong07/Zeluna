@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [string]$DeliveryDirectory
+    [string]$DeliveryDirectory,
+    [string]$GateReceiptPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +37,10 @@ foreach ($outputPath in @($archivePath, $checksumPath)) {
         throw "Refusing to overwrite immutable release output: $outputPath"
     }
 }
+
+. (Join-Path $PSScriptRoot 'release_gate.ps1')
+Assert-ZelunaCleanWorktree $projectRootFull
+$gate = Read-ZelunaReleaseGate $projectRootFull $GateReceiptPath
 
 $commit = (& git -C $projectRootFull rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{7,64}$') {
@@ -75,6 +80,7 @@ try {
         product = 'Zeluna'
         version = $version
         commit = $commit
+        ci_run_id = [string]$gate.ci_run_id
         built_utc = [DateTime]::UtcNow.ToString('o')
     }
     $metadataPath = Join-Path $stagingDirectory 'Zeluna-release-metadata.json'
@@ -102,5 +108,6 @@ $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLo
 )
 Write-Output "Version: $version"
 Write-Output "Commit: $commit"
+Write-Output "CI run: $($gate.ci_run_id)"
 Write-Output "SHA-256: $checksum"
 Write-Output "Checksum file: $checksumPath"

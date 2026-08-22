@@ -62,6 +62,7 @@ artifacts/
 dist/
 output/
 release/
+/tmp/imagegen/
 !android/app/src/release/
 !android/app/src/release/AndroidManifest.xml
 .vscode/

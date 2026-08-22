@@ -5,10 +5,10 @@ import '../domain/subject_content_type.dart';
 /// Returns a provider-neutral, privacy-safe key used only by recommendation
 /// ranking and de-duplication.
 ///
-/// Explicit cross-provider identifiers win, followed by the provider's stable
-/// identity. Title, release year and content type are only a conservative
-/// fallback for records without a stable source identity. Raw values are
-/// hashed and never appear in the key.
+/// Explicit cross-provider identifiers win. A normalized original title,
+/// release year and content type then form a conservative provider-neutral
+/// identity. Provider IDs remain the fallback when that cross-provider tuple
+/// is incomplete. Raw values are hashed and never appear in the key.
 String canonicalWorkKey(
   AnimeSubject subject, {
   Map<String, String> externalIds = const <String, String>{},
@@ -26,19 +26,22 @@ String canonicalWorkKey(
   final tmdbTv = normalizedIds['tmdb:tv'];
   if (tmdbTv != null) return _externalWorkKey('tmdb:tv', tmdbTv);
 
-  final sourceIdentity = _sourceExternalIdentity(subject);
-  if (sourceIdentity != null) {
-    return _externalWorkKey(sourceIdentity.$1, sourceIdentity.$2);
-  }
   final title = _normalizeWorkTitle(
     subject.originalTitle.trim().isNotEmpty
         ? subject.originalTitle
         : subject.title,
   );
   final year = _releaseYear(subject.date);
-  final contentType = subjectContentTypeOf(subject).name;
+  final contentType = subjectContentTypeOf(subject) == SubjectContentType.movie
+      ? 'movie'
+      : 'episodic';
   if (title.isNotEmpty && year != null) {
     return 'work:$stableIdentityVersion:${stableDigest('work|$stableIdentityVersion|title:$title|year:$year|type:$contentType')}';
+  }
+
+  final sourceIdentity = _sourceExternalIdentity(subject);
+  if (sourceIdentity != null) {
+    return _externalWorkKey(sourceIdentity.$1, sourceIdentity.$2);
   }
 
   if (title.isNotEmpty) {

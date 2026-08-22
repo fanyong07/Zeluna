@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string[]]$ArtifactPath,
     [string]$OutputPath = "release/release-manifest.json",
-    [string]$Version
+    [string]$Version,
+    [string]$GateReceiptPath
 )
 
 Set-StrictMode -Version Latest
@@ -12,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "release"))
 $pathComparison = [System.StringComparison]::OrdinalIgnoreCase
+. (Join-Path $PSScriptRoot 'release_gate.ps1')
 
 function Resolve-ProjectFile([string]$Path, [string]$Label) {
     $candidate = if ([System.IO.Path]::IsPathRooted($Path)) {
@@ -76,6 +78,27 @@ $commit = (& git -C $projectRoot rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{7,64}$') {
     throw "Unable to resolve the current Git commit."
 }
+$gate = Read-ZelunaReleaseGate $projectRoot $GateReceiptPath
+Assert-ZelunaCleanWorktree $projectRoot
+if ([string]$gate.version -ne $resolvedVersion) {
+    throw 'Release gate version does not match pubspec.yaml.'
+}
+
+foreach ($existingPath in Get-ChildItem -LiteralPath $releaseRoot -File -Filter '*manifest*.json' -ErrorAction SilentlyContinue) {
+    try {
+        $existing = Get-Content -LiteralPath $existingPath.FullName -Raw | ConvertFrom-Json
+    }
+    catch {
+        continue
+    }
+    if (
+        [string]$existing.version -eq $resolvedVersion -and
+        -not [string]::IsNullOrWhiteSpace([string]$existing.git_sha) -and
+        [string]$existing.git_sha -ne $commit
+    ) {
+        throw 'The same version is already bound to a different Git SHA.'
+    }
+}
 
 $artifacts = foreach ($artifact in $resolvedArtifacts | Sort-Object FullName) {
     $relative = $artifact.FullName.Substring($projectRoot.Length).TrimStart('\', '/')
@@ -88,11 +111,13 @@ $artifacts = foreach ($artifact in $resolvedArtifacts | Sort-Object FullName) {
 }
 
 $manifest = [ordered]@{
-    schema = "zeluna-release-manifest-v1"
+    schema = "zeluna-release-manifest-v2"
     version = $resolvedVersion
-    commit = $commit
+    git_sha = $commit
     generated_utc = [DateTime]::UtcNow.ToString("o")
-    ci_run_id = if ([string]::IsNullOrWhiteSpace($env:GITHUB_RUN_ID)) { $null } else { $env:GITHUB_RUN_ID }
+    ci_run_id = [string]$gate.ci_run_id
+    ci_run_url = [string]$gate.ci_run_url
+    quality_workflow = [string]$gate.workflow
     artifacts = @($artifacts)
 }
 

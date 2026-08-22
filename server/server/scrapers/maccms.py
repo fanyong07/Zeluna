@@ -25,7 +25,8 @@ import httpx
 
 from .base import (
     BaseScraper, SubjectResult, SubjectDetail,
-    EpisodeInfo, VideoLine,
+    DIRECT_MEDIA_URL, INVALID_MEDIA_URL, PLAYER_PAGE_URL, UNKNOWN_MEDIA_URL,
+    EpisodeInfo, VideoLine, classify_media_url, media_format_from_url,
 )
 from .maccms_sites import MACCMS_SITES, precache_sites
 
@@ -44,7 +45,8 @@ def parse_vod_play_url(raw: str) -> list[list[dict]]:
 
     分隔符: 播放源用 "$$$", 剧集用 "#", 单集 "名称$地址"。
     返回: 每个播放源一个列表 -> [[{"name","url"}, ...], ...]
-    只保留 http(s) 且形似视频(m3u8/mp4/flv 或无扩展的直链)的地址。
+    只保留 http(s) 媒体候选；明显 HTML/embed 播放页直接丢弃。
+    无扩展地址保留给完整内容验线，但不会被预先标成 mp4。
     """
     sources: list[list[dict]] = []
     if not raw:
@@ -60,7 +62,8 @@ def parse_vod_play_url(raw: str) -> list[list[dict]]:
             else:
                 name, url = "", seg
             url = url.strip()
-            if not url.lower().startswith(("http://", "https://")):
+            classification = classify_media_url(url)
+            if classification in {INVALID_MEDIA_URL, PLAYER_PAGE_URL}:
                 continue
             episodes.append({"name": name.strip(), "url": url})
         if episodes:
@@ -291,6 +294,12 @@ class MacCmsScraper(BaseScraper):
         raw_url = items[0].get("vod_play_url", "") or ""
         sources = parse_vod_play_url(raw_url)
 
+        configured_headers = {
+            str(name).strip(): str(value).strip()
+            for name, value in (site.get("headers") or {}).items()
+            if str(name).strip().lower() in {"referer", "origin"}
+            and str(value).strip()
+        }
         lines: list[VideoLine] = []
         ep_idx = episode - 1  # 0-based
         for src_idx, source_eps in enumerate(sources):
@@ -300,11 +309,15 @@ class MacCmsScraper(BaseScraper):
             url = ep["url"]
             if not url:
                 continue
-            fmt = "hls" if "m3u8" in url.lower() else "mp4"
+            classification = classify_media_url(url)
+            if classification not in {DIRECT_MEDIA_URL, UNKNOWN_MEDIA_URL}:
+                continue
+            fmt = media_format_from_url(url)
             lines.append(VideoLine(
                 url=url,
                 title=ep["name"] or f"线路{src_idx + 1}",
                 format=fmt,
+                headers=dict(configured_headers),
                 source_name=f"maccms:{site_name}",
             ))
         return lines

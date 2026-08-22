@@ -63,6 +63,26 @@ void main() {
 
     expect(preserved.single, same(current));
   });
+
+  test('exhausted lines stay quarantined until an explicit refresh', () {
+    final controller = PlaybackLineController();
+    addTearDown(controller.dispose);
+    final first = _line('line-a', 'provider-a');
+    final second = _line('line-b', 'provider-b');
+
+    expect(controller.markFailure(first, definitive: true), isTrue);
+    expect(controller.markFailure(second, definitive: true), isTrue);
+    expect(
+      controller.nextPlayableLine(currentLine: first, lines: [first, second]),
+      isNull,
+    );
+
+    controller.clearFailures();
+    expect(
+      controller.nextPlayableLine(currentLine: first, lines: [first, second]),
+      same(second),
+    );
+  });
 }
 
 PlaybackLine _line(

@@ -18,6 +18,7 @@ from .aggregator import (
     DNS_FAILURE,
     EMPTY_MEDIA,
     MALFORMED_MANIFEST,
+    NON_PUBLIC_TARGET,
     PARSER_MISMATCH,
     RATE_LIMITED,
     READ_TIMEOUT,
@@ -60,6 +61,12 @@ from .repositories.playback import (
     SourceHealthObservation,
     SqlPlaybackRepository,
 )
+from .scrapers.base import (
+    DIRECT_MEDIA_URL,
+    INVALID_MEDIA_URL,
+    PLAYER_PAGE_URL,
+    classify_media_url,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +85,7 @@ _SOURCE_ERROR_PENALTIES = {
     RESTRICTED: 30,
     RATE_LIMITED: 45,
     DNS_FAILURE: 65,
+    NON_PUBLIC_TARGET: 70,
     CONNECT_TIMEOUT: 75,
     READ_TIMEOUT: 90,
     UNKNOWN_EXCEPTION: 120,
@@ -420,6 +428,8 @@ class PlaybackService:
         fresh_items: list[dict] = []
         for item in items:
             if not isinstance(item, dict):
+                continue
+            if not self._is_safe_cached_item(item):
                 continue
             try:
                 expires_at = float(item.get("expires_at") or 0)
@@ -1194,9 +1204,28 @@ class PlaybackService:
         return parts[1].strip() if len(parts) >= 2 else ""
 
     @staticmethod
+    def _is_safe_cached_item(item: dict) -> bool:
+        url = str(item.get("url") or "").strip()
+        if not url:
+            return True
+        classification = classify_media_url(
+            url,
+            str(item.get("format") or ""),
+        )
+        if classification in {INVALID_MEDIA_URL, PLAYER_PAGE_URL}:
+            return False
+        if classification == DIRECT_MEDIA_URL:
+            return True
+        return (
+            item.get("available") is True
+            or str(item.get("status") or "") == SERVER_VERIFIED
+        )
+
+    @staticmethod
     def _has_playable_line(items: list[dict]) -> bool:
         return any(
             isinstance(item, dict)
+            and PlaybackService._is_safe_cached_item(item)
             and item.get("available") is True
             and bool(str(item.get("url") or "").strip())
             for item in items
@@ -1206,6 +1235,7 @@ class PlaybackService:
     def _has_usable_cached_route(items: list[dict]) -> bool:
         return any(
             isinstance(item, dict)
+            and PlaybackService._is_safe_cached_item(item)
             and bool(str(item.get("url") or "").strip())
             and (
                 item.get("available") is True
@@ -1220,6 +1250,7 @@ class PlaybackService:
             (index, dict(item))
             for index, item in enumerate(items)
             if isinstance(item, dict)
+            and PlaybackService._is_safe_cached_item(item)
             and bool(str(item.get("url") or "").strip())
             and (
                 item.get("available") is True

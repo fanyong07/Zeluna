@@ -2372,3 +2372,62 @@ Status: completed
 - This final status change is documentation-only. Final handoff still requires
   the resulting main SHA to receive its own successful exact-head Quality
   Gates run; no further commit may be added after that confirmation.
+
+## G15 - Stability correction and v1.0.0+39 release
+
+Status: release candidate; local validation complete, exact-HEAD external
+acceptance pending
+
+Background:
+
+- The 2026-08-23 handoff confirmed that kanju1 playback safety work was still
+  uncommitted and that review items R1-R4, Q1-Q7, the exact-HEAD CI rule, and
+  the release gate had not been implemented.
+
+Scope:
+
+- Complete the existing playback URL classification, header propagation,
+  cache filtering, `NON_PUBLIC_TARGET` diagnostics, and out-of-table MacCMS
+  candidate probe workflow.
+- Implement the stability and release corrections that can be verified in this
+  checkout. Do not add decorative UI dependencies or animation frameworks;
+  smooth playback and compact controls remain the priority.
+
+Implementation:
+
+- Catalog home now returns usable stale rankings immediately and starts one
+  background refresh per media type. The refresh creates and closes its own
+  database session instead of retaining a request-scoped repository.
+- Recommendation maturity counts distinct works; first-frame events shape
+  taste without marking a work as known; category/tag features are stronger
+  than platform/year; conservative title/year/kind identity joins episodic
+  works across Bangumi and TMDB.
+- Android landscape uses a dense complete control row. Widget coverage spans
+  568x320, 640x360, 800x360, and 854x384, while CI rotates the emulator and
+  records post-rotation activity, crash-log, and screenshot evidence.
+- Release packaging requires an immutable receipt proving that the exact local
+  HEAD has a successful GitHub `Quality Gates` run. The release manifest binds
+  version, `git_sha`, `ci_run_id`, CI URL, artifact sizes, and SHA-256 values;
+  the same version cannot be rebound to a different SHA.
+- Tracked `tmp/imagegen` iterations were removed and ignored. A 2,550-line
+  architecture guard prevents `AnimeController` from absorbing new domain
+  behavior instead of delegating to focused controllers.
+
+Acceptance still required before completion:
+
+- Full Flutter and server suites, format, analysis, repository gates, release
+  gate tests, Android/Windows builds, artifact hash/signature checks, exact-HEAD
+  GitHub Quality Gates, isolated VPS deployment checks, and public health/playback
+  smoke tests.
+
+Local validation checkpoint:
+
+- Flutter full regression: 757 passed, 26 intentional platform skips, 0
+  failures. Static analysis and the 235-file CI format scope passed.
+- Server full regression: 222 passed plus 10 subtests. Ruff and compileall
+  passed; the only warning is the existing upstream Starlette/httpx
+  deprecation warning.
+- Repository security, dependency/license, release immutability, exact-HEAD
+  gate unit checks, and strict Python vulnerability audit passed. The
+  dependency inventory contains 159 Dart and 72 Python packages with no known
+  audited Python vulnerabilities.

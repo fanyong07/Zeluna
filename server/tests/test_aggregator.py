@@ -7,6 +7,7 @@ import httpx
 from server.aggregator import (
     CLIENT_PROBE_REQUIRED,
     MALFORMED_MANIFEST,
+    NON_PUBLIC_TARGET,
     PARSER_MISMATCH,
     READ_TIMEOUT,
     SERVER_VERIFIED,
@@ -243,6 +244,18 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 format="hls",
                 source_name="quick",
             ),
+            VideoLine(
+                url="https://source.example/player.html?url=video",
+                title="网页播放器",
+                format="hls",
+                source_name="quick",
+            ),
+            VideoLine(
+                url="https://cdn.example/media/opaque-token",
+                title="尚未验明的无扩展地址",
+                format="auto",
+                source_name="quick",
+            ),
         ])
         self.aggregator = ContentAggregator(crawler_scrapers={"quick": crawler})
         self.aggregator._line_verification_status = AsyncMock(
@@ -269,6 +282,61 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines[0].verification_status, CLIENT_PROBE_REQUIRED)
         self.assertEqual(health, {"quick": CLIENT_PROBE_REQUIRED})
         self.aggregator._line_verification_status.assert_not_awaited()
+
+    async def test_full_verifier_accepts_real_extensionless_media(self):
+        requests = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            return httpx.Response(
+                206,
+                headers={"content-type": "video/mp4"},
+                content=_mp4_startup_sample(moov_before_mdat=True),
+            )
+
+        self.aggregator = ContentAggregator(
+            line_http_transport=httpx.MockTransport(handler),
+            crawler_scrapers={},
+        )
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(return_value=True),
+        ):
+            result = await self.aggregator._line_verification_status(
+                AggregatedVideoLine(
+                    url="https://cdn.example/media/opaque-token",
+                    format="auto",
+                ),
+                detailed=True,
+            )
+
+        self.assertEqual(result.status, SERVER_VERIFIED)
+        self.assertEqual(result.startup_profile, STARTUP_MP4_FASTSTART)
+        self.assertEqual(requests, ["https://cdn.example/media/opaque-token"])
+
+    async def test_obvious_player_page_is_rejected_without_http_request(self):
+        requests = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            return httpx.Response(200, content=b"not used")
+
+        self.aggregator = ContentAggregator(
+            line_http_transport=httpx.MockTransport(handler),
+            crawler_scrapers={},
+        )
+        result = await self.aggregator._line_verification_status(
+            AggregatedVideoLine(
+                url="https://source.example/player.html?url=video",
+                format="hls",
+            ),
+            detailed=True,
+        )
+
+        self.assertEqual(result.status, UNAVAILABLE)
+        self.assertEqual(result.error_category, PARSER_MISMATCH)
+        self.assertEqual(requests, 0)
 
     async def test_progressive_discovery_uses_first_matching_maccms_site(self):
         self.aggregator = ContentAggregator(crawler_scrapers={})
@@ -449,7 +517,45 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result.status, UNAVAILABLE)
-        self.assertEqual(result.error_category, PARSER_MISMATCH)
+        self.assertEqual(result.error_category, NON_PUBLIC_TARGET)
+
+    async def test_sinkholed_segment_host_is_reported_as_non_public_target(self):
+        """A live manifest whose segments resolve to a sinkhole must not read
+        as a parser problem: that mislabels DNS-blackholed sources."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                text=(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                    "#EXTINF:4,\nhttps://sinkholed.example/seg0.ts\n"
+                ),
+                headers={"content-type": "application/vnd.apple.mpegurl"},
+            )
+
+        aggregator = ContentAggregator(
+            line_http_transport=httpx.MockTransport(handler),
+            crawler_scrapers={},
+        )
+        self.addAsyncCleanup(aggregator.aclose)
+        line = AggregatedVideoLine(
+            url="https://cdn.example/index.m3u8",
+            format="hls",
+        )
+
+        async def only_manifest_is_public(url: str) -> bool:
+            return "sinkholed.example" not in url
+
+        with patch(
+            "server.aggregator._is_public_http_url",
+            new=AsyncMock(side_effect=only_manifest_is_public),
+        ):
+            result = await aggregator._line_verification_status(
+                line,
+                detailed=True,
+            )
+
+        self.assertEqual(result.status, UNAVAILABLE)
+        self.assertEqual(result.error_category, NON_PUBLIC_TARGET)
 
     async def test_search_uses_independent_crawler_without_upstream_aggregator(self):
         crawler = AsyncMock()

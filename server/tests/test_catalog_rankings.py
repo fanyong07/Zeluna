@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -347,26 +348,47 @@ class CatalogRankingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((first.status_code, second.status_code), (429, 200))
         self.assertEqual(sleeps, [7.0])
 
-    async def test_home_refresh_merges_new_and_stale_candidates(self):
+    async def test_stale_home_returns_immediately_and_refreshes_in_own_session(self):
         fresh = [_subject("bangumi:10")]
         stale = [*fresh, _subject("bangumi:11"), _subject("bangumi:12")]
+        request_session = object()
+        background_session = object()
 
-        class Repository:
+        class RequestRepository:
             def __init__(self):
                 self.home_calls = 0
-                self.persisted = []
 
             async def home_cached(self, **_kwargs):
                 self.home_calls += 1
                 return fresh if self.home_calls == 1 else stale
 
+            async def persist_many(self, _entries):
+                raise AssertionError("request-scoped repository must not refresh")
+
+        class BackgroundRepository:
+            def __init__(self):
+                self.persisted = []
+
             async def persist_many(self, entries):
                 self.persisted.extend(entries)
 
-        repository = Repository()
+        request_repository = RequestRepository()
+        background_repository = BackgroundRepository()
+
+        def repository_factory(session):
+            if session is request_session:
+                return request_repository
+            self.assertIs(session, background_session)
+            return background_repository
+
+        @asynccontextmanager
+        async def session_factory():
+            yield background_session
+
         service = CatalogService(
             transport=httpx.MockTransport(lambda _: httpx.Response(500)),
-            repository_factory=lambda _session: repository,
+            repository_factory=repository_factory,
+            session_factory=session_factory,
             clock=lambda: 1000.0,
         )
         refreshed = _subject("bangumi:20")
@@ -376,17 +398,33 @@ class CatalogRankingTests(unittest.IsolatedAsyncioTestCase):
             "globalScore": 1.0,
             "lists": [{"provider": "bangumi", "kind": "heat", "rank": 1}],
         }
-        service._load_home_candidates = AsyncMock(return_value=[refreshed])
+        refresh_started = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        async def load(_media_type: str, _limit: int) -> list[dict]:
+            refresh_started.set()
+            await release_refresh.wait()
+            return [refreshed]
+
+        service._load_home_candidates = AsyncMock(side_effect=load)
         try:
-            result = await service.home("anime", object(), limit=3)
+            result = await asyncio.wait_for(
+                service.home("anime", request_session, limit=3),
+                timeout=0.2,
+            )
+            await asyncio.wait_for(refresh_started.wait(), timeout=0.2)
+            self.assertEqual(
+                [item["stable_id"] for item in result],
+                ["bangumi:10", "bangumi:11", "bangumi:12"],
+            )
+            self.assertEqual(background_repository.persisted, [])
+
+            release_refresh.set()
+            await asyncio.gather(*service._home_refreshes.values())
         finally:
             await service.aclose()
 
-        self.assertEqual(
-            [item["stable_id"] for item in result],
-            ["bangumi:20", "bangumi:10", "bangumi:11"],
-        )
-        self.assertEqual(len(repository.persisted), 1)
+        self.assertEqual(len(background_repository.persisted), 1)
         service._load_home_candidates.assert_awaited_once_with("anime", 120)
 
 

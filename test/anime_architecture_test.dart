@@ -14,6 +14,20 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test('anime controller remains a bounded orchestration surface', () {
+    final controller = File('lib/src/data/anime_controller.dart');
+    final lines = controller.readAsLinesSync();
+
+    expect(
+      lines.length,
+      lessThanOrEqualTo(2550),
+      reason:
+          'Extract new catalog, playback, recommendation, account, or sync '
+          'behavior into its existing focused controller instead of growing '
+          'AnimeController.',
+    );
+  });
+
   test('super-resolution notices stay in the playback settings panel', () {
     final source = File('lib/src/player/player_page.dart').readAsStringSync();
     final surfaceGetter = RegExp(

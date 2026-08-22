@@ -146,34 +146,69 @@ void main() {
     expect(build(5, RecommendationEventType.completed).isMature, isTrue);
   });
 
-  test(
-    'five watched episodes mature one work without double counting completion',
-    () {
-      final now = DateTime.utc(2026, 8, 9);
-      final behaviors = <RecommendationEvent>[
-        for (var episode = 1; episode <= 5; episode++) ...[
-          _event(
-            RecommendationEventType.effectiveWatch,
-            'same-work',
-            now,
-            sessionId: 'episode:$episode',
-          ),
-          _event(
-            RecommendationEventType.completed,
-            'same-work',
-            now,
-            sessionId: 'episode:$episode',
-          ),
-        ],
-      ];
-      final profile = RecommendationProfile.fromEvents(
-        behaviors: behaviors,
-        served: const [],
-        now: now,
-      );
+  test('maturity counts distinct works instead of episodes', () {
+    final now = DateTime.utc(2026, 8, 9);
+    final behaviors = <RecommendationEvent>[
+      for (var episode = 1; episode <= 5; episode++) ...[
+        _event(
+          RecommendationEventType.effectiveWatch,
+          'same-work',
+          now,
+          sessionId: 'episode:$episode',
+        ),
+        _event(
+          RecommendationEventType.completed,
+          'same-work',
+          now,
+          sessionId: 'episode:$episode',
+        ),
+      ],
+    ];
+    final profile = RecommendationProfile.fromEvents(
+      behaviors: behaviors,
+      served: const [],
+      now: now,
+    );
 
-      expect(profile.effectiveSignalCount, 5);
-      expect(profile.isMature, isTrue);
-    },
-  );
+    expect(profile.effectiveSignalCount, 1);
+    expect(profile.isMature, isFalse);
+  });
+
+  test('first frame shapes taste but does not mark a work as known', () {
+    final now = DateTime.utc(2026, 8, 9);
+    final profile = RecommendationProfile.fromEvents(
+      behaviors: [_event(RecommendationEventType.firstFrame, 'previewed', now)],
+      served: const [],
+      now: now,
+    );
+
+    expect(profile.workWeights['previewed'], 1);
+    expect(profile.knownWorkKeys, isNot(contains('previewed')));
+  });
+
+  test('category and tag signals outweigh platform and year', () {
+    final now = DateTime.utc(2026, 8, 9);
+    final profile = RecommendationProfile.fromEvents(
+      behaviors: [
+        _event(
+          RecommendationEventType.favorite,
+          'work',
+          now,
+          features: const {
+            'category:fantasy',
+            'tag:adventure',
+            'platform:tv',
+            'year:2026',
+          },
+        ),
+      ],
+      served: const [],
+      now: now,
+    );
+
+    expect(profile.featureWeights['category:fantasy'], 4);
+    expect(profile.featureWeights['tag:adventure'], 4);
+    expect(profile.featureWeights['platform:tv'], 1);
+    expect(profile.featureWeights['year:2026'], 1);
+  });
 }

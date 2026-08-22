@@ -420,7 +420,7 @@ class _PlayerCanvas extends StatelessWidget {
                                             onSettings: onSettingsPanel,
                                           ),
                                         ),
-                                        _PlayerBottomBar(
+                                        PlayerBottomBar(
                                           line: line,
                                           settings: settings,
                                           services: services,
