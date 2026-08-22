@@ -24,28 +24,17 @@ $version = $versionLine.Matches[0].Groups[1].Value
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    $gatePath = Join-Path $testRoot 'gate.json'
-    $gate = [ordered]@{
-        schema = 'zeluna-release-head-gate-v1'
-        version = $version
-        git_sha = $head
-        workflow = 'Quality Gates'
-        conclusion = 'success'
-        ci_run_id = 'windows-package-content-test'
-        ci_run_url = 'https://example.invalid/actions/runs/test'
-    }
-    [System.IO.File]::WriteAllText(
-        $gatePath,
-        (($gate | ConvertTo-Json -Depth 3) + [Environment]::NewLine),
-        [System.Text.UTF8Encoding]::new($false)
-    )
-
-    & (Join-Path $projectRoot 'tool\package_windows_release.ps1') `
-        -SkipBuild `
-        -DeliveryDirectory $testRoot `
-        -GateReceiptPath $gatePath | Out-Null
-
     $archive = Join-Path $testRoot "Zeluna-Windows-$version.zip"
+    . (Join-Path $projectRoot 'tool\windows_release_archive.ps1')
+    New-ZelunaWindowsReleaseArchive `
+        -ProjectRoot $projectRoot `
+        -ReleaseSource (Join-Path $projectRoot 'build\windows\x64\runner\Release') `
+        -StagingDirectory (Join-Path $testRoot 'staging') `
+        -ArchivePath $archive `
+        -Version $version `
+        -Commit $head `
+        -CiRunId 'windows-package-content-test'
+
     $expanded = Join-Path $testRoot 'expanded'
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded
     foreach ($relative in @(

@@ -39,6 +39,7 @@ foreach ($outputPath in @($archivePath, $checksumPath)) {
 }
 
 . (Join-Path $PSScriptRoot 'release_gate.ps1')
+. (Join-Path $PSScriptRoot 'windows_release_archive.ps1')
 Assert-ZelunaCleanWorktree $projectRootFull
 $gate = Read-ZelunaReleaseGate $projectRootFull $GateReceiptPath
 
@@ -60,52 +61,15 @@ if (-not $SkipBuild) {
     }
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $releaseSource 'Zeluna.exe'))) {
-    throw "Windows Release output is missing: $releaseSource"
-}
-
 New-Item -ItemType Directory -Path $deliveryDirectory -Force | Out-Null
-if (Test-Path -LiteralPath $stagingDirectory) {
-    Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
-}
-New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
-
-try {
-    Get-ChildItem -LiteralPath $releaseSource -Force |
-        Where-Object { $_.Name -notlike '*.WebView2' } |
-        Copy-Item -Destination $stagingDirectory -Recurse -Force
-
-    foreach ($noticeName in @('LICENSE', 'THIRD_PARTY_NOTICES.md')) {
-        $noticeSource = Join-Path $projectRoot $noticeName
-        if (-not (Test-Path -LiteralPath $noticeSource -PathType Leaf)) {
-            throw "Required release notice is missing: $noticeName"
-        }
-        Copy-Item -LiteralPath $noticeSource -Destination $stagingDirectory
-    }
-
-    $metadata = [ordered]@{
-        schema = 'zeluna-windows-package-v1'
-        product = 'Zeluna'
-        version = $version
-        commit = $commit
-        ci_run_id = [string]$gate.ci_run_id
-        built_utc = [DateTime]::UtcNow.ToString('o')
-    }
-    $metadataPath = Join-Path $stagingDirectory 'Zeluna-release-metadata.json'
-    [System.IO.File]::WriteAllText(
-        $metadataPath,
-        (($metadata | ConvertTo-Json -Depth 3) + [Environment]::NewLine),
-        [System.Text.UTF8Encoding]::new($false)
-    )
-
-    Compress-Archive -Path (Join-Path $stagingDirectory '*') `
-        -DestinationPath $archivePath -CompressionLevel Optimal
-}
-finally {
-    if (Test-Path -LiteralPath $stagingDirectory) {
-        Remove-Item -LiteralPath $stagingDirectory -Recurse -Force
-    }
-}
+New-ZelunaWindowsReleaseArchive `
+    -ProjectRoot $projectRootFull `
+    -ReleaseSource $releaseSource `
+    -StagingDirectory $stagingDirectory `
+    -ArchivePath $archivePath `
+    -Version $version `
+    -Commit $commit `
+    -CiRunId ([string]$gate.ci_run_id)
 
 Write-Output "Windows package: $archivePath"
 $checksum = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
