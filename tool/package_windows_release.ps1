@@ -75,6 +75,14 @@ try {
         Where-Object { $_.Name -notlike '*.WebView2' } |
         Copy-Item -Destination $stagingDirectory -Recurse -Force
 
+    foreach ($noticeName in @('LICENSE', 'THIRD_PARTY_NOTICES.md')) {
+        $noticeSource = Join-Path $projectRoot $noticeName
+        if (-not (Test-Path -LiteralPath $noticeSource -PathType Leaf)) {
+            throw "Required release notice is missing: $noticeName"
+        }
+        Copy-Item -LiteralPath $noticeSource -Destination $stagingDirectory
+    }
+
     $metadata = [ordered]@{
         schema = 'zeluna-windows-package-v1'
         product = 'Zeluna'

@@ -140,6 +140,9 @@ jobs:
       - name: Verify exact-HEAD release gate
         shell: pwsh
         run: ./tool/ci/test_release_gate.ps1
+      - name: Verify Windows release package contents
+        shell: pwsh
+        run: ./tool/ci/test_windows_package_contents.ps1
       - name: Exercise local WebView fork lifecycle
         timeout-minutes: 15
         run: flutter test integration_test/animeko_webview_sniffer_integration_test.dart -d windows --reporter compact
