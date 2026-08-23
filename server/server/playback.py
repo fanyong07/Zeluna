@@ -59,6 +59,7 @@ from .managed_lines.service import (
     ManagedLineService,
     managed_line_service as default_managed_line_service,
 )
+from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -540,10 +541,20 @@ class PlaybackService:
             year=year,
         )
         if not aliases:
-            await self._store_cache(session, stable_id, episode, title, [])
-            return []
+            data = self._complete_site_inventory([])
+            await self._store_cache(session, stable_id, episode, title, data)
+            return [
+                {
+                    **item,
+                    "cached": False,
+                    "stale": False,
+                    "cache_state": "cold",
+                }
+                for item in data
+            ]
 
         source_health = await self._load_source_health(session)
+        discovery_diagnostics: dict[str, SourceDiscoveryDiagnostic] = {}
         matches = await self._load_bindings(
             session,
             stable_id,
@@ -556,22 +567,35 @@ class PlaybackService:
             if match.source_name in configured_sites
         }
         if len(matched_sites) < len(configured_sites):
-            discovered = await aggregator.discover_source_matches(
+            discovery = await aggregator.discover_source_matches(
                 aliases,
                 content_type=content_type,
                 year=year,
                 max_matches=len(aggregator.source_inventory) + 8,
+                include_diagnostics=True,
             )
+            if isinstance(discovery, tuple):
+                discovered, discovery_diagnostics = discovery
+            else:
+                discovered = discovery
+                discovery_diagnostics = {}
             now = time.time()
-            discovered = [
-                match
-                for match in discovered
+            probeable: list[SourceMatch] = []
+            for match in discovered:
                 if self._discovered_match_can_probe(
                     match,
                     source_health.get(match.source_name),
                     now,
-                )
-            ]
+                ):
+                    probeable.append(match)
+                    continue
+                diagnostic = discovery_diagnostics.get(match.source_name)
+                if diagnostic is not None:
+                    diagnostic.status = (
+                        SourceDiscoveryStatus.CIRCUIT_SUPPRESSED
+                    )
+                    diagnostic.matched = True
+            discovered = probeable
             matches = self._merge_matches(matches, discovered)
             await self._store_bindings(session, stable_id, matches)
 
@@ -599,6 +623,7 @@ class PlaybackService:
             matches=matches,
             health=health,
             diagnostics=diagnostics,
+            discovery_diagnostics=discovery_diagnostics,
         )
         await self._store_cache(session, stable_id, episode, title, data)
         return [
@@ -1191,40 +1216,106 @@ class PlaybackService:
         matches: list[SourceMatch] | None = None,
         health: dict[str, str | bool] | None = None,
         diagnostics: dict[str, SourceResolutionOutcome] | None = None,
+        discovery_diagnostics: (
+            dict[str, SourceDiscoveryDiagnostic] | None
+        ) = None,
     ) -> list[dict]:
         result = [dict(item) for item in items if isinstance(item, dict)]
         diagnostics = diagnostics or {}
+        discovery_diagnostics = discovery_diagnostics or {}
+        source_inventory = aggregator.source_inventory
+        matches_by_source: dict[str, SourceMatch] = {}
+        for match in matches or []:
+            previous = matches_by_source.get(match.source_name)
+            if previous is None or match.score > previous.score:
+                matches_by_source[match.source_name] = match
+            discovery = discovery_diagnostics.get(match.source_name)
+            if discovery is None:
+                discovery_diagnostics[match.source_name] = (
+                    SourceDiscoveryDiagnostic(
+                        source_name=match.source_name,
+                        provider_id=self._provider_id_for_match(match),
+                        best_match_score=match.score,
+                        matched=True,
+                        status=SourceDiscoveryStatus.MATCHED,
+                    )
+                )
+            else:
+                discovery.matched = True
+                discovery.best_match_score = max(
+                    discovery.best_match_score or match.score,
+                    match.score,
+                )
+        for source_name, raw_status in (health or {}).items():
+            discovery = discovery_diagnostics.get(source_name)
+            match = matches_by_source.get(source_name)
+            if discovery is None and match is not None:
+                discovery = SourceDiscoveryDiagnostic(
+                    source_name=source_name,
+                    provider_id=self._provider_id_for_match(match),
+                    best_match_score=match.score,
+                    matched=True,
+                    status=SourceDiscoveryStatus.MATCHED,
+                )
+                discovery_diagnostics[source_name] = discovery
+            if discovery is None:
+                continue
+            status = (
+                SERVER_VERIFIED
+                if raw_status is True
+                else UNAVAILABLE
+                if raw_status is False
+                else str(raw_status)
+            )
+            if status == SERVER_VERIFIED:
+                discovery.status = SourceDiscoveryStatus.SERVER_VERIFIED
+                discovery.episode_found = True
+            elif status == CLIENT_PROBE_REQUIRED:
+                discovery.status = SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED
+                discovery.episode_found = True
+            else:
+                discovery.status = SourceDiscoveryStatus.ROUTE_UNAVAILABLE
+        for source_name, resolution in diagnostics.items():
+            discovery = discovery_diagnostics.get(source_name)
+            if discovery is None:
+                discovery = SourceDiscoveryDiagnostic(
+                    source_name=source_name,
+                    provider_id=self._provider_id_for_match(resolution.match),
+                    best_match_score=resolution.match.score,
+                    matched=True,
+                    status=SourceDiscoveryStatus.MATCHED,
+                )
+                discovery_diagnostics[source_name] = discovery
+            self._apply_resolution_diagnostic(discovery, resolution)
         for item in result:
             source_name = self._site_name(item.get("source"))
             diagnostic = diagnostics.get(source_name)
-            if diagnostic is None:
-                continue
-            item["error_category"] = diagnostic.error_category
-            item["source_latency_ms"] = diagnostic.latency_ms
+            discovery = discovery_diagnostics.get(source_name)
+            if diagnostic is not None:
+                item["error_category"] = diagnostic.error_category
+                item["source_latency_ms"] = diagnostic.latency_ms
+            if discovery is not None:
+                self._apply_discovery_fields(item, discovery)
         represented_sites = {
             self._site_name(item.get("source"))
             for item in result
             if self._site_name(item.get("source"))
         }
-        source_inventory = aggregator.source_inventory
-        configured_sites = {name for _, name in source_inventory}
-        matched_sites = {
-            match.source_name
-            for match in (matches or [])
-            if match.source_name in configured_sites
-        }
-        health = health or {}
         for provider, name in source_inventory:
             if name in represented_sites:
                 continue
-            matched = name in matched_sites or name in health
-            status = "unavailable" if matched else "not_found"
-            message = (
-                "已匹配作品，但本集线路验证失败或暂时超时"
-                if matched
-                else "当前站点没有匹配到这部作品"
-            )
-            result.append({
+            discovery = discovery_diagnostics.get(name)
+            if discovery is None:
+                discovery = SourceDiscoveryDiagnostic(
+                    source_name=name,
+                    provider_id=(
+                        "aggregate.maccms"
+                        if provider == "maccms"
+                        else f"crawler.{name}"
+                    ),
+                )
+            diagnostic_status = discovery.status.value
+            item = {
                 "url": "",
                 "title": name,
                 "quality": "",
@@ -1232,21 +1323,111 @@ class PlaybackService:
                 "source": f"{provider}:{name}",
                 "headers": {},
                 "available": False,
-                "status": status,
-                "message": message,
-                "error_category": getattr(
-                    diagnostics.get(name),
-                    "error_category",
-                    "",
+                "status": self._legacy_discovery_status(diagnostic_status),
+                "message": self._discovery_message(diagnostic_status),
+                "error_category": (
+                    getattr(diagnostics.get(name), "error_category", "")
+                    or discovery.error_category
                 ),
-                "source_latency_ms": getattr(
-                    diagnostics.get(name),
-                    "latency_ms",
-                    0,
+                "source_latency_ms": (
+                    getattr(diagnostics.get(name), "latency_ms", 0)
+                    or discovery.elapsed_ms
                 ),
                 "expires_at": 0,
-            })
+            }
+            self._apply_discovery_fields(item, discovery)
+            result.append(item)
         return result
+
+    @staticmethod
+    def _apply_discovery_fields(
+        item: dict,
+        diagnostic: SourceDiscoveryDiagnostic,
+    ) -> None:
+        item.update({
+            "provider_id": diagnostic.provider_id,
+            "source_name": diagnostic.source_name,
+            "diagnostic_status": diagnostic.status.value,
+            "queried": diagnostic.queried,
+            "aliases_attempted": diagnostic.aliases_attempted,
+            "search_hit_count": diagnostic.search_hit_count,
+            "best_match_score": diagnostic.best_match_score,
+            "matched": diagnostic.matched,
+            "episode_found": diagnostic.episode_found,
+            "elapsed_ms": diagnostic.elapsed_ms,
+        })
+
+    @staticmethod
+    def _apply_resolution_diagnostic(
+        diagnostic: SourceDiscoveryDiagnostic,
+        resolution: SourceResolutionOutcome,
+    ) -> None:
+        diagnostic.matched = True
+        diagnostic.error_category = resolution.error_category
+        if resolution.status == SERVER_VERIFIED:
+            diagnostic.status = SourceDiscoveryStatus.SERVER_VERIFIED
+            diagnostic.episode_found = True
+        elif resolution.status == CLIENT_PROBE_REQUIRED:
+            diagnostic.status = SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED
+            diagnostic.episode_found = True
+        elif resolution.error_category == EMPTY_MEDIA:
+            diagnostic.status = SourceDiscoveryStatus.MATCHED_NO_EPISODE
+            diagnostic.episode_found = False
+        else:
+            diagnostic.status = SourceDiscoveryStatus.ROUTE_UNAVAILABLE
+
+    @staticmethod
+    def _provider_id_for_match(match: SourceMatch) -> str:
+        parts = match.source_id.split(":", 2)
+        if parts[0] == "maccms":
+            return "aggregate.maccms"
+        if parts[0] == "tvbox":
+            return "aggregate.tvbox"
+        if parts[0] == "crawler" and len(parts) >= 2:
+            return f"crawler.{parts[1]}"
+        return parts[0] if parts else ""
+
+    @staticmethod
+    def _discovery_message(status: str) -> str:
+        return {
+            SourceDiscoveryStatus.NOT_QUERIED.value: "本轮未查询该来源",
+            SourceDiscoveryStatus.SEARCHING.value: "正在搜索该来源",
+            SourceDiscoveryStatus.SEARCH_TIMEOUT.value: "来源搜索超时",
+            SourceDiscoveryStatus.SEARCH_ERROR.value: "来源暂时无法访问",
+            SourceDiscoveryStatus.SEARCH_MISS.value: "当前站点没有匹配到这部作品",
+            SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH.value: (
+                "搜索到候选，但没有可信作品匹配"
+            ),
+            SourceDiscoveryStatus.MATCHED.value: "已匹配作品，正在检查线路",
+            SourceDiscoveryStatus.CIRCUIT_SUPPRESSED.value: (
+                "来源近期连续失败，本轮暂缓请求"
+            ),
+            SourceDiscoveryStatus.MATCHED_NO_EPISODE.value: (
+                "已匹配作品，但没有找到当前集"
+            ),
+            SourceDiscoveryStatus.ROUTE_UNAVAILABLE.value: (
+                "已匹配作品，但当前线路验证失败"
+            ),
+            SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED.value: (
+                "服务器网络无法确认，可在当前设备尝试"
+            ),
+            SourceDiscoveryStatus.SERVER_VERIFIED.value: "在线服务已确认可播",
+            SourceDiscoveryStatus.QUARANTINED.value: "来源已隔离，等待复查",
+            SourceDiscoveryStatus.RETIRED.value: "来源已停用",
+        }.get(status, "来源暂时不可用")
+
+    @staticmethod
+    def _legacy_discovery_status(status: str) -> str:
+        if status in {
+            SourceDiscoveryStatus.SEARCH_MISS.value,
+            SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH.value,
+        }:
+            return "not_found"
+        if status == SourceDiscoveryStatus.SERVER_VERIFIED.value:
+            return SERVER_VERIFIED
+        if status == SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED.value:
+            return CLIENT_PROBE_REQUIRED
+        return UNAVAILABLE
 
     @staticmethod
     def _line_expiry(url: str) -> int:

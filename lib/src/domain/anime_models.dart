@@ -263,6 +263,23 @@ abstract final class PlaybackStartupProfile {
   static const mp4TailMoov = 'mp4_tail_moov';
 }
 
+abstract final class PlaybackDiscoveryStatus {
+  static const notQueried = 'not_queried';
+  static const searching = 'searching';
+  static const searchTimeout = 'search_timeout';
+  static const searchError = 'search_error';
+  static const searchMiss = 'search_miss';
+  static const searchHitNoMatch = 'search_hit_no_match';
+  static const matched = 'matched';
+  static const matchedNoEpisode = 'matched_no_episode';
+  static const circuitSuppressed = 'circuit_suppressed';
+  static const routeUnavailable = 'route_unavailable';
+  static const clientProbeRequired = 'client_probe_required';
+  static const serverVerified = 'server_verified';
+  static const quarantined = 'quarantined';
+  static const retired = 'retired';
+}
+
 class PlaybackLine {
   const PlaybackLine({
     required this.id,
@@ -291,6 +308,15 @@ class PlaybackLine {
     this.startupProfile = PlaybackStartupProfile.unknown,
     this.cacheState = 'unknown',
     this.sourceErrorCategory = '',
+    this.sourceName = '',
+    this.diagnosticStatus = '',
+    this.queried,
+    this.aliasesAttempted,
+    this.searchHitCount,
+    this.bestMatchScore,
+    this.matched,
+    this.episodeFound,
+    this.discoveryElapsed,
     this.expiresAt,
     this.available = false,
     this.message,
@@ -329,6 +355,15 @@ class PlaybackLine {
   final String startupProfile;
   final String cacheState;
   final String sourceErrorCategory;
+  final String sourceName;
+  final String diagnosticStatus;
+  final bool? queried;
+  final int? aliasesAttempted;
+  final int? searchHitCount;
+  final int? bestMatchScore;
+  final bool? matched;
+  final bool? episodeFound;
+  final Duration? discoveryElapsed;
   final DateTime? expiresAt;
   final bool available;
   final String? message;

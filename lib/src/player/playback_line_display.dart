@@ -182,6 +182,130 @@ List<PlaybackLine> allPlaybackLinesForDisplay(Iterable<PlaybackLine> lines) {
   return sortPlaybackLinesForDisplay(lines);
 }
 
+class PlaybackSourceDiagnosticSummary {
+  const PlaybackSourceDiagnosticSummary({
+    required this.totalSources,
+    required this.queriedSources,
+    required this.matchedSources,
+    required this.playableSources,
+  });
+
+  final int totalSources;
+  final int queriedSources;
+  final int matchedSources;
+  final int playableSources;
+}
+
+PlaybackSourceDiagnosticSummary summarizePlaybackSourceDiagnostics(
+  Iterable<PlaybackLine> lines,
+) {
+  final queried = <String>{};
+  final matched = <String>{};
+  final playable = <String>{};
+  final all = <String>{};
+  for (final line in lines) {
+    final key = playbackSourceIdentityKey(line);
+    all.add(key);
+    final status = line.diagnosticStatus;
+    final legacyResolved =
+        status.isEmpty &&
+        (line.available || line.serverVerified || line.requiresClientProbe);
+    if (line.queried == true ||
+        _diagnosticStatusWasQueried(status) ||
+        legacyResolved) {
+      queried.add(key);
+    }
+    if (line.matched == true ||
+        _diagnosticStatusWasMatched(status) ||
+        legacyResolved) {
+      matched.add(key);
+    }
+    if (line.available && (line.url?.trim().isNotEmpty ?? false)) {
+      playable.add(key);
+    }
+  }
+  return PlaybackSourceDiagnosticSummary(
+    totalSources: all.length,
+    queriedSources: queried.length,
+    matchedSources: matched.length,
+    playableSources: playable.length,
+  );
+}
+
+String playbackSourceIdentityKey(PlaybackLine line) {
+  final sourceName = line.sourceName.trim().toLowerCase();
+  final providerId = line.providerId.trim().toLowerCase();
+  if (sourceName.isNotEmpty) return '$providerId|$sourceName';
+  if (providerId.isNotEmpty) return providerId;
+  return '${line.providerName.trim().toLowerCase()}|${line.id}';
+}
+
+bool _diagnosticStatusWasQueried(String status) {
+  return status.isNotEmpty &&
+      status != PlaybackDiscoveryStatus.notQueried &&
+      status != PlaybackDiscoveryStatus.quarantined &&
+      status != PlaybackDiscoveryStatus.retired;
+}
+
+bool _diagnosticStatusWasMatched(String status) {
+  return const <String>{
+    PlaybackDiscoveryStatus.matched,
+    PlaybackDiscoveryStatus.matchedNoEpisode,
+    PlaybackDiscoveryStatus.circuitSuppressed,
+    PlaybackDiscoveryStatus.routeUnavailable,
+    PlaybackDiscoveryStatus.clientProbeRequired,
+    PlaybackDiscoveryStatus.serverVerified,
+  }.contains(status);
+}
+
+class PlaybackLineDiagnosticGroups {
+  const PlaybackLineDiagnosticGroups({
+    required this.primary,
+    required this.other,
+  });
+
+  final List<PlaybackLine> primary;
+  final List<PlaybackLine> other;
+}
+
+PlaybackLineDiagnosticGroups groupPlaybackLinesForDiagnostics(
+  Iterable<PlaybackLine> lines,
+) {
+  final ordered = allPlaybackLinesForDisplay(lines);
+  final indexedPrimary = <(int, int, PlaybackLine)>[];
+  final other = <PlaybackLine>[];
+  for (var index = 0; index < ordered.length; index++) {
+    final line = ordered[index];
+    final priority = _diagnosticPrimaryPriority(line);
+    if (priority == null) {
+      other.add(line);
+    } else {
+      indexedPrimary.add((priority, index, line));
+    }
+  }
+  indexedPrimary.sort((left, right) {
+    final statusOrder = left.$1.compareTo(right.$1);
+    return statusOrder != 0 ? statusOrder : left.$2.compareTo(right.$2);
+  });
+  return PlaybackLineDiagnosticGroups(
+    primary: List<PlaybackLine>.unmodifiable(
+      indexedPrimary.map((entry) => entry.$3),
+    ),
+    other: List<PlaybackLine>.unmodifiable(other),
+  );
+}
+
+int? _diagnosticPrimaryPriority(PlaybackLine line) {
+  return switch (line.diagnosticStatus) {
+    PlaybackDiscoveryStatus.serverVerified => 0,
+    PlaybackDiscoveryStatus.clientProbeRequired => 1,
+    PlaybackDiscoveryStatus.routeUnavailable => 2,
+    '' when line.available => 0,
+    '' when line.requiresClientProbe => 1,
+    _ => null,
+  };
+}
+
 List<PlaybackLine> mergePlaybackLineSnapshot({
   required Iterable<PlaybackLine> currentLines,
   required Iterable<PlaybackLine> snapshotLines,
@@ -259,6 +383,19 @@ PlaybackLine preservePlaybackLineProbeMetadata({
     sourceErrorCategory: incoming.sourceErrorCategory.isEmpty
         ? previous.sourceErrorCategory
         : incoming.sourceErrorCategory,
+    sourceName: incoming.sourceName.isEmpty
+        ? previous.sourceName
+        : incoming.sourceName,
+    diagnosticStatus: incoming.diagnosticStatus.isEmpty
+        ? previous.diagnosticStatus
+        : incoming.diagnosticStatus,
+    queried: incoming.queried ?? previous.queried,
+    aliasesAttempted: incoming.aliasesAttempted ?? previous.aliasesAttempted,
+    searchHitCount: incoming.searchHitCount ?? previous.searchHitCount,
+    bestMatchScore: incoming.bestMatchScore ?? previous.bestMatchScore,
+    matched: incoming.matched ?? previous.matched,
+    episodeFound: incoming.episodeFound ?? previous.episodeFound,
+    discoveryElapsed: incoming.discoveryElapsed ?? previous.discoveryElapsed,
     expiresAt: incoming.expiresAt ?? previous.expiresAt,
     available: previous.clientVerified
         ? previous.available
@@ -552,6 +689,27 @@ String playbackLineLatencyLabel(PlaybackLine line) {
 }
 
 String playbackLineFailureLabel(PlaybackLine line) {
+  final diagnosticReason = switch (line.diagnosticStatus) {
+    PlaybackDiscoveryStatus.notQueried => '未查询',
+    PlaybackDiscoveryStatus.searching => '搜索中',
+    PlaybackDiscoveryStatus.searchTimeout => '搜索超时',
+    PlaybackDiscoveryStatus.searchError => '来源异常',
+    PlaybackDiscoveryStatus.searchMiss => '未找到匹配',
+    PlaybackDiscoveryStatus.searchHitNoMatch => '匹配不足',
+    PlaybackDiscoveryStatus.matched => '正在验线',
+    PlaybackDiscoveryStatus.matchedNoEpisode => '缺少本集',
+    PlaybackDiscoveryStatus.circuitSuppressed => '暂缓请求',
+    PlaybackDiscoveryStatus.routeUnavailable => '线路失败',
+    PlaybackDiscoveryStatus.quarantined => '已隔离',
+    PlaybackDiscoveryStatus.retired => '已停用',
+    _ => null,
+  };
+  if (diagnosticReason != null) {
+    final latency = line.latency;
+    return latency == null
+        ? diagnosticReason
+        : '$diagnosticReason · ${latency.inMilliseconds}ms';
+  }
   final message = (line.message ?? '').toLowerCase();
   String reason;
   if (message.contains('403') || message.contains('拒绝')) {

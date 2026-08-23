@@ -681,7 +681,8 @@ class _LinePanelBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final displayLines = allPlaybackLinesForDisplay(lines);
-    final playableCount = lines.where((line) => line.available).length;
+    final groups = groupPlaybackLinesForDiagnostics(displayLines);
+    final summary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 110),
@@ -690,8 +691,13 @@ class _LinePanelBody extends StatelessWidget {
           _PanelInlineStatus(
             loading: scanning,
             text: scanning
-                ? '正在查找可播放线路$progress · 已确认 $playableCount 条可播'
-                : '共 ${displayLines.length} 个来源 · $playableCount 条可播',
+                ? '正在查找可播放线路$progress · '
+                      '${summary.queriedSources} 已查 · '
+                      '${summary.playableSources} 可播'
+                : '${summary.totalSources} 来源 · '
+                      '${summary.queriedSources} 已查 · '
+                      '${summary.matchedSources} 匹配 · '
+                      '${summary.playableSources} 可播',
           ),
           const SizedBox(height: 12),
         ],
@@ -711,18 +717,18 @@ class _LinePanelBody extends StatelessWidget {
             clipBehavior: Clip.antiAlias,
             child: Column(
               children: [
-                for (var i = 0; i < displayLines.length; i++) ...[
+                for (var i = 0; i < groups.primary.length; i++) ...[
                   _LineTile(
-                    key: ValueKey(displayLines[i].id),
+                    key: ValueKey(groups.primary[i].id),
                     index: i,
-                    line: displayLines[i],
-                    selected: selected?.id == displayLines[i].id,
-                    runtimeFailed: failedLineIds.contains(displayLines[i].id),
-                    onTap: displayLines[i].available
-                        ? () => onSelected(displayLines[i])
+                    line: groups.primary[i],
+                    selected: selected?.id == groups.primary[i].id,
+                    runtimeFailed: failedLineIds.contains(groups.primary[i].id),
+                    onTap: groups.primary[i].available
+                        ? () => onSelected(groups.primary[i])
                         : null,
                   ),
-                  if (i != displayLines.length - 1)
+                  if (i != groups.primary.length - 1 || groups.other.isNotEmpty)
                     const Divider(
                       height: 1,
                       indent: 12,
@@ -730,6 +736,41 @@ class _LinePanelBody extends StatelessWidget {
                       color: AppColors.theaterBorder,
                     ),
                 ],
+                if (groups.other.isNotEmpty)
+                  ExpansionTile(
+                    key: const ValueKey('playbackOtherSources'),
+                    tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+                    childrenPadding: EdgeInsets.zero,
+                    title: Text(
+                      '其它来源（${groups.other.length}）',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: AppColors.theaterMuted,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    children: [
+                      for (var i = 0; i < groups.other.length; i++) ...[
+                        const Divider(
+                          height: 1,
+                          indent: 12,
+                          endIndent: 12,
+                          color: AppColors.theaterBorder,
+                        ),
+                        _LineTile(
+                          key: ValueKey(groups.other[i].id),
+                          index: groups.primary.length + i,
+                          line: groups.other[i],
+                          selected: selected?.id == groups.other[i].id,
+                          runtimeFailed: failedLineIds.contains(
+                            groups.other[i].id,
+                          ),
+                          onTap: groups.other[i].available
+                              ? () => onSelected(groups.other[i])
+                              : null,
+                        ),
+                      ],
+                    ],
+                  ),
               ],
             ),
           ),

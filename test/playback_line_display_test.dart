@@ -109,6 +109,149 @@ void main() {
     ]);
   });
 
+  test('source diagnostic summary counts sources instead of route rows', () {
+    final summary = summarizePlaybackSourceDiagnostics([
+      _line(
+        'ikun-a',
+        providerId: 'aggregate.maccms',
+        sourceName: 'iKun',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        queried: true,
+        matched: true,
+      ),
+      _line(
+        'ikun-b',
+        providerId: 'aggregate.maccms',
+        sourceName: 'iKun',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        queried: true,
+        matched: true,
+      ),
+      _line(
+        'timeout',
+        providerId: 'aggregate.maccms',
+        sourceName: '超时源',
+        diagnosticStatus: PlaybackDiscoveryStatus.searchTimeout,
+        queried: true,
+        matched: false,
+        available: false,
+      ),
+      _line(
+        'circuit',
+        providerId: 'crawler.circuit',
+        sourceName: 'circuit',
+        diagnosticStatus: PlaybackDiscoveryStatus.circuitSuppressed,
+        queried: true,
+        matched: true,
+        available: false,
+      ),
+      _line(
+        'not-queried',
+        providerId: 'crawler.pending',
+        sourceName: 'pending',
+        diagnosticStatus: PlaybackDiscoveryStatus.notQueried,
+        queried: false,
+        matched: false,
+        available: false,
+      ),
+      _line(
+        'legacy-playable',
+        providerId: 'zeluna:site:legacy',
+        sourceName: 'legacy',
+      ),
+    ]);
+
+    expect(summary.totalSources, 5);
+    expect(summary.queriedSources, 4);
+    expect(summary.matchedSources, 3);
+    expect(summary.playableSources, 2);
+  });
+
+  test('diagnostic groups prioritize actionable source states', () {
+    final groups = groupPlaybackLinesForDiagnostics([
+      _line(
+        'miss',
+        diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+        available: false,
+      ),
+      _line(
+        'route',
+        diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+        available: false,
+      ),
+      _line(
+        'pending',
+        diagnosticStatus: PlaybackDiscoveryStatus.notQueried,
+        available: false,
+      ),
+      _line(
+        'verified',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+      ),
+      _line(
+        'client',
+        diagnosticStatus: PlaybackDiscoveryStatus.clientProbeRequired,
+        available: false,
+        requiresClientProbe: true,
+      ),
+      _line(
+        'circuit',
+        diagnosticStatus: PlaybackDiscoveryStatus.circuitSuppressed,
+        available: false,
+      ),
+    ]);
+
+    expect(groups.primary.map((line) => line.id), [
+      'verified',
+      'client',
+      'route',
+    ]);
+    expect(groups.other.map((line) => line.id), ['miss', 'pending', 'circuit']);
+  });
+
+  test('diagnostic status labels do not collapse into generic unavailable', () {
+    expect(
+      playbackLineFailureLabel(
+        _line(
+          'not-queried',
+          diagnosticStatus: PlaybackDiscoveryStatus.notQueried,
+          available: false,
+        ),
+      ),
+      '未查询',
+    );
+    expect(
+      playbackLineFailureLabel(
+        _line(
+          'no-episode',
+          diagnosticStatus: PlaybackDiscoveryStatus.matchedNoEpisode,
+          available: false,
+        ),
+      ),
+      '缺少本集',
+    );
+    expect(
+      playbackLineFailureLabel(
+        _line(
+          'route',
+          diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+          available: false,
+        ),
+      ),
+      '线路失败',
+    );
+    expect(
+      playbackLineFailureLabel(
+        _line(
+          'circuit',
+          diagnosticStatus: PlaybackDiscoveryStatus.circuitSuppressed,
+          available: false,
+        ),
+      ),
+      '暂缓请求',
+    );
+  });
+
   test('one runtime failure retries before the line is quarantined', () {
     final first = nextPlaybackLineFailureCount(0);
     final second = nextPlaybackLineFailureCount(first);
@@ -884,6 +1027,10 @@ PlaybackLine _line(
   String startupProfile = PlaybackStartupProfile.unknown,
   String cacheState = 'unknown',
   String sourceErrorCategory = '',
+  String sourceName = '',
+  String diagnosticStatus = '',
+  bool? queried,
+  bool? matched,
   String? message,
 }) {
   return PlaybackLine(
@@ -909,6 +1056,10 @@ PlaybackLine _line(
     startupProfile: startupProfile,
     cacheState: cacheState,
     sourceErrorCategory: sourceErrorCategory,
+    sourceName: sourceName,
+    diagnosticStatus: diagnosticStatus,
+    queried: queried,
+    matched: matched,
     available: available,
     message: message,
   );

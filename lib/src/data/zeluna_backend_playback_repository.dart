@@ -246,6 +246,20 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             : 'cold';
         final sourceErrorCategory =
             json['error_category']?.toString().trim() ?? '';
+        final sourceName = _trustedServerText(
+          json['source_name'],
+          maxLength: 200,
+        );
+        final diagnosticStatus = _diagnosticStatusFromJson(
+          json['diagnostic_status'] ?? status,
+        );
+        final queried = _nullableBool(json['queried']);
+        final aliasesAttempted = _nullableInt(json['aliases_attempted']);
+        final searchHitCount = _nullableInt(json['search_hit_count']);
+        final bestMatchScore = _nullableInt(json['best_match_score']);
+        final matched = _nullableBool(json['matched']);
+        final episodeFound = _nullableBool(json['episode_found']);
+        final discoveryElapsedMs = _nullableInt(json['elapsed_ms']);
         final sourceLatencyMs = int.tryParse(
           json['source_latency_ms']?.toString() ?? '',
         );
@@ -311,6 +325,19 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             startupProfile: startupProfile,
             cacheState: cacheState,
             sourceErrorCategory: sourceErrorCategory,
+            sourceName: sourceName.isNotEmpty
+                ? sourceName
+                : _sourceName(source),
+            diagnosticStatus: diagnosticStatus,
+            queried: queried,
+            aliasesAttempted: aliasesAttempted,
+            searchHitCount: searchHitCount,
+            bestMatchScore: bestMatchScore,
+            matched: matched,
+            episodeFound: episodeFound,
+            discoveryElapsed: discoveryElapsedMs == null
+                ? null
+                : Duration(milliseconds: discoveryElapsedMs),
             expiresAt: expiresAt,
             available: available,
             message: available
@@ -360,6 +387,47 @@ String _startupProfileFromJson(Object? value) {
     PlaybackStartupProfile.mp4TailMoov => PlaybackStartupProfile.mp4TailMoov,
     _ => PlaybackStartupProfile.unknown,
   };
+}
+
+String _diagnosticStatusFromJson(Object? value) {
+  return switch (value?.toString().trim().toLowerCase()) {
+    PlaybackDiscoveryStatus.notQueried => PlaybackDiscoveryStatus.notQueried,
+    PlaybackDiscoveryStatus.searching => PlaybackDiscoveryStatus.searching,
+    PlaybackDiscoveryStatus.searchTimeout =>
+      PlaybackDiscoveryStatus.searchTimeout,
+    PlaybackDiscoveryStatus.searchError => PlaybackDiscoveryStatus.searchError,
+    PlaybackDiscoveryStatus.searchMiss => PlaybackDiscoveryStatus.searchMiss,
+    PlaybackDiscoveryStatus.searchHitNoMatch =>
+      PlaybackDiscoveryStatus.searchHitNoMatch,
+    PlaybackDiscoveryStatus.matched => PlaybackDiscoveryStatus.matched,
+    PlaybackDiscoveryStatus.matchedNoEpisode =>
+      PlaybackDiscoveryStatus.matchedNoEpisode,
+    PlaybackDiscoveryStatus.circuitSuppressed =>
+      PlaybackDiscoveryStatus.circuitSuppressed,
+    PlaybackDiscoveryStatus.routeUnavailable =>
+      PlaybackDiscoveryStatus.routeUnavailable,
+    PlaybackDiscoveryStatus.clientProbeRequired =>
+      PlaybackDiscoveryStatus.clientProbeRequired,
+    PlaybackDiscoveryStatus.serverVerified =>
+      PlaybackDiscoveryStatus.serverVerified,
+    PlaybackDiscoveryStatus.quarantined => PlaybackDiscoveryStatus.quarantined,
+    PlaybackDiscoveryStatus.retired => PlaybackDiscoveryStatus.retired,
+    _ => '',
+  };
+}
+
+bool? _nullableBool(Object? value) {
+  if (value is bool) return value;
+  return switch (value?.toString().trim().toLowerCase()) {
+    'true' => true,
+    'false' => false,
+    _ => null,
+  };
+}
+
+int? _nullableInt(Object? value) {
+  if (value == null) return null;
+  return int.tryParse(value.toString());
 }
 
 DateTime? _epochDateTime(Object? value) {
@@ -426,6 +494,11 @@ String _providerName(String source) {
   final parts = value.split(':');
   final site = parts.length >= 2 ? parts[1].trim() : value.trim();
   return site.isEmpty ? '在线服务' : '在线服务 · $site';
+}
+
+String _sourceName(String source) {
+  final parts = source.split(':');
+  return parts.length >= 2 ? parts[1].trim() : '';
 }
 
 String _providerKey(String source, String stableId) {

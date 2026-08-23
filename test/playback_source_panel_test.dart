@@ -88,4 +88,112 @@ void main() {
     expect(find.text('风车'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets(
+    'source panel shows truthful summary and folds background states',
+    (tester) async {
+      tester.view.physicalSize = const Size(430, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const verified = PlaybackLine(
+        id: 'verified',
+        episodeId: 1,
+        providerId: 'aggregate.maccms',
+        providerName: '在线服务 · iKun',
+        sourceName: 'iKun',
+        title: '线路1',
+        quality: '1080P',
+        format: 'HLS',
+        url: 'https://cdn.example.com/verified.m3u8',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        queried: true,
+        matched: true,
+        available: true,
+      );
+      const lines = [
+        verified,
+        PlaybackLine(
+          id: 'route',
+          episodeId: 1,
+          providerId: 'crawler.route',
+          providerName: '在线服务 · 线路失败源',
+          sourceName: '线路失败源',
+          title: '线路失败源',
+          quality: '',
+          format: '',
+          diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+          queried: true,
+          matched: true,
+          available: false,
+          message: '已匹配作品，但当前线路验证失败',
+        ),
+        PlaybackLine(
+          id: 'miss',
+          episodeId: 1,
+          providerId: 'crawler.miss',
+          providerName: '在线服务 · 无结果源',
+          sourceName: '无结果源',
+          title: '无结果源',
+          quality: '',
+          format: '',
+          diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+          queried: true,
+          matched: false,
+          available: false,
+          message: '当前站点没有匹配到这部作品',
+        ),
+        PlaybackLine(
+          id: 'pending',
+          episodeId: 1,
+          providerId: 'crawler.pending',
+          providerName: '在线服务 · 未查询源',
+          sourceName: '未查询源',
+          title: '未查询源',
+          quality: '',
+          format: '',
+          diagnosticStatus: PlaybackDiscoveryStatus.notQueried,
+          queried: false,
+          matched: false,
+          available: false,
+          message: '本轮未查询该来源',
+        ),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(useMaterial3: true),
+          home: Scaffold(
+            body: PlaybackSourcePanel(
+              selected: verified,
+              lines: lines,
+              failedLineIds: const {},
+              scanning: false,
+              completedRules: 1,
+              totalRules: 1,
+              onSelected: (_) {},
+              onPickLocal: () async {},
+              onOpenNetwork: (_, _) async {},
+              onSearch: () async {},
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('4 来源 · 3 已查 · 2 匹配 · 1 可播'), findsOneWidget);
+      expect(find.text('在线服务 · iKun'), findsOneWidget);
+      expect(find.text('在线服务 · 线路失败源'), findsOneWidget);
+      expect(find.text('其它来源（2）'), findsOneWidget);
+      expect(find.text('在线服务 · 无结果源'), findsNothing);
+      expect(find.text('在线服务 · 未查询源'), findsNothing);
+
+      await tester.tap(find.text('其它来源（2）'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('在线服务 · 无结果源'), findsOneWidget);
+      expect(find.text('在线服务 · 未查询源'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

@@ -34,6 +34,8 @@ from server.database import (
 )
 from server.playback import PlaybackService
 from server.repositories.catalog import SqlCatalogRepository
+from server.scrapers.base import SubjectResult
+from server.scrapers.maccms import MacCmsScraper
 from server.scrapers.maccms_sites import MACCMS_SITES
 
 
@@ -397,6 +399,480 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.aclose()
         await self.engine.dispose()
 
+    async def test_search_timeout_is_not_reported_as_source_miss(self):
+        class TimedOutProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                raise asyncio.TimeoutError
+
+        metadata = {
+            "stable_id": "bangumi:999001",
+            "title": "超时诊断测试",
+            "original_title": "Timeout Diagnostic Test",
+            "aliases": ["超时诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"slow": TimedOutProvider()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.slow"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["超时诊断测试"]),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999001",
+                    1,
+                    session,
+                )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["source"], "crawler:slow")
+        self.assertEqual(items[0]["status"], "unavailable")
+        self.assertEqual(items[0]["diagnostic_status"], "search_timeout")
+        self.assertTrue(items[0]["queried"])
+        self.assertEqual(items[0]["aliases_attempted"], 1)
+        self.assertEqual(items[0]["search_hit_count"], 0)
+        self.assertEqual(items[0]["error_category"], "read_timeout")
+
+    async def test_search_error_and_route_failure_remain_distinct(self):
+        class SearchErrorProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                raise RuntimeError("provider unavailable")
+
+        class RouteFailureProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                return [
+                    SubjectResult(
+                        source_id="work-1",
+                        title="线路诊断测试",
+                        type="anime",
+                        year=2026,
+                    )
+                ]
+
+            async def get_video_urls(self, _source_id: str, _episode: int):
+                request = httpx.Request("GET", "https://media.test/episode")
+                raise httpx.ReadTimeout("route timeout", request=request)
+
+        class HitNoMatchProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                return [
+                    SubjectResult(
+                        source_id="other-work",
+                        title="完全不同的作品",
+                        type="anime",
+                        year=1999,
+                    )
+                ]
+
+        metadata = {
+            "stable_id": "bangumi:999007",
+            "title": "线路诊断测试",
+            "original_title": "Route Diagnostic Test",
+            "aliases": ["线路诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {
+                    "search_error": SearchErrorProvider(),
+                    "route_failure": RouteFailureProvider(),
+                    "hit_no_match": HitNoMatchProvider(),
+                },
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({
+                    "crawler.search_error",
+                    "crawler.route_failure",
+                    "crawler.hit_no_match",
+                }),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["线路诊断测试"]),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999007",
+                    1,
+                    session,
+                )
+
+        by_source = {item["source_name"]: item for item in items}
+        self.assertEqual(
+            by_source["search_error"]["diagnostic_status"],
+            "search_error",
+        )
+        self.assertEqual(
+            by_source["search_error"]["message"],
+            "来源暂时无法访问",
+        )
+        self.assertEqual(
+            by_source["route_failure"]["diagnostic_status"],
+            "route_unavailable",
+        )
+        self.assertTrue(by_source["route_failure"]["matched"])
+        self.assertEqual(
+            by_source["route_failure"]["message"],
+            "已匹配作品，但当前线路验证失败",
+        )
+        self.assertEqual(
+            by_source["hit_no_match"]["diagnostic_status"],
+            "search_hit_no_match",
+        )
+        self.assertEqual(by_source["hit_no_match"]["search_hit_count"], 1)
+        self.assertEqual(
+            by_source["hit_no_match"]["message"],
+            "搜索到候选，但没有可信作品匹配",
+        )
+
+    async def test_maccms_search_miss_and_timeout_remain_distinct(self):
+        sites = [
+            {
+                "name": "空结果源",
+                "api": "https://source.test/miss",
+                "weight": 10,
+            },
+            {
+                "name": "超时源",
+                "api": "https://source.test/timeout",
+                "weight": 9,
+            },
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/timeout":
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(200, json={"list": []})
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        metadata = {
+            "stable_id": "bangumi:999002",
+            "title": "站点诊断测试",
+            "original_title": "Site Diagnostic Test",
+            "aliases": ["站点诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        try:
+            with (
+                patch("server.aggregator.MACCMS_SITES", sites),
+                patch.object(aggregator, "_maccms", scraper),
+                patch.object(
+                    aggregator,
+                    "_enabled_provider_ids",
+                    frozenset({"aggregate.maccms"}),
+                ),
+                patch(
+                    "server.playback.catalog_service.get_subject",
+                    new=AsyncMock(return_value=metadata),
+                ),
+                patch(
+                    "server.playback.catalog_service.playback_aliases",
+                    new=AsyncMock(return_value=["站点诊断测试"]),
+                ),
+            ):
+                async with self.sessions() as session:
+                    items = await self.service.lines(
+                        "bangumi:999002",
+                        1,
+                        session,
+                    )
+        finally:
+            await scraper.aclose()
+
+        by_source = {item["source_name"]: item for item in items}
+        self.assertEqual(by_source["空结果源"]["status"], "not_found")
+        self.assertTrue(by_source["空结果源"]["queried"])
+        self.assertEqual(by_source["超时源"]["status"], "unavailable")
+        self.assertTrue(by_source["超时源"]["queried"])
+
+    async def test_matched_work_without_current_episode_is_not_route_failure(self):
+        class MissingEpisodeProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                return [
+                    SubjectResult(
+                        source_id="work-1",
+                        title="缺集诊断测试",
+                        type="anime",
+                        year=2026,
+                    )
+                ]
+
+            async def get_video_urls(self, _source_id: str, _episode: int):
+                return []
+
+        metadata = {
+            "stable_id": "bangumi:999003",
+            "title": "缺集诊断测试",
+            "original_title": "Missing Episode Diagnostic Test",
+            "aliases": ["缺集诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"missing_episode": MissingEpisodeProvider()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.missing_episode"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["缺集诊断测试"]),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999003",
+                    7,
+                    session,
+                )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "unavailable")
+        self.assertEqual(
+            items[0]["diagnostic_status"],
+            "matched_no_episode",
+        )
+        self.assertTrue(items[0]["matched"])
+        self.assertFalse(items[0]["episode_found"])
+        self.assertEqual(
+            items[0]["message"],
+            "已匹配作品，但没有找到当前集",
+        )
+
+    async def test_open_source_circuit_is_reported_as_suppressed(self):
+        class CircuitProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                return [
+                    SubjectResult(
+                        source_id="work-1",
+                        title="熔断诊断测试特别版",
+                        type="anime",
+                        year=2026,
+                    )
+                ]
+
+            async def get_video_urls(self, _source_id: str, _episode: int):
+                raise AssertionError("open circuit must suppress route resolution")
+
+        now = time.time()
+        async with self.sessions() as session:
+            session.add(SourceHealth(
+                source_name="circuit",
+                consecutive_failures=SOURCE_CIRCUIT_FAILURE_THRESHOLD,
+                last_status=UNAVAILABLE,
+                last_checked_at=now,
+                last_failure_at=now,
+            ))
+            await session.commit()
+
+        metadata = {
+            "stable_id": "bangumi:999004",
+            "title": "熔断诊断测试",
+            "original_title": "Circuit Diagnostic Test",
+            "aliases": ["熔断诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"circuit": CircuitProvider()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.circuit"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["熔断诊断测试"]),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999004",
+                    1,
+                    session,
+                )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "unavailable")
+        self.assertEqual(
+            items[0]["diagnostic_status"],
+            "circuit_suppressed",
+        )
+        self.assertTrue(items[0]["queried"])
+        self.assertTrue(items[0]["matched"])
+        self.assertEqual(
+            items[0]["message"],
+            "来源近期连续失败，本轮暂缓请求",
+        )
+
+    async def test_bound_source_resolution_still_emits_episode_diagnostic(self):
+        class BoundProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                raise AssertionError("fresh binding must skip discovery search")
+
+            async def get_video_urls(self, _source_id: str, _episode: int):
+                return []
+
+        now = time.time()
+        async with self.sessions() as session:
+            session.add(SourceBinding(
+                stable_id="bangumi:999005",
+                source_id="crawler:bound:work-1",
+                source_name="bound",
+                matched_title="绑定诊断测试",
+                media_type="anime",
+                year=2026,
+                score=118,
+                enabled=True,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        metadata = {
+            "stable_id": "bangumi:999005",
+            "title": "绑定诊断测试",
+            "original_title": "Bound Diagnostic Test",
+            "aliases": ["绑定诊断测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"bound": BoundProvider()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.bound"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["绑定诊断测试"]),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999005",
+                    3,
+                    session,
+                )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "unavailable")
+        self.assertEqual(
+            items[0]["diagnostic_status"],
+            "matched_no_episode",
+        )
+        self.assertFalse(items[0]["queried"])
+        self.assertEqual(items[0]["aliases_attempted"], 0)
+        self.assertTrue(items[0]["matched"])
+        self.assertFalse(items[0]["episode_found"])
+
+    async def test_missing_aliases_report_sources_as_not_queried(self):
+        class PendingProvider:
+            content_types = ["anime"]
+
+            async def search(self, _keyword: str):
+                raise AssertionError("missing aliases must not trigger search")
+
+        with (
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"pending": PendingProvider()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.pending"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999006",
+                    1,
+                    session,
+                )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "unavailable")
+        self.assertEqual(items[0]["diagnostic_status"], "not_queried")
+        self.assertFalse(items[0]["queried"])
+        self.assertEqual(items[0]["message"], "本轮未查询该来源")
+
     async def test_stable_id_discovers_binds_and_caches_multiple_sites(self):
         matches = [
             SourceMatch(
@@ -471,6 +947,19 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("crawler:dm706", {item["source"] for item in first})
         self.assertEqual(sum(item["available"] for item in first), 1)
+        first_by_source = {
+            item["source"].split(":", 1)[1]: item
+            for item in first
+        }
+        self.assertEqual(
+            first_by_source["iKun"]["diagnostic_status"],
+            "server_verified",
+        )
+        self.assertEqual(
+            first_by_source["魔都"]["diagnostic_status"],
+            "route_unavailable",
+        )
+        self.assertFalse(first_by_source["iKun"]["queried"])
         self.assertEqual(discover.await_count, 1)
         self.assertEqual(resolve.await_count, 1)
         async with self.sessions() as session:

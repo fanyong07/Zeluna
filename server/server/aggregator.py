@@ -22,7 +22,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .m3u8_resolver import resolver as m3u8_resolver
-from .scrapers.maccms import MacCmsScraper
+from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
+from .scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
 from .scrapers.maccms_sites import MACCMS_SITES, site_priority
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
 from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
@@ -567,34 +568,63 @@ class ContentAggregator:
         *,
         content_type: str,
         year: int,
+        diagnostics: dict[str, SourceDiscoveryDiagnostic] | None = None,
     ) -> list[SourceMatch]:
         expected_type = "series" if content_type == "tv" else content_type
         if expected_type and expected_type not in scraper.content_types:
             return []
 
+        started_at = time.monotonic()
+        attempted_aliases = aliases[:1] if provider == "maccms" else aliases[:3]
+        failures: list[BaseException] = []
+        successful_searches = 0
+        search_hit_count = 0
+        maccms_outcomes: list[MacCmsSearchOutcome] = []
         if provider == "maccms":
             # MacCMS 都是中文聚合站，首选标题的命中率最高。只查一次可避免
             # 站点数 × 别名数造成瞬时连接洪峰；其它独立站仍保留多别名尝试。
             result_groups = await asyncio.gather(
-                *(scraper.search(alias) for alias in aliases[:1]),
+                *(
+                    scraper.search_with_diagnostics(alias)
+                    if isinstance(scraper, MacCmsScraper)
+                    and diagnostics is not None
+                    else scraper.search(alias)
+                    for alias in attempted_aliases
+                ),
                 return_exceptions=True,
             )
         else:
             result_groups = []
-            for alias in aliases[:3]:
+            for alias in attempted_aliases:
                 try:
                     result_groups.append(await scraper.search(alias))
                 except Exception as error:
                     result_groups.append(error)
         matches: dict[str, SourceMatch] = {}
-        for results in result_groups:
-            if isinstance(results, BaseException):
+        for raw_results in result_groups:
+            if isinstance(raw_results, BaseException):
+                failures.append(raw_results)
                 logger.debug(
                     "Source discovery failed [%s]: %s",
                     provider,
-                    type(results).__name__,
+                    type(raw_results).__name__,
                 )
                 continue
+            if (
+                provider == "maccms"
+                and isinstance(raw_results, tuple)
+                and len(raw_results) == 2
+            ):
+                results, outcomes = raw_results
+                maccms_outcomes.extend(
+                    outcome
+                    for outcome in outcomes
+                    if isinstance(outcome, MacCmsSearchOutcome)
+                )
+            else:
+                results = raw_results
+            successful_searches += 1
+            search_hit_count += len(results)
             for candidate in self._score_scraper_results(
                 provider,
                 results,
@@ -605,7 +635,92 @@ class ContentAggregator:
                 previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:
                     matches[candidate.source_id] = candidate
+
+        if provider == "maccms" and diagnostics is not None:
+            for outcome in maccms_outcomes:
+                diagnostic = diagnostics.get(outcome.site_name)
+                if diagnostic is None:
+                    continue
+                diagnostic.queried = True
+                diagnostic.aliases_attempted += 1
+                diagnostic.search_hit_count += len(outcome.results)
+                diagnostic.elapsed_ms = max(
+                    diagnostic.elapsed_ms,
+                    outcome.elapsed_ms,
+                )
+                if outcome.succeeded:
+                    diagnostic.status = (
+                        SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
+                        if diagnostic.search_hit_count
+                        else SourceDiscoveryStatus.SEARCH_MISS
+                    )
+                    diagnostic.error_category = ""
+                elif outcome.timed_out:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
+                    diagnostic.error_category = outcome.error_category
+                else:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
+                    diagnostic.error_category = outcome.error_category
+            matches_by_site: dict[str, list[SourceMatch]] = {}
+            for match in matches.values():
+                matches_by_site.setdefault(match.source_name, []).append(match)
+            for source_name, site_matches in matches_by_site.items():
+                diagnostic = diagnostics.get(source_name)
+                if diagnostic is None:
+                    continue
+                diagnostic.matched = True
+                diagnostic.best_match_score = max(
+                    match.score for match in site_matches
+                )
+                diagnostic.status = SourceDiscoveryStatus.MATCHED
+                diagnostic.error_category = ""
+        elif diagnostics is not None:
+            diagnostic = diagnostics.get(provider)
+            if diagnostic is not None:
+                diagnostic.queried = bool(attempted_aliases)
+                diagnostic.aliases_attempted = len(attempted_aliases)
+                diagnostic.search_hit_count = search_hit_count
+                diagnostic.best_match_score = max(
+                    (match.score for match in matches.values()),
+                    default=None,
+                )
+                diagnostic.matched = bool(matches)
+                diagnostic.elapsed_ms = max(
+                    0,
+                    int((time.monotonic() - started_at) * 1000),
+                )
+                if matches:
+                    diagnostic.status = SourceDiscoveryStatus.MATCHED
+                elif search_hit_count:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
+                elif successful_searches:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_MISS
+                elif any(
+                    isinstance(error, (asyncio.TimeoutError, TimeoutError))
+                    for error in failures
+                ):
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
+                    diagnostic.error_category = READ_TIMEOUT
+                elif failures:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
+                    diagnostic.error_category = _classify_resolution_exception(
+                        failures[0]
+                    )
         return list(matches.values())
+
+    def _new_discovery_diagnostics(self) -> dict[str, SourceDiscoveryDiagnostic]:
+        result: dict[str, SourceDiscoveryDiagnostic] = {}
+        for provider, name in self.source_inventory:
+            provider_id = (
+                "aggregate.maccms"
+                if provider == "maccms"
+                else f"crawler.{name}"
+            )
+            result[name] = SourceDiscoveryDiagnostic(
+                source_name=name,
+                provider_id=provider_id,
+            )
+        return result
 
     @staticmethod
     def _score_scraper_results(
@@ -687,7 +802,11 @@ class ContentAggregator:
         content_type: str = "",
         year: int = 0,
         max_matches: int = 12,
-    ) -> list[SourceMatch]:
+        include_diagnostics: bool = False,
+    ) -> (
+        list[SourceMatch]
+        | tuple[list[SourceMatch], dict[str, SourceDiscoveryDiagnostic]]
+    ):
         """把稳定元数据条目绑定到各采集站，不把采集站 ID 暴露给客户端。"""
         clean_aliases = []
         seen_aliases = set()
@@ -697,8 +816,9 @@ class ContentAggregator:
             if value and key and key not in seen_aliases:
                 seen_aliases.add(key)
                 clean_aliases.append(value)
+        diagnostics = self._new_discovery_diagnostics()
         if not clean_aliases:
-            return []
+            return ([], diagnostics) if include_diagnostics else []
 
         providers: list[tuple[str, MediaProvider, float]] = []
         if self._provider_enabled("aggregate.maccms"):
@@ -721,6 +841,7 @@ class ContentAggregator:
                     clean_aliases,
                     content_type=content_type,
                     year=year,
+                    diagnostics=diagnostics,
                 ),
                 timeout=timeout,
             )
@@ -728,8 +849,30 @@ class ContentAggregator:
         ]
         groups = await asyncio.gather(*jobs, return_exceptions=True)
         matches: dict[str, SourceMatch] = {}
-        for group in groups:
+        for (name, _scraper, _timeout), group in zip(providers, groups):
             if isinstance(group, BaseException):
+                affected = (
+                    [
+                        diagnostic
+                        for diagnostic in diagnostics.values()
+                        if diagnostic.provider_id == "aggregate.maccms"
+                    ]
+                    if name == "maccms"
+                    else [diagnostics.get(name)]
+                )
+                for diagnostic in affected:
+                    if diagnostic is None:
+                        continue
+                    diagnostic.queried = True
+                    diagnostic.aliases_attempted = min(1, len(clean_aliases))
+                    if isinstance(group, (asyncio.TimeoutError, TimeoutError)):
+                        diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
+                        diagnostic.error_category = READ_TIMEOUT
+                    else:
+                        diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
+                        diagnostic.error_category = _classify_resolution_exception(
+                            group
+                        )
                 continue
             for candidate in group:
                 previous = matches.get(candidate.source_id)
@@ -742,11 +885,12 @@ class ContentAggregator:
             previous = by_site.get(match.source_name)
             if previous is None or match.score > previous.score:
                 by_site[match.source_name] = match
-        return sorted(
+        result = sorted(
             by_site.values(),
             key=lambda item: item.score,
             reverse=True,
         )[:max_matches]
+        return (result, diagnostics) if include_diagnostics else result
 
     async def discover_source_matches_progressively(
         self,

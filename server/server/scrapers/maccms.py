@@ -17,7 +17,9 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote
 
@@ -37,6 +39,16 @@ _UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
+
+
+@dataclass(frozen=True)
+class MacCmsSearchOutcome:
+    site_name: str
+    results: list[SubjectResult]
+    succeeded: bool
+    timed_out: bool = False
+    error_category: str = ""
+    elapsed_ms: int = 0
 
 
 def parse_vod_play_url(raw: str) -> list[list[dict]]:
@@ -108,7 +120,12 @@ class MacCmsScraper(BaseScraper):
             return "movie"
         return "tv"
 
-    async def _site_search(self, site: dict, keyword: str) -> list[SubjectResult]:
+    async def _site_search_outcome(
+        self,
+        site: dict,
+        keyword: str,
+    ) -> MacCmsSearchOutcome:
+        started_at = time.monotonic()
         try:
             async with self._search_semaphore:
                 resp = await self._client.get(
@@ -118,12 +135,51 @@ class MacCmsScraper(BaseScraper):
                 )
             if resp.status_code != 200:
                 self._failures[site["name"]] = self._failures.get(site["name"], 0) + 1
-                return []
+                category = (
+                    "rate_limited"
+                    if resp.status_code == 429
+                    else "restricted"
+                    if resp.status_code in {401, 403, 451}
+                    else "search_error"
+                )
+                return MacCmsSearchOutcome(
+                    site_name=site["name"],
+                    results=[],
+                    succeeded=False,
+                    error_category=category,
+                    elapsed_ms=max(
+                        0,
+                        int((time.monotonic() - started_at) * 1000),
+                    ),
+                )
             data = resp.json()
         except Exception as e:
             self._failures[site["name"]] = self._failures.get(site["name"], 0) + 1
             logger.debug(f"MacCMS search fail [{site['name']}]: {e}")
-            return []
+            timed_out = isinstance(
+                e,
+                (asyncio.TimeoutError, httpx.TimeoutException, TimeoutError),
+            )
+            category = (
+                "connect_timeout"
+                if isinstance(e, httpx.ConnectTimeout)
+                else "read_timeout"
+                if timed_out
+                else "parser_mismatch"
+                if isinstance(e, (ValueError, KeyError, TypeError))
+                else "unknown_exception"
+            )
+            return MacCmsSearchOutcome(
+                site_name=site["name"],
+                results=[],
+                succeeded=False,
+                timed_out=timed_out,
+                error_category=category,
+                elapsed_ms=max(
+                    0,
+                    int((time.monotonic() - started_at) * 1000),
+                ),
+            )
 
         self._failures[site["name"]] = 0
         items = data.get("list", []) if isinstance(data, dict) else []
@@ -144,20 +200,28 @@ class MacCmsScraper(BaseScraper):
                 extra={"site": site["name"], "vod_id": vid,
                        "remarks": it.get("vod_remarks", "")},
             ))
-        return out
+        return MacCmsSearchOutcome(
+            site_name=site["name"],
+            results=out,
+            succeeded=True,
+            elapsed_ms=max(
+                0,
+                int((time.monotonic() - started_at) * 1000),
+            ),
+        )
 
-    async def search(self, keyword: str) -> list[SubjectResult]:
-        """并发搜索所有站点，并按站点优先级轮转结果。"""
-        tasks = [self._site_search(s, keyword) for s in self._sites]
-        groups = await asyncio.gather(*tasks, return_exceptions=True)
+    async def _site_search(self, site: dict, keyword: str) -> list[SubjectResult]:
+        outcome = await self._site_search_outcome(site, keyword)
+        return outcome.results
+
+    def _interleave_search_groups(
+        self,
+        groups: list[tuple[dict, list[SubjectResult]]],
+    ) -> list[SubjectResult]:
         results: list[SubjectResult] = []
         seen: set[str] = set()
         ranked_groups = sorted(
-            (
-                (site, group)
-                for site, group in zip(self._sites, groups)
-                if not isinstance(group, Exception) and group
-            ),
+            ((site, group) for site, group in groups if group),
             key=lambda pair: (
                 int(pair[0].get("weight", 0))
                 - 15 * self._failures.get(pair[0]["name"], 0)
@@ -169,13 +233,39 @@ class MacCmsScraper(BaseScraper):
             for _, group in ranked_groups:
                 if index >= len(group):
                     continue
-                r = group[index]
-                key = f"{r.extra.get('site')}:{r.title}:{r.year}"
+                result = group[index]
+                key = f"{result.extra.get('site')}:{result.title}:{result.year}"
                 if key in seen:
                     continue
                 seen.add(key)
-                results.append(r)
+                results.append(result)
         return results
+
+    async def search(self, keyword: str) -> list[SubjectResult]:
+        """并发搜索所有站点，并按站点优先级轮转结果。"""
+        tasks = [self._site_search(s, keyword) for s in self._sites]
+        groups = await asyncio.gather(*tasks, return_exceptions=True)
+        return self._interleave_search_groups([
+            (site, group)
+            for site, group in zip(self._sites, groups)
+            if isinstance(group, list)
+        ])
+
+    async def search_with_diagnostics(
+        self,
+        keyword: str,
+    ) -> tuple[list[SubjectResult], list[MacCmsSearchOutcome]]:
+        """Search every configured site without collapsing misses into errors."""
+        outcomes = await asyncio.gather(
+            *(self._site_search_outcome(site, keyword) for site in self._sites)
+        )
+        by_name = {site["name"]: site for site in self._sites}
+        results = self._interleave_search_groups([
+            (by_name[outcome.site_name], outcome.results)
+            for outcome in outcomes
+            if outcome.site_name in by_name
+        ])
+        return results, list(outcomes)
 
     async def search_progressively(
         self,

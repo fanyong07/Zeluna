@@ -109,6 +109,56 @@ void main() {
     expect(lines.last.message, '当前站点没有匹配到这部作品');
   });
 
+  test('聚合后端会保留请求级来源诊断字段', () async {
+    final client = MockClient((request) async {
+      expect(request.url.pathSegments.take(3).join('/'), 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': '',
+          'title': '超时源',
+          'source': 'maccms:超时源',
+          'provider_id': 'aggregate.maccms',
+          'source_name': '超时源',
+          'available': false,
+          'status': 'search_timeout',
+          'diagnostic_status': 'search_timeout',
+          'queried': true,
+          'aliases_attempted': 2,
+          'search_hit_count': 0,
+          'best_match_score': null,
+          'matched': false,
+          'episode_found': null,
+          'elapsed_ms': 950,
+          'message': '来源搜索超时',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.providerId, 'aggregate.maccms');
+    expect(lines.single.sourceName, '超时源');
+    expect(lines.single.diagnosticStatus, 'search_timeout');
+    expect(lines.single.queried, isTrue);
+    expect(lines.single.aliasesAttempted, 2);
+    expect(lines.single.searchHitCount, 0);
+    expect(lines.single.bestMatchScore, isNull);
+    expect(lines.single.matched, isFalse);
+    expect(lines.single.episodeFound, isNull);
+    expect(lines.single.discoveryElapsed, const Duration(milliseconds: 950));
+    expect(lines.single.message, '来源搜索超时');
+  });
+
   test('完整查线使用兼容接口，过期前的旧缓存会明确提示后台更新', () async {
     final client = MockClient((request) async {
       expect(request.url.pathSegments.take(3).join('/'), 'api/v3/playback');
@@ -219,6 +269,15 @@ void main() {
           'headers': {'Referer': 'https://source.example/watch/1'},
           'available': false,
           'status': 'client_probe_required',
+          'source_name': 'dm706',
+          'diagnostic_status': 'client_probe_required',
+          'queried': true,
+          'aliases_attempted': 1,
+          'search_hit_count': 2,
+          'best_match_score': 108,
+          'matched': true,
+          'episode_found': true,
+          'elapsed_ms': 410,
           'cache_state': 'cold',
           'error_category': 'server_blocked_client_candidate',
           'source_latency_ms': 730,
@@ -275,6 +334,18 @@ void main() {
     expect(verified.serverVerified, isFalse);
     expect(verified.cacheState, 'cold');
     expect(verified.sourceErrorCategory, 'server_blocked_client_candidate');
+    expect(verified.sourceName, 'dm706');
+    expect(
+      verified.diagnosticStatus,
+      PlaybackDiscoveryStatus.clientProbeRequired,
+    );
+    expect(verified.queried, isTrue);
+    expect(verified.aliasesAttempted, 1);
+    expect(verified.searchHitCount, 2);
+    expect(verified.bestMatchScore, 108);
+    expect(verified.matched, isTrue);
+    expect(verified.episodeFound, isTrue);
+    expect(verified.discoveryElapsed, const Duration(milliseconds: 410));
   });
 
   test('客户端拒绝后端误返回的 HTML 和 embed 播放页', () async {
