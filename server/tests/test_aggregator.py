@@ -80,6 +80,41 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(wrong_season, 65)
         self.assertLess(spinoff, 65)
 
+    def test_specific_season_alias_rejects_base_season_and_movie_edition(self):
+        aliases = [
+            "团子大家族 第二季",
+            "团子大家族",
+            "CLANNAD AFTER STORY",
+        ]
+        correct = _source_match_score(
+            "团子大家族第二季",
+            aliases,
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2008,
+            expected_year=2008,
+        )
+        first_season = _source_match_score(
+            "团子大家族",
+            aliases,
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2007,
+            expected_year=2008,
+        )
+        movie = _source_match_score(
+            "团子大家族 剧场版",
+            aliases,
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2007,
+            expected_year=2008,
+        )
+
+        self.assertGreaterEqual(correct, 65)
+        self.assertLess(first_season, 65)
+        self.assertLess(movie, 65)
+
     async def test_default_crawlers_are_current_vps_playback_candidates(self):
         self.aggregator = ContentAggregator()
 

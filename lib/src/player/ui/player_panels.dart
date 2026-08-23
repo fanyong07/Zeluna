@@ -213,17 +213,23 @@ String _emptyLineMessage(
     return '已检查 ${lines.length} 条候选线路，但暂时都不能播放。';
   }
   final unavailableCount = lines.where((line) => !line.available).length;
-  return _unavailableLinesMessage(lines, count: unavailableCount);
+  return playbackUnavailableMessage(lines, count: unavailableCount);
 }
 
-String _unavailableLinesMessage(List<PlaybackLine> lines, {int? count}) {
+String playbackUnavailableMessage(List<PlaybackLine> lines, {int? count}) {
   final unavailableLines = lines.where((line) => !line.available).toList();
   final total = count ?? unavailableLines.length;
-  final backendCount = unavailableLines
+  final backendLines = unavailableLines
       .where((line) => line.providerId.startsWith('zeluna:'))
+      .toList();
+  final backendMediaCount = backendLines
+      .where((line) => line.url?.trim().isNotEmpty == true)
       .length;
-  if (backendCount > 0) {
-    return '找到了 $backendCount 条候选线路，但当前网络下无法打开视频。请检查网络或代理后重试。';
+  if (backendMediaCount > 0) {
+    return '找到了 $backendMediaCount 条视频线路，但当前网络下无法打开。请检查网络或代理后重试。';
+  }
+  if (backendLines.isNotEmpty) {
+    return '已查询 ${backendLines.length} 个在线来源，但没有返回可播放地址。当前作品可能使用了不同译名，或这些来源暂时没有资源。';
   }
   final deadCount = unavailableLines
       .where((line) => (line.message ?? '').contains('视频 CDN'))
@@ -696,7 +702,7 @@ class _LinePanelBody extends StatelessWidget {
             title: '当前没有可播放线路',
             message: lines.isEmpty
                 ? '仍在查找中，目前还没有确认可播的线路。'
-                : _unavailableLinesMessage(lines),
+                : playbackUnavailableMessage(lines),
           )
         else
           Material(

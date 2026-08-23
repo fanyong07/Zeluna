@@ -154,6 +154,50 @@ def _interleave_unique(groups: list[list[dict]]) -> list[dict]:
     return result
 
 
+def _playback_title_key(value: Any) -> str:
+    return "".join(char for char in _clean_text(value).casefold() if char.isalnum())
+
+
+def _contains_han(value: str) -> bool:
+    return any("\u3400" <= char <= "\u9fff" for char in value)
+
+
+def _year_from_date(value: Any) -> int:
+    text = _clean_text(value)
+    return int(text[:4]) if len(text) >= 4 and text[:4].isdigit() else 0
+
+
+def _chinese_number(value: int) -> str:
+    digits = "零一二三四五六七八九"
+    if 0 <= value <= 9:
+        return digits[value]
+    if value == 10:
+        return "十"
+    if 10 < value < 20:
+        return "十" + digits[value - 10]
+    if value == 20:
+        return "二十"
+    return str(value)
+
+
+def _prioritize_playback_aliases(values) -> list[str]:
+    """Prefer localized Han titles without changing catalog display metadata."""
+
+    unique = _unique_text(values)
+    indexed = list(enumerate(unique))
+    indexed.sort(
+        key=lambda pair: (
+            0
+            if _contains_han(pair[1])
+            else 1
+            if any(char.isascii() and char.isalnum() for char in pair[1])
+            else 2,
+            pair[0],
+        )
+    )
+    return [value for _, value in indexed]
+
+
 def _merge_ranked_candidates(
     *groups: list[dict],
     limit: int,
@@ -286,6 +330,7 @@ class CatalogService:
         self._provider_semaphores: dict[str, asyncio.Semaphore] = {}
         self._provider_cooldown_until: dict[str, float] = {}
         self._home_refreshes: dict[str, asyncio.Task[list[dict]]] = {}
+        self._playback_alias_cache: dict[str, tuple[str, ...]] = {}
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(12, connect=6),
             follow_redirects=True,
@@ -452,6 +497,170 @@ class CatalogService:
         result = list(unique.values())[: max(1, min(limit, 100))]
         await self._persist_many(repository, result)
         return result
+
+    async def playback_aliases(self, metadata: dict) -> list[str]:
+        """Return source-search aliases, enriching untranslated anime via TMDB.
+
+        Bangumi occasionally has no ``name_cn`` even though TMDB has verified
+        alternative titles for the same series.  A strict exact normalized
+        alias overlap prevents a similarly named TMDB result from being used.
+        """
+
+        base = _unique_text([
+            metadata.get("title"),
+            metadata.get("original_title"),
+            *(metadata.get("aliases") or []),
+        ])
+        if not base:
+            return []
+        if (
+            metadata.get("provider") != "bangumi"
+            or metadata.get("media_type") != "anime"
+            or not TMDB_READ_ACCESS_TOKEN
+        ):
+            return _prioritize_playback_aliases(base)
+
+        title = _clean_text(metadata.get("title"))
+        original = _clean_text(metadata.get("original_title"))
+        if (
+            title
+            and original
+            and _playback_title_key(title) != _playback_title_key(original)
+            and _contains_han(title)
+        ):
+            return _prioritize_playback_aliases(base)
+
+        cache_key = _clean_text(metadata.get("stable_id")) or (
+            "bangumi-title:" + _playback_title_key(original or title)
+        )
+        cached = self._playback_alias_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+
+        enriched = list(base)
+        try:
+            discovered = await self._tmdb_playback_aliases(metadata, base)
+        except Exception as error:
+            logger.debug(
+                "TMDB playback alias crosswalk failed: %s",
+                type(error).__name__,
+            )
+            return _prioritize_playback_aliases(base)
+        if discovered is None:
+            return _prioritize_playback_aliases(base)
+        enriched.extend(discovered)
+        ordered = _prioritize_playback_aliases(enriched)
+        self._playback_alias_cache[cache_key] = tuple(ordered)
+        return ordered
+
+    async def _tmdb_playback_aliases(
+        self,
+        metadata: dict,
+        targets: list[str],
+    ) -> list[str] | None:
+        query = _clean_text(
+            metadata.get("original_title")
+            or metadata.get("title")
+            or targets[0]
+        )
+        if not query:
+            return []
+        response = await self._tmdb_get("/search/tv", query=query)
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        results = payload.get("results", []) if isinstance(payload, dict) else []
+        target_keys = {_playback_title_key(value) for value in targets}
+        target_keys.discard("")
+        detail_succeeded = False
+        for candidate in results[:3]:
+            if not isinstance(candidate, dict):
+                continue
+            provider_id = _clean_text(candidate.get("id"))
+            if not provider_id.isdigit():
+                continue
+            detail_response = await self._tmdb_get(
+                f"/tv/{provider_id}",
+                append_to_response="alternative_titles",
+            )
+            if detail_response.status_code != 200:
+                continue
+            detail_succeeded = True
+            raw_detail = detail_response.json()
+            item = self._subject_from_tmdb(raw_detail, "tv")
+            if item is None:
+                continue
+            aliases = _unique_text([
+                item.get("title"),
+                item.get("original_title"),
+                *(item.get("aliases") or []),
+            ])
+            candidate_keys = {_playback_title_key(value) for value in aliases}
+            if target_keys.intersection(candidate_keys):
+                return [
+                    *self._season_specific_playback_aliases(
+                        metadata,
+                        raw_detail,
+                        aliases,
+                        target_keys,
+                    ),
+                    *aliases,
+                ]
+        return [] if detail_succeeded or not results else None
+
+    @staticmethod
+    def _season_specific_playback_aliases(
+        metadata: dict,
+        raw_detail: dict,
+        aliases: list[str],
+        target_keys: set[str],
+    ) -> list[str]:
+        target_year = _year_from_date(metadata.get("date"))
+        try:
+            target_episodes = int(metadata.get("total_episodes") or 0)
+        except (TypeError, ValueError):
+            target_episodes = 0
+        seasons = raw_detail.get("seasons", [])
+        if not isinstance(seasons, list):
+            return []
+        best: tuple[int, int] | None = None
+        for raw in seasons:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                number = int(raw.get("season_number") or 0)
+                episodes = int(raw.get("episode_count") or 0)
+            except (TypeError, ValueError):
+                continue
+            if number <= 0:
+                continue
+            name_matches = _playback_title_key(raw.get("name")) in target_keys
+            year_matches = bool(
+                target_year and _year_from_date(raw.get("air_date")) == target_year
+            )
+            episode_matches = bool(
+                target_episodes and episodes == target_episodes
+            )
+            if not name_matches and not (year_matches and episode_matches):
+                continue
+            score = (
+                (20 if name_matches else 0)
+                + (8 if year_matches else 0)
+                + (6 if episode_matches else 0)
+            )
+            if best is None or score > best[0]:
+                best = (score, number)
+        if best is None or best[1] <= 1:
+            return []
+        localized = next((value for value in aliases if _contains_han(value)), "")
+        if not localized:
+            return []
+        number = best[1]
+        chinese = _chinese_number(number)
+        return _unique_text([
+            f"{localized} 第{chinese}季",
+            f"{localized} 第{number}季",
+        ])
 
     async def home(
         self,

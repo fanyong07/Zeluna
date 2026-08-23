@@ -132,9 +132,27 @@ def _source_match_score(
 ) -> int:
     normalized = _normalized_match_title(candidate)
     targets = [_normalized_match_title(alias) for alias in aliases]
+    season_specific_bases: dict[str, str] = {}
+    for target in targets:
+        match = re.search(
+            r"(?:第?[一二三四五六七八九十百两\d]+季|season\d+|s\d+)$",
+            target,
+        )
+        if match and target[:match.start()]:
+            season_specific_bases[target] = target[:match.start()]
+    season_bases = set(season_specific_bases.values())
     score = 0
     for target in targets:
         if not target:
+            continue
+        if normalized == season_specific_bases.get(target):
+            continue
+        if target in season_bases and (
+            normalized == target or normalized.startswith(target)
+        ):
+            # Once a verified season-specific alias exists, a bare base title
+            # or a different edition (for example a theatrical movie) must not
+            # outrank that season merely because it is an exact short match.
             continue
         if normalized == target:
             score = max(score, 100)

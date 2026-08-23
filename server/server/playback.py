@@ -570,11 +570,7 @@ class PlaybackService:
             date = str(metadata.get("date") or "")
             if not year and len(date) >= 4 and date[:4].isdigit():
                 year = int(date[:4])
-            aliases = [
-                title,
-                original_title,
-                *(metadata.get("aliases") or []),
-            ]
+            aliases = await catalog_service.playback_aliases(metadata)
         else:
             aliases = [title, original_title]
             identity = parse_stable_id(stable_id)

@@ -38,6 +38,167 @@ from server.scrapers.maccms_sites import MACCMS_SITES
 
 
 class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bangumi_playback_aliases_use_verified_tmdb_alternatives(self):
+        requested_paths: list[str] = []
+
+        def handler(request: httpx.Request):
+            requested_paths.append(request.url.path)
+            if request.url.path == "/3/search/tv":
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "id": 24835,
+                                "name": "CLANNAD",
+                                "original_name": "CLANNAD",
+                                "first_air_date": "2007-10-05",
+                            }
+                        ]
+                    },
+                )
+            if request.url.path == "/3/tv/24835":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 24835,
+                        "name": "CLANNAD",
+                        "original_name": "CLANNAD",
+                        "first_air_date": "2007-10-05",
+                        "alternative_titles": {
+                            "results": [
+                                {"title": "团子大家族"},
+                                {"title": "CLANNAD ～AFTER STORY～"},
+                            ]
+                        },
+                        "seasons": [
+                            {
+                                "season_number": 1,
+                                "name": "CLANNAD",
+                                "air_date": "2007-10-05",
+                                "episode_count": 22,
+                            },
+                            {
+                                "season_number": 2,
+                                "name": "CLANNAD 〜AFTER STORY〜",
+                                "air_date": "2008-10-03",
+                                "episode_count": 22,
+                            },
+                        ],
+                    },
+                )
+            return httpx.Response(404)
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        metadata = {
+            "stable_id": "bangumi:876",
+            "provider": "bangumi",
+            "media_type": "anime",
+            "title": "CLANNAD 〜AFTER STORY〜",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["CLANNAD 〜AFTER STORY〜"],
+            "date": "2008-10-02",
+            "total_episodes": 22,
+        }
+        try:
+            with patch("server.catalog.TMDB_READ_ACCESS_TOKEN", "test-token"):
+                first = await service.playback_aliases(metadata)
+                second = await service.playback_aliases(metadata)
+        finally:
+            await service.aclose()
+
+        self.assertEqual(first[0], "团子大家族 第二季")
+        self.assertIn("CLANNAD 〜AFTER STORY〜", first)
+        self.assertEqual(second, first)
+        self.assertEqual(requested_paths, ["/3/search/tv", "/3/tv/24835"])
+
+    async def test_bangumi_playback_aliases_reject_unrelated_tmdb_result(self):
+        def handler(request: httpx.Request):
+            if request.url.path == "/3/search/tv":
+                return httpx.Response(
+                    200,
+                    json={"results": [{"id": 999, "name": "After Story"}]},
+                )
+            if request.url.path == "/3/tv/999":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 999,
+                        "name": "After Story",
+                        "original_name": "After Story",
+                        "alternative_titles": {
+                            "results": [{"title": "完全无关的作品"}]
+                        },
+                    },
+                )
+            return httpx.Response(404)
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        metadata = {
+            "stable_id": "bangumi:876",
+            "provider": "bangumi",
+            "media_type": "anime",
+            "title": "CLANNAD 〜AFTER STORY〜",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["CLANNAD 〜AFTER STORY〜"],
+        }
+        try:
+            with patch("server.catalog.TMDB_READ_ACCESS_TOKEN", "test-token"):
+                aliases = await service.playback_aliases(metadata)
+        finally:
+            await service.aclose()
+
+        self.assertEqual(aliases, ["CLANNAD 〜AFTER STORY〜"])
+
+    async def test_bangumi_playback_aliases_do_not_cache_transient_tmdb_failure(self):
+        search_calls = 0
+
+        def handler(request: httpx.Request):
+            nonlocal search_calls
+            if request.url.path == "/3/search/tv":
+                search_calls += 1
+                if search_calls == 1:
+                    return httpx.Response(503)
+                return httpx.Response(
+                    200,
+                    json={"results": [{"id": 24835, "name": "CLANNAD"}]},
+                )
+            if request.url.path == "/3/tv/24835":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 24835,
+                        "name": "CLANNAD",
+                        "alternative_titles": {
+                            "results": [
+                                {"title": "CLANNAD 〜AFTER STORY〜"},
+                                {"title": "团子大家族"},
+                            ]
+                        },
+                    },
+                )
+            return httpx.Response(404)
+
+        service = CatalogService(transport=httpx.MockTransport(handler))
+        metadata = {
+            "stable_id": "bangumi:876",
+            "provider": "bangumi",
+            "media_type": "anime",
+            "title": "CLANNAD 〜AFTER STORY〜",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["CLANNAD 〜AFTER STORY〜"],
+        }
+        try:
+            with patch("server.catalog.TMDB_READ_ACCESS_TOKEN", "test-token"):
+                first = await service.playback_aliases(metadata)
+                second = await service.playback_aliases(metadata)
+        finally:
+            await service.aclose()
+
+        self.assertEqual(first, ["CLANNAD 〜AFTER STORY〜"])
+        self.assertEqual(second[0], "团子大家族")
+        self.assertEqual(search_calls, 2)
+
     async def test_search_uses_stable_bangumi_and_tmdb_ids(self):
         def handler(request: httpx.Request):
             if request.url.path == "/v0/search/subjects":
@@ -317,6 +478,45 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             binding_count = await session.scalar(select(func.count(SourceBinding.id)))
         self.assertEqual(cache_count, 1)
         self.assertEqual(binding_count, 2)
+
+    async def test_playback_context_uses_catalog_crosswalk_alias_order(self):
+        metadata = {
+            "stable_id": "bangumi:876",
+            "provider": "bangumi",
+            "title": "CLANNAD 〜AFTER STORY〜",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["CLANNAD 〜AFTER STORY〜"],
+            "media_type": "anime",
+            "date": "2008-10-02",
+        }
+        localized = ["团子大家族", "CLANNAD 〜AFTER STORY〜"]
+        with (
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=localized),
+            ) as aliases,
+        ):
+            async with self.sessions() as session:
+                title, content_type, year, result = (
+                    await self.service._playback_context(
+                        "bangumi:876",
+                        session,
+                        title="",
+                        original_title="",
+                        content_type="",
+                        year=0,
+                    )
+                )
+
+        self.assertEqual(title, "CLANNAD 〜AFTER STORY〜")
+        self.assertEqual(content_type, "anime")
+        self.assertEqual(year, 2008)
+        self.assertEqual(result, localized)
+        aliases.assert_awaited_once_with(metadata)
 
     async def test_partial_positive_cache_expires_before_stable_cache(self):
         now = time.time()
