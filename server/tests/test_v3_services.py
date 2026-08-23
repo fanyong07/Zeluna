@@ -984,6 +984,18 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                     stored_health.consecutive_failures,
                     SOURCE_CIRCUIT_FAILURE_THRESHOLD,
                 )
+                self.assertFalse(self.service._discovered_match_can_probe(
+                    SourceMatch(
+                        source_id="crawler:circuit:partial",
+                        source_name="circuit",
+                        title="Circuit",
+                        content_type="anime",
+                        year=2024,
+                        score=107,
+                    ),
+                    stored_health,
+                    now,
+                ))
 
         cooldown = self.service._source_circuit_cooldown_seconds(
             SOURCE_CIRCUIT_FAILURE_THRESHOLD
@@ -1010,6 +1022,158 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([item.source_name for item in healthy], ["circuit"])
                 self.assertEqual(stored_health.consecutive_failures, 0)
                 self.assertEqual(stored_health.last_status, "healthy")
+
+    async def test_exact_new_match_can_recover_open_source_in_full_refresh(self):
+        now = 1_800_000_000.0
+        match = SourceMatch(
+            source_id="crawler:girigiri:4086",
+            source_name="girigiri",
+            title="团子大家族 第二季",
+            content_type="anime",
+            year=0,
+            score=108,
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/clannad-after-story.mp4",
+            title="团子大家族 第二季",
+            format="mp4",
+            source="crawler:girigiri",
+            verification_status=SERVER_VERIFIED,
+        )
+        metadata = {
+            "stable_id": "bangumi:876",
+            "title": "CLANNAD 〜AFTER STORY〜",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["CLANNAD 〜AFTER STORY〜"],
+            "media_type": "anime",
+            "date": "2008-10-02",
+        }
+        async with self.sessions() as session:
+            session.add(SourceHealth(
+                source_name="girigiri",
+                failure_count=266,
+                consecutive_failures=266,
+                last_status="unhealthy",
+                last_error_category="empty_media",
+                last_checked_at=now,
+                last_failure_at=now,
+                recent_success_rate=0.0,
+            ))
+            await session.commit()
+
+        async def resolve(candidates, **_kwargs):
+            if not candidates:
+                return [], {}, {}
+            return [line], {"girigiri": SERVER_VERIFIED}, {}
+
+        with (
+            patch("server.playback.time.time", return_value=now),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.girigiri"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=[
+                    "团子大家族 第二季",
+                    "CLANNAD 〜AFTER STORY〜",
+                ]),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=[match]),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(side_effect=resolve),
+            ) as resolver,
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines("bangumi:876", 1, session)
+
+        self.assertEqual(
+            [item["url"] for item in items if item.get("available")],
+            ["https://cdn.example/clannad-after-story.mp4"],
+        )
+        self.assertEqual(resolver.await_args.args[0], [match])
+
+    async def test_exact_new_match_can_recover_open_source_in_quick_refresh(self):
+        now = 1_800_000_000.0
+        match = SourceMatch(
+            source_id="crawler:girigiri:4086",
+            source_name="girigiri",
+            title="团子大家族 第二季",
+            content_type="anime",
+            year=0,
+            score=108,
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/clannad-after-story.mp4",
+            title="团子大家族 第二季",
+            format="mp4",
+            source="crawler:girigiri",
+            verification_status=SERVER_VERIFIED,
+        )
+        async with self.sessions() as session:
+            session.add(SourceHealth(
+                source_name="girigiri",
+                failure_count=266,
+                consecutive_failures=266,
+                last_status="unhealthy",
+                last_error_category="empty_media",
+                last_checked_at=now,
+                last_failure_at=now,
+                recent_success_rate=0.0,
+            ))
+            await session.commit()
+
+        async def discover(*_args, **_kwargs):
+            yield match
+
+        async def resolve(candidates, **_kwargs):
+            self.assertEqual(candidates, [match])
+            yield match, [line], SERVER_VERIFIED
+
+        with (
+            patch("server.playback.time.time", return_value=now),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.girigiri"}),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service._refresh_quick(
+                    "bangumi:876",
+                    1,
+                    session,
+                    title="团子大家族 第二季",
+                    original_title="CLANNAD 〜AFTER STORY〜",
+                    content_type="anime",
+                    year=2008,
+                )
+
+        self.assertEqual(
+            [item["url"] for item in items if item.get("url")],
+            ["https://cdn.example/clannad-after-story.mp4"],
+        )
 
     async def test_client_probe_candidate_never_opens_source_circuit(self):
         now = 1_800_000_000.0

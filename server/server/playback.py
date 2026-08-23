@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 _QUICK_CANDIDATE_GRACE_SECONDS = 0.35
 _SOURCE_HEALTH_EMA_ALPHA = 0.35
+_CIRCUIT_RECOVERY_MATCH_SCORE = 108
 _DETERMINISTIC_SOURCE_FAILURES = {
     STALE_ROUTE,
     MALFORMED_MANIFEST,
@@ -506,7 +507,8 @@ class PlaybackService:
             discovered = [
                 match
                 for match in discovered
-                if not self._source_circuit_is_open(
+                if self._discovered_match_can_probe(
+                    match,
                     source_health.get(match.source_name),
                     now,
                 )
@@ -728,7 +730,8 @@ class PlaybackService:
                             max_matches=len(aggregator.source_inventory) + 8,
                         )
                     ):
-                        if self._source_circuit_is_open(
+                        if not self._discovered_match_can_probe(
+                            match,
                             source_health.get(match.source_name),
                             time.time(),
                         ):
@@ -907,6 +910,21 @@ class PlaybackService:
             health.consecutive_failures
         )
         return cooldown > 0 and now < health.last_checked_at + cooldown
+
+    @classmethod
+    def _discovered_match_can_probe(
+        cls,
+        match: SourceMatch,
+        health: SourceHealthEntry | None,
+        now: float,
+    ) -> bool:
+        if not cls._source_circuit_is_open(health, now):
+            return True
+        # Health is tracked per site, not per work. A run of failures on
+        # unrelated titles must not suppress an exact newly discovered title
+        # indefinitely. The discovery score of 108 represents an exact title
+        # plus matching media type; the negative cache still bounds retries.
+        return match.score >= _CIRCUIT_RECOVERY_MATCH_SCORE
 
     @staticmethod
     def _source_binding_rank(
