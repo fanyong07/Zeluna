@@ -386,6 +386,8 @@ class DanmakuComment {
     required this.mode,
     required this.color,
     required this.text,
+    this.authorName = '',
+    this.isMine = false,
   });
 
   final String id;
@@ -394,6 +396,8 @@ class DanmakuComment {
   final DanmakuMode mode;
   final int color;
   final String text;
+  final String authorName;
+  final bool isMine;
 }
 
 class DanmakuTimeline {

@@ -12,6 +12,7 @@ from .database import (
     BangumiCollection,
     Comment,
     CommentLike,
+    CommunityDanmaku,
     Danmaku,
     PlayHistory,
     RefreshTokenHistory,
@@ -293,6 +294,11 @@ async def _finalize_account_deletion(session: AsyncSession, user: User) -> None:
         update(Danmaku).where(Danmaku.user_id == user.id).values(user_id=None)
     )
     await session.execute(
+        update(CommunityDanmaku)
+        .where(CommunityDanmaku.user_id == user.id)
+        .values(user_id=None)
+    )
+    await session.execute(
         update(Thread).where(Thread.user_id == user.id).values(user_id=None)
     )
     await session.execute(
@@ -332,6 +338,9 @@ async def build_account_data_export(
         )
     )
     danmaku = await owned(Danmaku, Danmaku.user_id == user.id)
+    community_danmaku = await owned(
+        CommunityDanmaku, CommunityDanmaku.user_id == user.id
+    )
     threads = await owned(Thread, Thread.user_id == user.id)
     thread_images = list(
         await session.scalars(
@@ -416,6 +425,19 @@ async def build_account_data_export(
                     "external_id": item.danmaku_id,
                 }
                 for item in danmaku
+            ],
+            "community_danmaku": [
+                {
+                    "id": item.id,
+                    "subject_key": item.subject_key,
+                    "episode_key": item.episode_key,
+                    "time_seconds": item.time_seconds,
+                    "mode": item.mode,
+                    "color": item.color,
+                    "text": item.text,
+                    "created_at": item.created_at,
+                }
+                for item in community_danmaku
             ],
             "threads": [
                 {

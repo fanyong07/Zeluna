@@ -189,6 +189,110 @@ void main() {
     expect(timeline.comments.single.text, '备用真实弹幕');
   });
 
+  test('official and public danmaku sources are merged', () async {
+    final paths = <String>[];
+    late final MockClient client;
+    client = MockClient((request) async {
+      paths.add(request.url.path);
+      if (request.url.host == 'api.zeluna.test') {
+        expect(request.url.path, '/api/v3/danmaku');
+        expect(request.url.queryParameters['subject_key'], 'bangumi:1');
+        expect(request.url.queryParameters['episode_key'], isNotEmpty);
+        return _jsonResponse({
+          'comments': [
+            {
+              'id': '41',
+              'subject_key': 'bangumi:1',
+              'episode_key': 'episode:v2:first',
+              'time_seconds': 9.5,
+              'mode': 'scroll',
+              'color': 0xFFFFFF,
+              'text': 'B 站公开弹幕',
+              'created_at': 1,
+              'author': {'display_name': '同步用户', 'is_mine': false},
+            },
+            {
+              'id': '42',
+              'subject_key': 'bangumi:1',
+              'episode_key': 'episode:v2:first',
+              'time_seconds': 20,
+              'mode': 'top',
+              'color': 0xFFCC00,
+              'text': 'Zeluna 用户弹幕',
+              'created_at': 1,
+              'author': {'display_name': '用户', 'is_mine': false},
+            },
+          ],
+          'next_cursor': null,
+        });
+      }
+      if (request.url.path == '/x/web-interface/nav') {
+        return _jsonResponse({
+          'code': -101,
+          'data': {
+            'wbi_img': {
+              'img_url':
+                  'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+              'sub_url':
+                  'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+            },
+          },
+        });
+      }
+      if (request.url.path == '/x/web-interface/wbi/search/type') {
+        return _jsonResponse({
+          'code': 0,
+          'data': {
+            'result': [
+              {'season_id': 42, 'title': '葬送的芙莉莲', 'org_title': ''},
+            ],
+          },
+        });
+      }
+      if (request.url.path == '/pgc/view/web/season') {
+        return _jsonResponse({
+          'code': 0,
+          'result': {
+            'title': '葬送的芙莉莲',
+            'episodes': [
+              {'title': '1', 'long_title': '冒险的结束', 'cid': 777},
+            ],
+          },
+        });
+      }
+      if (request.url.path == '/x/v1/dm/list.so') {
+        return http.Response(
+          '<i><d p="9.5,1,25,16777215,0,0,u,1">B 站公开弹幕</d></i>',
+          200,
+          headers: const {'content-type': 'text/xml; charset=utf-8'},
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final repository = DanmakuRepository(
+      client: client,
+      officialClient: client,
+      officialBaseUrl: 'https://api.zeluna.test',
+    );
+
+    final timeline = await repository.timelineForEpisode(
+      _subject,
+      _episode,
+      const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
+    );
+
+    expect(paths, contains('/api/v3/danmaku'));
+    expect(timeline.sources.map((item) => item.provider), [
+      'Zeluna',
+      'Bilibili',
+    ]);
+    expect(timeline.comments.map((item) => item.text), [
+      'B 站公开弹幕',
+      'Zeluna 用户弹幕',
+    ]);
+    expect(timeline.comments.first.provider, 'Zeluna');
+  });
+
   test(
     'unrelated Bilibili result is rejected instead of attaching wrong comments',
     () async {

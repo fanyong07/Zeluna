@@ -2,6 +2,7 @@
 
 from .admin import router as admin_router
 from .catalog import router as catalog_router
+from .danmaku import router as danmaku_router
 from .compat_v2 import router as compat_v2_router
 from .health import router as health_router
 from .legacy_account import router as legacy_account_router
@@ -17,6 +18,7 @@ from .sync import router as sync_router
 __all__ = [
     "admin_router",
     "catalog_router",
+    "danmaku_router",
     "compat_v2_router",
     "health_router",
     "legacy_account_router",

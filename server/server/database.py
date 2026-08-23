@@ -98,6 +98,9 @@ class User(Base):
 
     tokens: Mapped[list["UserToken"]] = relationship("UserToken", back_populates="user", cascade="all, delete-orphan")
     danmaku: Mapped[list["Danmaku"]] = relationship("Danmaku", back_populates="user", cascade="all, delete-orphan")
+    community_danmaku: Mapped[list["CommunityDanmaku"]] = relationship(
+        "CommunityDanmaku", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class UserToken(Base):
@@ -318,6 +321,40 @@ class Danmaku(Base):
     bangumi: Mapped["Bangumi"] = relationship("Bangumi", back_populates="danmaku")
     episode: Mapped["BangumiEpisode"] = relationship("BangumiEpisode", back_populates="danmaku")
     user: Mapped["User"] = relationship("User", back_populates="danmaku")
+
+
+class CommunityDanmaku(Base):
+    """Stable-identity JSON danmaku, separate from the legacy numeric protocol."""
+
+    __tablename__ = "community_danmaku"
+    __table_args__ = (
+        Index(
+            "ix_community_danmaku_episode_cursor",
+            "subject_key",
+            "episode_key",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    subject_key: Mapped[str] = mapped_column(String(300))
+    episode_key: Mapped[str] = mapped_column(String(300))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    time_seconds: Mapped[float] = mapped_column(Float)
+    mode: Mapped[str] = mapped_column(String(16), default="scroll")
+    color: Mapped[int] = mapped_column(Integer, default=0xFFFFFF)
+    text: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+        index=True,
+    )
+
+    user: Mapped["User | None"] = relationship(
+        "User", back_populates="community_danmaku"
+    )
 
 
 # ---------------------------------------------------------------------------

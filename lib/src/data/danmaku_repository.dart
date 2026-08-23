@@ -8,15 +8,30 @@ import 'package:xml/xml.dart';
 
 import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import 'danmaku_response_decoder.dart';
 
 class DanmakuRepository {
-  DanmakuRepository({http.Client? client})
-    : _client =
-          client ??
-          createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
-      _ownsClient = client == null;
+  DanmakuRepository({
+    http.Client? client,
+    http.Client? officialClient,
+    String officialBaseUrl = 'https://api.zeluna.top',
+    Future<String?> Function()? officialTokenProvider,
+  }) : _client =
+           client ??
+           createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
+       _ownsClient = client == null,
+       _officialClient =
+           officialClient ??
+           createNetworkHttpClient(
+             NetworkRequestPolicy.forService(
+               NetworkServiceKind.officialPlaybackBackend,
+             ),
+           ),
+       _ownsOfficialClient = officialClient == null,
+       _officialBaseUri = Uri.parse(officialBaseUrl),
+       _officialTokenProvider = officialTokenProvider;
 
   static const _requestTimeout = Duration(seconds: 8);
   static const _successCacheDuration = Duration(minutes: 30);
@@ -24,6 +39,10 @@ class DanmakuRepository {
 
   final http.Client _client;
   final bool _ownsClient;
+  final http.Client _officialClient;
+  final bool _ownsOfficialClient;
+  final Uri _officialBaseUri;
+  final Future<String?> Function()? _officialTokenProvider;
   final Map<String, _TimedTimeline> _cache = {};
   final Map<String, Future<DanmakuTimeline>> _inFlight = {};
   String? _wbiMixinKey;
@@ -69,6 +88,7 @@ class DanmakuRepository {
 
   void close() {
     if (_ownsClient) _client.close();
+    if (_ownsOfficialClient) _officialClient.close();
   }
 
   Future<DanmakuTimeline> _loadTimeline(
@@ -76,43 +96,91 @@ class DanmakuRepository {
     AnimeEpisode episode,
     ExternalServiceSettings settings,
   ) async {
-    final sources = <DanmakuMatch>[];
-
-    if (settings.bilibiliDanmakuEnabled) {
-      final bilibili = await _loadBilibili(subject, episode);
-      sources.add(bilibili.match);
-      if (bilibili.comments.isNotEmpty) {
-        return DanmakuTimeline(
-          sources: List.unmodifiable(sources),
-          comments: List.unmodifiable(bilibili.comments),
-        );
-      }
-    }
-
-    if (settings.dandanplayDanmakuEnabled) {
-      final dandanplay = await _loadDandanplay(subject, episode, settings);
-      sources.add(dandanplay.match);
-      if (dandanplay.comments.isNotEmpty) {
-        return DanmakuTimeline(
-          sources: List.unmodifiable(sources),
-          comments: List.unmodifiable(dandanplay.comments),
-        );
-      }
-    }
+    final loaders = <Future<_DanmakuSourceResult?>>[
+      _loadOfficial(subject, episode),
+      if (settings.bilibiliDanmakuEnabled) _loadBilibili(subject, episode),
+      if (settings.dandanplayDanmakuEnabled)
+        _loadDandanplay(subject, episode, settings),
+    ];
 
     final customEndpoint = settings.customDanmakuEndpoint.trim();
     if (settings.customDanmakuEnabled && customEndpoint.isNotEmpty) {
-      final custom = await _loadCustom(customEndpoint, subject, episode);
-      sources.add(custom.match);
-      if (custom.comments.isNotEmpty) {
-        return DanmakuTimeline(
-          sources: List.unmodifiable(sources),
-          comments: List.unmodifiable(custom.comments),
-        );
-      }
+      loaders.add(_loadCustom(customEndpoint, subject, episode));
     }
 
-    return DanmakuTimeline(sources: List.unmodifiable(sources));
+    final results = (await Future.wait(
+      loaders,
+    )).whereType<_DanmakuSourceResult>();
+    final sources = results
+        .map((result) => result.match)
+        .toList(growable: false);
+    final comments = _mergeDanmakuComments(
+      results.expand((result) => result.comments),
+    );
+    return DanmakuTimeline(
+      sources: List.unmodifiable(sources),
+      comments: comments,
+    );
+  }
+
+  Future<_DanmakuSourceResult?> _loadOfficial(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) async {
+    try {
+      final token = (await _officialTokenProvider?.call())?.trim() ?? '';
+      Uri targetFor({required bool authenticated}) => _officialBaseUri.replace(
+        pathSegments: [
+          ..._officialBaseUri.pathSegments.where(
+            (segment) => segment.isNotEmpty,
+          ),
+          'api',
+          'v3',
+          'danmaku',
+          if (authenticated) 'mine',
+        ],
+        queryParameters: {
+          'subject_key': subject.identityKey,
+          'episode_key': episode.identityKey(subjectKey: subject.identityKey),
+          'limit': '1000',
+        },
+      );
+      var response = await _officialClient
+          .get(
+            targetFor(authenticated: token.isNotEmpty),
+            headers: {
+              'Accept': 'application/json',
+              if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+            },
+          )
+          .timeout(_requestTimeout);
+      if (response.statusCode == 401 && token.isNotEmpty) {
+        response = await _officialClient
+            .get(
+              targetFor(authenticated: false),
+              headers: const {'Accept': 'application/json'},
+            )
+            .timeout(_requestTimeout);
+      }
+      if (response.statusCode != 200) return null;
+      final comments = parseZelunaDanmaku(
+        jsonDecode(utf8.decode(response.bodyBytes)),
+      );
+      return _DanmakuSourceResult(
+        match: DanmakuMatch(
+          provider: 'Zeluna',
+          title: subject.title,
+          episodeTitle: episode.displayTitle,
+          episodeId: episode.identityKey(subjectKey: subject.identityKey),
+          commentCount: comments.length,
+          available: true,
+          message: comments.isEmpty ? '当前集还没有用户弹幕' : null,
+        ),
+        comments: comments,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<_DanmakuSourceResult> _loadBilibili(
@@ -850,6 +918,62 @@ List<DanmakuComment> parseCustomDanmaku(Object? source) {
     if (comment != null) comments.add(comment);
   }
   comments.sort(_compareComments);
+  return List.unmodifiable(comments);
+}
+
+List<DanmakuComment> parseZelunaDanmaku(Object? source) {
+  final rawComments = source is Map ? source['comments'] : null;
+  if (rawComments is! List) return const [];
+  final comments = <DanmakuComment>[];
+  for (final item in rawComments.whereType<Map>()) {
+    final id = item['id']?.toString().trim() ?? '';
+    final text = item['text']?.toString().trim() ?? '';
+    final seconds = _doubleValue(item['time_seconds']);
+    final color = _colorValue(item['color']);
+    if (id.isEmpty ||
+        text.isEmpty ||
+        seconds == null ||
+        !seconds.isFinite ||
+        seconds < 0 ||
+        color == null) {
+      continue;
+    }
+    final author = item['author'];
+    final authorMap = author is Map ? author : const <Object?, Object?>{};
+    comments.add(
+      DanmakuComment(
+        id: 'zeluna-$id',
+        provider: 'Zeluna',
+        time: Duration(milliseconds: (seconds * 1000).round()),
+        mode: switch (item['mode']?.toString()) {
+          'top' => DanmakuMode.top,
+          'bottom' => DanmakuMode.bottom,
+          _ => DanmakuMode.scroll,
+        },
+        color: color,
+        text: text,
+        authorName: authorMap['display_name']?.toString().trim() ?? '',
+        isMine: authorMap['is_mine'] == true,
+      ),
+    );
+  }
+  comments.sort(_compareComments);
+  return List.unmodifiable(comments);
+}
+
+List<DanmakuComment> _mergeDanmakuComments(
+  Iterable<DanmakuComment> candidates,
+) {
+  final unique = <String, DanmakuComment>{};
+  for (final comment in candidates) {
+    final normalizedText = comment.text
+        .trim()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .toLowerCase();
+    final timeBucket = (comment.time.inMilliseconds / 100).round();
+    unique.putIfAbsent('$timeBucket|$normalizedText', () => comment);
+  }
+  final comments = unique.values.toList()..sort(_compareComments);
   return List.unmodifiable(comments);
 }
 

@@ -12,6 +12,7 @@ from .observability import ObservabilityMetrics, ObservabilityMiddleware
 from .routers import (
     admin_router,
     catalog_router,
+    danmaku_router,
     compat_v2_router,
     health_router,
     legacy_account_router,
@@ -42,6 +43,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(compat_v2_router)
     app.include_router(health_router)
     app.include_router(catalog_router)
+    app.include_router(danmaku_router)
     app.include_router(playback_router)
     app.include_router(sync_router)
     app.include_router(admin_router)

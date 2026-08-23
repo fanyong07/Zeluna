@@ -276,6 +276,68 @@ def test_source_health_diagnostics_upgrade_preserves_existing_health(tmp_path):
         engine.dispose()
 
 
+def test_community_danmaku_migration_preserves_existing_accounts(tmp_path):
+    database_path = tmp_path / "community-danmaku.db"
+    config = _config(database_path)
+    command.upgrade(config, "0011_catalog_rankings")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users (
+                email, name, password_hash, role, sex, avatar, exp, coin,
+                color, address, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "kept-danmaku@example.com",
+                "kept-danmaku-user",
+                "hash",
+                "user",
+                "",
+                "",
+                0,
+                0,
+                "#000000",
+                "",
+                1,
+                1,
+            ),
+        )
+
+    command.upgrade(config, "head")
+    command.check(config)
+
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        inspector = inspect(engine)
+        assert "community_danmaku" in inspector.get_table_names()
+        assert {
+            "id",
+            "subject_key",
+            "episode_key",
+            "user_id",
+            "time_seconds",
+            "mode",
+            "color",
+            "text",
+            "created_at",
+        } == {
+            column["name"]
+            for column in inspector.get_columns("community_danmaku")
+        }
+        assert any(
+            index["name"] == "ix_community_danmaku_episode_cursor"
+            for index in inspector.get_indexes("community_danmaku")
+        )
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT name FROM users WHERE email='kept-danmaku@example.com'")
+            ) == "kept-danmaku-user"
+        assert _revision(database_path) == migration_head_revision()
+    finally:
+        engine.dispose()
+
+
 def test_incompatible_existing_schema_is_not_stamped(tmp_path):
     database_path = tmp_path / "incompatible.db"
     with sqlite3.connect(database_path) as connection:

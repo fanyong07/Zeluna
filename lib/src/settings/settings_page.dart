@@ -32,10 +32,16 @@ class SettingsHubPage extends ConsumerWidget {
             onTap: () => context.push('/profile/offline'),
           ),
           _SettingsHubTile(
-            icon: Icons.subtitles,
-            title: '弹幕设置',
+            icon: Icons.comment_outlined,
+            title: '弹幕显示',
             value: state.danmaku.enabled ? '开启' : '关闭',
             onTap: () => context.push('/profile/danmaku'),
+          ),
+          _SettingsHubTile(
+            icon: Icons.hub_outlined,
+            title: '弹幕来源',
+            value: _danmakuSourceSummary(state.services),
+            onTap: () => context.push('/settings/services/danmaku'),
           ),
           _SettingsHubTile(
             icon: Icons.play_circle_outline,
@@ -122,6 +128,15 @@ class SettingsHubPage extends ConsumerWidget {
       },
     );
   }
+}
+
+String _danmakuSourceSummary(ExternalServiceSettings settings) {
+  final enabled = <bool>[
+    settings.dandanplayDanmakuEnabled,
+    settings.bilibiliDanmakuEnabled,
+    settings.customDanmakuEnabled,
+  ].where((value) => value).length;
+  return enabled == 0 ? 'Zeluna' : 'Zeluna + $enabled 个';
 }
 
 class _SettingsHubTile extends StatelessWidget {
@@ -1214,7 +1229,6 @@ class ServiceSettingsPage extends ConsumerWidget {
                     const SizedBox(height: 12),
                     ...switch (kind) {
                       'sync' => _syncSourceCards(settings, controller),
-                      'subtitles' => _subtitleSourceCards(settings, controller),
                       'danmaku' => _danmakuSourceCards(
                         settings,
                         controller,
@@ -1413,49 +1427,6 @@ class ServiceSettingsPage extends ConsumerWidget {
         false;
   }
 
-  List<Widget> _subtitleSourceCards(
-    ExternalServiceSettings settings,
-    AnimeController controller,
-  ) {
-    return [
-      const _InfoCard(
-        title: '字幕源：Bilibili 公开字幕',
-        lines: [
-          '通过 B 站公开番剧搜索匹配 season/episode，再读取播放器公开字幕列表。',
-          '不需要 API Key；没有官方字幕或需要登录权限时会显示未匹配。',
-        ],
-      ),
-      const SizedBox(height: 12),
-      SettingsCard(
-        children: [
-          SettingsSwitchRow(
-            title: '启用 Bilibili 字幕',
-            value: settings.bilibiliSubtitleEnabled,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(bilibiliSubtitleEnabled: value),
-            ),
-          ),
-          SettingsSwitchRow(
-            title: '自动匹配字幕',
-            value: settings.autoMatchSubtitle,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(autoMatchSubtitle: value),
-            ),
-          ),
-          SettingsChoiceRow<String>(
-            title: '默认字幕语言',
-            value: settings.subtitleLanguage,
-            options: const ['zh-CN', 'zh-TW', 'ja-JP', 'en-US'],
-            labelOf: (value) => value,
-            onChanged: (value) => controller.updateServices(
-              settings.copyWith(subtitleLanguage: value),
-            ),
-          ),
-        ],
-      ),
-    ];
-  }
-
   List<Widget> _danmakuSourceCards(
     ExternalServiceSettings settings,
     AnimeController controller,
@@ -1463,8 +1434,9 @@ class ServiceSettingsPage extends ConsumerWidget {
   ) {
     return [
       const _InfoCard(
-        title: '弹幕源：弹弹play / Bilibili / 自建弹幕库',
+        title: '弹幕源：Zeluna / 弹弹play / Bilibili / 自建弹幕库',
         lines: [
+          'Zeluna 用户弹幕默认接入：游客可读取，登录后可发送，也可删除自己发送的弹幕。',
           '弹弹play 使用官方开放平台按番名和集数匹配弹幕库，需要填写 AppId 和 AppSecret。',
           '通过 B 站公开番剧搜索匹配当前集 cid，再读取公开弹幕 XML。',
           '自建弹幕库仍保留为用户自己的接口补充。',

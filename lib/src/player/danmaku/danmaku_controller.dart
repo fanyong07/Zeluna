@@ -104,6 +104,27 @@ final class DanmakuController extends ChangeNotifier {
     return LocalDanmakuSendResult.accepted;
   }
 
+  void addRemoteComment(DanmakuComment comment) {
+    if (_disposed) return;
+    final next =
+        _remoteComments.where((item) => item.id != comment.id).followedBy([
+          comment,
+        ]).toList()..sort((left, right) {
+          final byTime = left.time.compareTo(right.time);
+          return byTime != 0 ? byTime : left.id.compareTo(right.id);
+        });
+    _remoteComments = List.unmodifiable(next);
+    notifyListeners();
+  }
+
+  void removeRemoteComment(String id) {
+    if (_disposed || !_remoteComments.any((item) => item.id == id)) return;
+    _remoteComments = List.unmodifiable(
+      _remoteComments.where((item) => item.id != id),
+    );
+    notifyListeners();
+  }
+
   bool _acceptsLoadResult(int serial, int episodeId) {
     return !_disposed &&
         serial == _loadSerial &&

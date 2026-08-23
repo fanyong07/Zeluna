@@ -105,6 +105,65 @@ void main() {
     await repository.verifyPassword('password-123');
   });
 
+  test('logged-in account can publish and delete official danmaku', () async {
+    final tokens = _MemoryTokenStore()..value = 'session-token';
+    final requests = <http.Request>[];
+    final client = MockClient((request) async {
+      requests.add(request);
+      expect(request.headers['Authorization'], 'Bearer session-token');
+      if (request.method == 'POST') {
+        expect(request.url.toString(), 'https://api.example/api/v3/danmaku');
+        expect(jsonDecode(request.body), {
+          'subject_key': 'bangumi:400602',
+          'episode_key': 'episode:v2:first',
+          'time_seconds': 12.5,
+          'mode': 'scroll',
+          'color': 0xFFFFFF,
+          'text': '新弹幕',
+        });
+        return http.Response(
+          jsonEncode({
+            'id': '42',
+            'subject_key': 'bangumi:400602',
+            'episode_key': 'episode:v2:first',
+            'time_seconds': 12.5,
+            'mode': 'scroll',
+            'color': 0xFFFFFF,
+            'text': '新弹幕',
+            'created_at': 1,
+            'author': {'display_name': '星野', 'is_mine': true},
+          }),
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      expect(request.method, 'DELETE');
+      expect(request.url.toString(), 'https://api.example/api/v3/danmaku/42');
+      return http.Response('', 204);
+    });
+    addTearDown(client.close);
+    final repository = CloudAccountRepository(
+      baseUrl: 'https://api.example',
+      client: client,
+      tokenStore: tokens,
+    );
+
+    final comment = await repository.createDanmaku(
+      subjectKey: 'bangumi:400602',
+      episodeKey: 'episode:v2:first',
+      time: const Duration(milliseconds: 12500),
+      mode: DanmakuMode.scroll,
+      color: 0xFFFFFF,
+      text: '新弹幕',
+    );
+    expect(comment.id, 'zeluna-42');
+    expect(comment.authorName, '星野');
+    expect(comment.isMine, isTrue);
+
+    await repository.deleteDanmaku(comment.id);
+    expect(requests, hasLength(2));
+  });
+
   test(
     'password reset uses email code and clears no unrelated token',
     () async {

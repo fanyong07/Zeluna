@@ -36,6 +36,7 @@ import 'bangumi_credential_store.dart';
 import 'bangumi_metadata_repository.dart';
 import 'chinese_metadata_repository.dart';
 import 'danmaku_repository.dart';
+import 'danmaku_cloud_controller.dart';
 import 'external_service_repository.dart';
 import 'media_download_service.dart';
 import 'media_download_task.dart';
@@ -204,11 +205,25 @@ final selfHostedBackendHttpClientProvider = Provider.family<http.Client, bool>((
   return client;
 });
 
-final cloudAccountServiceProvider = Provider<CloudAccountService>((ref) {
-  final repository = CloudAccountRepository();
+final cloudAccountTokenStoreProvider = Provider<CloudAccountTokenStore>(
+  (ref) => SecureCloudAccountTokenStore(),
+);
+
+final cloudAccountRepositoryProvider = Provider<CloudAccountRepository>((ref) {
+  final repository = CloudAccountRepository(
+    tokenStore: ref.read(cloudAccountTokenStoreProvider),
+  );
   ref.onDispose(repository.close);
   return repository;
 });
+
+final cloudAccountServiceProvider = Provider<CloudAccountService>(
+  (ref) => ref.read(cloudAccountRepositoryProvider),
+);
+
+final cloudDanmakuServiceProvider = Provider<CloudDanmakuService>(
+  (ref) => ref.read(cloudAccountRepositoryProvider),
+);
 
 final externalServiceHttpClientProvider = Provider<http.Client>((ref) {
   final client = createNetworkHttpClient(
@@ -251,7 +266,8 @@ final externalServiceRepositoryProvider = Provider<ExternalServiceRepository>((
 });
 
 final danmakuRepositoryProvider = Provider<DanmakuRepository>((ref) {
-  final repository = DanmakuRepository();
+  final tokenStore = ref.read(cloudAccountTokenStoreProvider);
+  final repository = DanmakuRepository(officialTokenProvider: tokenStore.read);
   ref.onDispose(repository.close);
   return repository;
 });
@@ -1075,13 +1091,27 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         : const DanmakuTimeline();
   }
 
-  Future<List<DanmakuMatch>> danmakuForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async {
-    final timeline = await danmakuTimelineForEpisode(subject, episode);
-    return timeline.sources;
-  }
+  DanmakuCloudController get _danmakuCloud => DanmakuCloudController(
+    service: ref.read(cloudDanmakuServiceProvider),
+    repository: ref.read(danmakuRepositoryProvider),
+    activeAccount: () => _activeAccount,
+    contextVersion: () => _accountContextVersion,
+    ensureContext: _accounts.ensureContext,
+  );
+  Future<DanmakuComment> publishDanmaku({
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    required Duration position,
+    required String text,
+  }) => _danmakuCloud.publish(
+    subject: subject,
+    episode: episode,
+    position: position,
+    text: text,
+  );
+
+  Future<void> deleteDanmaku(DanmakuComment comment) =>
+      _danmakuCloud.delete(comment);
 
   Future<void> registerAccount({
     required String email,
@@ -1482,6 +1512,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     ref.read(m3uSourceAdapterProvider).clearCache();
     ref.read(torrentSourceAdapterProvider).clearCache();
+    ref.read(danmakuRepositoryProvider).invalidate();
     ref.read(sourceRuleBridgeProvider).xbpqHydrator?.clearCache();
     state = AsyncData(
       current.copyWith(

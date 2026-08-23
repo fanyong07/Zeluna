@@ -30,6 +30,9 @@ void main() {
     expect(find.text('影视资料与 API'), findsNothing);
     expect(find.text('番剧资料与 API'), findsNothing);
     expect(find.text('播放设置'), findsOneWidget);
+    expect(find.text('弹幕显示'), findsOneWidget);
+    expect(find.text('弹幕来源'), findsOneWidget);
+    expect(find.text('Zeluna + 2 个'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -63,6 +66,37 @@ void main() {
       expect(find.text('影视资料与 API'), findsNothing);
       expect(find.text('番剧资料与 API'), findsNothing);
     }
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('danmaku sources are reachable from the settings hub', (
+    tester,
+  ) async {
+    await _setViewport(tester);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AnimeApp)),
+    );
+    container.read(routerProvider).go('/settings');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('弹幕来源'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('弹幕源：Zeluna / 弹弹play / Bilibili / 自建弹幕库'), findsOneWidget);
+    expect(find.textContaining('游客可读取，登录后可发送'), findsOneWidget);
+    expect(find.text('启用弹弹play弹幕'), findsOneWidget);
+    expect(find.text('启用 Bilibili 弹幕'), findsOneWidget);
+    expect(find.text('启用自建弹幕库'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

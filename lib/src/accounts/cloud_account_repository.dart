@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
+import '../domain/anime_models.dart';
 import '../sync/cloud_sync_transport.dart';
 import 'local_account_repository.dart';
 
@@ -75,6 +76,19 @@ abstract interface class CloudAccountService {
     required String verificationCode,
     required String newPassword,
   });
+}
+
+abstract interface class CloudDanmakuService {
+  Future<DanmakuComment> createDanmaku({
+    required String subjectKey,
+    required String episodeKey,
+    required Duration time,
+    required DanmakuMode mode,
+    required int color,
+    required String text,
+  });
+
+  Future<void> deleteDanmaku(String commentId);
 }
 
 abstract interface class CloudAccountTokenStore {
@@ -248,7 +262,7 @@ class AccountDeletionPendingException extends AccountException {
 }
 
 class CloudAccountRepository
-    implements CloudAccountService, CloudSyncTransport {
+    implements CloudAccountService, CloudDanmakuService, CloudSyncTransport {
   CloudAccountRepository({
     String baseUrl = defaultCloudAccountBaseUrl,
     http.Client? client,
@@ -486,6 +500,53 @@ class CloudAccountRepository
         'code': _validateCode(verificationCode),
         'new_password': _validatePassword(newPassword),
       },
+    );
+    _decodeSuccess(response);
+  }
+
+  @override
+  Future<DanmakuComment> createDanmaku({
+    required String subjectKey,
+    required String episodeKey,
+    required Duration time,
+    required DanmakuMode mode,
+    required int color,
+    required String text,
+  }) async {
+    final token = await _requiredToken();
+    final response = await _send(
+      'POST',
+      '',
+      token: token,
+      uri: _danmakuEndpoint(),
+      body: {
+        'subject_key': subjectKey,
+        'episode_key': episodeKey,
+        'time_seconds': time.inMilliseconds / 1000,
+        'mode': switch (mode) {
+          DanmakuMode.top => 'top',
+          DanmakuMode.bottom => 'bottom',
+          _ => 'scroll',
+        },
+        'color': color,
+        'text': text.trim(),
+      },
+    );
+    return _danmakuCommentFrom(_decodeSuccess(response));
+  }
+
+  @override
+  Future<void> deleteDanmaku(String commentId) async {
+    final normalized = commentId.trim().replaceFirst('zeluna-', '');
+    if (!RegExp(r'^\d+$').hasMatch(normalized)) {
+      throw const AccountException('弹幕编号无效，无法删除');
+    }
+    final token = await _requiredToken();
+    final response = await _send(
+      'DELETE',
+      '',
+      token: token,
+      uri: _danmakuEndpoint(normalized),
     );
     _decodeSuccess(response);
   }
@@ -799,6 +860,57 @@ class CloudAccountRepository
       ...path.split('/').where((segment) => segment.isNotEmpty),
     ],
   );
+
+  Uri _danmakuEndpoint([String? commentId]) => _baseUri.replace(
+    pathSegments: [
+      ..._baseUri.pathSegments.where((segment) => segment.isNotEmpty),
+      'api',
+      'v3',
+      'danmaku',
+      ?commentId,
+    ],
+  );
+
+  DanmakuComment _danmakuCommentFrom(Map<String, dynamic> json) {
+    final id = json['id']?.toString().trim() ?? '';
+    final text = json['text']?.toString().trim() ?? '';
+    final seconds = switch (json['time_seconds']) {
+      final num value => value.toDouble(),
+      _ => null,
+    };
+    final color = switch (json['color']) {
+      final num value => value.toInt(),
+      _ => null,
+    };
+    if (id.isEmpty ||
+        text.isEmpty ||
+        seconds == null ||
+        !seconds.isFinite ||
+        seconds < 0 ||
+        color == null ||
+        color < 0 ||
+        color > 0xFFFFFF) {
+      throw const AccountException('服务器返回的弹幕格式无效');
+    }
+    final author = json['author'];
+    final authorMap = author is Map
+        ? author.cast<Object?, Object?>()
+        : const <Object?, Object?>{};
+    return DanmakuComment(
+      id: 'zeluna-$id',
+      provider: 'Zeluna',
+      time: Duration(milliseconds: (seconds * 1000).round()),
+      mode: switch (json['mode']?.toString()) {
+        'top' => DanmakuMode.top,
+        'bottom' => DanmakuMode.bottom,
+        _ => DanmakuMode.scroll,
+      },
+      color: color,
+      text: text,
+      authorName: authorMap['display_name']?.toString().trim() ?? '',
+      isMine: authorMap['is_mine'] == true,
+    );
+  }
 
   @override
   Future<CloudSyncPushResult> push(List<CloudSyncMutation> mutations) async {

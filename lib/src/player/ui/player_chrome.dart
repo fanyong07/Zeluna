@@ -203,7 +203,6 @@ class PlayerBottomBar extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onSpeedSelected,
     required this.onFullscreen,
-    required this.onSubtitlePanel,
     required this.onDanmakuPanel,
     required this.danmakuInput,
     required this.onSendDanmaku,
@@ -232,7 +231,6 @@ class PlayerBottomBar extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSpeedSelected;
   final Future<void> Function() onFullscreen;
-  final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
   final TextEditingController danmakuInput;
   final ValueChanged<String> onSendDanmaku;
@@ -300,7 +298,6 @@ class PlayerBottomBar extends StatelessWidget {
                     onPreviousEpisode: onPreviousEpisode,
                     onNextEpisode: onNextEpisode,
                     onFullscreen: onFullscreen,
-                    onSubtitlePanel: onSubtitlePanel,
                     landscape: false,
                   )
                 : mobileLandscape
@@ -323,7 +320,6 @@ class PlayerBottomBar extends StatelessWidget {
                     onVolumeChanged: onVolumeChanged,
                     onSpeedSelected: onSpeedSelected,
                     onFullscreen: onFullscreen,
-                    onSubtitlePanel: onSubtitlePanel,
                     onDanmakuPanel: onDanmakuPanel,
                     onEpisodePanel: onEpisodePanel,
                     onLinePanel: onLinePanel,
@@ -531,7 +527,6 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
     required this.onVolumeChanged,
     required this.onSpeedSelected,
     required this.onFullscreen,
-    required this.onSubtitlePanel,
     required this.onDanmakuPanel,
     required this.onEpisodePanel,
     required this.onLinePanel,
@@ -555,14 +550,13 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSpeedSelected;
   final Future<void> Function() onFullscreen;
-  final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
   final VoidCallback onEpisodePanel;
   final VoidCallback onLinePanel;
 
   @override
   Widget build(BuildContext context) {
-    const controlSize = 34.0;
+    const controlSize = 40.0;
     _ControlIconButton action({
       required IconData icon,
       required String tooltip,
@@ -620,11 +614,6 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
               ? '弹幕源与显示设置'
               : '弹幕源已关闭',
           onPressed: () async => onDanmakuPanel(),
-        ),
-        action(
-          icon: Icons.subtitles_outlined,
-          tooltip: '字幕',
-          onPressed: () async => onSubtitlePanel(),
         ),
         action(
           icon: Icons.video_library_outlined,
@@ -693,13 +682,16 @@ class _SpeedMenuButton extends StatelessWidget {
           ),
       ],
       builder: (context, controller, child) {
+        final badge = SmallBadge(label: _speedLabel(current), compact: compact);
         return Tooltip(
           message: '播放速度',
           child: InkWell(
             borderRadius: BorderRadius.circular(999),
             onTap: () =>
                 controller.isOpen ? controller.close() : controller.open(),
-            child: SmallBadge(label: _speedLabel(current), compact: compact),
+            child: compact
+                ? SizedBox(width: 44, height: 40, child: Center(child: badge))
+                : badge,
           ),
         );
       },
@@ -756,7 +748,7 @@ class _VolumeButtonState extends State<_VolumeButton> {
           onEnter: (_) => _cancelClose(),
           onExit: (_) => _scheduleClose(),
           child: SizedBox(
-            height: 148,
+            height: widget.compact ? 188 : 148,
             width: 44,
             child: Column(
               children: [
@@ -775,6 +767,18 @@ class _VolumeButtonState extends State<_VolumeButton> {
                     ),
                   ),
                 ),
+                if (widget.compact)
+                  IconButton(
+                    tooltip: widget.muted ? '恢复声音' : '静音',
+                    onPressed: widget.onMute,
+                    visualDensity: VisualDensity.compact,
+                    icon: Icon(
+                      widget.muted || widget.volume <= 0
+                          ? Icons.volume_off_rounded
+                          : Icons.volume_up_rounded,
+                      size: 20,
+                    ),
+                  ),
                 const SizedBox(height: 4),
               ],
             ),
@@ -782,31 +786,40 @@ class _VolumeButtonState extends State<_VolumeButton> {
         ),
       ],
       builder: (context, controller, child) {
+        final button = Tooltip(
+          message: widget.compact
+              ? widget.muted
+                    ? '已静音，点击调节音量'
+                    : '音量 ${widget.volume.round()}%，点击调节'
+              : widget.muted
+              ? '已静音，点击恢复'
+              : '音量 ${widget.volume.round()}%，点击静音',
+          child: IconButton(
+            onPressed: widget.compact
+                ? () =>
+                      controller.isOpen ? controller.close() : controller.open()
+                : widget.onMute,
+            padding: EdgeInsets.zero,
+            constraints: widget.compact
+                ? const BoxConstraints.tightFor(width: 40, height: 40)
+                : null,
+            visualDensity: widget.compact ? VisualDensity.compact : null,
+            icon: Icon(
+              widget.muted || widget.volume <= 0
+                  ? Icons.volume_off_rounded
+                  : Icons.volume_up_rounded,
+              color: AppColors.theaterInk,
+            ),
+          ),
+        );
+        if (widget.compact) return button;
         return MouseRegion(
           onEnter: (_) {
             _cancelClose();
             if (!controller.isOpen) controller.open();
           },
           onExit: (_) => _scheduleClose(),
-          child: Tooltip(
-            message: widget.muted
-                ? '已静音，点击恢复'
-                : '音量 ${widget.volume.round()}%，点击静音',
-            child: IconButton(
-              onPressed: widget.onMute,
-              padding: EdgeInsets.zero,
-              constraints: widget.compact
-                  ? const BoxConstraints.tightFor(width: 34, height: 34)
-                  : null,
-              visualDensity: widget.compact ? VisualDensity.compact : null,
-              icon: Icon(
-                widget.muted || widget.volume <= 0
-                    ? Icons.volume_off_rounded
-                    : Icons.volume_up_rounded,
-                color: AppColors.theaterInk,
-              ),
-            ),
-          ),
+          child: button,
         );
       },
     );
@@ -823,7 +836,6 @@ class _MobilePlayerControls extends StatelessWidget {
     required this.onPreviousEpisode,
     required this.onNextEpisode,
     required this.onFullscreen,
-    required this.onSubtitlePanel,
     required this.landscape,
   });
 
@@ -835,7 +847,6 @@ class _MobilePlayerControls extends StatelessWidget {
   final Future<void> Function()? onPreviousEpisode;
   final Future<void> Function()? onNextEpisode;
   final Future<void> Function() onFullscreen;
-  final VoidCallback onSubtitlePanel;
   final bool landscape;
 
   @override
@@ -878,15 +889,6 @@ class _MobilePlayerControls extends StatelessWidget {
               compactSize: controlSize,
             ),
           ],
-          SizedBox(width: landscape ? 8 : 6),
-          _ControlIconButton(
-            icon: Icons.subtitles_outlined,
-            tooltip: '字幕设置',
-            onPressed: () async => onSubtitlePanel(),
-            size: landscape ? 24 : 22,
-            compact: true,
-            compactSize: controlSize,
-          ),
           const Spacer(),
           _ControlIconButton(
             icon: fullscreen

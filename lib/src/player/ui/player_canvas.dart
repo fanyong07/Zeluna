@@ -165,7 +165,6 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onEpisodePanel,
     required this.onEpisodeSelected,
     required this.onLinePanel,
-    required this.onSubtitlePanel,
     required this.onDanmakuPanel,
     required this.danmakuInput,
     required this.onSendDanmaku,
@@ -232,7 +231,6 @@ class _PlayerCanvas extends StatelessWidget {
   final VoidCallback onEpisodePanel;
   final ValueChanged<AnimeEpisode> onEpisodeSelected;
   final VoidCallback onLinePanel;
-  final VoidCallback onSubtitlePanel;
   final VoidCallback onDanmakuPanel;
   final TextEditingController danmakuInput;
   final ValueChanged<String> onSendDanmaku;
@@ -444,7 +442,6 @@ class _PlayerCanvas extends StatelessWidget {
                                           onVolumeChanged: onVolumeChanged,
                                           onSpeedSelected: onSpeedSelected,
                                           onFullscreen: onFullscreen,
-                                          onSubtitlePanel: onSubtitlePanel,
                                           onDanmakuPanel: onDanmakuPanel,
                                           danmakuInput: danmakuInput,
                                           onSendDanmaku: onSendDanmaku,

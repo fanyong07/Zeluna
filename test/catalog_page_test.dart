@@ -808,7 +808,8 @@ void main() {
     expect(find.text('播放规则'), findsNothing);
     expect(find.text('自定义仓库'), findsNothing);
     expect(find.text('外部源目录'), findsNothing);
-    expect(find.text('弹幕设置'), findsOneWidget);
+    expect(find.text('弹幕显示'), findsOneWidget);
+    expect(find.text('弹幕来源'), findsOneWidget);
     expect(find.text('播放设置'), findsOneWidget);
     expect(find.text('在线服务'), findsOneWidget);
 

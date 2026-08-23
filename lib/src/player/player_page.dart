@@ -11,6 +11,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 
 import '../app/anime_app.dart';
+import '../accounts/local_account_repository.dart';
 import '../data/anime_controller.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
@@ -34,7 +35,6 @@ import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
 import 'session/playback_session_state.dart';
-import 'subtitles/subtitle_controller.dart';
 import 'video/native_video_controller.dart';
 import 'video/web_video_controller.dart';
 import 'web_stream_player.dart';
@@ -75,7 +75,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final PlaybackRecoveryController _recoveryController;
   late final NextEpisodeWarmupCoordinator _nextEpisodeWarmupCoordinator;
   late final DanmakuController _danmakuController;
-  late final SubtitleController _subtitleController;
   late final Anime4KController _anime4kController;
   late PlaybackPerformanceTrace _playbackTrace;
   final _nativeMediaEvents = NativeMediaEventGuard();
@@ -116,7 +115,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Duration? _pendingInitialResumePosition;
   bool _episodePanel = false;
   bool _linePanel = false;
-  bool _subtitlePanel = false;
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
   bool _theaterMode = false;
@@ -217,9 +215,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController = PlaybackRecoveryController();
     _danmakuController = DanmakuController()
       ..addListener(_handleDanmakuChanged);
-    _subtitleController = SubtitleController(
-      applyTrack: _player.setSubtitleTrack,
-    )..addListener(_handleSubtitleChanged);
     _anime4kController = Anime4KController(
       platform: defaultTargetPlatform,
       getProperty: _readMpvProperty,
@@ -261,10 +256,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _handleDanmakuChanged() {
-    if (mounted) setState(() {});
-  }
-
-  void _handleSubtitleChanged() {
     if (mounted) setState(() {});
   }
 
@@ -709,7 +700,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     unawaited(_lineRepository.dispose());
     _lineController.dispose();
     _danmakuController.dispose();
-    _subtitleController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
     super.dispose();
@@ -854,11 +844,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         onEpisodePanel: _toggleEpisodePanel,
                         onEpisodeSelected: _selectEpisode,
                         onLinePanel: _toggleLinePanel,
-                        onSubtitlePanel: _toggleSubtitlePanel,
                         onDanmakuPanel: _toggleDanmakuPanel,
                         danmakuInput: _danmakuController.input,
-                        onSendDanmaku: (text) =>
-                            _sendLocalDanmaku(text, settings: state.danmaku),
+                        onSendDanmaku: (text) => unawaited(
+                          _sendDanmaku(
+                            text,
+                            settings: state.danmaku,
+                            loggedIn:
+                                state
+                                    .accountSession
+                                    .current
+                                    ?.cloudAuthenticated ==
+                                true,
+                          ),
+                        ),
                         onWebReady: () => _handleWebReady(playbackGeneration),
                         onWebError: () => _handleWebError(playbackGeneration),
                         onWebPosition: (value) =>
@@ -899,25 +898,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onSearch: _searchPlaybackLines,
                         ),
                       ),
-                    if (_subtitlePanel)
-                      _PlayerFunctionPage(
-                        title: '字幕源',
-                        onClose: _closePanels,
-                        child: _SubtitlePanel(
-                          subject: widget.request.subject,
-                          episode: _episode,
-                          selected: _subtitleController.selected,
-                          onSelected: _selectSubtitle,
-                          onDisabled: _disableSubtitle,
-                        ),
-                      ),
                     if (_danmakuPanel)
                       _PlayerFunctionPage(
-                        title: '弹幕源',
+                        title: '弹幕',
                         onClose: _closePanels,
                         child: _DanmakuPanel(
                           subject: widget.request.subject,
                           episode: _episode,
+                          comments: _danmakuController.remoteComments,
+                          onDelete: _deleteDanmaku,
                         ),
                       ),
                     if (_settingsPanel)
@@ -2454,7 +2443,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _openingWarmupTransitionPrimary = false;
     _resetNextEpisodePrefetch();
     _danmakuController.changeEpisode();
-    _subtitleController.invalidatePendingAction();
     final playbackSerial = ++_openLineSerial;
     _nativeMediaEvents.invalidate();
     _webVideo.cancelStartupWatchdog();
@@ -2734,7 +2722,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       if (!enabled) return;
       _episodePanel = false;
       _linePanel = false;
-      _subtitlePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
     });
@@ -2786,18 +2773,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   bool get _hasOpenPanel =>
-      _episodePanel ||
-      _linePanel ||
-      _subtitlePanel ||
-      _danmakuPanel ||
-      _settingsPanel;
+      _episodePanel || _linePanel || _danmakuPanel || _settingsPanel;
 
   void _closePanels() {
     if (!_hasOpenPanel) return;
     setState(() {
       _episodePanel = false;
       _linePanel = false;
-      _subtitlePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
     });
@@ -2809,7 +2791,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     setState(() {
       _episodePanel = !_episodePanel;
       _linePanel = false;
-      _subtitlePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
     });
@@ -2821,22 +2802,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     setState(() {
       _linePanel = opening;
       _episodePanel = false;
-      _subtitlePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
     });
     if (opening) _startExpandedLineLookup();
-  }
-
-  void _toggleSubtitlePanel() {
-    _revealPlayerControls();
-    setState(() {
-      _subtitlePanel = !_subtitlePanel;
-      _episodePanel = false;
-      _linePanel = false;
-      _danmakuPanel = false;
-      _settingsPanel = false;
-    });
   }
 
   void _toggleDanmakuPanel() {
@@ -2846,7 +2815,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _danmakuPanel = opening;
       _episodePanel = false;
       _linePanel = false;
-      _subtitlePanel = false;
       _settingsPanel = false;
     });
     // Danmaku is intentionally opt-in during playback. Fetching and parsing a
@@ -2861,7 +2829,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _settingsPanel = !_settingsPanel;
       _episodePanel = false;
       _linePanel = false;
-      _subtitlePanel = false;
       _danmakuPanel = false;
     });
   }
@@ -2920,37 +2887,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
   }
 
-  Future<void> _selectSubtitle(SubtitleCandidate candidate) async {
-    final result = await _subtitleController.select(candidate);
-    if (!mounted) return;
-    switch (result.status) {
-      case SubtitleActionStatus.applied:
-        setState(() => _subtitlePanel = false);
-        _showPlayerToast('已加载字幕：${candidate.title}');
-      case SubtitleActionStatus.unavailable:
-        _showPlayerToast(result.message ?? '该字幕暂不可用');
-      case SubtitleActionStatus.failed:
-        _showPlayerToast('字幕加载失败：${_friendlyPlaybackError(result.error!)}');
-      case SubtitleActionStatus.stale:
-        break;
-    }
-  }
-
-  Future<void> _disableSubtitle() async {
-    final result = await _subtitleController.disable();
-    if (!mounted) return;
-    switch (result.status) {
-      case SubtitleActionStatus.applied:
-        setState(() => _subtitlePanel = false);
-        _showPlayerToast('字幕已关闭');
-      case SubtitleActionStatus.failed:
-        _showPlayerToast('字幕关闭失败：${_friendlyPlaybackError(result.error!)}');
-      case SubtitleActionStatus.unavailable:
-      case SubtitleActionStatus.stale:
-        break;
-    }
-  }
-
   Future<void> _loadDanmakuForCurrentEpisode() async {
     final episode = _episode;
     await _danmakuController.loadEpisode(
@@ -2961,15 +2897,63 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
   }
 
-  void _sendLocalDanmaku(String text, {required DanmakuSettings settings}) {
+  Future<void> _sendDanmaku(
+    String text, {
+    required DanmakuSettings settings,
+    required bool loggedIn,
+  }) async {
+    final value = text.trim();
+    if (value.isEmpty) return;
+    if (!settings.enabled) {
+      _showPlayerToast('请先在弹幕设置中启用弹幕');
+      return;
+    }
+    if (settings.blockKeywords.any(value.contains)) {
+      _showPlayerToast('内容命中了本地屏蔽词');
+      return;
+    }
+    if (!loggedIn) {
+      _showPlayerToast('登录后才能发送弹幕');
+      return;
+    }
     switch (_danmakuController.sendLocal(text, settings: settings)) {
       case LocalDanmakuSendResult.disabled:
         _showPlayerToast('请先在弹幕设置中启用弹幕');
       case LocalDanmakuSendResult.blocked:
         _showPlayerToast('内容命中了本地屏蔽词');
       case LocalDanmakuSendResult.accepted:
+        try {
+          final comment = await ref
+              .read(animeControllerProvider.notifier)
+              .publishDanmaku(
+                subject: widget.request.subject,
+                episode: _episode,
+                position: _position,
+                text: value,
+              );
+          if (!mounted) return;
+          _danmakuController.addRemoteComment(comment);
+          _showPlayerToast('弹幕已发送');
+        } on AccountException catch (error) {
+          _showPlayerToast('发送失败：${error.message}');
+        } catch (error) {
+          _showPlayerToast('发送失败：${_friendlyPlaybackError(error)}');
+        }
       case LocalDanmakuSendResult.empty:
         break;
+    }
+  }
+
+  Future<void> _deleteDanmaku(DanmakuComment comment) async {
+    try {
+      await ref.read(animeControllerProvider.notifier).deleteDanmaku(comment);
+      if (!mounted) return;
+      _danmakuController.removeRemoteComment(comment.id);
+      _showPlayerToast('弹幕已删除');
+    } on AccountException catch (error) {
+      _showPlayerToast('删除失败：${error.message}');
+    } catch (error) {
+      _showPlayerToast('删除失败：${_friendlyPlaybackError(error)}');
     }
   }
 

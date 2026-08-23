@@ -16,6 +16,7 @@ from server.database import (
     Base,
     Comment,
     CommentLike,
+    CommunityDanmaku,
     Danmaku,
     PlayHistory,
     RefreshTokenHistory,
@@ -383,6 +384,7 @@ def test_account_erasure_inventory_covers_every_user_foreign_key():
         ("bangumi_collections", "user_id", False),
         ("comment_likes", "user_id", False),
         ("comments", "user_id", True),
+        ("community_danmaku", "user_id", True),
         ("danmaku", "user_id", True),
         ("play_history", "user_id", False),
         ("sync_mutations", "user_id", False),
@@ -635,6 +637,15 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                         episode_id=episode.id,
                         text="owner public danmaku",
                     ),
+                    CommunityDanmaku(
+                        user_id=owner.id,
+                        subject_key="bangumi:1",
+                        episode_key="episode:v2:first",
+                        time_seconds=12,
+                        mode="scroll",
+                        color=0xFFFFFF,
+                        text="owner community danmaku",
+                    ),
                     ThreadImage(
                         thread_id=owner_thread.id,
                         original="https://media.example/preserved.png",
@@ -696,6 +707,11 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
             public_danmaku = await session.scalar(
                 select(Danmaku).where(Danmaku.text == "owner public danmaku")
             )
+            community_danmaku = await session.scalar(
+                select(CommunityDanmaku).where(
+                    CommunityDanmaku.text == "owner community danmaku"
+                )
+            )
             keeper_counts = (
                 await session.execute(
                     select(Thread.like_count, Thread.collect_count).where(
@@ -725,6 +741,10 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
                 "public_danmaku": (
                     public_danmaku.user_id,
                     public_danmaku.text,
+                ),
+                "community_danmaku": (
+                    community_danmaku.user_id,
+                    community_danmaku.text,
                 ),
                 "image_count": await session.scalar(
                     select(func.count(ThreadImage.id)).where(
@@ -786,6 +806,7 @@ def test_due_deletion_anonymizes_public_content_and_erases_private_data(tmp_path
     assert result["public_comment"][0] is None
     assert "owner public comment" in result["public_comment"][1]
     assert result["public_danmaku"] == (None, "owner public danmaku")
+    assert result["community_danmaku"] == (None, "owner community danmaku")
     assert result["image_count"] == 1
     assert result["private_counts"] == (0, 0, 0, 0, 0, 0, 0, 0)
     assert result["keeper_counts"] == (1, 1, 1)

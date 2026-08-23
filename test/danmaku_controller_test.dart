@@ -122,6 +122,29 @@ void main() {
     expect(controller.remoteComments, isEmpty);
     expect(notifications, 1);
   });
+
+  test('published danmaku is inserted and an owned comment can be removed', () {
+    final controller = DanmakuController();
+    addTearDown(controller.dispose);
+
+    controller.addRemoteComment(
+      _comment('later').copyWithForTest(
+        id: 'zeluna-42',
+        time: const Duration(seconds: 20),
+        isMine: true,
+      ),
+    );
+    controller.addRemoteComment(
+      _comment('earlier').copyWithForTest(time: const Duration(seconds: 10)),
+    );
+
+    expect(controller.remoteComments.map((item) => item.text), [
+      'earlier',
+      'later',
+    ]);
+    controller.removeRemoteComment('zeluna-42');
+    expect(controller.remoteComments.map((item) => item.text), ['earlier']);
+  });
 }
 
 DanmakuComment _comment(String text) {
@@ -133,4 +156,18 @@ DanmakuComment _comment(String text) {
     color: 0xFFFFFF,
     text: text,
   );
+}
+
+extension on DanmakuComment {
+  DanmakuComment copyWithForTest({String? id, Duration? time, bool? isMine}) =>
+      DanmakuComment(
+        id: id ?? this.id,
+        provider: provider,
+        time: time ?? this.time,
+        mode: mode,
+        color: color,
+        text: text,
+        authorName: authorName,
+        isMine: isMine ?? this.isMine,
+      );
 }

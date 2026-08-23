@@ -732,83 +732,18 @@ class _LinePanelBody extends StatelessWidget {
   }
 }
 
-class _SubtitlePanel extends ConsumerWidget {
-  const _SubtitlePanel({
+class _DanmakuPanel extends ConsumerStatefulWidget {
+  const _DanmakuPanel({
     required this.subject,
     required this.episode,
-    required this.selected,
-    required this.onSelected,
-    required this.onDisabled,
+    required this.comments,
+    required this.onDelete,
   });
 
   final AnimeSubject subject;
   final AnimeEpisode episode;
-  final SubtitleCandidate? selected;
-  final ValueChanged<SubtitleCandidate> onSelected;
-  final VoidCallback onDisabled;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return FutureBuilder<List<SubtitleCandidate>>(
-      future: ref
-          .read(animeControllerProvider.notifier)
-          .subtitlesForEpisode(subject, episode),
-      builder: (context, snapshot) {
-        final items = snapshot.data ?? const <SubtitleCandidate>[];
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return _PanelEmpty(
-            title: '字幕读取失败',
-            message: _friendlyPlaybackError(snapshot.error!),
-          );
-        }
-        if (items.isEmpty) {
-          return const _PanelEmpty(
-            title: '没有匹配字幕',
-            message: 'B 站公开接口没有返回当前集字幕，可能该条目没有官方字幕或需要登录权限。',
-          );
-        }
-        return ListView.separated(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-          itemCount: items.length + 1,
-          separatorBuilder: (context, index) => const SizedBox(height: 10),
-          itemBuilder: (context, index) {
-            if (index == 0) {
-              return _PanelRow(
-                title: '关闭字幕',
-                subtitle: '不显示外部字幕轨道',
-                trailing: selected == null ? '当前' : '',
-                selected: selected == null,
-                onTap: onDisabled,
-              );
-            }
-            final item = items[index - 1];
-            return _PanelRow(
-              title: item.title,
-              subtitle:
-                  '${item.provider} · ${item.language} · 下载 ${item.downloadCount}',
-              trailing: selected?.downloadUrl == item.downloadUrl
-                  ? '当前'
-                  : item.available
-                  ? '加载'
-                  : item.message ?? '待配置',
-              selected: selected?.downloadUrl == item.downloadUrl,
-              onTap: item.available ? () => onSelected(item) : null,
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-class _DanmakuPanel extends ConsumerStatefulWidget {
-  const _DanmakuPanel({required this.subject, required this.episode});
-
-  final AnimeSubject subject;
-  final AnimeEpisode episode;
+  final List<DanmakuComment> comments;
+  final Future<void> Function(DanmakuComment comment) onDelete;
 
   @override
   ConsumerState<_DanmakuPanel> createState() => _DanmakuPanelState();
@@ -816,6 +751,7 @@ class _DanmakuPanel extends ConsumerStatefulWidget {
 
 class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
   late Future<List<DanmakuMatch>> _future;
+  String? _deletingId;
 
   @override
   void initState() {
@@ -836,7 +772,18 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
   Future<List<DanmakuMatch>> _load() {
     return ref
         .read(animeControllerProvider.notifier)
-        .danmakuForEpisode(widget.subject, widget.episode);
+        .danmakuTimelineForEpisode(widget.subject, widget.episode)
+        .then((timeline) => timeline.sources);
+  }
+
+  Future<void> _delete(DanmakuComment comment) async {
+    if (_deletingId != null) return;
+    setState(() => _deletingId = comment.id);
+    try {
+      await widget.onDelete(comment);
+    } finally {
+      if (mounted) setState(() => _deletingId = null);
+    }
   }
 
   @override
@@ -854,29 +801,134 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
             message: _friendlyPlaybackError(snapshot.error!),
           );
         }
-        if (items.isEmpty) {
+        final mine = widget.comments
+            .where((comment) => comment.provider == 'Zeluna' && comment.isMine)
+            .toList(growable: false);
+        if (items.isEmpty && mine.isEmpty) {
           return const _PanelEmpty(
             title: '没有匹配弹幕',
-            message: 'B 站公开接口没有返回当前集弹幕，可能没有匹配到番剧或该集弹幕不可公开访问。',
+            message: '当前集还没有可显示的公开弹幕或 Zeluna 用户弹幕。',
           );
         }
-        return ListView.separated(
+        return ListView(
           padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-          itemCount: items.length,
-          separatorBuilder: (context, index) => const SizedBox(height: 10),
-          itemBuilder: (context, index) {
-            final item = items[index];
-            return _PanelRow(
-              title: item.title.isEmpty ? widget.subject.title : item.title,
-              subtitle:
-                  '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
-              trailing: item.available
-                  ? '${item.commentCount} 条'
-                  : item.message ?? '待配置',
-            );
-          },
+          children: [
+            if (mine.isNotEmpty) ...[
+              const _PanelSectionTitle('我的弹幕'),
+              for (final comment in mine) ...[
+                _OwnedDanmakuRow(
+                  key: ValueKey('owned-danmaku-${comment.id}'),
+                  comment: comment,
+                  deleting: _deletingId == comment.id,
+                  onDelete: () => _delete(comment),
+                ),
+                const SizedBox(height: 10),
+              ],
+            ],
+            const _PanelSectionTitle('弹幕来源'),
+            if (items.isEmpty)
+              const _PanelInlineStatus(text: '公开来源暂时没有返回弹幕', loading: false)
+            else
+              for (final item in items) ...[
+                _PanelRow(
+                  title: item.title.isEmpty ? widget.subject.title : item.title,
+                  subtitle:
+                      '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
+                  trailing: item.available
+                      ? '${item.commentCount} 条'
+                      : item.message ?? '待配置',
+                ),
+                const SizedBox(height: 10),
+              ],
+          ],
         );
       },
+    );
+  }
+}
+
+class _PanelSectionTitle extends StatelessWidget {
+  const _PanelSectionTitle(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+    child: Text(
+      text,
+      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+        color: AppColors.theaterMuted,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+  );
+}
+
+class _OwnedDanmakuRow extends StatelessWidget {
+  const _OwnedDanmakuRow({
+    super.key,
+    required this.comment,
+    required this.deleting,
+    required this.onDelete,
+  });
+
+  final DanmakuComment comment;
+  final bool deleting;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final seconds = comment.time.inSeconds;
+    final position =
+        '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    comment.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.theaterInk,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '出现在 $position',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.theaterMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: deleting
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : IconButton(
+                      tooltip: '删除这条弹幕',
+                      onPressed: onDelete,
+                      icon: const Icon(Icons.delete_outline_rounded, size: 20),
+                    ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -886,64 +938,54 @@ class _PanelRow extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.trailing,
-    this.selected = false,
-    this.onTap,
   });
 
   final String title;
   final String subtitle;
   final String trailing;
-  final bool selected;
-  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: selected
-          ? Theme.of(context).colorScheme.secondaryContainer
-          : Theme.of(context).colorScheme.surfaceContainerHigh,
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurface,
-                        fontWeight: FontWeight.w800,
-                      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurface,
+                      fontWeight: FontWeight.w800,
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Text(
-                trailing,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppStatusColors.probing,
-                ),
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              trailing,
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: AppStatusColors.probing),
+            ),
+          ],
         ),
       ),
     );
