@@ -95,6 +95,14 @@ def test_status_exposes_only_actually_enabled_playback_provider_ids():
     assert response.json()["playback_providers"] == {
         "enabled_ids": ["aggregate.maccms"],
     }
+    public_payload = response.text
+    for private_field in (
+        "canonical_url",
+        "headers_json",
+        "rights_reference",
+        "operator_note",
+    ):
+        assert private_field not in public_payload
 
 
 def test_route_table_has_no_duplicate_method_path_pairs():

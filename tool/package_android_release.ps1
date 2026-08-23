@@ -29,7 +29,8 @@ if ($null -eq $versionLine) {
     throw 'Unable to read the version from pubspec.yaml.'
 }
 $version = $versionLine.Matches[0].Groups[1].Value
-$deliveryPath = Join-Path $deliveryDirectory "Zeluna-Android-$version-release.apk"
+$publicVersion = ($version -split '\+', 2)[0]
+$deliveryPath = Join-Path $deliveryDirectory "Zeluna-v$publicVersion-Android.apk"
 $checksumPath = "$deliveryPath.sha256"
 
 foreach ($outputPath in @($deliveryPath, $checksumPath)) {

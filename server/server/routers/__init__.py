@@ -1,6 +1,7 @@
 """Explicit route groups for the Zeluna HTTP API."""
 
 from .admin import router as admin_router
+from .admin_managed_lines import router as admin_managed_lines_router
 from .catalog import router as catalog_router
 from .danmaku import router as danmaku_router
 from .compat_v2 import router as compat_v2_router
@@ -17,6 +18,7 @@ from .sync import router as sync_router
 
 __all__ = [
     "admin_router",
+    "admin_managed_lines_router",
     "catalog_router",
     "danmaku_router",
     "compat_v2_router",

@@ -29,7 +29,8 @@ if ($null -eq $versionLine) {
     throw 'Unable to read the version from pubspec.yaml.'
 }
 $version = $versionLine.Matches[0].Groups[1].Value
-$archivePath = Join-Path $deliveryDirectory "Zeluna-Windows-$version.zip"
+$publicVersion = ($version -split '\+', 2)[0]
+$archivePath = Join-Path $deliveryDirectory "Zeluna-v$publicVersion-Windows.zip"
 $checksumPath = "$archivePath.sha256"
 
 foreach ($outputPath in @($archivePath, $checksumPath)) {

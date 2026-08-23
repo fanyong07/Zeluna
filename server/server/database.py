@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
     String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func,
-    UniqueConstraint, Index, select, text,
+    CheckConstraint, UniqueConstraint, Index, select, text,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -477,6 +477,103 @@ class PlaybackCache(Base):
     line_count: Mapped[int] = mapped_column(Integer, default=0)
     verified_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+class ManagedPlaybackLine(Base):
+    """Persistent managed remote URL; this table never contains media bytes."""
+
+    __tablename__ = "managed_playback_lines"
+    __table_args__ = (
+        CheckConstraint("episode >= 1", name="ck_managed_line_episode_positive"),
+        CheckConstraint(
+            "priority >= 0 AND priority <= 1000",
+            name="ck_managed_line_priority_range",
+        ),
+        CheckConstraint(
+            "url_kind IN ('static_direct')",
+            name="ck_managed_line_url_kind",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'degraded', 'quarantined', 'revoked')",
+            name="ck_managed_line_status",
+        ),
+        CheckConstraint(
+            "review_status IN ('pending', 'approved', 'rejected')",
+            name="ck_managed_line_review_status",
+        ),
+        CheckConstraint(
+            "provenance_kind IN ('owned', 'licensed', 'public_domain', "
+            "'open_license', 'authorized_third_party', 'user_managed')",
+            name="ck_managed_line_provenance_kind",
+        ),
+        Index(
+            "ix_managed_playback_lines_lookup",
+            "stable_id",
+            "episode",
+            "enabled",
+            "status",
+            "review_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    stable_id: Mapped[str] = mapped_column(String(200), index=True)
+    episode: Mapped[int] = mapped_column(Integer)
+    provider_key: Mapped[str] = mapped_column(
+        String(100), default="managed.main", server_default="managed.main"
+    )
+    label: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    quality: Mapped[str] = mapped_column(String(50), default="", server_default="")
+    format_hint: Mapped[str] = mapped_column(
+        String(20), default="auto", server_default="auto"
+    )
+    canonical_url: Mapped[str] = mapped_column(Text)
+    url_kind: Mapped[str] = mapped_column(
+        String(30), default="static_direct", server_default="static_direct"
+    )
+    expires_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    headers_json: Mapped[str] = mapped_column(
+        Text, default="{}", server_default="{}"
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=500, server_default="500")
+    status: Mapped[str] = mapped_column(
+        String(20), default="draft", server_default="draft", index=True
+    )
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="pending", server_default="pending", index=True
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True
+    )
+    provenance_kind: Mapped[str] = mapped_column(String(40))
+    rights_reference: Mapped[str] = mapped_column(
+        String(500), default="", server_default=""
+    )
+    operator_note: Mapped[str] = mapped_column(Text, default="", server_default="")
+    last_verified_status: Mapped[str] = mapped_column(
+        String(40), default="unverified", server_default="unverified"
+    )
+    last_verified_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    last_error_category: Mapped[str] = mapped_column(
+        String(50), default="", server_default=""
+    )
+    last_latency_ms: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    created_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+    updated_at: Mapped[float] = mapped_column(
+        Float,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp(),
+    )
+    published_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    revoked_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
 
 
 # ---------------------------------------------------------------------------

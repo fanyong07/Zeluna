@@ -1823,9 +1823,7 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                   SettingsReadonlyRow(
                     title: '版本',
-                    value: info == null
-                        ? '读取中…'
-                        : '${info.version}+${info.buildNumber}',
+                    value: info == null ? '读取中…' : 'v${info.version}',
                   ),
                   const SettingsReadonlyRow(
                     title: '内容资料',

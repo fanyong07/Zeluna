@@ -21,10 +21,11 @@ if ($null -eq $versionLine) {
     throw 'Unable to read the version from pubspec.yaml.'
 }
 $version = $versionLine.Matches[0].Groups[1].Value
+$publicVersion = ($version -split '\+', 2)[0]
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    $archive = Join-Path $testRoot "Zeluna-Windows-$version.zip"
+    $archive = Join-Path $testRoot "Zeluna-v$publicVersion-Windows.zip"
     . (Join-Path $projectRoot 'tool\windows_release_archive.ps1')
     New-ZelunaWindowsReleaseArchive `
         -ProjectRoot $projectRoot `

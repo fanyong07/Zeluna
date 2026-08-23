@@ -39,6 +39,8 @@ from .aggregator import (
 )
 from .catalog import catalog_service, parse_stable_id
 from .config import (
+    MANAGED_PLAYBACK_LINES_ENABLED,
+    MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE,
     PLAYBACK_CACHE_HOURS,
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
@@ -53,6 +55,10 @@ from .config import (
     SOURCE_MAX_CONCURRENCY,
 )
 from .database import async_session
+from .managed_lines.service import (
+    ManagedLineService,
+    managed_line_service as default_managed_line_service,
+)
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -105,9 +111,13 @@ class PlaybackService:
         repository_factory: Callable[[AsyncSession], PlaybackRepository] = (
             SqlPlaybackRepository
         ),
+        managed_lines_enabled: bool = MANAGED_PLAYBACK_LINES_ENABLED,
+        managed_line_service: ManagedLineService = default_managed_line_service,
     ):
         self._session_factory = session_factory
         self._repository_factory = repository_factory
+        self._managed_lines_enabled = managed_lines_enabled
+        self._managed_line_service = managed_line_service
         self._closing = False
         self._refresh_semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
         # Foreground first-route discovery must never wait behind long-running
@@ -153,6 +163,7 @@ class PlaybackService:
         if parse_stable_id(stable_id) is None:
             return []
         episode = max(1, episode)
+        managed = await self._managed_playback_lines(session, stable_id, episode)
         if not force:
             cache_state, cached = await self._cache_lookup(
                 session,
@@ -161,7 +172,7 @@ class PlaybackService:
             )
             if cache_state == "fresh":
                 self._metrics["fresh_hit"] += 1
-                return cached
+                return self._merge_managed_lines(managed, cached)
             if cache_state == "stale":
                 self._metrics["stale_hit"] += 1
                 self._start_full_refresh(
@@ -172,7 +183,7 @@ class PlaybackService:
                     content_type=content_type,
                     year=year,
                 )
-                return cached
+                return self._merge_managed_lines(managed, cached)
             self._metrics["miss"] += 1
 
         task = self._start_full_refresh(
@@ -183,7 +194,8 @@ class PlaybackService:
             content_type=content_type,
             year=year,
         )
-        return await asyncio.shield(task)
+        discovered = await asyncio.shield(task)
+        return self._merge_managed_lines(managed, discovered)
 
     async def quick_lines(
         self,
@@ -199,6 +211,7 @@ class PlaybackService:
         if parse_stable_id(stable_id) is None:
             return []
         episode = max(1, episode)
+        managed = await self._managed_playback_lines(session, stable_id, episode)
         cache_state, cached = await self._cache_lookup(
             session,
             stable_id,
@@ -206,7 +219,7 @@ class PlaybackService:
         )
         if cache_state == "fresh":
             self._metrics["fresh_hit"] += 1
-            return self._select_quick_lines(cached)
+            return self._select_quick_lines([*managed, *cached])
         if cache_state == "stale":
             self._metrics["stale_hit"] += 1
             self._start_full_refresh(
@@ -217,7 +230,7 @@ class PlaybackService:
                 content_type=content_type,
                 year=year,
             )
-            return self._select_quick_lines(cached)
+            return self._select_quick_lines([*managed, *cached])
 
         self._metrics["miss"] += 1
         task = self._start_quick_refresh(
@@ -228,7 +241,53 @@ class PlaybackService:
             content_type=content_type,
             year=year,
         )
+        if managed:
+            return self._select_quick_lines(managed)
         return await asyncio.shield(task)
+
+    async def _managed_playback_lines(
+        self,
+        session: AsyncSession,
+        stable_id: str,
+        episode: int,
+    ) -> list[dict]:
+        if not self._managed_lines_enabled:
+            return []
+        try:
+            return await self._managed_line_service.playback_lines(
+                session,
+                stable_id=stable_id,
+                episode=episode,
+                limit=MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning(
+                "Managed playback line lookup failed for %s episode %s: %s",
+                stable_id,
+                episode,
+                type(error).__name__,
+            )
+            return []
+
+    @staticmethod
+    def _merge_managed_lines(
+        managed: list[dict],
+        aggregate: list[dict],
+    ) -> list[dict]:
+        result: list[dict] = []
+        seen_urls: set[str] = set()
+        for item in [*managed, *aggregate]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if url and url in seen_urls:
+                continue
+            if url:
+                seen_urls.add(url)
+            result.append(dict(item))
+        return result
 
     def _start_full_refresh(
         self,
@@ -1314,6 +1373,7 @@ class PlaybackService:
         candidates.sort(
             key=lambda entry: (
                 0 if entry[1].get("available") is True else 1,
+                0 if entry[1].get("origin_kind") == "managed" else 1,
                 startup_rank(entry[1]),
                 startup_latency(entry[1]),
                 entry[0],

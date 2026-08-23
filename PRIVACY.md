@@ -18,6 +18,12 @@ deployment may change without updating the policy and release notes.
 - Source requests are untrusted network operations governed by the rule and
   public-network policies. A rule's cookies and temporary headers are scoped to
   its session and are not written to logs or cloud data.
+- A self-hosted administrator may store authorized remote playback URLs in the
+  managed line registry together with stable content IDs, episode numbers,
+  labels, non-sensitive Referer/Origin headers, rights references, review
+  notes, and verification results. Managed lines never contain uploaded media,
+  video segments, cookies, authorization credentials, or account tokens, and
+  they are not copied into account sync or the aggregate playback cache.
 
 ## Playback diagnostics
 
@@ -26,6 +32,13 @@ format, cache, provider, and outcome fields. The server request layer adds a
 short-lived `request_id` and process-local aggregate counters. Diagnostics do
 not contain titles, account IDs, email, passwords, tokens, cookies, private
 headers, or full signed media URLs. URL-shaped values are redacted.
+
+Managed media URLs are returned only to playback clients and may contain
+short-lived query values. Ordinary logs record operation status and error
+categories without the full URL or query. Public service status never exposes
+managed URLs, request headers, rights references, or operator notes. URL
+verification reads only bounded in-memory samples and immediately discards
+them; Zeluna does not store, transcode, cache, or proxy the media stream.
 
 The current build does not upload playback traces or crash logs to a telemetry
 vendor. Local debug output is bounded and can be disabled by its owner. Any

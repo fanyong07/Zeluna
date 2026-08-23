@@ -253,12 +253,28 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           json['startup_latency_ms']?.toString() ?? '',
         );
         final startupProfile = _startupProfileFromJson(json['startup_profile']);
-        final providerId = _providerKey(source, stableId);
+        final serverProviderId = _trustedServerText(
+          json['provider_id'],
+          maxLength: 200,
+        );
+        final serverProviderName = _trustedServerText(
+          json['provider_name'],
+          maxLength: 200,
+        );
+        final serverLineId = _trustedServerText(
+          json['line_id'],
+          maxLength: 200,
+        );
+        final providerId = serverProviderId.isNotEmpty
+            ? serverProviderId
+            : _providerKey(source, stableId);
         final episodeKey = stableEpisodeKey(
           subjectKey: stableId,
           normalizedNumber: episode.number,
         );
-        final lineId = hasPlayableUrl
+        final lineId = serverLineId.isNotEmpty
+            ? serverLineId
+            : hasPlayableUrl
             ? stablePlaybackLineKey(
                 providerId: providerId,
                 episodeKey: episodeKey,
@@ -271,7 +287,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             id: lineId,
             episodeId: episode.id,
             providerId: providerId,
-            providerName: _providerName(source),
+            providerName: serverProviderName.isNotEmpty
+                ? serverProviderName
+                : _providerName(source),
             title: json['title']?.toString().trim().isNotEmpty == true
                 ? json['title'].toString().trim()
                 : '聚合线路${index + 1}',
@@ -414,4 +432,11 @@ String _providerKey(String source, String stableId) {
   final parts = source.split(':');
   final site = parts.length >= 2 ? parts[1].trim() : '';
   return site.isEmpty ? 'zeluna:$stableId' : 'zeluna:site:$site';
+}
+
+String _trustedServerText(Object? value, {required int maxLength}) {
+  final text = value?.toString().trim() ?? '';
+  if (text.isEmpty || text.length > maxLength) return '';
+  if (text.codeUnits.any((unit) => unit < 0x20 || unit == 0x7f)) return '';
+  return text;
 }

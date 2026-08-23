@@ -20,6 +20,7 @@ if ($null -eq $versionLine) {
     throw 'Unable to read the version from pubspec.yaml.'
 }
 $version = $versionLine.Matches[0].Groups[1].Value
+$publicVersion = ($version -split '\+', 2)[0]
 $releaseRoot = Join-Path $projectRoot 'release'
 $createdReleaseRoot = -not (Test-Path -LiteralPath $releaseRoot)
 $manifestPath = Join-Path $releaseRoot (
@@ -51,14 +52,14 @@ try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
     New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
-    $androidPath = Join-Path $testRoot "Zeluna-Android-$version-release.apk"
+    $androidPath = Join-Path $testRoot "Zeluna-v$publicVersion-Android.apk"
     [System.IO.File]::WriteAllText($androidPath, 'android-sentinel')
     Assert-ImmutableRefusal `
         -Action { & (Join-Path $projectRoot 'tool\package_android_release.ps1') -SkipBuild -DeliveryDirectory $testRoot } `
         -ExpectedMessage 'Refusing to overwrite immutable release output' `
         -SentinelPath $androidPath
 
-    $windowsPath = Join-Path $testRoot "Zeluna-Windows-$version.zip"
+    $windowsPath = Join-Path $testRoot "Zeluna-v$publicVersion-Windows.zip"
     [System.IO.File]::WriteAllText($windowsPath, 'windows-sentinel')
     Assert-ImmutableRefusal `
         -Action { & (Join-Path $projectRoot 'tool\package_windows_release.ps1') -SkipBuild -DeliveryDirectory $testRoot } `

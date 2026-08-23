@@ -183,11 +183,20 @@ def _is_public_ip(value: str) -> bool:
 
 async def _is_public_http_url(url: str) -> bool:
     """Reject local/private destinations before the backend probes a line."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         return False
     host = parsed.hostname.strip().lower()
-    if host == "localhost" or host.endswith(".localhost"):
+    if host == "localhost" or host.endswith((".localhost", ".local")):
         return False
     try:
         ipaddress.ip_address(host)
@@ -198,7 +207,7 @@ async def _is_public_http_url(url: str) -> bool:
                 None,
                 lambda: socket.getaddrinfo(
                     host,
-                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                    port,
                     type=socket.SOCK_STREAM,
                 ),
             )
@@ -218,11 +227,20 @@ def _is_client_probe_candidate_url(url: str, declared_format: str = "") -> bool:
     """
     if classify_media_url(url, declared_format) != DIRECT_MEDIA_URL:
         return False
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    try:
+        parsed = urlparse(url)
+        parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         return False
     host = parsed.hostname.strip().lower()
-    if host == "localhost" or host.endswith(".localhost"):
+    if host == "localhost" or host.endswith((".localhost", ".local")):
         return False
     try:
         ipaddress.ip_address(host)

@@ -114,6 +114,8 @@ flutter run -d windows `
 
 - 客户端只使用稳定 ID：`bangumi:{id}`、`tmdb:tv:{id}`、`tmdb:movie:{id}`  
 - 服务端完成资料聚合与线路验证；片源直连播放器  
+- 管理员可把经过授权和审核的远程 HLS / MP4 / DASH 直链绑定到稳定作品 ID；这些线路使用与 URL 无关的稳定 `line_id`，并在响应时与聚合线路动态合并
+- 管理线路只保存远程地址和审核元数据，不进入聚合缓存；Zeluna 不上传、保存、转码、缓存或代理任何视频字节
 - 后端不可用时，应用会明确提示，而不会假装仍有官方线路  
 
 部署与运维细节见 [`server/DEPLOY.md`](server/DEPLOY.md)。
@@ -151,6 +153,8 @@ cd server && uv sync --frozen --all-groups && uv run pytest -q
 ## 自建后端
 
 `server/` 提供 FastAPI 统一后端：目录与播放 API、线路缓存、云账号与邮件验证码、后台预热。
+
+自建实例还可启用 `managed.urls` 管理线路。该能力默认关闭；部署者完成数据库迁移后，通过现有管理员认证依次执行“添加 → 验线 → 批准 → 启用”，再开启播放合并开关。只接受公共 HTTP(S) 直接媒体地址，请求头仅允许非敏感的 `Referer` 和 `Origin`。
 
 ```powershell
 cd server

@@ -56,6 +56,10 @@ SQLITE_CONNECT_TIMEOUT_SECONDS=30
 PLAYBACK_STALE_HOURS=24
 PLAYBACK_QUICK_TIMEOUT_SECONDS=4.5
 PLAYBACK_QUICK_LINE_COUNT=3
+MANAGED_PLAYBACK_LINES_ENABLED=false
+MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL=true
+MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE=8
+MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS=12
 ```
 
 - `TMDB_READ_ACCESS_TOKEN`：TMDB v4 Read Access Token，电视剧和电影目录必需。
@@ -76,6 +80,64 @@ PLAYBACK_QUICK_LINE_COUNT=3
 - `PLAYBACK_PROVIDER_IDS`：逗号分隔的服务端 provider ID allowlist。默认留空，留空时搜索、详情、播放解析、首页清单和预热都不会调用任何播放 provider；只启用已经完成合规和网络验证的 ID。
 - `M3U8_SEARCH_ENABLED`：通用 M3U8 搜索回退，正式环境默认 `false`。只有完成独立安全评审并明确批准时才可启用。
 - `PRECACHE_ENABLED`：只有 `PLAYBACK_PROVIDER_IDS` 已显式配置且预热流量已获批准时才可设为 `true`。
+- `MANAGED_PLAYBACK_LINES_ENABLED`：是否把已批准并启用的管理线路动态合并进 quick/full；默认 `false`，可先导入和审核，再显式开启。
+- `MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL`：默认 `true`。保持开启时，验线成功后仍必须由管理员批准；关闭时，验线通过会自动批准，但新建和批量导入仍始终从 draft 开始。
+- `MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE`：单集最多参与合并的管理线路数，默认 `8`。
+- `MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS`：单条远程 URL 验线总超时，默认 `12` 秒。验线只在内存中有限读取清单、密钥或首段样本，不写入磁盘。
+
+## 管理远程播放线路
+
+管理线路使用独立的 `managed_playback_lines` 表，不写入 `PlaybackCache.lines_json`。quick/full 每次响应时动态读取，因此禁用或撤销会立即生效，聚合负缓存也不能遮住管理线路。客户端仍直接连接远程媒体 Host；FastAPI 和反向代理不得转发媒体流。
+
+安全边界：
+
+- 只支持 `static_direct` 公共 HTTP(S) 直链；拒绝本地、私网、环回、`.local`、URL userinfo、HTML、embed、iframe 和 player 页面。
+- 无扩展地址必须经过服务端内容嗅探，不能因为路径无后缀直接公开。
+- 管理请求头只允许 `Referer` 和 `Origin`；禁止 Cookie、Authorization、API Key 及其他凭据。
+- 普通日志不得记录完整 URL 或 query；管理员备注、授权记录和请求头不得出现在公共 `/api/v3/status`。
+- 不支持上传、本地媒体、FFmpeg、转码、视频缓存、视频代理、任意脚本或短时 resolver。
+
+管理员接口复用 `X-Zeluna-Admin` 认证：
+
+```text
+GET    /admin/managed-lines
+POST   /admin/managed-lines
+GET    /admin/managed-lines/{line_id}
+PATCH  /admin/managed-lines/{line_id}
+POST   /admin/managed-lines/{line_id}/verify
+POST   /admin/managed-lines/{line_id}/approve
+POST   /admin/managed-lines/{line_id}/enable
+POST   /admin/managed-lines/{line_id}/disable
+POST   /admin/managed-lines/{line_id}/revoke
+POST   /admin/managed-lines/import
+```
+
+单条创建示例：
+
+```json
+{
+  "stable_id": "bangumi:400602",
+  "episode": 1,
+  "provider_key": "managed.main",
+  "label": "主线路",
+  "canonical_url": "https://media.example/index.m3u8",
+  "format_hint": "hls",
+  "quality": "1080p",
+  "headers": {"Referer": "https://player.example/"},
+  "priority": 800,
+  "provenance_kind": "licensed",
+  "rights_reference": "INTERNAL-2026-001"
+}
+```
+
+创建和 JSON 批量导入的记录固定为 `draft + pending + disabled`。正确发布顺序是：
+
+1. `POST /verify` 完成安全检查和有限字节验线；
+2. `POST /approve` 将记录置为 approved/active；
+3. `POST /enable` 开始对新播放请求返回；
+4. 需要止损时用 `disable`，永久撤销用幂等的 `revoke`。
+
+替换 URL 不改变 `line_id`，但会自动退回 draft、pending、disabled，并要求重新验线和审核。已撤销记录保留审计信息，不能通过修改或启用恢复；需要新线路时应新建记录。
 
 当前代码接受的播放 provider ID：
 
@@ -134,6 +196,8 @@ sudo systemctl --no-pager --full status zeluna.service
 ```
 
 升级工具会在 SQLite 数据库旁的 `backups/` 目录先生成一致性备份，再执行到最新版本。普通服务启动只核对 Alembic 版本；数据库未迁移、版本落后或结构未知时会拒绝启动，不会静默改表。开发用的一次性数据库才可以显式设置 `DATABASE_AUTO_CREATE=true`。
+
+本版本迁移 head 为 `0013_managed_playback_lines`。上线前应在备份副本上完成一次 `upgrade head → downgrade -1 → upgrade head` 往返；回退到 `0012` 会删除管理线路表，因此生产回退前必须先保留数据库备份。
 
 ## systemd
 
@@ -198,6 +262,8 @@ curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&tit
 - 搜索结果只返回稳定作品 ID，不出现采集站内部 ID。
 - 第一次播放完成验证并写缓存；第二次请求返回 `cached: true`。
 - 热缓存快速接口应立即返回主线路，并尽量附带两个不同域名的备用线路；`stale: true` 表示旧线路仍可播且后台正在刷新。
+- 开启管理线路后，已批准线路应带稳定 `line_id`、`provider_id: managed.urls`，并优先于健康聚合线路；禁用或撤销后下一次请求立即消失。
+- 管理线路 URL 不得出现在 `playback_cache.lines_json`，VPS 磁盘不得生成视频、分片或转码文件，客户端网络请求应直接到远程媒体 Host。
 - App 中不存在播放规则、外部源目录或规则导入入口。
 - 后端不可用时 App 明确显示无线路，不回退本地爬虫。
 

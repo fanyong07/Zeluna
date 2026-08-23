@@ -71,6 +71,57 @@ def test_empty_database_upgrades_to_head_and_rolls_back(tmp_path):
         engine.dispose()
 
 
+def test_managed_line_migration_round_trip_has_no_local_media_fields(tmp_path):
+    database_path = tmp_path / "managed-lines.db"
+    config = _config(database_path)
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        inspector = inspect(engine)
+        columns = {
+            column["name"]
+            for column in inspector.get_columns("managed_playback_lines")
+        }
+        assert {
+            "id",
+            "stable_id",
+            "episode",
+            "canonical_url",
+            "headers_json",
+            "review_status",
+            "last_verified_status",
+        }.issubset(columns)
+        assert not columns & {
+            "manifest_path",
+            "storage_prefix",
+            "source_sha256",
+            "source_size",
+            "duration_ms",
+            "width",
+            "height",
+            "video_codec",
+            "audio_codec",
+            "renditions_json",
+        }
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "-1")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        assert "managed_playback_lines" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        assert "managed_playback_lines" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
 def test_upgrade_head_is_idempotent_and_preserves_rows(tmp_path):
     database_path = tmp_path / "repeated.db"
     config = _config(database_path)

@@ -10,6 +10,7 @@ from .account_api import router as account_router
 from .config import CORS_ORIGINS
 from .observability import ObservabilityMetrics, ObservabilityMiddleware
 from .routers import (
+    admin_managed_lines_router,
     admin_router,
     catalog_router,
     danmaku_router,
@@ -46,6 +47,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(danmaku_router)
     app.include_router(playback_router)
     app.include_router(sync_router)
+    app.include_router(admin_managed_lines_router)
     app.include_router(admin_router)
     app.add_middleware(
         CORSMiddleware,
