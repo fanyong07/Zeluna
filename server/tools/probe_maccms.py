@@ -1117,6 +1117,14 @@ async def main(argv: list[str] | None = None) -> dict[str, object]:
         help="Probe only the named source; repeat for multiple sources",
     )
     parser.add_argument(
+        "--enabled-only",
+        action="store_true",
+        help=(
+            "Skip disabled configured sources while retaining selected "
+            "candidate entries"
+        ),
+    )
+    parser.add_argument(
         "--json-output",
         type=Path,
         help="Write a redacted structured result for later review",
@@ -1154,6 +1162,16 @@ async def main(argv: list[str] | None = None) -> dict[str, object]:
         )
     elif args.include_configured:
         parser.error("--include-configured only applies together with --candidates")
+
+    if args.enabled_only:
+        sites = [
+            site
+            for site in sites
+            if site.get("origin") != CONFIGURED_ORIGIN
+            or site.get("enabled") is True
+        ]
+        if not sites:
+            parser.error("--enabled-only left no selected source")
 
     if args.site:
         selected_names = {str(name).strip().casefold() for name in args.site}

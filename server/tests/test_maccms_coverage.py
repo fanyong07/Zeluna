@@ -521,13 +521,22 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch(
                 "tools.probe_maccms.CONFIGURED_SITES",
-                [{
-                    "name": "coverage-source",
-                    "api": "https://source.example/api.php/provide/vod",
-                    "origin": "configured",
-                    "enabled": True,
-                    "tier": "core",
-                }],
+                [
+                    {
+                        "name": "coverage-source",
+                        "api": "https://source.example/api.php/provide/vod",
+                        "origin": "configured",
+                        "enabled": True,
+                        "tier": "core",
+                    },
+                    {
+                        "name": "disabled-source",
+                        "api": "https://disabled.example/api.php/provide/vod",
+                        "origin": "configured",
+                        "enabled": False,
+                        "tier": "quarantine",
+                    },
+                ],
             ),
             patch(
                 "tools.probe_maccms.load_coverage_cases",
@@ -542,12 +551,15 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
             report = await main([
                 "--profile",
                 "coverage",
-                "--site",
-                "coverage-source",
+                "--enabled-only",
             ])
 
         load_cases.assert_called_once_with(DEFAULT_COVERAGE_CASES_PATH)
         probe_site.assert_awaited_once()
+        self.assertEqual(
+            probe_site.await_args.args[0]["name"],
+            "coverage-source",
+        )
         self.assertEqual(report["schema"], "zeluna.maccms-probe.v3")
         self.assertEqual(report["profile"], "coverage")
         self.assertEqual(report["benchmark_subject_count"], 1)
