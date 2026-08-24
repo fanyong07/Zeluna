@@ -11,7 +11,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.aggregator import (
     CLIENT_PROBE_REQUIRED,
+    EMPTY_MEDIA,
     PARSER_MISMATCH,
+    READ_TIMEOUT,
     SERVER_VERIFIED,
     SERVER_BLOCKED_CLIENT_CANDIDATE,
     STARTUP_HLS,
@@ -33,6 +35,10 @@ from server.database import (
     SourceHealth,
 )
 from server.playback import PlaybackService
+from server.playback_discovery import (
+    SourceDiscoveryDiagnostic,
+    SourceDiscoveryStatus,
+)
 from server.repositories.catalog import SqlCatalogRepository
 from server.scrapers.base import SubjectResult
 from server.scrapers.maccms import MacCmsScraper
@@ -1104,6 +1110,185 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cached[0]["startup_profile"], STARTUP_MP4_FASTSTART)
         self.assertEqual(cached[0]["startup_latency_ms"], 143)
 
+    async def test_client_probe_route_is_not_stored_as_a_negative_cache(self):
+        item = self.service._line_dict(
+            AggregatedVideoLine(
+                url="https://cdn.example/client-probe.m3u8",
+                title="Client probe",
+                format="hls",
+                source="maccms:client-probe",
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+        )
+        async with self.sessions() as session:
+            await self.service._store_cache(
+                session,
+                "bangumi:client-probe-cache",
+                1,
+                "Client probe",
+                [item],
+            )
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:client-probe-cache",
+                    PlaybackCache.episode == 1,
+                )
+            )
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.line_count, 1)
+
+    async def test_full_transient_failure_does_not_create_negative_cache(self):
+        diagnostic = SourceDiscoveryDiagnostic(
+            source_name="slow",
+            provider_id="crawler.slow",
+            queried=True,
+            aliases_attempted=1,
+            status=SourceDiscoveryStatus.SEARCH_TIMEOUT,
+            error_category=READ_TIMEOUT,
+        )
+        with (
+            patch.object(
+                self.service,
+                "_playback_context",
+                new=AsyncMock(
+                    return_value=("Transient", "anime", 2026, ["Transient"])
+                ),
+            ),
+            patch.object(
+                self.service,
+                "_load_source_health",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(aggregator, "_crawler_scrapers", {"slow": object()}),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.slow"}),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=([], {"slow": diagnostic})),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(return_value=([], {}, {})),
+            ),
+        ):
+            async with self.sessions() as session:
+                await self.service._refresh(
+                    "bangumi:991005",
+                    1,
+                    session,
+                    title="Transient",
+                    original_title="",
+                    content_type="anime",
+                    year=2026,
+                )
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:991005",
+                    PlaybackCache.episode == 1,
+                )
+            )
+
+        self.assertIsNone(cached)
+
+    async def test_full_confirmed_miss_keeps_bounded_negative_cache(self):
+        diagnostics = {
+            name: SourceDiscoveryDiagnostic(
+                source_name=name,
+                provider_id=f"crawler.{name}",
+                queried=True,
+                aliases_attempted=1,
+                status=SourceDiscoveryStatus.SEARCH_MISS,
+            )
+            for name in ("one", "two")
+        }
+        with (
+            patch.object(
+                self.service,
+                "_playback_context",
+                new=AsyncMock(
+                    return_value=("Confirmed", "anime", 2026, ["Confirmed"])
+                ),
+            ),
+            patch.object(
+                self.service,
+                "_load_source_health",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"one": object(), "two": object()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.one", "crawler.two"}),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=([], diagnostics)),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(return_value=([], {}, {})),
+            ),
+        ):
+            async with self.sessions() as session:
+                await self.service._refresh(
+                    "bangumi:991006",
+                    1,
+                    session,
+                    title="Confirmed",
+                    original_title="",
+                    content_type="anime",
+                    year=2026,
+                )
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:991006",
+                    PlaybackCache.episode == 1,
+                )
+            )
+
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.line_count, 0)
+
+    def test_only_deterministic_route_failures_confirm_a_full_negative(self):
+        deterministic = {
+            "queried": True,
+            "diagnostic_status": SourceDiscoveryStatus.ROUTE_UNAVAILABLE.value,
+            "error_category": EMPTY_MEDIA,
+        }
+        transient = {**deterministic, "error_category": READ_TIMEOUT}
+
+        self.assertTrue(
+            self.service._full_negative_cache_is_confirmed([deterministic])
+        )
+        self.assertFalse(
+            self.service._full_negative_cache_is_confirmed([transient])
+        )
+
     async def test_cache_drops_player_pages_and_unverified_opaque_urls(self):
         async with self.sessions() as session:
             session.add(
@@ -1275,6 +1460,81 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(refresh_calls, 1)
         self.assertEqual(results[0], results[1])
+
+    async def test_quick_miss_does_not_block_immediate_full_refresh(self):
+        async def discover_none(*_args, **_kwargs):
+            if False:
+                yield None
+
+        with (
+            patch.object(
+                self.service,
+                "_playback_context",
+                new=AsyncMock(
+                    return_value=("Quick Miss", "anime", 2026, ["Quick Miss"])
+                ),
+            ),
+            patch.object(
+                self.service,
+                "_load_source_health",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover_none,
+            ),
+        ):
+            async with self.sessions() as session:
+                quick = await self.service._refresh_quick(
+                    "bangumi:991004",
+                    1,
+                    session,
+                    title="Quick Miss",
+                    original_title="",
+                    content_type="anime",
+                    year=2026,
+                    deadline=time.monotonic() + 1,
+                )
+
+        self.assertEqual(quick, [])
+        expected = [
+            {
+                "url": "https://cdn-a.example/full.m3u8",
+                "available": True,
+            },
+            {
+                "url": "https://cdn-b.example/full.m3u8",
+                "available": True,
+            },
+        ]
+        full_refresh = AsyncMock(return_value=expected)
+        with patch.object(self.service, "_refresh", new=full_refresh):
+            async with self.sessions() as session:
+                full = await self.service.lines(
+                    "bangumi:991004",
+                    1,
+                    session,
+                    title="Quick Miss",
+                    content_type="anime",
+                    year=2026,
+                )
+
+        self.assertEqual(full, expected)
+        full_refresh.assert_awaited_once()
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:991004",
+                    PlaybackCache.episode == 1,
+                )
+            )
+        self.assertIsNone(cached)
 
     async def test_quick_cold_lookup_races_sources_and_returns_fastest(self):
         slow_match = SourceMatch(
