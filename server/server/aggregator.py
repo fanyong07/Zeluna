@@ -660,7 +660,7 @@ class ContentAggregator:
                 candidate_year=result.year,
                 expected_year=year,
             )
-            if not analysis.accepted:
+            if not analysis.playback_eligible:
                 continue
             parts = result.source_id.split(":", 2)
             if provider in {"maccms", "tvbox"} and len(parts) == 3:

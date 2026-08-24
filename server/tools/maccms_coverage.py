@@ -166,6 +166,27 @@ def _percentile(values: list[int], percentile: float) -> int:
     return int(ordered[index])
 
 
+def _has_known_playback_error(item: dict[str, Any]) -> bool:
+    return (
+        item.get("wrong_match") is True
+        or item.get("wrong_episode") is True
+    )
+
+
+def _is_credible_server_verification(item: dict[str, Any]) -> bool:
+    return (
+        item.get("server_verified") is True
+        and not _has_known_playback_error(item)
+    )
+
+
+def _is_credible_client_probe(item: dict[str, Any]) -> bool:
+    return (
+        item.get("client_probe_required") is True
+        and not _has_known_playback_error(item)
+    )
+
+
 def summarize_source_coverage(
     case_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -178,6 +199,11 @@ def summarize_source_coverage(
         item["wrong_match"]
         for item in case_results
         if isinstance(item.get("wrong_match"), bool)
+    ]
+    wrong_episode_reviewed = [
+        item["wrong_episode"]
+        for item in case_results
+        if isinstance(item.get("wrong_episode"), bool)
     ]
     season_reviewed = [
         item["season_conflict"]
@@ -197,6 +223,7 @@ def summarize_source_coverage(
     hosts = {
         str(host).strip().lower()
         for item in case_results
+        if _is_credible_server_verification(item)
         for host in item.get("verified_media_hosts", [])
         if str(host).strip()
     }
@@ -208,11 +235,13 @@ def summarize_source_coverage(
             if item.get("content_type") == content_type
         ]
         content_type_coverage[content_type] = _rate(
-            sum(item.get("server_verified") is True for item in typed),
+            sum(_is_credible_server_verification(item) for item in typed),
             len(typed),
         )
 
-    server_verified_count = count_true("server_verified")
+    server_verified_count = sum(
+        _is_credible_server_verification(item) for item in case_results
+    )
     return {
         "case_count": total,
         "search_response_rate": _rate(count_true("search_responded"), total),
@@ -222,6 +251,12 @@ def summarize_source_coverage(
         "wrong_match_rate": (
             _rate(sum(wrong_match_reviewed), len(wrong_match_reviewed))
             if wrong_match_reviewed
+            else None
+        ),
+        "wrong_episode_reviewed_cases": len(wrong_episode_reviewed),
+        "wrong_episode_rate": (
+            _rate(sum(wrong_episode_reviewed), len(wrong_episode_reviewed))
+            if wrong_episode_reviewed
             else None
         ),
         "season_conflict_reviewed_cases": len(season_reviewed),
@@ -234,7 +269,7 @@ def summarize_source_coverage(
         "episode_found_rate": _rate(count_true("episode_found"), total),
         "server_verified_rate": _rate(server_verified_count, total),
         "client_probe_required_rate": _rate(
-            count_true("client_probe_required"),
+            sum(_is_credible_client_probe(item) for item in case_results),
             total,
         ),
         "route_unavailable_rate": _rate(count_true("route_unavailable"), total),
@@ -432,14 +467,14 @@ def build_coverage_kpis(site_results: list[dict[str, Any]]) -> dict[str, Any]:
                 "client_probe_required": False,
                 "verified_hosts": set(),
             })
-            if result.get("server_verified") is True:
+            if _is_credible_server_verification(result):
                 aggregate["server_verified"] = True
                 aggregate["verified_hosts"].update(
                     str(host).strip().lower()
                     for host in result.get("verified_media_hosts", [])
                     if str(host).strip()
                 )
-            if result.get("client_probe_required") is True:
+            if _is_credible_client_probe(result):
                 aggregate["client_probe_required"] = True
             if isinstance(result.get("wrong_match"), bool):
                 wrong_match_reviewed.append(result["wrong_match"])
@@ -575,7 +610,7 @@ def build_legacy_coverage_baselines(
             hosts = sorted({
                 str(host).strip().lower()
                 for item in considered
-                if item.get("server_verified") is True
+                if _is_credible_server_verification(item)
                 for host in item.get("verified_media_hosts", [])
                 if str(host).strip()
             })
@@ -589,10 +624,11 @@ def build_legacy_coverage_baselines(
                     template.get("content_type") or "unknown"
                 ),
                 "server_verified": any(
-                    item.get("server_verified") is True for item in considered
+                    _is_credible_server_verification(item)
+                    for item in considered
                 ),
                 "client_probe_required": any(
-                    item.get("client_probe_required") is True
+                    _is_credible_client_probe(item)
                     for item in considered
                 ),
                 "verified_media_hosts": hosts,

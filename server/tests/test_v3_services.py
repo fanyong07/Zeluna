@@ -2175,6 +2175,39 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(stored_health.consecutive_failures, 0)
                 self.assertEqual(stored_health.last_status, "healthy")
 
+    async def test_binding_with_explicit_identity_conflict_is_not_reused(self):
+        now = time.time()
+        async with self.sessions() as session:
+            session.add(SourceBinding(
+                stable_id="bangumi:identity-conflict",
+                source_id="maccms:identity-conflict:1",
+                source_name="identity-conflict",
+                matched_title="进击的巨人 最终季 完结篇 后篇",
+                media_type="anime",
+                year=2023,
+                score=88,
+                success_count=3,
+                last_success_at=now,
+                enabled=True,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        async with self.sessions() as session:
+            matches = await self.service._load_bindings(
+                session,
+                "bangumi:identity-conflict",
+                source_health={},
+                aliases=[
+                    "进击的巨人 最终季",
+                    "Attack on Titan Final Season",
+                ],
+                content_type="anime",
+                year=2020,
+            )
+
+        self.assertEqual(matches, [])
+
     async def test_exact_new_match_can_recover_open_source_in_full_refresh(self):
         now = 1_800_000_000.0
         match = SourceMatch(

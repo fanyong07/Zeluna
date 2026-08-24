@@ -152,6 +152,33 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             [("unknown", 0), ("unknown", 0), ("unknown", 0)],
         )
 
+    def test_scoring_does_not_emit_explicit_identity_conflicts_for_playback(self):
+        matches = ContentAggregator._score_scraper_results(
+            "maccms",
+            [
+                SubjectResult(
+                    source_id="maccms:wrong:1",
+                    title="进击的巨人 最终季 完结篇 后篇",
+                    type="anime",
+                    year=2023,
+                ),
+                SubjectResult(
+                    source_id="maccms:correct:2",
+                    title="进击的巨人 最终季",
+                    type="anime",
+                    year=2020,
+                ),
+            ],
+            ["进击的巨人 最终季", "Attack on Titan Final Season"],
+            content_type="anime",
+            year=2020,
+        )
+
+        self.assertEqual(
+            [match.source_id for match in matches],
+            ["maccms:correct:2"],
+        )
+
     async def test_default_crawlers_are_current_vps_playback_candidates(self):
         self.aggregator = ContentAggregator()
 

@@ -192,6 +192,38 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["content_type_coverage"]["anime"], 1.0)
         self.assertEqual(metrics["content_type_coverage"]["tv"], 0.0)
 
+    def test_source_metrics_do_not_credit_known_wrong_routes(self):
+        metrics = summarize_source_coverage([
+            {
+                "case_id": "anime-wrong-match",
+                "content_type": "anime",
+                "wrong_match": True,
+                "wrong_episode": False,
+                "server_verified": True,
+                "client_probe_required": False,
+                "verified_media_hosts": ["wrong-match.example"],
+            },
+            {
+                "case_id": "tv-wrong-episode",
+                "content_type": "tv",
+                "wrong_match": False,
+                "wrong_episode": True,
+                "server_verified": True,
+                "client_probe_required": False,
+                "verified_media_hosts": ["wrong-episode.example"],
+            },
+        ])
+
+        self.assertEqual(metrics["server_verified_rate"], 0.0)
+        self.assertEqual(metrics["subject_with_any_playable_route_rate"], 0.0)
+        self.assertEqual(metrics["zero_playable_rate"], 1.0)
+        self.assertEqual(metrics["unique_media_hosts"], 0)
+        self.assertEqual(metrics["media_hosts"], [])
+        self.assertEqual(metrics["content_type_coverage"]["anime"], 0.0)
+        self.assertEqual(metrics["content_type_coverage"]["tv"], 0.0)
+        self.assertEqual(metrics["wrong_match_rate"], 0.5)
+        self.assertEqual(metrics["wrong_episode_rate"], 0.5)
+
     def test_cross_source_kpis_use_case_union_and_host_diversity(self):
         kpis = build_coverage_kpis([
             {
@@ -300,6 +332,43 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kpis["zero_playable_episode_rate"], 0.5)
         self.assertEqual(kpis["multi_host_rate"], 0.5)
 
+    def test_cross_source_kpis_exclude_known_wrong_routes_and_hosts(self):
+        kpis = build_coverage_kpis([{
+            "cases": [
+                {
+                    "case_id": "anime-wrong-match-episode-1",
+                    "subject_id": "anime-wrong-match",
+                    "sample_kind": "episode_1",
+                    "content_type": "anime",
+                    "wrong_match": True,
+                    "wrong_episode": False,
+                    "server_verified": True,
+                    "verified_media_hosts": ["wrong-match.example"],
+                },
+                {
+                    "case_id": "tv-wrong-episode-episode-1",
+                    "subject_id": "tv-wrong-episode",
+                    "sample_kind": "episode_1",
+                    "content_type": "tv",
+                    "wrong_match": False,
+                    "wrong_episode": True,
+                    "server_verified": True,
+                    "verified_media_hosts": ["wrong-episode.example"],
+                },
+            ],
+        }])
+
+        self.assertEqual(kpis["subject_with_any_playable_route_rate"], 0.0)
+        self.assertEqual(kpis["episode_with_any_playable_route_rate"], 0.0)
+        self.assertEqual(kpis["zero_playable_rate"], 1.0)
+        self.assertEqual(kpis["server_verified_rate"], 0.0)
+        self.assertEqual(kpis["single_host_rate"], 0.0)
+        self.assertEqual(kpis["multi_host_rate"], 0.0)
+        self.assertEqual(kpis["anime_coverage"], 0.0)
+        self.assertEqual(kpis["tv_coverage"], 0.0)
+        self.assertEqual(kpis["wrong_match_rate"], 0.5)
+        self.assertEqual(kpis["wrong_episode_rate"], 0.5)
+
     def test_legacy_baselines_model_alias0_and_first_match_failures(self):
         site_results = [
             {
@@ -357,6 +426,112 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
             ],
             0.5,
         )
+
+    def test_legacy_baselines_do_not_credit_known_wrong_routes(self):
+        site_results = [
+            {
+                "cases": [
+                    {
+                        "case_id": "anime-a-episode-1",
+                        "subject_id": "anime-a",
+                        "sample_kind": "episode_1",
+                        "content_type": "anime",
+                        "accepted_match": True,
+                        "matched_alias_index": 0,
+                        "search_latency_ms": 10,
+                        "wrong_match": True,
+                        "wrong_episode": False,
+                        "server_verified": True,
+                        "verified_media_hosts": ["wrong-match.example"],
+                    },
+                    {
+                        "case_id": "tv-b-episode-1",
+                        "subject_id": "tv-b",
+                        "sample_kind": "episode_1",
+                        "content_type": "tv",
+                        "accepted_match": True,
+                        "matched_alias_index": 0,
+                        "search_latency_ms": 10,
+                        "wrong_match": False,
+                        "wrong_episode": True,
+                        "server_verified": True,
+                        "verified_media_hosts": ["wrong-episode.example"],
+                    },
+                ],
+            },
+            {
+                "cases": [{
+                    "case_id": "anime-a-episode-1",
+                    "subject_id": "anime-a",
+                    "sample_kind": "episode_1",
+                    "content_type": "anime",
+                    "accepted_match": True,
+                    "matched_alias_index": 0,
+                    "search_latency_ms": 20,
+                    "wrong_match": False,
+                    "wrong_episode": False,
+                    "server_verified": True,
+                    "verified_media_hosts": ["correct.example"],
+                }],
+            },
+        ]
+
+        baselines = build_legacy_coverage_baselines(site_results)
+        first_match = baselines["legacy_alias0_first_match"]
+        candidate_cap = baselines["legacy_alias0_candidate_cap_6"]
+
+        self.assertEqual(first_match["subject_with_any_playable_route_rate"], 0.0)
+        self.assertEqual(first_match["single_host_rate"], 0.0)
+        self.assertEqual(candidate_cap["subject_with_any_playable_route_rate"], 0.5)
+        self.assertEqual(candidate_cap["single_host_rate"], 0.5)
+
+    async def test_coverage_probe_does_not_verify_explicit_identity_conflict(self):
+        case = CoverageCase(
+            case_id="movie-kung-fu-episode-1",
+            query="功夫",
+            aliases=("功夫",),
+            content_type="movie",
+            year=2004,
+            episode=1,
+            tags=("movie", "difficult"),
+            subject_id="movie-kung-fu",
+        )
+        search = {
+            "list": [{
+                "vod_id": "wrong-2025",
+                "vod_name": "功夫",
+                "vod_year": "2025",
+                "type_name": "动作片",
+            }],
+        }
+        detail = {
+            "list": [{
+                "vod_id": "wrong-2025",
+                "vod_play_url": "第1集$https://wrong.example/1.m3u8",
+            }],
+        }
+        fetch_json = AsyncMock(side_effect=[(search, ""), (detail, "")])
+        verify = AsyncMock(return_value={
+            "url": "https://wrong.example/1.m3u8",
+            "status": "server_verified",
+            "error_category": "",
+        })
+
+        with (
+            patch("tools.probe_maccms._fetch_json", new=fetch_json),
+            patch("tools.probe_maccms.verify_media_url", new=verify),
+        ):
+            result = await probe_coverage_case(
+                {"name": "coverage-source", "api": "https://api.example"},
+                case,
+                object(),
+                AsyncMock(),
+            )
+
+        self.assertFalse(result["accepted_match"])
+        self.assertFalse(result["server_verified"])
+        self.assertEqual(result["error_category"], "search_hit_no_match")
+        verify.assert_not_awaited()
 
     def test_report_separates_enabled_production_from_disabled_sources(self):
         cases = [CoverageCase(

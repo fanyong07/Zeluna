@@ -536,7 +536,7 @@ async def probe_coverage_case(
                 candidate_year=year_from_value(item.get("vod_year")),
                 expected_year=case.year,
             )
-            if analysis.accepted:
+            if analysis.playback_eligible:
                 accepted.append((
                     analysis.ranking_score,
                     alias_index,
@@ -576,7 +576,10 @@ async def probe_coverage_case(
     result["season_conflict"] = evidence.season_conflict
     if (
         evidence.season_conflict
-        or (evidence.media_type_known and not evidence.media_type_match)
+        or (
+            evidence.media_type_known
+            and not evidence.media_type_compatible
+        )
         or (evidence.year_known and not evidence.year_compatible)
     ):
         result["wrong_match"] = True
