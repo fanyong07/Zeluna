@@ -56,17 +56,19 @@ MACCMS_SITES: list[dict] = [
     {"name": "速博", "api": "https://subocaiji.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 88, "content_types": ["anime", "tv", "movie"]},
     {"name": "魔都", "api": "https://caiji.moduapi.cc/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 86, "content_types": ["anime", "tv", "movie"]},
     {"name": "红牛", "api": "https://www.hongniuzy2.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 84, "content_types": ["anime", "tv", "movie"]},
-    # —— 动漫专门站：来自 Animeko 订阅的 30 站中唯一暴露标准 JSON 接口者，
-    #    VPS 实测多部新番可播(斗罗 / 咒术 / 进击 / 转生史莱姆)。 ——
-    {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
+    # 2026-08-24 目标 VPS Smoke 与平衡 Coverage 均为 API http_444；
+    # 保留来源身份用于诊断，但不再进入任何用户查询入口。
+    {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
     # —— 第二梯队：VPS 实测部分类型可播(注释标注命中类型) ——
     {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 78, "content_types": ["anime", "movie"]},
     {"name": "量子", "api": "https://cj.lziapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 76, "content_types": ["anime", "movie"]},
     {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 74, "content_types": ["anime", "tv"]},
+    # 2026-08-24 目标 VPS 能搜索详情，但 Smoke 18/18、Coverage 6/6
+    # 媒体线路均为 stale_route；不是单纯机房受限，直接隔离。
+    {"name": "暴风", "api": "https://bfzyapi.com/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 72, "content_types": ["anime", "tv", "movie"]},
     # —— 第三梯队：三类内容均能完成搜索、详情和媒体候选解析；当前本机
     #    Fake-IP 出口无法做服务端首分片定论，因此只作为客户端复验候选，
     #    不参与预爬，且始终排在 VPS 已实播来源之后。 ——
-    {"name": "暴风", "api": "https://bfzyapi.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 72, "content_types": ["anime", "tv", "movie"]},
     {"name": "百度", "api": "https://api.apibdzy.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 70, "content_types": ["anime", "tv", "movie"]},
     {"name": "无尽", "api": "https://api.wujinapi.me/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 68, "content_types": ["anime", "tv", "movie"]},
     {"name": "最大", "api": "https://api.zuidapi.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 66, "content_types": ["anime", "tv", "movie"]},

@@ -644,7 +644,7 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(configured["虎牙"]["weight"], configured["360"]["weight"])
 
     def test_client_probe_candidates_do_not_enter_precache(self):
-        client_probe_names = {"暴风", "百度", "无尽", "最大", "360"}
+        client_probe_names = {"百度", "无尽", "最大", "360"}
         configured = {
             site["name"]: site for site in MACCMS_SITES
             if site["name"] in client_probe_names
@@ -667,10 +667,8 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(source=name):
                 self.assertFalse(configured[name]["quick"])
                 self.assertFalse(configured[name]["precache"])
-        self.assertEqual(configured["极速"]["tier"], "quarantine")
-        self.assertFalse(configured["极速"]["enabled"])
-        self.assertEqual(configured["暴风"]["tier"], "client_probe")
-        self.assertEqual(configured["风车"]["tier"], "specialist")
+                self.assertEqual(configured[name]["tier"], "quarantine")
+                self.assertFalse(configured[name]["enabled"])
         self.assertEqual(configured["风车"]["content_types"], ["anime"])
 
 if __name__ == "__main__":
