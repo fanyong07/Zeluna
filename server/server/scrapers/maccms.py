@@ -31,7 +31,15 @@ from .base import (
     DIRECT_MEDIA_URL, INVALID_MEDIA_URL, PLAYER_PAGE_URL, UNKNOWN_MEDIA_URL,
     EpisodeInfo, VideoLine, classify_media_url, media_format_from_url,
 )
-from .maccms_sites import MACCMS_SITES, precache_sites
+from .maccms_sites import (
+    MACCMS_SITES,
+    enabled_sites,
+    normalize_content_type,
+    precache_sites,
+    quick_sites,
+    site_content_types,
+    site_tier_rank,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +64,23 @@ class MacCmsSearchOutcome:
 class MacCmsSource:
     name: str
     weight: int
-    preferred: bool
+    quick: bool
+    precache: bool
+    tier: str
+    content_types: tuple[str, ...]
+
+    @property
+    def preferred(self) -> bool:
+        """Compatibility name used by the two-wave discovery strategy."""
+        return self.quick
+
+    @property
+    def priority_group(self) -> int:
+        return site_tier_rank(self.tier)
+
+    def supports(self, content_type: object) -> bool:
+        normalized = normalize_content_type(content_type)
+        return not normalized or normalized in self.content_types
 
 
 def _year_from_value(value: object) -> int:
@@ -172,7 +196,8 @@ class MacCmsScraper(BaseScraper):
 
     @property
     def base_url(self) -> str:
-        return self._sites[0]["api"] if self._sites else ""
+        sites = enabled_sites(self._sites)
+        return sites[0]["api"] if sites else ""
 
     @property
     def discovery_sources(self) -> tuple[MacCmsSource, ...]:
@@ -180,10 +205,23 @@ class MacCmsScraper(BaseScraper):
             MacCmsSource(
                 name=str(site.get("name") or "").strip(),
                 weight=int(site.get("weight", 0)),
-                preferred=site.get("precache") is True,
+                quick=site.get("quick") is True,
+                precache=site.get("precache") is True,
+                tier=str(site.get("tier") or "fallback").strip().lower(),
+                content_types=site_content_types(site),
             )
-            for site in self._sites
-            if str(site.get("name") or "").strip()
+            for site in enabled_sites(self._sites)
+        )
+
+    def discovery_sources_for(
+        self,
+        content_type: object,
+    ) -> tuple[MacCmsSource, ...]:
+        """Return enabled sources applicable to one normalized media type."""
+        return tuple(
+            source
+            for source in self.discovery_sources
+            if source.supports(content_type)
         )
 
     async def aclose(self):
@@ -309,7 +347,7 @@ class MacCmsScraper(BaseScraper):
         site = next(
             (
                 item
-                for item in self._sites
+                for item in enabled_sites(self._sites)
                 if str(item.get("name") or "").strip() == source_name
             ),
             None,
@@ -347,11 +385,12 @@ class MacCmsScraper(BaseScraper):
 
     async def search(self, keyword: str) -> list[SubjectResult]:
         """并发搜索所有站点，并按站点优先级轮转结果。"""
-        tasks = [self._site_search(s, keyword) for s in self._sites]
+        sites = enabled_sites(self._sites)
+        tasks = [self._site_search(s, keyword) for s in sites]
         groups = await asyncio.gather(*tasks, return_exceptions=True)
         return self._interleave_search_groups([
             (site, group)
-            for site, group in zip(self._sites, groups)
+            for site, group in zip(sites, groups)
             if isinstance(group, list)
         ])
 
@@ -360,10 +399,11 @@ class MacCmsScraper(BaseScraper):
         keyword: str,
     ) -> tuple[list[SubjectResult], list[MacCmsSearchOutcome]]:
         """Search every configured site without collapsing misses into errors."""
+        sites = enabled_sites(self._sites)
         outcomes = await asyncio.gather(
-            *(self._site_search_outcome(site, keyword) for site in self._sites)
+            *(self._site_search_outcome(site, keyword) for site in sites)
         )
-        by_name = {site["name"]: site for site in self._sites}
+        by_name = {site["name"]: site for site in sites}
         results = self._interleave_search_groups([
             (by_name[outcome.site_name], outcome.results)
             for outcome in outcomes
@@ -384,7 +424,7 @@ class MacCmsScraper(BaseScraper):
         iterator to avoid waiting for the slowest MacCMS endpoint before it
         can resolve the first usable route.
         """
-        sites = precache_sites() if preferred_only else self._sites
+        sites = quick_sites(self._sites) if preferred_only else enabled_sites(self._sites)
         tasks = [
             asyncio.create_task(self._site_search(site, keyword))
             for site in sites
@@ -406,7 +446,10 @@ class MacCmsScraper(BaseScraper):
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _site_detail(self, site_name: str, vod_id: str) -> Optional[SubjectDetail]:
-        site = next((s for s in self._sites if s["name"] == site_name), None)
+        site = next(
+            (s for s in enabled_sites(self._sites) if s["name"] == site_name),
+            None,
+        )
         if not site:
             return None
         try:
@@ -488,7 +531,10 @@ class MacCmsScraper(BaseScraper):
             return []
         site_name, vod_id = parts[1], parts[2]
 
-        site = next((s for s in self._sites if s["name"] == site_name), None)
+        site = next(
+            (s for s in enabled_sites(self._sites) if s["name"] == site_name),
+            None,
+        )
         if not site:
             return []
         try:
@@ -538,7 +584,7 @@ class MacCmsScraper(BaseScraper):
 
     async def get_latest(self, page: int = 1) -> list[SubjectResult]:
         """仅从显式启用的稳定站点取最新内容。"""
-        top_sites = precache_sites()
+        top_sites = precache_sites(self._sites)
         tasks = []
         for site in top_sites:
             tasks.append(self._site_latest(site, page))

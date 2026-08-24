@@ -26,7 +26,7 @@ from server.aggregator import (
     _source_match_score,
 )
 from server.scrapers.base import SubjectDetail, SubjectResult, VideoLine
-from server.scrapers.maccms import MacCmsScraper
+from server.scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
 
 
 def _mp4_startup_sample(*, moov_before_mdat: bool) -> bytes:
@@ -415,6 +415,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "name": "fast",
             "api": "https://source.test/fast",
             "weight": 100,
+            "quick": True,
             "precache": True,
         }]
 
@@ -456,6 +457,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "name": "unknown-expected",
             "api": "https://source.test/unknown-expected",
             "weight": 100,
+            "quick": True,
             "precache": True,
         }]
 
@@ -500,6 +502,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "name": "alias-source",
             "api": "https://source.test/alias-source",
             "weight": 100,
+            "quick": True,
             "precache": True,
         }]
         requests: list[str] = []
@@ -550,6 +553,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "name": "season-source",
             "api": "https://source.test/season-source",
             "weight": 100,
+            "quick": True,
             "precache": True,
         }]
         requests: list[str] = []
@@ -605,12 +609,14 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 "name": "fast-dead",
                 "api": "https://source.test/fast-dead",
                 "weight": 100,
+                "quick": True,
                 "precache": True,
             },
             {
                 "name": "later-valid",
                 "api": "https://source.test/later-valid",
                 "weight": 90,
+                "quick": True,
                 "precache": True,
             },
         ]
@@ -660,6 +666,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 "name": f"site-{index}",
                 "api": f"https://source.test/site-{index}",
                 "weight": 100 - index,
+                "quick": index < 10,
                 "precache": index < 10,
             }
             for index in range(20)
@@ -735,6 +742,113 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             {"site-0", "site-1", "site-2", "site-10"},
         )
         self.assertLessEqual(len(requests), 32)
+
+    async def test_hundred_site_inventory_skips_quarantine_and_wrong_specialists(self):
+        sites = []
+        for index in range(100):
+            if index < 10:
+                tier = "core"
+                enabled = True
+                quick = True
+                content_types = ["anime", "tv", "movie"]
+            elif index < 50:
+                tier = "fallback"
+                enabled = True
+                quick = False
+                content_types = ["anime", "tv", "movie"]
+            elif index < 70:
+                tier = "specialist"
+                enabled = True
+                quick = False
+                content_types = ["movie"] if index < 60 else ["anime"]
+            elif index < 80:
+                tier = "client_probe"
+                enabled = True
+                quick = False
+                content_types = ["anime", "tv", "movie"]
+            else:
+                tier = "quarantine"
+                enabled = False
+                quick = False
+                content_types = ["anime", "tv", "movie"]
+            weight = (
+                1000 + index
+                if tier == "quarantine"
+                else 800 + index
+                if tier == "specialist" and content_types == ["movie"]
+                else 200 - index
+            )
+            sites.append({
+                "name": f"inventory-{index:03d}",
+                "api": f"https://source.test/inventory-{index:03d}",
+                "enabled": enabled,
+                "tier": tier,
+                "quick": quick,
+                "precache": False,
+                "weight": weight,
+                "content_types": content_types,
+            })
+
+        requested: list[str] = []
+        active = 0
+        max_active = 0
+
+        async def search_source(
+            source_name: str,
+            keyword: str,
+        ) -> MacCmsSearchOutcome:
+            nonlocal active, max_active
+            self.assertEqual(keyword, "Inventory Anime")
+            requested.append(source_name)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                await asyncio.sleep(0.001)
+                return MacCmsSearchOutcome(
+                    site_name=source_name,
+                    results=[],
+                    succeeded=True,
+                )
+            finally:
+                active -= 1
+
+        scraper = MacCmsScraper()
+        scraper._sites = sites
+        scraper.search_source = AsyncMock(side_effect=search_source)
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        try:
+            with (
+                patch("server.aggregator.MACCMS_QUICK_QUERY_BUDGET", 32),
+                patch("server.aggregator.MACCMS_FALLBACK_WAVE_DELAY_SECONDS", 0),
+            ):
+                matches = [
+                    match
+                    async for match in (
+                        self.aggregator.discover_source_matches_progressively(
+                            ["Inventory Anime"],
+                            content_type="anime",
+                            year=2025,
+                            max_matches=100,
+                        )
+                    )
+                ]
+        finally:
+            await scraper.aclose()
+
+        self.assertEqual(matches, [])
+        self.assertEqual(len(requested), 32)
+        self.assertEqual(active, 0)
+        self.assertLessEqual(max_active, 10)
+        self.assertFalse(any(name >= "inventory-080" for name in requested))
+        self.assertFalse(
+            any("inventory-050" <= name < "inventory-060" for name in requested)
+        )
 
     async def test_full_discovery_uses_later_alias_and_records_attempts(self):
         sites = [{

@@ -17,6 +17,7 @@ class DiscoverySource:
 
     key: str
     preferred: bool = False
+    priority_group: int = 0
     weight: int = 0
 
 
@@ -42,6 +43,7 @@ async def progressive_alias_search(
         (source for source in sources if source.key),
         key=lambda source: (
             0 if source.preferred else 1,
+            source.priority_group,
             -source.weight,
             source.key,
         ),

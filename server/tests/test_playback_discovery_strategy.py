@@ -98,6 +98,48 @@ class ProgressiveAliasSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(results), 4)
         self.assertEqual({item.alias for item in attempts}, {"first"})
 
+    async def test_priority_group_orders_sources_before_weight(self):
+        sources = [
+            DiscoverySource(
+                key="client-probe",
+                priority_group=3,
+                weight=1000,
+            ),
+            DiscoverySource(
+                key="core",
+                priority_group=0,
+                weight=1,
+            ),
+            DiscoverySource(
+                key="fallback",
+                priority_group=1,
+                weight=500,
+            ),
+        ]
+        attempts: list[Attempt] = []
+
+        async def query(source: DiscoverySource, alias: str) -> Attempt:
+            attempt = Attempt(source.key, alias, terminal=True)
+            attempts.append(attempt)
+            return attempt
+
+        results = [
+            result
+            async for result in progressive_alias_search(
+                sources,
+                ["first"],
+                query=query,
+                is_terminal=lambda result: result.terminal,
+                query_budget=3,
+                max_concurrency=1,
+            )
+        ]
+
+        self.assertEqual(
+            [item.source for item in results],
+            ["core", "fallback", "client-probe"],
+        )
+
     async def test_closing_consumer_cancels_every_pending_query(self):
         sources = [
             DiscoverySource(key="fast", preferred=True, weight=100),

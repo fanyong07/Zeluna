@@ -1,9 +1,10 @@
 import asyncio
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import httpx
 
+import server.scrapers.maccms_sites as maccms_sites
 from server.scrapers.base import SubjectResult
 from server.scrapers.maccms import (
     MacCmsScraper,
@@ -260,18 +261,14 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((detail.year, detail.type), (0, "unknown"))
 
     async def test_latest_preserves_unknown_year_and_type(self):
-        site = self._configure_single_site({
+        self._configure_single_site({
             "vod_id": "1",
             "vod_name": "测试作品",
             "vod_year": "未知",
             "type_name": "",
         }, precache=True)
 
-        with patch(
-            "server.scrapers.maccms.precache_sites",
-            return_value=[site],
-        ):
-            results = await self.scraper.get_latest()
+        results = await self.scraper.get_latest()
 
         self.assertEqual((results[0].year, results[0].type), (0, "unknown"))
 
@@ -395,37 +392,45 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         await results.aclose()
         self.assertTrue(slow_cancelled.is_set())
 
-    async def test_progressive_preferred_search_only_queries_precache_sites(self):
-        preferred = {
-            "name": "preferred",
-            "api": "https://preferred.example",
-            "precache": True,
+    async def test_progressive_preferred_search_only_queries_quick_sites(self):
+        quick = {
+            "name": "quick",
+            "api": "https://quick.example",
+            "enabled": True,
+            "tier": "core",
+            "quick": True,
+            "precache": False,
+            "content_types": ["anime", "tv", "movie"],
         }
         self.scraper._sites = [
-            preferred,
-            {"name": "fallback", "api": "https://fallback.example"},
+            quick,
+            {
+                "name": "precache-only",
+                "api": "https://precache.example",
+                "enabled": True,
+                "tier": "fallback",
+                "quick": False,
+                "precache": True,
+                "content_types": ["anime", "tv", "movie"],
+            },
         ]
         self.scraper._site_search = AsyncMock(return_value=[
             SubjectResult(
-                source_id="maccms:preferred:1",
+                source_id="maccms:quick:1",
                 title="Test",
                 type="anime",
             )
         ])
 
-        with patch(
-            "server.scrapers.maccms.precache_sites",
-            return_value=[preferred],
-        ):
-            results = self.scraper.search_progressively(
-                "test",
-                preferred_only=True,
-            )
-            first = await asyncio.wait_for(anext(results), timeout=0.2)
-            await results.aclose()
+        results = self.scraper.search_progressively(
+            "test",
+            preferred_only=True,
+        )
+        first = await asyncio.wait_for(anext(results), timeout=0.2)
+        await results.aclose()
 
-        self.assertEqual(first[0].source_id, "maccms:preferred:1")
-        self.scraper._site_search.assert_awaited_once_with(preferred, "test")
+        self.assertEqual(first[0].source_id, "maccms:quick:1")
+        self.scraper._site_search.assert_awaited_once_with(quick, "test")
 
     def test_precache_uses_only_explicit_stable_sites(self):
         sites = precache_sites()
@@ -434,6 +439,201 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(site.get("precache") is True for site in sites))
         self.assertEqual(sites[0]["name"], "iKun")
         self.assertEqual(sites[1]["name"], "光速")
+
+    def test_quick_preference_is_independent_from_precache_and_enabled(self):
+        self.scraper._sites = [
+            {
+                "name": "quick-only",
+                "api": "https://quick.example",
+                "enabled": True,
+                "tier": "core",
+                "quick": True,
+                "precache": False,
+            },
+            {
+                "name": "precache-only",
+                "api": "https://precache.example",
+                "enabled": True,
+                "tier": "fallback",
+                "quick": False,
+                "precache": True,
+            },
+            {
+                "name": "disabled",
+                "api": "https://disabled.example",
+                "enabled": False,
+                "tier": "quarantine",
+                "quick": False,
+                "precache": False,
+            },
+        ]
+
+        sources = {
+            source.name: source for source in self.scraper.discovery_sources
+        }
+
+        self.assertTrue(sources["quick-only"].preferred)
+        self.assertFalse(sources["precache-only"].preferred)
+        self.assertNotIn("disabled", sources)
+
+    def test_site_helpers_keep_operational_dimensions_independent(self):
+        sites = [
+            {
+                "name": "quick-only",
+                "api": "https://quick.example",
+                "enabled": True,
+                "tier": "core",
+                "quick": True,
+                "precache": False,
+                "weight": 90,
+                "content_types": ["anime", "tv", "movie"],
+            },
+            {
+                "name": "precache-only",
+                "api": "https://precache.example",
+                "enabled": True,
+                "tier": "fallback",
+                "quick": False,
+                "precache": True,
+                "weight": 80,
+                "content_types": ["anime", "tv", "movie"],
+            },
+            {
+                "name": "anime-specialist",
+                "api": "https://anime.example",
+                "enabled": True,
+                "tier": "specialist",
+                "quick": False,
+                "precache": False,
+                "weight": 70,
+                "content_types": ["anime"],
+            },
+            {
+                "name": "client-probe",
+                "api": "https://client.example",
+                "enabled": True,
+                "tier": "client_probe",
+                "quick": False,
+                "precache": False,
+                "weight": 60,
+                "content_types": ["movie"],
+            },
+            {
+                "name": "quarantine",
+                "api": "https://quarantine.example",
+                "enabled": False,
+                "tier": "quarantine",
+                "quick": False,
+                "precache": False,
+                "weight": 100,
+                "content_types": ["anime", "tv", "movie"],
+            },
+        ]
+
+        names = lambda items: [site["name"] for site in items]
+
+        self.assertEqual(
+            names(maccms_sites.enabled_sites(sites)),
+            ["quick-only", "precache-only", "anime-specialist", "client-probe"],
+        )
+        self.assertEqual(names(maccms_sites.core_sites(sites)), ["quick-only"])
+        self.assertEqual(names(maccms_sites.quick_sites(sites)), ["quick-only"])
+        self.assertEqual(
+            names(maccms_sites.fallback_sites(sites)),
+            ["precache-only"],
+        )
+        self.assertEqual(
+            names(maccms_sites.specialist_sites(sites, content_type="anime")),
+            ["anime-specialist"],
+        )
+        self.assertEqual(
+            names(maccms_sites.client_probe_sites(sites)),
+            ["client-probe"],
+        )
+        self.assertEqual(
+            names(maccms_sites.precache_sites(sites)),
+            ["precache-only"],
+        )
+
+    def test_configured_sites_have_explicit_inventory_fields(self):
+        required = {
+            "name",
+            "api",
+            "enabled",
+            "tier",
+            "quick",
+            "precache",
+            "weight",
+            "content_types",
+        }
+        allowed_tiers = {
+            "core",
+            "fallback",
+            "specialist",
+            "client_probe",
+            "quarantine",
+            "retired",
+        }
+        allowed_content_types = {"anime", "tv", "movie"}
+
+        self.assertGreaterEqual(len(MACCMS_SITES), 20)
+        for site in MACCMS_SITES:
+            with self.subTest(site=site.get("name")):
+                self.assertTrue(required.issubset(site))
+                self.assertIn(site["tier"], allowed_tiers)
+                self.assertTrue(site["content_types"])
+                self.assertLessEqual(
+                    set(site["content_types"]),
+                    allowed_content_types,
+                )
+                if site["tier"] in {"quarantine", "retired"}:
+                    self.assertFalse(site["enabled"])
+                    self.assertFalse(site["quick"])
+                    self.assertFalse(site["precache"])
+
+    def test_specialists_are_selected_only_for_declared_content_types(self):
+        self.scraper._sites = [
+            {
+                "name": "core",
+                "api": "https://core.example",
+                "enabled": True,
+                "tier": "core",
+                "quick": True,
+                "precache": True,
+                "weight": 100,
+                "content_types": ["anime", "tv", "movie"],
+            },
+            {
+                "name": "anime-only",
+                "api": "https://anime.example",
+                "enabled": True,
+                "tier": "specialist",
+                "quick": False,
+                "precache": False,
+                "weight": 80,
+                "content_types": ["anime"],
+            },
+            {
+                "name": "tv-only",
+                "api": "https://tv.example",
+                "enabled": True,
+                "tier": "specialist",
+                "quick": False,
+                "precache": False,
+                "weight": 70,
+                "content_types": ["tv"],
+            },
+        ]
+
+        anime = {
+            source.name for source in self.scraper.discovery_sources_for("anime")
+        }
+        tv = {
+            source.name for source in self.scraper.discovery_sources_for("series")
+        }
+
+        self.assertEqual(anime, {"core", "anime-only"})
+        self.assertEqual(tv, {"core", "tv-only"})
 
     def test_github_candidates_keep_expected_priority_and_precache_policy(self):
         configured = {site["name"]: site for site in MACCMS_SITES}
@@ -452,8 +652,26 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(set(configured), client_probe_names)
         self.assertTrue(
-            all(site.get("precache") is False for site in configured.values())
+            all(
+                site["tier"] == "client_probe"
+                and site["quick"] is False
+                and site["precache"] is False
+                for site in configured.values()
+            )
         )
+
+    def test_known_isolated_sources_do_not_enter_quick_or_precache(self):
+        configured = {site["name"]: site for site in MACCMS_SITES}
+
+        for name in {"极速", "暴风", "风车"}:
+            with self.subTest(source=name):
+                self.assertFalse(configured[name]["quick"])
+                self.assertFalse(configured[name]["precache"])
+        self.assertEqual(configured["极速"]["tier"], "quarantine")
+        self.assertFalse(configured["极速"]["enabled"])
+        self.assertEqual(configured["暴风"]["tier"], "client_probe")
+        self.assertEqual(configured["风车"]["tier"], "specialist")
+        self.assertEqual(configured["风车"]["content_types"], ["anime"])
 
 if __name__ == "__main__":
     unittest.main()
