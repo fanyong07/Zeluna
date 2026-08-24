@@ -17,6 +17,7 @@ from server.aggregator import (
     STARTUP_UNKNOWN,
     STALE_ROUTE,
     UNAVAILABLE,
+    AggregatedSubject,
     AggregatedVideoLine,
     ContentAggregator,
     LineVerificationResult,
@@ -24,7 +25,7 @@ from server.aggregator import (
     _mp4_startup_profile,
     _source_match_score,
 )
-from server.scrapers.base import SubjectResult, VideoLine
+from server.scrapers.base import SubjectDetail, SubjectResult, VideoLine
 from server.scrapers.maccms import MacCmsScraper
 
 
@@ -115,6 +116,41 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(correct, 65)
         self.assertLess(first_season, 65)
         self.assertLess(movie, 65)
+
+    def test_unknown_metadata_is_neutral_in_source_match_score(self):
+        scores = (
+            _source_match_score(
+                "Exact Title",
+                ["Exact Title"],
+                candidate_type="unknown",
+                expected_type="anime",
+                candidate_year=0,
+                expected_year=2025,
+            ),
+            _source_match_score(
+                "Exact Title",
+                ["Exact Title"],
+                candidate_type="anime",
+                expected_type="unknown",
+                candidate_year=2025,
+                expected_year=0,
+            ),
+        )
+
+        self.assertEqual(scores, (100, 100))
+
+    def test_missing_subject_metadata_defaults_to_unknown(self):
+        metadata = (
+            SubjectResult(source_id="source:1", title="Result"),
+            SubjectDetail(source_id="source:1", title="Detail"),
+            AggregatedSubject(id="aggregate:1", title="Aggregate"),
+        )
+
+        self.assertEqual(
+            [(item.type, item.year) for item in metadata[:2]]
+            + [(metadata[2].content_type, metadata[2].year)],
+            [("unknown", 0), ("unknown", 0), ("unknown", 0)],
+        )
 
     async def test_default_crawlers_are_current_vps_playback_candidates(self):
         self.aggregator = ContentAggregator()
@@ -414,6 +450,50 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         await iterator.aclose()
 
         self.assertEqual(first.source_id, "maccms:fast:1")
+
+    async def test_progressive_discovery_allows_unknown_expected_type(self):
+        sites = [{
+            "name": "unknown-expected",
+            "api": "https://source.test/unknown-expected",
+            "weight": 100,
+            "precache": True,
+        }]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"list": [{
+                "vod_id": "1",
+                "vod_name": "Exact Title",
+                "type_name": "",
+                "vod_year": "",
+            }]})
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        matches = [
+            match
+            async for match in self.aggregator.discover_source_matches_progressively(
+                ["Exact Title"],
+                content_type="unknown",
+                year=0,
+            )
+        ]
+
+        self.assertEqual(
+            [match.source_id for match in matches],
+            ["maccms:unknown-expected:1"],
+        )
 
     async def test_progressive_discovery_uses_later_alias_when_primary_misses(self):
         sites = [{
