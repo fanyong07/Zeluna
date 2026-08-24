@@ -25,6 +25,7 @@ from server.aggregator import (
     _source_match_score,
 )
 from server.scrapers.base import SubjectResult, VideoLine
+from server.scrapers.maccms import MacCmsScraper
 
 
 def _mp4_startup_sample(*, moov_before_mdat: bool) -> bytes:
@@ -374,27 +375,35 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests, 0)
 
     async def test_progressive_discovery_uses_first_matching_maccms_site(self):
-        self.aggregator = ContentAggregator(crawler_scrapers={})
+        sites = [{
+            "name": "fast",
+            "api": "https://source.test/fast",
+            "weight": 100,
+            "precache": True,
+        }]
 
-        async def progressive_search(keyword, *, preferred_only=False):
-            self.assertEqual(keyword, "Test Anime")
-            self.assertTrue(preferred_only)
-            yield [
-                SubjectResult(
-                    source_id="maccms:fast:1",
-                    title="Test Anime",
-                    type="anime",
-                    year=2025,
-                )
-            ]
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.params.get("wd"), "Test Anime")
+            return httpx.Response(200, json={"list": [{
+                "vod_id": "1",
+                "vod_name": "Test Anime",
+                "type_name": "动漫",
+                "vod_year": "2025",
+            }]})
 
-        self.aggregator._maccms.search_progressively = progressive_search
-        self.aggregator._maccms.search = AsyncMock(
-            side_effect=AssertionError(
-                "quick discovery must not wait for full search"
-            )
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
         )
-        self.aggregator._tvbox.search = AsyncMock(return_value=[])
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
 
         iterator = self.aggregator.discover_source_matches_progressively(
             ["Test Anime"],
@@ -405,7 +414,344 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         await iterator.aclose()
 
         self.assertEqual(first.source_id, "maccms:fast:1")
-        self.aggregator._maccms.search.assert_not_awaited()
+
+    async def test_progressive_discovery_uses_later_alias_when_primary_misses(self):
+        sites = [{
+            "name": "alias-source",
+            "api": "https://source.test/alias-source",
+            "weight": 100,
+            "precache": True,
+        }]
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            alias = request.url.params.get("wd", "")
+            requests.append(alias)
+            return httpx.Response(200, json={
+                "list": [{
+                    "vod_id": "2",
+                    "vod_name": "Alternate Anime",
+                    "type_name": "动漫",
+                    "vod_year": "2025",
+                }] if alias == "Alternate Anime" else [],
+            })
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        matches = [
+            match
+            async for match in self.aggregator.discover_source_matches_progressively(
+                ["Primary Anime", "Alternate Anime"],
+                content_type="anime",
+                year=2025,
+            )
+        ]
+
+        self.assertEqual(
+            [match.source_id for match in matches],
+            ["maccms:alias-source:2"],
+        )
+        self.assertEqual(requests, ["Primary Anime", "Alternate Anime"])
+
+    async def test_progressive_discovery_prioritizes_season_alias(self):
+        sites = [{
+            "name": "season-source",
+            "api": "https://source.test/season-source",
+            "weight": 100,
+            "precache": True,
+        }]
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            alias = request.url.params.get("wd", "")
+            requests.append(alias)
+            return httpx.Response(200, json={
+                "list": [{
+                    "vod_id": "2",
+                    "vod_name": "Example Anime 第2季",
+                    "type_name": "动漫",
+                    "vod_year": "2025",
+                }] if alias == "Example Anime 第2季" else [],
+            })
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        matches = [
+            match
+            async for match in self.aggregator.discover_source_matches_progressively(
+                [
+                    "Example Anime",
+                    "Example Anime 第2季",
+                    "Example Anime Season 2",
+                ],
+                content_type="anime",
+                year=2025,
+            )
+        ]
+
+        self.assertEqual(
+            [match.source_name for match in matches],
+            ["season-source"],
+        )
+        self.assertEqual(requests, ["Example Anime 第2季"])
+
+    async def test_progressive_discovery_keeps_sites_after_first_match(self):
+        sites = [
+            {
+                "name": "fast-dead",
+                "api": "https://source.test/fast-dead",
+                "weight": 100,
+                "precache": True,
+            },
+            {
+                "name": "later-valid",
+                "api": "https://source.test/later-valid",
+                "weight": 90,
+                "precache": True,
+            },
+        ]
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            site_name = request.url.path.removeprefix("/")
+            self.assertEqual(request.url.params.get("wd"), "Race Anime")
+            await asyncio.sleep(0.005 if site_name == "fast-dead" else 0.02)
+            return httpx.Response(200, json={"list": [{
+                "vod_id": "1" if site_name == "fast-dead" else "2",
+                "vod_name": "Race Anime",
+                "type_name": "动漫",
+                "vod_year": "2025",
+            }]})
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        matches = [
+            match
+            async for match in self.aggregator.discover_source_matches_progressively(
+                ["Race Anime"],
+                content_type="anime",
+                year=2025,
+            )
+        ]
+
+        self.assertEqual(
+            [match.source_name for match in matches],
+            ["fast-dead", "later-valid"],
+        )
+
+    async def test_progressive_discovery_releases_fallback_within_query_budget(self):
+        sites = [
+            {
+                "name": f"site-{index}",
+                "api": f"https://source.test/site-{index}",
+                "weight": 100 - index,
+                "precache": index < 10,
+            }
+            for index in range(20)
+        ]
+        requests: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            site_name = request.url.path.removeprefix("/")
+            alias = request.url.params.get("wd", "")
+            requests.append((site_name, alias))
+            matched = (
+                alias == "Localized Anime" and site_name in {"site-0", "site-1"}
+            ) or (
+                alias == "Original Anime" and site_name == "site-2"
+            ) or (
+                alias == "Primary Anime" and site_name == "site-10"
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "list": [
+                        {
+                            "vod_id": site_name,
+                            "vod_name": alias,
+                            "type_name": "动漫",
+                            "vod_year": "2025",
+                        }
+                    ]
+                    if matched
+                    else []
+                },
+            )
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        try:
+            with patch(
+                "server.scrapers.maccms.precache_sites",
+                return_value=sites[:10],
+            ):
+                matches = [
+                    match
+                    async for match in (
+                        self.aggregator.discover_source_matches_progressively(
+                            [
+                                "Primary Anime",
+                                "Localized Anime",
+                                "Original Anime",
+                            ],
+                            content_type="anime",
+                            year=2025,
+                            max_matches=40,
+                        )
+                    )
+                ]
+        finally:
+            await scraper.aclose()
+
+        self.assertEqual(
+            {match.source_name for match in matches},
+            {"site-0", "site-1", "site-2", "site-10"},
+        )
+        self.assertLessEqual(len(requests), 32)
+
+    async def test_full_discovery_uses_later_alias_and_records_attempts(self):
+        sites = [{
+            "name": "full-alias",
+            "api": "https://source.test/full-alias",
+            "weight": 100,
+            "precache": True,
+        }]
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            alias = request.url.params.get("wd", "")
+            requests.append(alias)
+            return httpx.Response(200, json={
+                "list": [{
+                    "vod_id": "9",
+                    "vod_name": "Localized Full Anime",
+                    "type_name": "动漫",
+                    "vod_year": "2025",
+                }] if alias == "Localized Full Anime" else [],
+            })
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        matches, diagnostics = await self.aggregator.discover_source_matches(
+            ["Primary Full Anime", "Localized Full Anime"],
+            content_type="anime",
+            year=2025,
+            include_diagnostics=True,
+        )
+
+        self.assertEqual(
+            [match.source_id for match in matches],
+            ["maccms:full-alias:9"],
+        )
+        self.assertEqual(requests, ["Primary Full Anime", "Localized Full Anime"])
+        diagnostic = diagnostics["full-alias"]
+        self.assertTrue(diagnostic.queried)
+        self.assertEqual(diagnostic.aliases_attempted, 2)
+        self.assertTrue(diagnostic.matched)
+
+    async def test_full_discovery_leaves_sources_outside_budget_not_queried(self):
+        sites = [
+            {
+                "name": f"budget-{index}",
+                "api": f"https://source.test/budget-{index}",
+                "weight": 100 - index,
+                "precache": True,
+            }
+            for index in range(5)
+        ]
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request.url.path)
+            return httpx.Response(200, json={"list": []})
+
+        scraper = MacCmsScraper()
+        await scraper._client.aclose()
+        scraper._sites = sites
+        scraper._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=5,
+        )
+        self.aggregator = ContentAggregator(
+            crawler_scrapers={},
+            enabled_provider_ids=frozenset({"aggregate.maccms"}),
+        )
+        await self.aggregator._maccms.aclose()
+        self.aggregator._maccms = scraper
+
+        with patch("server.aggregator.MACCMS_FULL_QUERY_BUDGET", 2):
+            matches, diagnostics = await self.aggregator.discover_source_matches(
+                ["Budget Anime", "Budget Anime Alternate"],
+                content_type="anime",
+                year=2025,
+                include_diagnostics=True,
+            )
+
+        self.assertEqual(matches, [])
+        self.assertEqual(len(requests), 2)
+        queried = [item for item in diagnostics.values() if item.queried]
+        not_queried = [item for item in diagnostics.values() if not item.queried]
+        self.assertEqual(len(queried), 2)
+        self.assertEqual(len(not_queried), 3)
 
     async def test_definitive_404_is_not_sent_to_the_client_as_a_candidate(self):
         crawler = AsyncMock()

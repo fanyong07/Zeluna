@@ -114,6 +114,35 @@ PLAYBACK_QUICK_TIMEOUT_SECONDS = max(
 PLAYBACK_QUICK_LINE_COUNT = max(
     1, min(5, int(os.getenv("PLAYBACK_QUICK_LINE_COUNT", "3")))
 )
+PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES = max(
+    1,
+    min(
+        12,
+        int(os.getenv("PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES", "6")),
+    ),
+)
+MACCMS_QUICK_ALIAS_LIMIT = max(
+    1, min(5, int(os.getenv("MACCMS_QUICK_ALIAS_LIMIT", "3")))
+)
+MACCMS_QUICK_QUERY_BUDGET = max(
+    1, min(500, int(os.getenv("MACCMS_QUICK_QUERY_BUDGET", "32")))
+)
+MACCMS_FULL_ALIAS_LIMIT = max(
+    1, min(8, int(os.getenv("MACCMS_FULL_ALIAS_LIMIT", "5")))
+)
+MACCMS_FULL_QUERY_BUDGET = max(
+    1, min(1000, int(os.getenv("MACCMS_FULL_QUERY_BUDGET", "120")))
+)
+MACCMS_SEARCH_MAX_CONCURRENCY = max(
+    1, min(20, int(os.getenv("MACCMS_SEARCH_MAX_CONCURRENCY", "10")))
+)
+MACCMS_FALLBACK_WAVE_DELAY_SECONDS = max(
+    0.0,
+    min(
+        2.0,
+        float(os.getenv("MACCMS_FALLBACK_WAVE_DELAY_SECONDS", "0.35")),
+    ),
+)
 MANAGED_PLAYBACK_LINES_ENABLED = _env_bool(
     "MANAGED_PLAYBACK_LINES_ENABLED", False
 )

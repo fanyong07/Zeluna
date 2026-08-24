@@ -14,7 +14,7 @@ import asyncio
 import ipaddress
 import re
 import socket
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Iterator
 from typing import Optional
 from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin, urlparse
@@ -23,8 +23,12 @@ import httpx
 
 from .m3u8_resolver import resolver as m3u8_resolver
 from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
+from .playback_discovery.strategy import (
+    DiscoverySource,
+    progressive_alias_search,
+)
 from .scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
-from .scrapers.maccms_sites import MACCMS_SITES, site_priority
+from .scrapers.maccms_sites import site_priority
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
 from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
@@ -42,6 +46,12 @@ from .scrapers.base import (
     classify_media_url,
 )
 from .config import (
+    MACCMS_FALLBACK_WAVE_DELAY_SECONDS,
+    MACCMS_FULL_ALIAS_LIMIT,
+    MACCMS_FULL_QUERY_BUDGET,
+    MACCMS_QUICK_ALIAS_LIMIT,
+    MACCMS_QUICK_QUERY_BUDGET,
+    MACCMS_SEARCH_MAX_CONCURRENCY,
     M3U8_SEARCH_ENABLED,
     PLAYBACK_PROVIDER_IDS,
     SOURCE_MAX_CONCURRENCY,
@@ -120,6 +130,48 @@ def _is_safe_short_title_variant(candidate: str, target: str) -> bool:
             suffix,
         )
     )
+
+
+def _prepare_discovery_aliases(values: list[str]) -> list[str]:
+    """Deduplicate aliases and put precise season titles before broad names."""
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        value = (raw_value or "").strip()
+        # Alias identity must retain season markers. The looser title matcher
+        # intentionally removes some edition suffixes, but using it here would
+        # collapse "Title" and "Title 第2季" before the search budget sees the
+        # precise seasonal query.
+        key = "".join(char for char in value.casefold() if char.isalnum())
+        if value and key and key not in seen:
+            seen.add(key)
+            unique.append(value)
+
+    def priority(pair: tuple[int, str]) -> tuple[int, int, int]:
+        index, value = pair
+        season_specific = bool(re.search(
+            r"(?:"
+            r"第\s*[一二三四五六七八九十百两\d]+\s*季"
+            r"|\bseason\s*0*\d+\b"
+            r"|\bs\s*0*\d+\b"
+            r")",
+            value,
+            flags=re.IGNORECASE,
+        ))
+        script_tier = (
+            0
+            if any("\u3400" <= char <= "\u9fff" for char in value)
+            else 1
+            if any(char.isascii() and char.isalnum() for char in value)
+            else 2
+        )
+        return (0 if season_specific else 1, script_tier, index)
+
+    return [
+        value
+        for _index, value in sorted(enumerate(unique), key=priority)
+    ]
 
 
 def _source_match_score(
@@ -542,7 +594,10 @@ class ContentAggregator:
         """Return independently queried sources as ``(provider, name)`` pairs."""
         inventory: list[tuple[str, str]] = []
         if self._provider_enabled("aggregate.maccms"):
-            inventory.extend(("maccms", site["name"]) for site in MACCMS_SITES)
+            inventory.extend(
+                ("maccms", source.name)
+                for source in self._maccms.discovery_sources
+            )
         inventory.extend(
             ("crawler", name) for name in self._active_crawler_scrapers
         )
@@ -573,33 +628,22 @@ class ContentAggregator:
         expected_type = "series" if content_type == "tv" else content_type
         if expected_type and expected_type not in scraper.content_types:
             return []
+        if provider == "maccms":
+            raise ValueError(
+                "MacCMS discovery must use the bounded progressive strategy"
+            )
 
         started_at = time.monotonic()
-        attempted_aliases = aliases[:1] if provider == "maccms" else aliases[:3]
+        attempted_aliases = aliases[:3]
         failures: list[BaseException] = []
         successful_searches = 0
         search_hit_count = 0
-        maccms_outcomes: list[MacCmsSearchOutcome] = []
-        if provider == "maccms":
-            # MacCMS 都是中文聚合站，首选标题的命中率最高。只查一次可避免
-            # 站点数 × 别名数造成瞬时连接洪峰；其它独立站仍保留多别名尝试。
-            result_groups = await asyncio.gather(
-                *(
-                    scraper.search_with_diagnostics(alias)
-                    if isinstance(scraper, MacCmsScraper)
-                    and diagnostics is not None
-                    else scraper.search(alias)
-                    for alias in attempted_aliases
-                ),
-                return_exceptions=True,
-            )
-        else:
-            result_groups = []
-            for alias in attempted_aliases:
-                try:
-                    result_groups.append(await scraper.search(alias))
-                except Exception as error:
-                    result_groups.append(error)
+        result_groups = []
+        for alias in attempted_aliases:
+            try:
+                result_groups.append(await scraper.search(alias))
+            except Exception as error:
+                result_groups.append(error)
         matches: dict[str, SourceMatch] = {}
         for raw_results in result_groups:
             if isinstance(raw_results, BaseException):
@@ -610,19 +654,7 @@ class ContentAggregator:
                     type(raw_results).__name__,
                 )
                 continue
-            if (
-                provider == "maccms"
-                and isinstance(raw_results, tuple)
-                and len(raw_results) == 2
-            ):
-                results, outcomes = raw_results
-                maccms_outcomes.extend(
-                    outcome
-                    for outcome in outcomes
-                    if isinstance(outcome, MacCmsSearchOutcome)
-                )
-            else:
-                results = raw_results
+            results = raw_results
             successful_searches += 1
             search_hit_count += len(results)
             for candidate in self._score_scraper_results(
@@ -636,45 +668,7 @@ class ContentAggregator:
                 if previous is None or candidate.score > previous.score:
                     matches[candidate.source_id] = candidate
 
-        if provider == "maccms" and diagnostics is not None:
-            for outcome in maccms_outcomes:
-                diagnostic = diagnostics.get(outcome.site_name)
-                if diagnostic is None:
-                    continue
-                diagnostic.queried = True
-                diagnostic.aliases_attempted += 1
-                diagnostic.search_hit_count += len(outcome.results)
-                diagnostic.elapsed_ms = max(
-                    diagnostic.elapsed_ms,
-                    outcome.elapsed_ms,
-                )
-                if outcome.succeeded:
-                    diagnostic.status = (
-                        SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
-                        if diagnostic.search_hit_count
-                        else SourceDiscoveryStatus.SEARCH_MISS
-                    )
-                    diagnostic.error_category = ""
-                elif outcome.timed_out:
-                    diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
-                    diagnostic.error_category = outcome.error_category
-                else:
-                    diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
-                    diagnostic.error_category = outcome.error_category
-            matches_by_site: dict[str, list[SourceMatch]] = {}
-            for match in matches.values():
-                matches_by_site.setdefault(match.source_name, []).append(match)
-            for source_name, site_matches in matches_by_site.items():
-                diagnostic = diagnostics.get(source_name)
-                if diagnostic is None:
-                    continue
-                diagnostic.matched = True
-                diagnostic.best_match_score = max(
-                    match.score for match in site_matches
-                )
-                diagnostic.status = SourceDiscoveryStatus.MATCHED
-                diagnostic.error_category = ""
-        elif diagnostics is not None:
+        if diagnostics is not None:
             diagnostic = diagnostics.get(provider)
             if diagnostic is not None:
                 diagnostic.queried = bool(attempted_aliases)
@@ -768,32 +762,106 @@ class ContentAggregator:
                 matches[source_id] = candidate
         return list(matches.values())
 
-    async def _discover_first_maccms_matches(
+    async def _discover_maccms_matches_progressively(
         self,
         aliases: list[str],
         *,
         content_type: str,
         year: int,
-    ) -> list[SourceMatch]:
+        query_budget: int,
+        alias_limit: int,
+        diagnostics: dict[str, SourceDiscoveryDiagnostic] | None = None,
+    ) -> AsyncIterator[SourceMatch]:
         if not self._provider_enabled("aggregate.maccms"):
-            return []
+            return
         expected_type = "series" if content_type == "tv" else content_type
         if expected_type and expected_type not in self._maccms.content_types:
-            return []
-        async for results in self._maccms.search_progressively(
-            aliases[0],
-            preferred_only=True,
-        ):
-            matches = self._score_scraper_results(
+            return
+        sources = [
+            DiscoverySource(
+                key=source.name,
+                preferred=source.preferred,
+                weight=source.weight,
+            )
+            for source in self._maccms.discovery_sources
+        ]
+        scored_outcomes: dict[int, list[SourceMatch]] = {}
+
+        def score_outcome(outcome: MacCmsSearchOutcome) -> list[SourceMatch]:
+            return self._score_scraper_results(
                 "maccms",
-                results,
+                outcome.results,
                 aliases,
                 content_type=content_type,
                 year=year,
             )
-            if matches:
-                return matches
-        return []
+
+        def is_terminal(outcome: MacCmsSearchOutcome) -> bool:
+            matches = score_outcome(outcome)
+            scored_outcomes[id(outcome)] = matches
+            return not outcome.succeeded or bool(matches)
+
+        async def query(
+            source: DiscoverySource,
+            alias: str,
+        ) -> MacCmsSearchOutcome:
+            diagnostic = diagnostics.get(source.key) if diagnostics else None
+            if diagnostic is not None:
+                diagnostic.queried = True
+                diagnostic.aliases_attempted += 1
+                diagnostic.status = SourceDiscoveryStatus.SEARCHING
+            return await self._maccms.search_source(source.key, alias)
+
+        yielded_sites: set[str] = set()
+        async for outcome in progressive_alias_search(
+            sources,
+            aliases[:alias_limit],
+            query=query,
+            is_terminal=is_terminal,
+            query_budget=query_budget,
+            max_concurrency=MACCMS_SEARCH_MAX_CONCURRENCY,
+            fallback_delay_seconds=MACCMS_FALLBACK_WAVE_DELAY_SECONDS,
+        ):
+            matches = scored_outcomes.pop(id(outcome), None)
+            if matches is None:
+                matches = score_outcome(outcome)
+            diagnostic = diagnostics.get(outcome.site_name) if diagnostics else None
+            if diagnostic is not None:
+                diagnostic.search_hit_count += len(outcome.results)
+                diagnostic.elapsed_ms = max(
+                    diagnostic.elapsed_ms,
+                    outcome.elapsed_ms,
+                )
+                if matches:
+                    diagnostic.matched = True
+                    diagnostic.best_match_score = max(
+                        (match.score for match in matches),
+                        default=diagnostic.best_match_score,
+                    )
+                    diagnostic.status = SourceDiscoveryStatus.MATCHED
+                    diagnostic.error_category = ""
+                elif outcome.succeeded:
+                    diagnostic.status = (
+                        SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
+                        if diagnostic.search_hit_count
+                        else SourceDiscoveryStatus.SEARCH_MISS
+                    )
+                    diagnostic.error_category = ""
+                elif outcome.timed_out:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
+                    diagnostic.error_category = outcome.error_category
+                else:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
+                    diagnostic.error_category = outcome.error_category
+            for candidate in sorted(
+                matches,
+                key=lambda item: item.score,
+                reverse=True,
+            ):
+                if candidate.source_name in yielded_sites:
+                    continue
+                yielded_sites.add(candidate.source_name)
+                yield candidate
 
     async def discover_source_matches(
         self,
@@ -808,21 +876,12 @@ class ContentAggregator:
         | tuple[list[SourceMatch], dict[str, SourceDiscoveryDiagnostic]]
     ):
         """把稳定元数据条目绑定到各采集站，不把采集站 ID 暴露给客户端。"""
-        clean_aliases = []
-        seen_aliases = set()
-        for value in aliases:
-            value = (value or "").strip()
-            key = _normalized_match_title(value)
-            if value and key and key not in seen_aliases:
-                seen_aliases.add(key)
-                clean_aliases.append(value)
+        clean_aliases = _prepare_discovery_aliases(aliases)
         diagnostics = self._new_discovery_diagnostics()
         if not clean_aliases:
             return ([], diagnostics) if include_diagnostics else []
 
         providers: list[tuple[str, MediaProvider, float]] = []
-        if self._provider_enabled("aggregate.maccms"):
-            providers.append(("maccms", self._maccms, 8))
         if self._provider_enabled("aggregate.tvbox"):
             providers.append(("tvbox", self._tvbox, 2))
         providers.extend(
@@ -833,23 +892,45 @@ class ContentAggregator:
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )
-        jobs = [
-            asyncio.wait_for(
-                self._discover_scraper_matches(
-                    name,
-                    scraper,
+        async def collect_maccms() -> list[SourceMatch]:
+            return [
+                match
+                async for match in self._discover_maccms_matches_progressively(
                     clean_aliases,
                     content_type=content_type,
                     year=year,
+                    query_budget=MACCMS_FULL_QUERY_BUDGET,
+                    alias_limit=MACCMS_FULL_ALIAS_LIMIT,
                     diagnostics=diagnostics,
+                )
+            ]
+
+        jobs: list[tuple[str, Awaitable[list[SourceMatch]]]] = []
+        if self._provider_enabled("aggregate.maccms"):
+            jobs.append(("maccms", asyncio.wait_for(collect_maccms(), timeout=8)))
+        jobs.extend(
+            (
+                name,
+                asyncio.wait_for(
+                    self._discover_scraper_matches(
+                        name,
+                        scraper,
+                        clean_aliases,
+                        content_type=content_type,
+                        year=year,
+                        diagnostics=diagnostics,
+                    ),
+                    timeout=timeout,
                 ),
-                timeout=timeout,
             )
             for name, scraper, timeout in providers
-        ]
-        groups = await asyncio.gather(*jobs, return_exceptions=True)
+        )
+        groups = await asyncio.gather(
+            *(job for _name, job in jobs),
+            return_exceptions=True,
+        )
         matches: dict[str, SourceMatch] = {}
-        for (name, _scraper, _timeout), group in zip(providers, groups):
+        for (name, _job), group in zip(jobs, groups):
             if isinstance(group, BaseException):
                 affected = (
                     [
@@ -862,6 +943,11 @@ class ContentAggregator:
                 )
                 for diagnostic in affected:
                     if diagnostic is None:
+                        continue
+                    if name == "maccms":
+                        if diagnostic.status == SourceDiscoveryStatus.SEARCHING:
+                            diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
+                            diagnostic.error_category = READ_TIMEOUT
                         continue
                     diagnostic.queried = True
                     diagnostic.aliases_attempted = min(1, len(clean_aliases))
@@ -901,14 +987,7 @@ class ContentAggregator:
         max_matches: int = 12,
     ) -> AsyncIterator[SourceMatch]:
         """Yield the first useful source matches without waiting for every site."""
-        clean_aliases: list[str] = []
-        seen_aliases: set[str] = set()
-        for value in aliases:
-            value = (value or "").strip()
-            key = _normalized_match_title(value)
-            if value and key and key not in seen_aliases:
-                seen_aliases.add(key)
-                clean_aliases.append(value)
+        clean_aliases = _prepare_discovery_aliases(aliases)
         if not clean_aliases:
             return
 
@@ -923,23 +1002,36 @@ class ContentAggregator:
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )
-        tasks = []
-        if self._provider_enabled("aggregate.maccms"):
-            tasks.append(
-                asyncio.create_task(
-                    asyncio.wait_for(
-                        self._discover_first_maccms_matches(
-                            clean_aliases,
-                            content_type=content_type,
-                            year=year,
-                        ),
-                        timeout=8,
-                    )
+        queue: asyncio.Queue[SourceMatch | object] = asyncio.Queue()
+        completed_producer = object()
+
+        async def produce_maccms() -> None:
+            try:
+                async for candidate in self._discover_maccms_matches_progressively(
+                    clean_aliases,
+                    content_type=content_type,
+                    year=year,
+                    query_budget=MACCMS_QUICK_QUERY_BUDGET,
+                    alias_limit=MACCMS_QUICK_ALIAS_LIMIT,
+                ):
+                    await queue.put(candidate)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.debug(
+                    "Progressive MacCMS discovery failed: %s",
+                    type(error).__name__,
                 )
-            )
-        tasks.extend(
-            asyncio.create_task(
-                asyncio.wait_for(
+            finally:
+                queue.put_nowait(completed_producer)
+
+        async def produce_provider(
+            name: str,
+            scraper: MediaProvider,
+            timeout: float,
+        ) -> None:
+            try:
+                group = await asyncio.wait_for(
                     self._discover_scraper_matches(
                         name,
                         scraper,
@@ -949,31 +1041,48 @@ class ContentAggregator:
                     ),
                     timeout=timeout,
                 )
-            )
-            for name, scraper, timeout in providers
-        )
-        yielded_sites: set[str] = set()
-        yielded_count = 0
-        try:
-            for completed in asyncio.as_completed(tasks):
-                try:
-                    group = await completed
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    continue
                 for candidate in sorted(
                     group,
                     key=lambda item: item.score,
                     reverse=True,
                 ):
-                    if candidate.source_name in yielded_sites:
-                        continue
-                    yielded_sites.add(candidate.source_name)
-                    yield candidate
-                    yielded_count += 1
-                    if yielded_count >= max_matches:
-                        return
+                    await queue.put(candidate)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.debug(
+                    "Progressive source discovery failed [%s]: %s",
+                    name,
+                    type(error).__name__,
+                )
+            finally:
+                queue.put_nowait(completed_producer)
+
+        tasks: list[asyncio.Task[None]] = []
+        if self._provider_enabled("aggregate.maccms"):
+            tasks.append(asyncio.create_task(produce_maccms()))
+        tasks.extend(
+            asyncio.create_task(produce_provider(name, scraper, timeout))
+            for name, scraper, timeout in providers
+        )
+        yielded_sites: set[str] = set()
+        yielded_count = 0
+        active_producers = len(tasks)
+        try:
+            while active_producers:
+                candidate = await queue.get()
+                if candidate is completed_producer:
+                    active_producers -= 1
+                    continue
+                if not isinstance(candidate, SourceMatch):
+                    continue
+                if candidate.source_name in yielded_sites:
+                    continue
+                yielded_sites.add(candidate.source_name)
+                yield candidate
+                yielded_count += 1
+                if yielded_count >= max_matches:
+                    return
         finally:
             for task in tasks:
                 if not task.done():
