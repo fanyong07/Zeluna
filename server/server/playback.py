@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from urllib.parse import parse_qs, urlparse
 
@@ -45,6 +46,7 @@ from .config import (
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
     PLAYBACK_QUICK_LINE_COUNT,
+    PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES,
     PLAYBACK_QUICK_TIMEOUT_SECONDS,
     PLAYBACK_STALE_HOURS,
     PLAYBACK_STABLE_LINE_COUNT,
@@ -78,7 +80,6 @@ from .scrapers.base import (
 
 logger = logging.getLogger(__name__)
 
-_QUICK_CANDIDATE_GRACE_SECONDS = 0.35
 _SOURCE_HEALTH_EMA_ALPHA = 0.35
 _CIRCUIT_RECOVERY_MATCH_SCORE = 108
 _DETERMINISTIC_SOURCE_FAILURES = {
@@ -403,6 +404,7 @@ class PlaybackService:
         year: int,
     ) -> list[dict]:
         result: list[dict] = []
+        deadline = time.monotonic() + PLAYBACK_QUICK_TIMEOUT_SECONDS
 
         async def load() -> list[dict]:
             async with self._quick_refresh_semaphore:
@@ -415,13 +417,14 @@ class PlaybackService:
                         original_title=original_title,
                         content_type=content_type,
                         year=year,
+                        deadline=deadline,
                     )
 
         try:
-            result = await asyncio.wait_for(
-                load(),
-                timeout=PLAYBACK_QUICK_TIMEOUT_SECONDS,
-            )
+            # _refresh_quick owns the deadline so it can return routes already
+            # accumulated when the budget expires. An outer wait_for would
+            # cancel the coroutine and turn a partial success back into zero.
+            result = await load()
             if result:
                 self._metrics["quick_success"] += 1
         except asyncio.TimeoutError:
@@ -674,38 +677,53 @@ class PlaybackService:
         original_title: str,
         content_type: str,
         year: int,
+        deadline: float | None = None,
     ) -> list[dict]:
-        title = title.strip()
-        original_title = original_title.strip()
-        aliases = [value for value in (title, original_title) if value]
-        if aliases:
-            identity = parse_stable_id(stable_id)
-            content_type = content_type or (identity[1] if identity else "")
-        else:
-            title, content_type, year, aliases = await self._playback_context(
-                stable_id,
-                session,
-                title=title,
-                original_title=original_title,
-                content_type=content_type,
-                year=year,
+        deadline = deadline or (time.monotonic() + PLAYBACK_QUICK_TIMEOUT_SECONDS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        try:
+            title, content_type, year, aliases = await asyncio.wait_for(
+                self._playback_context(
+                    stable_id,
+                    session,
+                    title=title.strip(),
+                    original_title=original_title.strip(),
+                    content_type=content_type,
+                    year=year,
+                ),
+                timeout=remaining,
             )
+        except asyncio.TimeoutError:
+            return []
         if not aliases:
             return []
 
-        source_health = await self._load_source_health(session)
-        matches = await self._load_bindings(
-            session,
-            stable_id,
-            source_health=source_health,
-        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        try:
+            source_health = await asyncio.wait_for(
+                self._load_source_health(session),
+                timeout=remaining,
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            matches = await asyncio.wait_for(
+                self._load_bindings(
+                    session,
+                    stable_id,
+                    source_health=source_health,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            return []
         resolved: dict[str, AggregatedVideoLine] = {}
         health: dict[str, str] = {}
         diagnostics: dict[str, SourceResolutionOutcome] = {}
-        quick_candidate_limit = min(
-            6,
-            max(2, PLAYBACK_QUICK_LINE_COUNT * 2),
-        )
 
         def remember_result(
             match: SourceMatch,
@@ -728,53 +746,6 @@ class PlaybackService:
             # source in the background.
             return status in {SERVER_VERIFIED, CLIENT_PROBE_REQUIRED}
 
-        async def resolve_until_usable(candidates: list[SourceMatch]) -> bool:
-            # Existing bindings are usually the fastest cold path. Keep a tiny
-            # grace window after the first usable result so the response can
-            # include immediate backup hosts without waiting for every source.
-            iterator = aggregator.resolve_source_matches_progressively(
-                candidates,
-                episode=episode,
-                # The quick cold path returns only syntactically public
-                # candidates. The client performs manifest + first-media
-                # validation before display while the full server refresh
-                # verifies every source in the background.
-                verify=False,
-            ).__aiter__()
-            found = False
-            first_usable_at: float | None = None
-            try:
-                while True:
-                    try:
-                        if first_usable_at is None:
-                            outcome = await anext(iterator)
-                        else:
-                            remaining = (
-                                _QUICK_CANDIDATE_GRACE_SECONDS
-                                - (time.monotonic() - first_usable_at)
-                            )
-                            if remaining <= 0:
-                                break
-                            outcome = await asyncio.wait_for(
-                                anext(iterator),
-                                timeout=remaining,
-                            )
-                    except (StopAsyncIteration, asyncio.TimeoutError):
-                        break
-                    match, lines, status = outcome
-                    if remember_result(match, lines, status, outcome):
-                        found = True
-                        first_usable_at = first_usable_at or time.monotonic()
-                        quick_count = len(self._select_quick_lines([
-                            self._line_dict(line)
-                            for line in resolved.values()
-                        ]))
-                        if quick_count >= PLAYBACK_QUICK_LINE_COUNT:
-                            break
-            finally:
-                await iterator.aclose()
-            return found
-
         async def resolve_one(
             match: SourceMatch,
         ) -> object:
@@ -791,123 +762,188 @@ class PlaybackService:
                 error_category=EMPTY_MEDIA,
             )
 
-        async def discover_until_usable() -> tuple[bool, list[SourceMatch]]:
-            # Discovery and source resolution overlap. Up to six foreground
-            # candidates race; the first usable one wins and the rest are
-            # cancelled. The outer quick semaphore keeps this bounded to one
-            # cold foreground lookup per process.
-            queue: asyncio.Queue[object] = asyncio.Queue()
-            sentinel = object()
-            tasks: set[asyncio.Task] = set()
-            discovered: list[SourceMatch] = []
-
-            def completed(task: asyncio.Task) -> None:
-                queue.put_nowait(task)
-
-            async def produce() -> None:
-                try:
-                    async for match in (
-                        aggregator.discover_source_matches_progressively(
-                            aliases,
-                            content_type=content_type,
-                            year=year,
-                            max_matches=len(aggregator.source_inventory) + 8,
-                        )
-                    ):
-                        if not self._discovered_match_can_probe(
-                            match,
-                            source_health.get(match.source_name),
-                            time.time(),
-                        ):
-                            continue
-                        discovered.append(match)
-                        task = asyncio.create_task(resolve_one(match))
-                        tasks.add(task)
-                        task.add_done_callback(completed)
-                        if len(discovered) >= quick_candidate_limit:
-                            break
-                finally:
-                    queue.put_nowait(sentinel)
-
-            producer = asyncio.create_task(produce())
-            producer_done = False
-            found = False
-            first_usable_at: float | None = None
-            try:
-                while not producer_done or tasks:
-                    if first_usable_at is None:
-                        item = await queue.get()
-                    else:
-                        remaining = (
-                            _QUICK_CANDIDATE_GRACE_SECONDS
-                            - (time.monotonic() - first_usable_at)
-                        )
-                        if remaining <= 0:
-                            break
-                        try:
-                            item = await asyncio.wait_for(
-                                queue.get(),
-                                timeout=remaining,
-                            )
-                        except asyncio.TimeoutError:
-                            break
-                    if item is sentinel:
-                        producer_done = True
-                        continue
-                    task = item
-                    if not isinstance(task, asyncio.Task):
-                        continue
-                    tasks.discard(task)
-                    try:
-                        outcome = task.result()
-                        match, lines, status = outcome
-                    except Exception:
-                        continue
-                    if remember_result(match, lines, status, outcome):
-                        found = True
-                        first_usable_at = first_usable_at or time.monotonic()
-                        quick_count = len(self._select_quick_lines([
-                            self._line_dict(line)
-                            for line in resolved.values()
-                        ]))
-                        if quick_count >= PLAYBACK_QUICK_LINE_COUNT:
-                            break
-            finally:
-                if not producer.done():
-                    producer.cancel()
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(
-                    producer,
-                    *tasks,
-                    return_exceptions=True,
-                )
-            return found, discovered
-
-        found = bool(matches) and await resolve_until_usable(
-            matches[:quick_candidate_limit]
-        )
         discovered: list[SourceMatch] = []
-        if not found:
-            found, discovered = await discover_until_usable()
+        discovered_queue: deque[SourceMatch] = deque()
+        existing_queue: deque[SourceMatch] = deque(matches)
+        completed_tasks: deque[asyncio.Task[object]] = deque()
+        active_tasks: set[asyncio.Task[object]] = set()
+        attempted_source_ids: set[str] = set()
+        wake = asyncio.Event()
+        producer_done = False
+
+        async def produce() -> None:
+            nonlocal producer_done
+            try:
+                async for match in aggregator.discover_source_matches_progressively(
+                    aliases,
+                    content_type=content_type,
+                    year=year,
+                    max_matches=len(aggregator.source_inventory) + 8,
+                ):
+                    if not self._discovered_match_can_probe(
+                        match,
+                        source_health.get(match.source_name),
+                        time.time(),
+                    ):
+                        continue
+                    discovered.append(match)
+                    discovered_queue.append(match)
+                    wake.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                logger.debug(
+                    "Quick playback discovery failed: %s",
+                    type(error).__name__,
+                )
+            finally:
+                producer_done = True
+                wake.set()
+
+        def completed(task: asyncio.Task[object]) -> None:
+            completed_tasks.append(task)
+            wake.set()
+
+        def consume_completed(task: asyncio.Task[object]) -> None:
+            if task.cancelled():
+                return
+            try:
+                outcome = task.result()
+                match, lines, status = outcome
+            except Exception as error:
+                logger.debug(
+                    "Quick candidate resolution failed: %s",
+                    type(error).__name__,
+                )
+                return
+            remember_result(match, lines, status, outcome)
+
+        def next_candidate() -> SourceMatch | None:
+            # After the initial binding wave, prefer freshly discovered exact
+            # matches over draining a long list of stale bindings.
+            for queue in (discovered_queue, existing_queue):
+                while queue:
+                    candidate = queue.popleft()
+                    if candidate.source_id in attempted_source_ids:
+                        continue
+                    attempted_source_ids.add(candidate.source_id)
+                    return candidate
+            return None
+
+        def start_candidate(match: SourceMatch) -> None:
+            task = asyncio.create_task(resolve_one(match))
+            active_tasks.add(task)
+            task.add_done_callback(completed)
+
+        def quick_count() -> int:
+            return len(self._select_quick_lines([
+                self._line_dict(line)
+                for line in resolved.values()
+            ]))
+
+        producer = asyncio.create_task(produce())
+        try:
+            while True:
+                # Clear before inspecting shared queues so a callback racing
+                # with this pass leaves the event set for the next iteration.
+                wake.clear()
+                while completed_tasks:
+                    task = completed_tasks.popleft()
+                    active_tasks.discard(task)
+                    consume_completed(task)
+
+                if quick_count() >= PLAYBACK_QUICK_LINE_COUNT:
+                    break
+
+                while (
+                    len(active_tasks)
+                    < PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES
+                ):
+                    candidate = next_candidate()
+                    if candidate is None:
+                        break
+                    start_candidate(candidate)
+
+                no_more_candidates = (
+                    producer_done
+                    and not discovered_queue
+                    and not existing_queue
+                )
+                if no_more_candidates and not active_tasks:
+                    break
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if wake.is_set():
+                    continue
+                try:
+                    await asyncio.wait_for(wake.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+        finally:
+            if not producer.done():
+                producer.cancel()
+            # Preserve a result that completed at the deadline before
+            # cancelling the genuinely pending candidates.
+            for task in tuple(active_tasks):
+                if task.done():
+                    active_tasks.discard(task)
+                    consume_completed(task)
+            for task in active_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                producer,
+                *active_tasks,
+                return_exceptions=True,
+            )
+            for task in tuple(active_tasks):
+                active_tasks.discard(task)
+                if not task.cancelled():
+                    consume_completed(task)
+
         if discovered:
             matches = self._merge_matches(matches, discovered)
-            await self._store_bindings(session, stable_id, matches)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(
+                        self._store_bindings(session, stable_id, matches),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    pass
         if health:
-            await self._record_health(
-                session,
-                stable_id,
-                health,
-                diagnostics=diagnostics,
-            )
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(
+                        self._record_health(
+                            session,
+                            stable_id,
+                            health,
+                            diagnostics=diagnostics,
+                        ),
+                        timeout=remaining,
+                    )
+                except asyncio.TimeoutError:
+                    pass
         data = self._complete_site_inventory(
             [self._line_dict(line) for line in resolved.values()],
             matches=matches,
             health=health,
             diagnostics=diagnostics,
         )
-        await self._store_cache(session, stable_id, episode, title, data)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            try:
+                await asyncio.wait_for(
+                    self._store_cache(session, stable_id, episode, title, data),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                pass
         return self._select_quick_lines([
             {
                 **item,

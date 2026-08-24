@@ -51,6 +51,13 @@ class MacCmsSearchOutcome:
     elapsed_ms: int = 0
 
 
+@dataclass(frozen=True)
+class MacCmsSource:
+    name: str
+    weight: int
+    preferred: bool
+
+
 def parse_vod_play_url(raw: str) -> list[list[dict]]:
     """
     解析 MacCMS 的 vod_play_url 字段。
@@ -108,6 +115,18 @@ class MacCmsScraper(BaseScraper):
     @property
     def base_url(self) -> str:
         return self._sites[0]["api"] if self._sites else ""
+
+    @property
+    def discovery_sources(self) -> tuple[MacCmsSource, ...]:
+        return tuple(
+            MacCmsSource(
+                name=str(site.get("name") or "").strip(),
+                weight=int(site.get("weight", 0)),
+                preferred=site.get("precache") is True,
+            )
+            for site in self._sites
+            if str(site.get("name") or "").strip()
+        )
 
     async def aclose(self):
         await self._client.aclose()
@@ -213,6 +232,23 @@ class MacCmsScraper(BaseScraper):
     async def _site_search(self, site: dict, keyword: str) -> list[SubjectResult]:
         outcome = await self._site_search_outcome(site, keyword)
         return outcome.results
+
+    async def search_source(
+        self,
+        source_name: str,
+        keyword: str,
+    ) -> MacCmsSearchOutcome:
+        site = next(
+            (
+                item
+                for item in self._sites
+                if str(item.get("name") or "").strip() == source_name
+            ),
+            None,
+        )
+        if site is None:
+            raise KeyError(f"Unknown MacCMS source: {source_name}")
+        return await self._site_search_outcome(site, keyword)
 
     def _interleave_search_groups(
         self,

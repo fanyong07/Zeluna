@@ -594,7 +594,6 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         try:
             with (
-                patch("server.aggregator.MACCMS_SITES", sites),
                 patch.object(aggregator, "_maccms", scraper),
                 patch.object(
                     aggregator,
@@ -1363,6 +1362,398 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["quick"] for item in items))
         self.assertTrue(slow_cancelled.is_set())
 
+    async def test_quick_discovery_reuses_slots_until_seventh_candidate_succeeds(self):
+        matches = [
+            SourceMatch(
+                source_id=f"maccms:site-{index}:{index}",
+                source_name=f"site-{index}",
+                title="Slot Anime",
+                content_type="anime",
+                year=2025,
+                score=100 - index,
+            )
+            for index in range(7)
+        ]
+        valid_lines = [
+            AggregatedVideoLine(
+                url=f"https://slot-{index}.example/video.m3u8",
+                title=f"Route {index}",
+                format="hls",
+                source="maccms:site-6",
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+            for index in range(3)
+        ]
+        first_wave_full = asyncio.Event()
+        attempts: list[int] = []
+        active = 0
+        max_active = 0
+
+        async def discover(*_args, **_kwargs):
+            for match in matches:
+                yield match
+
+        async def resolve(candidates, **_kwargs):
+            nonlocal active, max_active
+            match = candidates[0]
+            index = int(match.source_name.rsplit("-", 1)[1])
+            attempts.append(index)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                if index < 6:
+                    if active == 6:
+                        first_wave_full.set()
+                    await first_wave_full.wait()
+                    await asyncio.sleep(0)
+                    yield SourceResolutionOutcome(
+                        match=match,
+                        lines=[],
+                        status=UNAVAILABLE,
+                        error_category="empty_media",
+                    )
+                else:
+                    yield SourceResolutionOutcome(
+                        match=match,
+                        lines=valid_lines,
+                        status=CLIENT_PROBE_REQUIRED,
+                    )
+            finally:
+                active -= 1
+
+        with (
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                self.service,
+                "_store_bindings",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_record_health",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_store_cache",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service._refresh_quick(
+                    "bangumi:slot",
+                    1,
+                    session,
+                    title="Slot Anime",
+                    original_title="",
+                    content_type="anime",
+                    year=2025,
+                )
+
+        self.assertEqual(attempts, list(range(7)))
+        self.assertLessEqual(max_active, 6)
+        self.assertEqual(
+            {urlparse(item["url"]).hostname for item in items},
+            {"slot-0.example", "slot-1.example", "slot-2.example"},
+        )
+
+    async def test_quick_hundred_candidates_cancel_after_playable_target(self):
+        matches = [
+            SourceMatch(
+                source_id=f"maccms:bulk-{index}:{index}",
+                source_name=f"bulk-{index}",
+                title="Bulk Anime",
+                content_type="anime",
+                year=2025,
+                score=200 - index,
+            )
+            for index in range(100)
+        ]
+        valid_lines = [
+            AggregatedVideoLine(
+                url=f"https://bulk-host-{index}.example/video.m3u8",
+                title=f"Bulk route {index}",
+                format="hls",
+                source="maccms:bulk-20",
+                verification_status=CLIENT_PROBE_REQUIRED,
+            )
+            for index in range(3)
+        ]
+        attempts: list[int] = []
+        active = 0
+        max_active = 0
+        cancelled = 0
+
+        async def discover(*_args, **_kwargs):
+            for match in matches:
+                yield match
+
+        async def resolve(candidates, **_kwargs):
+            nonlocal active, max_active, cancelled
+            match = candidates[0]
+            index = int(match.source_name.rsplit("-", 1)[1])
+            attempts.append(index)
+            active += 1
+            max_active = max(max_active, active)
+            try:
+                if index < 20:
+                    await asyncio.sleep(0)
+                    yield SourceResolutionOutcome(
+                        match=match,
+                        lines=[],
+                        status=UNAVAILABLE,
+                        error_category="empty_media",
+                    )
+                elif index == 20:
+                    await asyncio.sleep(0.005)
+                    yield SourceResolutionOutcome(
+                        match=match,
+                        lines=valid_lines,
+                        status=CLIENT_PROBE_REQUIRED,
+                    )
+                else:
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled += 1
+                        raise
+            finally:
+                active -= 1
+
+        with (
+            patch.object(
+                self.service,
+                "_playback_context",
+                new=AsyncMock(return_value=(
+                    "Bulk Anime",
+                    "anime",
+                    2025,
+                    ["Bulk Anime"],
+                )),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                self.service,
+                "_store_bindings",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_record_health",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_store_cache",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service._refresh_quick(
+                    "bangumi:bulk",
+                    1,
+                    session,
+                    title="Bulk Anime",
+                    original_title="",
+                    content_type="anime",
+                    year=2025,
+                )
+
+        self.assertIn(20, attempts)
+        self.assertLess(len(attempts), 100)
+        self.assertLessEqual(max_active, 6)
+        self.assertEqual(active, 0)
+        self.assertGreaterEqual(cancelled, 1)
+        self.assertEqual(len(items), 3)
+
+    async def test_quick_refresh_uses_catalog_aliases_when_request_has_title(self):
+        metadata = {
+            "stable_id": "bangumi:aliases",
+            "title": "Original Anime",
+            "original_title": "Original Anime",
+            "aliases": ["Localized Anime", "Original Anime"],
+            "media_type": "anime",
+            "date": "2025-01-01",
+        }
+        expected_aliases = [
+            "Localized Anime 第二季",
+            "Localized Anime Season 2",
+            "Original Anime",
+        ]
+        received_aliases: list[str] = []
+
+        async def discover(aliases, **_kwargs):
+            received_aliases.extend(aliases)
+            if False:
+                yield None
+
+        with (
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=expected_aliases),
+            ) as playback_aliases,
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                self.service,
+                "_store_cache",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+        ):
+            async with self.sessions() as session:
+                await self.service._refresh_quick(
+                    "bangumi:aliases",
+                    1,
+                    session,
+                    title="Original Anime",
+                    original_title="",
+                    content_type="anime",
+                    year=2025,
+                )
+
+        self.assertEqual(received_aliases, expected_aliases)
+        playback_aliases.assert_awaited_once_with(metadata)
+
+    async def test_quick_deadline_returns_accumulated_lines_and_cleans_tasks(self):
+        match = SourceMatch(
+            source_id="maccms:deadline:1",
+            source_name="deadline",
+            title="Deadline Anime",
+            content_type="anime",
+            year=2025,
+            score=100,
+        )
+        line = AggregatedVideoLine(
+            url="https://deadline.example/video.m3u8",
+            title="Deadline route",
+            format="hls",
+            source="maccms:deadline",
+            verification_status=CLIENT_PROBE_REQUIRED,
+        )
+        discovery_closed = asyncio.Event()
+
+        async def discover(*_args, **_kwargs):
+            try:
+                yield match
+                await asyncio.Event().wait()
+            finally:
+                discovery_closed.set()
+
+        async def resolve(candidates, **_kwargs):
+            yield SourceResolutionOutcome(
+                match=candidates[0],
+                lines=[line],
+                status=CLIENT_PROBE_REQUIRED,
+            )
+
+        metadata = {
+            "stable_id": "bangumi:deadline",
+            "title": "Deadline Anime",
+            "original_title": "Deadline Anime",
+            "aliases": ["Deadline Anime"],
+            "media_type": "anime",
+            "date": "2025-01-01",
+        }
+        with (
+            patch("server.playback.PLAYBACK_QUICK_TIMEOUT_SECONDS", 0.08),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["Deadline Anime"]),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                self.service,
+                "_store_bindings",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_record_health",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_store_cache",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                self.service,
+                "_start_full_refresh",
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches_progressively",
+                new=discover,
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches_progressively",
+                new=resolve,
+            ),
+        ):
+            items = await self.service._run_quick_refresh(
+                "bangumi:deadline",
+                1,
+                title="Deadline Anime",
+                original_title="",
+                content_type="anime",
+                year=2025,
+            )
+
+        self.assertEqual(
+            [item["url"] for item in items],
+            ["https://deadline.example/video.m3u8"],
+        )
+        self.assertTrue(discovery_closed.is_set())
+
     async def test_quick_existing_bindings_collect_immediate_backup_hosts(self):
         matches = [
             SourceMatch(
@@ -1375,7 +1766,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             for index in range(3)
         ]
-        generator_closed = asyncio.Event()
+        generators_closed: set[int] = set()
 
         def result(index: int):
             line = AggregatedVideoLine(
@@ -1387,14 +1778,25 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             return matches[index], [line], CLIENT_PROBE_REQUIRED
 
-        async def resolve(*_args, **_kwargs):
+        async def resolve(candidates, **_kwargs):
+            index = matches.index(candidates[0])
             try:
-                yield result(0)
-                await asyncio.sleep(0.03)
-                yield result(1)
-                await asyncio.Event().wait()
+                await asyncio.sleep(index * 0.02)
+                if index < 2:
+                    yield result(index)
+                else:
+                    yield SourceResolutionOutcome(
+                        match=matches[index],
+                        lines=[],
+                        status=UNAVAILABLE,
+                        error_category="empty_media",
+                    )
             finally:
-                generator_closed.set()
+                generators_closed.add(index)
+
+        async def discover_none(*_args, **_kwargs):
+            if False:
+                yield None
 
         with (
             patch.object(
@@ -1410,7 +1812,8 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 aggregator,
                 "discover_source_matches_progressively",
-            ) as discover,
+                new=discover_none,
+            ),
         ):
             started = time.monotonic()
             async with self.sessions() as session:
@@ -1430,8 +1833,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             ["cdn-0.example", "cdn-1.example"],
         )
         self.assertLess(elapsed, 1.0)
-        self.assertTrue(generator_closed.is_set())
-        discover.assert_not_called()
+        self.assertEqual(generators_closed, {0, 1, 2})
 
     async def test_recent_source_failures_open_then_half_open_and_recover(self):
         now = 1_800_000_000.0
