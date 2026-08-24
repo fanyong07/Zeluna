@@ -800,9 +800,10 @@ class ContentAggregator:
             DiscoverySource(
                 key=source.name,
                 preferred=source.preferred,
+                priority_group=source.priority_group,
                 weight=source.weight,
             )
-            for source in self._maccms.discovery_sources
+            for source in self._maccms.discovery_sources_for(content_type)
         ]
         scored_outcomes: dict[int, list[SourceMatch]] = {}
 
