@@ -155,12 +155,15 @@ POST   /admin/managed-lines/import
      --json-output probe-results/maccms-$(date -u +%Y%m%dT%H%M%SZ).json
    ```
 
-2. 需要评估覆盖率时，运行 48 个动漫、剧集、电影和困难案例；该命令会走搜索、
-   匹配、详情、分集、清单/文件头、密钥和首分片链路，而不是只检查 HTTP 200：
+2. 需要评估覆盖率时，运行默认的 100 部作品 / 167 个分集案例（每部 Episode 1，
+   剧集再抽取一个中间集）；该命令会走搜索、匹配、详情、分集、清单/文件头、
+   密钥和首分片链路，而不是只检查 HTTP 200。生产覆盖率应排除已禁用或隔离的
+   配置来源：
 
    ```bash
    /opt/zeluna/venv/bin/python tools/probe_maccms.py \
      --profile coverage \
+     --enabled-only \
      --json-output probe-results/coverage-$(date -u +%Y%m%dT%H%M%SZ).json
    ```
 

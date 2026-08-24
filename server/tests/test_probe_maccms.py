@@ -13,6 +13,7 @@ from tools.maccms_coverage import DEFAULT_CANDIDATE_REGISTRY_PATH
 from tools.probe_maccms import (
     CANDIDATE_ORIGIN,
     CONFIGURED_SITES,
+    _redacted_url,
     build_report,
     load_candidate_sites,
     main,
@@ -23,6 +24,15 @@ from tools.probe_maccms import (
 
 
 class MacCmsProbeTests(unittest.IsolatedAsyncioTestCase):
+    def test_report_url_redaction_removes_query_fragment_and_userinfo(self):
+        self.assertEqual(
+            _redacted_url(
+                "https://user:password@[2001:db8::1]:8443/video.m3u8"
+                "?token=secret#fragment"
+            ),
+            "https://[2001:db8::1]:8443/video.m3u8",
+        )
+
     def test_candidate_parser_rejects_player_pages_and_keeps_real_media(self):
         candidates = parse_first_media_urls(
             "播放页$https://source.example/player.html?url=video"

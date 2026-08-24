@@ -144,9 +144,15 @@ _DETERMINISTIC_COVERAGE_FAILURES = {
 def _redacted_url(value: str) -> str:
     try:
         parsed = urlparse(value)
+        host = parsed.hostname
+        port = parsed.port
     except ValueError:
         return ""
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    if not parsed.scheme or not host:
+        return ""
+    safe_host = f"[{host}]" if ":" in host else host
+    safe_netloc = f"{safe_host}:{port}" if port is not None else safe_host
+    return urlunparse((parsed.scheme, safe_netloc, parsed.path, "", "", ""))
 
 
 def _is_fixed_github_blob_url(value: object) -> bool:
