@@ -1,0 +1,437 @@
+{
+  "schema": "zeluna.maccms-coverage-cases.v1",
+  "cases": [
+    {
+      "case_id": "anime-frieren-2023",
+      "query": "葬送的芙莉莲",
+      "aliases": ["葬送的芙莉蓮", "Frieren: Beyond Journey's End"],
+      "content_type": "anime",
+      "year": 2023,
+      "episode": 1,
+      "tags": ["anime", "recent", "localized-title"]
+    },
+    {
+      "case_id": "anime-jujutsu-season-2",
+      "query": "咒术回战 第二季",
+      "aliases": ["咒術迴戰 第二季", "呪術廻戦 第2期", "Jujutsu Kaisen Season 2"],
+      "content_type": "anime",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["anime", "seasoned", "difficult", "japanese-title"]
+    },
+    {
+      "case_id": "anime-attack-on-titan-final",
+      "query": "进击的巨人 最终季",
+      "aliases": ["進擊的巨人 最終季", "進撃の巨人 The Final Season"],
+      "content_type": "anime",
+      "year": 2020,
+      "episode": 1,
+      "tags": ["anime", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "anime-clannad-after-story",
+      "query": "团子大家族 第二季",
+      "aliases": ["CLANNAD AFTER STORY", "クラナド アフターストーリー"],
+      "content_type": "anime",
+      "year": 2008,
+      "episode": 3,
+      "tags": ["anime", "classic", "seasoned", "difficult", "english-title"]
+    },
+    {
+      "case_id": "anime-sword-art-online",
+      "query": "刀剑神域",
+      "aliases": ["刀劍神域", "ソードアート・オンライン", "Sword Art Online"],
+      "content_type": "anime",
+      "year": 2012,
+      "episode": 1,
+      "tags": ["anime", "popular", "japanese-title"]
+    },
+    {
+      "case_id": "anime-demon-slayer-entertainment",
+      "query": "鬼灭之刃 游郭篇",
+      "aliases": ["鬼滅之刃 遊郭篇", "鬼滅の刃 遊郭編"],
+      "content_type": "anime",
+      "year": 2021,
+      "episode": 3,
+      "tags": ["anime", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "anime-mushoku-season-2",
+      "query": "无职转生 第二季",
+      "aliases": ["無職轉生 第二季", "無職転生II", "Mushoku Tensei Season 2"],
+      "content_type": "anime",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["anime", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "anime-rezero-season-2",
+      "query": "Re：从零开始的异世界生活 第二季",
+      "aliases": ["Re:从零開始的異世界生活 第二季", "Re:ゼロから始める異世界生活 2nd season"],
+      "content_type": "anime",
+      "year": 2020,
+      "episode": 1,
+      "tags": ["anime", "seasoned", "difficult", "mixed-script"]
+    },
+    {
+      "case_id": "anime-natsume-season-1",
+      "query": "夏目友人帐",
+      "aliases": ["夏目友人帳", "Natsume's Book of Friends"],
+      "content_type": "anime",
+      "year": 2008,
+      "episode": 1,
+      "tags": ["anime", "classic", "localized-title"]
+    },
+    {
+      "case_id": "anime-fullmetal-alchemist-brotherhood",
+      "query": "钢之炼金术师FA",
+      "aliases": ["鋼之鍊金術師 FULLMETAL ALCHEMIST", "Fullmetal Alchemist: Brotherhood"],
+      "content_type": "anime",
+      "year": 2009,
+      "episode": 1,
+      "tags": ["anime", "classic", "difficult", "edition"]
+    },
+    {
+      "case_id": "anime-one-piece",
+      "query": "海贼王",
+      "aliases": ["航海王", "ONE PIECE", "ワンピース"],
+      "content_type": "anime",
+      "year": 1999,
+      "episode": 1,
+      "tags": ["anime", "long-running", "classic"]
+    },
+    {
+      "case_id": "anime-monogatari-second-season",
+      "query": "物语系列 第二季",
+      "aliases": ["物語系列 第二季", "〈物語〉シリーズ セカンドシーズン"],
+      "content_type": "anime",
+      "year": 2013,
+      "episode": 3,
+      "tags": ["anime", "seasoned", "difficult", "japanese-title"]
+    },
+    {
+      "case_id": "anime-violet-evergarden",
+      "query": "紫罗兰永恒花园",
+      "aliases": ["紫羅蘭永恆花園", "ヴァイオレット・エヴァーガーデン", "Violet Evergarden"],
+      "content_type": "anime",
+      "year": 2018,
+      "episode": 1,
+      "tags": ["anime", "localized-title"]
+    },
+    {
+      "case_id": "anime-ling-cage-season-2",
+      "query": "灵笼 第二季",
+      "aliases": ["靈籠 第二季", "Ling Cage Season 2"],
+      "content_type": "anime",
+      "year": 2025,
+      "episode": 1,
+      "tags": ["anime", "recent", "seasoned", "difficult", "chinese-animation"]
+    },
+    {
+      "case_id": "anime-record-of-mortals-journey",
+      "query": "凡人修仙传",
+      "aliases": ["凡人修仙傳", "A Record of a Mortal's Journey to Immortality"],
+      "content_type": "anime",
+      "year": 2020,
+      "episode": 1,
+      "tags": ["anime", "long-running", "chinese-animation"]
+    },
+    {
+      "case_id": "anime-soul-land",
+      "query": "斗罗大陆",
+      "aliases": ["斗羅大陸", "Soul Land"],
+      "content_type": "anime",
+      "year": 2018,
+      "episode": 1,
+      "tags": ["anime", "long-running", "chinese-animation"]
+    },
+    {
+      "case_id": "tv-joy-of-life-season-1",
+      "query": "庆余年 第一季",
+      "aliases": ["慶餘年 第一季", "庆余年", "Joy of Life Season 1"],
+      "content_type": "tv",
+      "year": 2019,
+      "episode": 3,
+      "tags": ["tv", "chinese", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "tv-joy-of-life-season-2",
+      "query": "庆余年 第二季",
+      "aliases": ["慶餘年 第二季", "庆余年2", "Joy of Life Season 2"],
+      "content_type": "tv",
+      "year": 2024,
+      "episode": 3,
+      "tags": ["tv", "chinese", "seasoned", "difficult", "same-title"]
+    },
+    {
+      "case_id": "tv-game-of-thrones-season-1",
+      "query": "权力的游戏 第一季",
+      "aliases": ["權力遊戲 第一季", "Game of Thrones Season 1"],
+      "content_type": "tv",
+      "year": 2011,
+      "episode": 3,
+      "tags": ["tv", "western", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "tv-game-of-thrones-season-2",
+      "query": "权力的游戏 第二季",
+      "aliases": ["權力遊戲 第二季", "Game of Thrones Season 2"],
+      "content_type": "tv",
+      "year": 2012,
+      "episode": 3,
+      "tags": ["tv", "western", "seasoned", "difficult", "same-title"]
+    },
+    {
+      "case_id": "tv-breaking-bad-season-1",
+      "query": "绝命毒师 第一季",
+      "aliases": ["絕命毒師 第一季", "Breaking Bad Season 1"],
+      "content_type": "tv",
+      "year": 2008,
+      "episode": 3,
+      "tags": ["tv", "western", "classic", "seasoned"]
+    },
+    {
+      "case_id": "tv-black-mirror-season-6",
+      "query": "黑镜 第六季",
+      "aliases": ["黑鏡 第六季", "Black Mirror Season 6"],
+      "content_type": "tv",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["tv", "western", "seasoned", "difficult"]
+    },
+    {
+      "case_id": "tv-long-season",
+      "query": "漫长的季节",
+      "aliases": ["漫長的季節", "The Long Season"],
+      "content_type": "tv",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["tv", "chinese", "recent"]
+    },
+    {
+      "case_id": "tv-empresses-in-the-palace",
+      "query": "甄嬛传",
+      "aliases": ["後宮甄嬛傳", "Empresses in the Palace"],
+      "content_type": "tv",
+      "year": 2011,
+      "episode": 3,
+      "tags": ["tv", "chinese", "classic"]
+    },
+    {
+      "case_id": "tv-reply-1988",
+      "query": "请回答1988",
+      "aliases": ["請回答1988", "응답하라 1988", "Reply 1988"],
+      "content_type": "tv",
+      "year": 2015,
+      "episode": 3,
+      "tags": ["tv", "korean", "localized-title"]
+    },
+    {
+      "case_id": "tv-hanzawa-naoki",
+      "query": "半泽直树",
+      "aliases": ["半澤直樹", "半沢直樹", "Hanzawa Naoki"],
+      "content_type": "tv",
+      "year": 2013,
+      "episode": 3,
+      "tags": ["tv", "japanese", "localized-title"]
+    },
+    {
+      "case_id": "tv-someday-or-one-day",
+      "query": "想见你",
+      "aliases": ["想見你", "Someday or One Day"],
+      "content_type": "tv",
+      "year": 2019,
+      "episode": 3,
+      "tags": ["tv", "taiwan", "localized-title"]
+    },
+    {
+      "case_id": "tv-blossoms-shanghai",
+      "query": "繁花",
+      "aliases": ["繁花 沪语版", "Blossoms Shanghai"],
+      "content_type": "tv",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["tv", "chinese", "recent", "edition"]
+    },
+    {
+      "case_id": "tv-three-body-2023",
+      "query": "三体 2023",
+      "aliases": ["三體 2023", "三体电视剧", "Three-Body"],
+      "content_type": "tv",
+      "year": 2023,
+      "episode": 3,
+      "tags": ["tv", "chinese", "difficult", "same-title", "adaptation"]
+    },
+    {
+      "case_id": "tv-day-and-night",
+      "query": "白夜追凶",
+      "aliases": ["白夜追兇", "Day and Night"],
+      "content_type": "tv",
+      "year": 2017,
+      "episode": 3,
+      "tags": ["tv", "chinese", "crime"]
+    },
+    {
+      "case_id": "tv-nirvana-in-fire",
+      "query": "琅琊榜",
+      "aliases": ["瑯琊榜", "Nirvana in Fire"],
+      "content_type": "tv",
+      "year": 2015,
+      "episode": 3,
+      "tags": ["tv", "chinese", "classic"]
+    },
+    {
+      "case_id": "tv-reset-2022",
+      "query": "开端",
+      "aliases": ["開端", "Reset"],
+      "content_type": "tv",
+      "year": 2022,
+      "episode": 3,
+      "tags": ["tv", "chinese", "difficult", "short-title"]
+    },
+    {
+      "case_id": "movie-wandering-earth",
+      "query": "流浪地球",
+      "aliases": ["流浪地球1", "The Wandering Earth"],
+      "content_type": "movie",
+      "year": 2019,
+      "episode": 1,
+      "tags": ["movie", "chinese", "same-title", "difficult"]
+    },
+    {
+      "case_id": "movie-wandering-earth-2",
+      "query": "流浪地球2",
+      "aliases": ["流浪地球Ⅱ", "The Wandering Earth 2"],
+      "content_type": "movie",
+      "year": 2023,
+      "episode": 1,
+      "tags": ["movie", "chinese", "sequel", "difficult"]
+    },
+    {
+      "case_id": "movie-farewell-my-concubine",
+      "query": "霸王别姬",
+      "aliases": ["霸王別姬", "Farewell My Concubine"],
+      "content_type": "movie",
+      "year": 1993,
+      "episode": 1,
+      "tags": ["movie", "chinese", "classic"]
+    },
+    {
+      "case_id": "movie-infernal-affairs",
+      "query": "无间道",
+      "aliases": ["無間道", "Infernal Affairs"],
+      "content_type": "movie",
+      "year": 2002,
+      "episode": 1,
+      "tags": ["movie", "hong-kong", "classic"]
+    },
+    {
+      "case_id": "movie-spirited-away",
+      "query": "千与千寻",
+      "aliases": ["千與千尋", "千と千尋の神隠し", "Spirited Away"],
+      "content_type": "movie",
+      "year": 2001,
+      "episode": 1,
+      "tags": ["movie", "japanese", "animation", "localized-title"]
+    },
+    {
+      "case_id": "movie-your-name",
+      "query": "你的名字。",
+      "aliases": ["你的名字", "君の名は。", "Your Name"],
+      "content_type": "movie",
+      "year": 2016,
+      "episode": 1,
+      "tags": ["movie", "japanese", "animation", "punctuation"]
+    },
+    {
+      "case_id": "movie-inception",
+      "query": "盗梦空间",
+      "aliases": ["潛行凶間", "Inception"],
+      "content_type": "movie",
+      "year": 2010,
+      "episode": 1,
+      "tags": ["movie", "western", "popular"]
+    },
+    {
+      "case_id": "movie-interstellar",
+      "query": "星际穿越",
+      "aliases": ["星際啟示錄", "Interstellar"],
+      "content_type": "movie",
+      "year": 2014,
+      "episode": 1,
+      "tags": ["movie", "western", "popular"]
+    },
+    {
+      "case_id": "movie-dune-2021",
+      "query": "沙丘 2021",
+      "aliases": ["沙丘瀚戰", "Dune 2021"],
+      "content_type": "movie",
+      "year": 2021,
+      "episode": 1,
+      "tags": ["movie", "western", "adaptation", "same-title", "difficult"]
+    },
+    {
+      "case_id": "movie-dune-part-two",
+      "query": "沙丘2",
+      "aliases": ["沙丘：第二部", "Dune: Part Two"],
+      "content_type": "movie",
+      "year": 2024,
+      "episode": 1,
+      "tags": ["movie", "western", "sequel", "difficult"]
+    },
+    {
+      "case_id": "movie-parasite-2019",
+      "query": "寄生虫 2019",
+      "aliases": ["上流寄生族", "기생충", "Parasite 2019"],
+      "content_type": "movie",
+      "year": 2019,
+      "episode": 1,
+      "tags": ["movie", "korean", "same-title", "difficult"]
+    },
+    {
+      "case_id": "movie-in-the-mood-for-love",
+      "query": "花样年华",
+      "aliases": ["花樣年華", "In the Mood for Love"],
+      "content_type": "movie",
+      "year": 2000,
+      "episode": 1,
+      "tags": ["movie", "hong-kong", "classic"]
+    },
+    {
+      "case_id": "movie-hero-2002",
+      "query": "英雄 2002",
+      "aliases": ["英雄电影", "Hero 2002"],
+      "content_type": "movie",
+      "year": 2002,
+      "episode": 1,
+      "tags": ["movie", "chinese", "short-title", "same-title", "difficult"]
+    },
+    {
+      "case_id": "movie-leon-the-professional",
+      "query": "这个杀手不太冷",
+      "aliases": ["終極追殺令", "Léon: The Professional"],
+      "content_type": "movie",
+      "year": 1994,
+      "episode": 1,
+      "tags": ["movie", "western", "classic", "localized-title"]
+    },
+    {
+      "case_id": "movie-shawshank-redemption",
+      "query": "肖申克的救赎",
+      "aliases": ["刺激1995", "The Shawshank Redemption"],
+      "content_type": "movie",
+      "year": 1994,
+      "episode": 1,
+      "tags": ["movie", "western", "classic", "localized-title"]
+    },
+    {
+      "case_id": "movie-chinese-odyssey-part-two",
+      "query": "大话西游之大圣娶亲",
+      "aliases": ["西遊記大結局之仙履奇緣", "A Chinese Odyssey Part Two: Cinderella"],
+      "content_type": "movie",
+      "year": 1995,
+      "episode": 1,
+      "tags": ["movie", "hong-kong", "classic", "edition", "difficult"]
+    }
+  ]
+}

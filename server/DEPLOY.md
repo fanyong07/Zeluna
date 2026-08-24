@@ -155,20 +155,38 @@ POST   /admin/managed-lines/import
      --json-output probe-results/maccms-$(date -u +%Y%m%dT%H%M%SZ).json
    ```
 
-2. 需要新增采集站时，先把候选写成 JSON 数据实测，不要先改 `maccms_sites.py`：
+2. 需要评估覆盖率时，运行 48 个动漫、剧集、电影和困难案例；该命令会走搜索、
+   匹配、详情、分集、清单/文件头、密钥和首分片链路，而不是只检查 HTTP 200：
 
    ```bash
    /opt/zeluna/venv/bin/python tools/probe_maccms.py \
-     --candidates candidates.json \
-     --json-output probe-results/candidates-$(date -u +%Y%m%dT%H%M%SZ).json
+     --profile coverage \
+     --json-output probe-results/coverage-$(date -u +%Y%m%dT%H%M%SZ).json
    ```
 
-   `candidates.json` 形如 `[{"name": "站名", "api": "https://.../api.php/provide/vod"}]`；
-   非 http(s)、带凭据或与现有表重复的条目会被直接拒绝。只有在目标出口真正完成媒体验证
-   （报告里 `origin` 为 `candidate` 且 `playable` 非空）并通过合规审核的站，才可写入
-   `maccms_sites.py`，且首次写入保持 `precache: False`。
+3. 新采集站先进入独立的 `data/maccms_candidates.json`，禁止直接写正式站表。注册表
+   必须使用 `zeluna.maccms-candidates.v1` schema，声明镜像排除数量，并为每条记录保留
+   `name`、`api`、固定提交来源、`review_status=candidate` 和风险说明。先对注册表运行
+   Smoke，再只对有价值的候选运行完整晋级流程：
 
-3. 审核合规性和目标出口探针结果后，在 `/etc/zeluna/zeluna.env` 中只填写获准 ID。首次启用保持 `PRECACHE_ENABLED=false`，例如：
+   ```bash
+   /opt/zeluna/venv/bin/python tools/probe_maccms.py \
+     --candidates --profile smoke \
+     --json-output probe-results/candidates-smoke-$(date -u +%Y%m%dT%H%M%SZ).json
+
+   /opt/zeluna/venv/bin/python tools/probe_maccms.py \
+     --candidates --profile promotion \
+     --site 候选站名 \
+     --json-output probe-results/candidates-review-$(date -u +%Y%m%dT%H%M%SZ).json
+   ```
+
+   注册表会拒绝非 http(s)、IP literal、查询凭据、重复名称/主机、正式源主机、未知字段
+   和非候选 review 状态。`promotion` 会依次运行 Smoke 与 Coverage，并记录 SSRF/URL
+   安全门、人工审核门和建议 tier；它永远不会自动修改 `maccms_sites.py`。只有目标出口
+   媒体验证、内容/条款合规人工审核都通过的站才可进入正式表，首次写入保持
+   `precache: False`。
+
+4. 审核合规性和目标出口探针结果后，在 `/etc/zeluna/zeluna.env` 中只填写获准 ID。首次启用保持 `PRECACHE_ENABLED=false`，例如：
 
    ```dotenv
    PLAYBACK_PROVIDER_IDS=aggregate.maccms

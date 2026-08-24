@@ -83,7 +83,7 @@ class MacCmsSource:
         return not normalized or normalized in self.content_types
 
 
-def _year_from_value(value: object) -> int:
+def year_from_value(value: object) -> int:
     match = re.match(r"^(?:18|19|20|21)\d{2}", str(value or "").strip())
     return int(match.group(0)) if match else 0
 
@@ -117,7 +117,7 @@ def episode_number_from_label(label: str) -> int | None:
     return None
 
 
-def _episode_from_group(group: list[dict], episode: int) -> dict | None:
+def episode_from_group(group: list[dict], episode: int) -> dict | None:
     numbered = [
         (item, episode_number_from_label(str(item.get("name") or "")))
         for item in group
@@ -138,6 +138,25 @@ def _episode_from_group(group: list[dict], episode: int) -> dict | None:
         if 0 <= index < len(fallback_group)
         else None
     )
+
+
+def media_type_from_name(type_name: str) -> str:
+    raw = (type_name or "").strip()
+    normalized = raw.lower()
+    if any(key in raw for key in ("动漫", "动画", "番")) or "anime" in normalized:
+        return "anime"
+    if any(key in raw for key in ("电影", "影片")) or "movie" in normalized:
+        return "movie"
+    if (
+        any(key in raw for key in (
+            "电视剧", "连续剧", "剧集", "国产剧", "大陆剧", "内地剧",
+            "港台剧", "香港剧", "台湾剧", "欧美剧", "美剧", "英剧",
+            "日剧", "韩剧", "泰剧", "海外剧", "短剧", "网剧", "综艺",
+        ))
+        or any(key in normalized for key in ("tv", "series", "drama", "show"))
+    ):
+        return "tv"
+    return "unknown"
 
 
 def parse_vod_play_url(raw: str) -> list[list[dict]]:
@@ -228,22 +247,7 @@ class MacCmsScraper(BaseScraper):
         await self._client.aclose()
 
     def _guess_type(self, type_name: str) -> str:
-        raw = (type_name or "").strip()
-        t = raw.lower()
-        if any(k in raw for k in ("动漫", "动画", "番")) or "anime" in t:
-            return "anime"
-        if any(k in raw for k in ("电影", "影片")) or "movie" in t:
-            return "movie"
-        if (
-            any(k in raw for k in (
-                "电视剧", "连续剧", "剧集", "国产剧", "大陆剧", "内地剧",
-                "港台剧", "香港剧", "台湾剧", "欧美剧", "美剧", "英剧",
-                "日剧", "韩剧", "泰剧", "海外剧", "短剧", "网剧", "综艺",
-            ))
-            or any(k in t for k in ("tv", "series", "drama", "show"))
-        ):
-            return "tv"
-        return "unknown"
+        return media_type_from_name(type_name)
 
     async def _site_search_outcome(
         self,
@@ -321,7 +325,7 @@ class MacCmsScraper(BaseScraper):
                 summary=(it.get("vod_blurb", "") or it.get("vod_content", "") or "")[:500],
                 type=self._guess_type(it.get("type_name", "")),
                 lang="zh",
-                year=_year_from_value(it.get("vod_year")),
+                year=year_from_value(it.get("vod_year")),
                 extra={"site": site["name"], "vod_id": vid,
                        "remarks": it.get("vod_remarks", "")},
             ))
@@ -510,7 +514,7 @@ class MacCmsScraper(BaseScraper):
             summary=(it.get("vod_blurb", "") or it.get("vod_content", "") or "")[:500],
             type=self._guess_type(it.get("type_name", "")),
             lang="zh",
-            year=_year_from_value(it.get("vod_year")),
+            year=year_from_value(it.get("vod_year")),
             status=1 if "完结" in (it.get("vod_remarks", "") or "") else 0,
             episodes=episodes,
             extra={"site": site_name, "vod_id": vod_id,
@@ -563,7 +567,7 @@ class MacCmsScraper(BaseScraper):
         }
         lines: list[VideoLine] = []
         for src_idx, source_eps in enumerate(sources):
-            ep = _episode_from_group(source_eps, episode)
+            ep = episode_from_group(source_eps, episode)
             if ep is None:
                 continue
             url = ep["url"]
@@ -625,7 +629,7 @@ class MacCmsScraper(BaseScraper):
                 cover_url=it.get("vod_pic", "") or "",
                 type=self._guess_type(it.get("type_name", "")),
                 lang="zh",
-                year=_year_from_value(it.get("vod_year")),
+                year=year_from_value(it.get("vod_year")),
                 extra={"site": site["name"], "vod_id": vid},
             ))
         return out

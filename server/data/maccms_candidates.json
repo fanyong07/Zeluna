@@ -1,0 +1,583 @@
+{
+  "schema": "zeluna.maccms-candidates.v1",
+  "generated_on": "2026-08-24",
+  "source_document": "docs/research/maccms-candidate-sources-2026-08-24.md",
+  "policy": {
+    "logical_candidate_count": 80,
+    "excluded_mirror_alias_count": 20,
+    "production_table_separate": true,
+    "automatic_promotion": false
+  },
+  "source_references": {
+    "G1": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+    "G2": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+    "G3": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+    "G4": "https://github.com/heroaku/TVboxo/blob/42edfca812780525e95a1c1c2d97d6ed664e27a4/Text/cmstv.json",
+    "G5": "https://github.com/qist/tvbox/blob/36b5158f8510f242926348c15c2f3a13cfec0495/dianshi.json",
+    "G6": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+    "G7": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+    "G8": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json"
+  },
+  "sites": [
+    {
+      "name": "1080P资源",
+      "api": "https://1080api.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称暗示清晰度，不代表实际码率或可播质量。"
+    },
+    {
+      "name": "1080zyk优质资源库",
+      "api": "https://api.1080zyku.com/inc/api.php/provide/vod/",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；`/inc/api.php` 前缀需先验证与现有 JSON parser 的兼容性。"
+    },
+    {
+      "name": "49资源",
+      "api": "https://49zyw.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需确认响应 schema、分页和内容类型范围。"
+    },
+    {
+      "name": "68资源",
+      "api": "https://68zy88.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；品牌信息有限，人工合规和内容范围复核优先。"
+    },
+    {
+      "name": "蓝天90",
+      "api": "https://90sr.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；配置名称不稳定，需用返回站点标识确认真实 provider。"
+    },
+    {
+      "name": "樱花资源",
+      "api": "https://m3u8.apiyhzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；域名含 `m3u8` 不等于线路已验证，仍须完整验线。"
+    },
+    {
+      "name": "蜂巢片库",
+      "api": "https://api.fczy888.me/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；内容类型和权利状态未知。"
+    },
+    {
+      "name": "金马资源",
+      "api": "https://api.jmzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需验证标题匹配、分集标签和媒体 Host 多样性。"
+    },
+    {
+      "name": "牛牛资源",
+      "api": "https://api.niuniuzy.me/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；Epic 既有研究 lead，本轮只补充公开 endpoint 证据。"
+    },
+    {
+      "name": "OK资源",
+      "api": "https://api.okzy.org/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；与 `okzyw9.com` 可能同品牌，晋级前先做身份归并。"
+    },
+    {
+      "name": "天空资源",
+      "api": "https://api.tiankongapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需验证默认响应是否为 JSON 而非 XML/HTML。"
+    },
+    {
+      "name": "TOM资源",
+      "api": "https://api.tomcaiji.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；品牌与维护主体未知，需人工 review。"
+    },
+    {
+      "name": "U酷资源",
+      "api": "https://api.ukuapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；Epic 既有研究 lead，另有镜像条目不得重复计数。"
+    },
+    {
+      "name": "无限资源",
+      "api": "https://api.wuxianzy.net/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称容易与“无尽”混淆，provider identity 必须独立确认。"
+    },
+    {
+      "name": "旺旺资源",
+      "api": "https://api.wwzy.tv/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；可能偏短剧，先按 content type 做 coverage 分类。"
+    },
+    {
+      "name": "新浪资源",
+      "api": "https://api.xinlangapi.com/xinlangapi.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；脚本名不是标准 `api.php`，需做结构兼容验证。"
+    },
+    {
+      "name": "易看资源",
+      "api": "https://api.yikanapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；内容范围和站点授权未知。"
+    },
+    {
+      "name": "秒播资源",
+      "api": "https://api.zeqaht.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；配置中的品牌名与域名不一致，先确认 provider identity。"
+    },
+    {
+      "name": "白狐资源",
+      "api": "https://baihuzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；只在单一证据文件出现，时效和结构风险较高。"
+    },
+    {
+      "name": "豆瓣资源",
+      "api": "https://caiji.dbzy.tv/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称不代表豆瓣官方合作，UI 和文档不得作官方暗示。"
+    },
+    {
+      "name": "快车资源",
+      "api": "https://caiji.kczyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需确认是否与“快播”配置别名混用。"
+    },
+    {
+      "name": "可可资源",
+      "api": "https://caiji.kekezyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；单一公开配置证据，需优先结构检查。"
+    },
+    {
+      "name": "茅台资源",
+      "api": "https://caiji.maotaizy.cc/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；Epic 既有研究 lead，本轮未做实时访问。"
+    },
+    {
+      "name": "奇虎资源",
+      "api": "https://caiji.qhzyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称不代表 360/奇虎官方合作。"
+    },
+    {
+      "name": "非凡资源",
+      "api": "https://cj.ffzyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在多个历史域名，必须按同一 logical provider 去重。"
+    },
+    {
+      "name": "影图资源",
+      "api": "https://cj.vodimg.top/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需检查封面 URL 和媒体 URL 是否为公网安全目标。"
+    },
+    {
+      "name": "丫丫资源",
+      "api": "https://cj.yayazy.net/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；另有镜像域名，晋级前先确认独立性。"
+    },
+    {
+      "name": "华为吧资源",
+      "api": "https://cjhwba.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称不代表华为官方合作，禁止任何官方暗示。"
+    },
+    {
+      "name": "CK资源",
+      "api": "https://ckzy.me/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在旧 HTTP 同名域名，先做身份和迁移关系审查。"
+    },
+    {
+      "name": "卧龙资源",
+      "api": "https://collect.wolongzy.cc/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在多个相近域名，只能按一个 provider 进入 KPI。"
+    },
+    {
+      "name": "大漠资源",
+      "api": "https://damozy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需确认 JSON schema 和当前维护主体。"
+    },
+    {
+      "name": "海外看资源",
+      "api": "https://haiwaikan.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；原配置标记 VPN，可能有明显地域/出口差异。"
+    },
+    {
+      "name": "花都影视",
+      "api": "https://hdys2.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；内容范围和权利状态未知。"
+    },
+    {
+      "name": "HG资源",
+      "api": "https://hong.hgyx.vip/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；标识不透明，必须先确认内容类型和站点主体。"
+    },
+    {
+      "name": "神马资源",
+      "api": "https://img.smdyw.top/api.php/provide/vod",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；API 位于 `img` 子域，需额外验证重定向和响应类型。"
+    },
+    {
+      "name": "小黄人资源",
+      "api": "https://iqyi.xiaohuangrentv.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/heroaku/TVboxo/blob/42edfca812780525e95a1c1c2d97d6ed664e27a4/Text/cmstv.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；`iqyi` 子域不代表爱奇艺官方接口或授权。"
+    },
+    {
+      "name": "极光资源",
+      "api": "https://jiguang.la/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；单一配置证据，需优先确认 endpoint 所有权。"
+    },
+    {
+      "name": "金鹰资源",
+      "api": "https://jinyingzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；Epic 既有 research lead，另有镜像条目不得重复计数。"
+    },
+    {
+      "name": "黑木耳资源",
+      "api": "https://json.heimuer.xyz/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在多个 JSON/XML 子域，需确认稳定主入口。"
+    },
+    {
+      "name": "聚星资源",
+      "api": "https://jxzyw.top/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；内容类型和可播链路均未验证。"
+    },
+    {
+      "name": "快看资源",
+      "api": "https://kuaikan-api.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需检查是否返回直接媒体 URL 或播放器页面。"
+    },
+    {
+      "name": "乐视资源",
+      "api": "https://leshiapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称不代表乐视官方合作，另有旧域名需去重。"
+    },
+    {
+      "name": "爱胆资源",
+      "api": "https://lovedan.net/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；配置中存在“爱胆/艾旦”异名，先归一化 source identity。"
+    },
+    {
+      "name": "秒看资源",
+      "api": "https://mkzy.vip/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需验证站点类型、结构和合法使用条件。"
+    },
+    {
+      "name": "新马影视",
+      "api": "https://movie.gsl99.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；`movie` 子域可能偏电影，先作为 movie specialist 候选评估。"
+    },
+    {
+      "name": "魔爪资源",
+      "api": "https://mozhuazy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需检查搜索、详情和分集完整性。"
+    },
+    {
+      "name": "OLE资源",
+      "api": "https://olevod1.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；消费站域名暴露 API 不等于允许第三方聚合，合规审查优先。"
+    },
+    {
+      "name": "飘零资源",
+      "api": "https://p2100.net/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需确认当前站点主体和稳定域名。"
+    },
+    {
+      "name": "四圈资源",
+      "api": "https://pg.fenwe078.cf/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；免费子域形态有较高迁移风险，先验证 DNS/证书稳定性。"
+    },
+    {
+      "name": "闪电资源",
+      "api": "https://sdzyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；另有子域镜像，按同一 provider 处理。"
+    },
+    {
+      "name": "索尼资源",
+      "api": "https://suoniapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；Epic 既有 research lead，名称不代表 Sony 官方合作。"
+    },
+    {
+      "name": "天涯资源",
+      "api": "https://ty.tyyszy5.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在多个域名，需建立 alias/migration 关系。"
+    },
+    {
+      "name": "小绵羊资源",
+      "api": "https://vs.okcdn100.top/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；API 位于 CDN 风格子域，需验证所有权与重定向安全。"
+    },
+    {
+      "name": "39影视",
+      "api": "https://www.39kan.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，时效风险高。"
+    },
+    {
+      "name": "电影雷达",
+      "api": "https://www.dianyingleida.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；可能偏电影，先作为 movie specialist 候选评估。"
+    },
+    {
+      "name": "飞速资源",
+      "api": "https://www.feisuzyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；存在多个同品牌域名，必须按一个 logical provider 去重。"
+    },
+    {
+      "name": "映迷资源",
+      "api": "https://www.inmi.app/api.php/provide/vod/",
+      "discovered_from": "https://github.com/shidahuilang/shuyuan-bak/blob/399cba926cbcbc029ff2376d7248b67bbca19f29/UZ.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；消费站域名/API 授权未知，人工 review 优先。"
+    },
+    {
+      "name": "快云资源",
+      "api": "https://www.kuaiyunzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需验证是否仍由原维护主体运营。"
+    },
+    {
+      "name": "人人影视",
+      "api": "https://www.rrvipw.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；名称不代表任何官方/原品牌合作，权利审查优先。"
+    },
+    {
+      "name": "无忧资源",
+      "api": "https://www.wyvod.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/anaer/Meow/blob/dfd4a00fc94ef82ee8afe63d9b49bb74e06e031a/meow.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；仅单一配置证据，需验证标准 JSON 行为。"
+    },
+    {
+      "name": "享看资源",
+      "api": "https://xkanzy10.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；带编号域名可能频繁迁移，稳定性风险较高。"
+    },
+    {
+      "name": "熊掌资源",
+      "api": "https://xzcjz.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需确认详情和播放字段是否符合 MacCMS v10 JSON。"
+    },
+    {
+      "name": "优速资源",
+      "api": "https://yszyw1.top/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；带编号域名可能是迁移入口，先验证 canonical host。"
+    },
+    {
+      "name": "速看资源",
+      "api": "https://ziyuan.skm3u8.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；域名含 `m3u8` 不代表首分片可读。"
+    },
+    {
+      "name": "宝片资源",
+      "api": "https://zpsps.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/heroaku/TVboxo/blob/42edfca812780525e95a1c1c2d97d6ed664e27a4/Text/cmstv.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；只在一份 CMS 配置中出现，需高优先级结构检查。"
+    },
+    {
+      "name": "看看资源",
+      "api": "https://zy.hikan.xyz/api.php/provide/vod/",
+      "discovered_from": "https://github.com/xiongjian83/TvBox/blob/1717a78bad2dc29519f0efde4ab5d39876c787b3/ZY.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；免费子域形态有迁移和证书风险。"
+    },
+    {
+      "name": "虾米资源",
+      "api": "https://zy.hls.one/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；`hls` 域名不等于返回线路已通过媒体验证。"
+    },
+    {
+      "name": "金蝉资源",
+      "api": "https://zy.jinchancaiji.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/hd9211/Tvbox1/blob/9766d3045e3345aad84ce73fdbe23102159a059e/zy.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；需验证 content type 覆盖和媒体 Host 独立性。"
+    },
+    {
+      "name": "Fox API资源",
+      "api": "https://api.foxzyapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，需先确认域名和维护主体是否仍有效。"
+    },
+    {
+      "name": "酷点资源",
+      "api": "https://api.kuapi.cc/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，结构与时效均未验证。"
+    },
+    {
+      "name": "诺迅资源",
+      "api": "https://caiji.nxflv.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，需确认是否仍为同一 provider。"
+    },
+    {
+      "name": "共青春影院",
+      "api": "https://gqcyy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；历史配置线索，消费站接口授权和时效风险高。"
+    },
+    {
+      "name": "考拉TV",
+      "api": "https://ikaola.tv/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，需重新确认 endpoint 和条款。"
+    },
+    {
+      "name": "松鼠资源",
+      "api": "https://m3u8.songshuzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；历史线索，需验证域名、schema 和首媒体段。"
+    },
+    {
+      "name": "想看资源",
+      "api": "https://m3u8.xiangkanapi.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，另有同品牌域名需去重。"
+    },
+    {
+      "name": "趣看资源",
+      "api": "https://qkmp4.cn/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；历史配置线索，可能偏 MP4，需验证 Range 与文件头。"
+    },
+    {
+      "name": "200121资源",
+      "api": "https://www.200121.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；数字品牌信息不足且证据较旧，人工 review 优先。"
+    },
+    {
+      "name": "八戒资源",
+      "api": "https://www.bajiezy.xyz/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；历史配置线索，免费子域和时效风险较高。"
+    },
+    {
+      "name": "冠军资源",
+      "api": "https://www.cmpzy.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；证据快照来自 2023，需重新确认结构和授权。"
+    },
+    {
+      "name": "鱼乐资源",
+      "api": "https://www.ylzy1.com/api.php/provide/vod/",
+      "discovered_from": "https://github.com/liu673cn/bug/blob/7820ab8e94f060401f791a646df760404276098e/vod/m.json",
+      "review_status": "candidate",
+      "notes": "HTTPS；历史配置线索，带编号域名可能存在迁移风险。"
+    }
+  ]
+}
