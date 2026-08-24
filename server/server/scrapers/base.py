@@ -95,9 +95,9 @@ class SubjectResult:
     title: str                # 标题
     cover_url: str = ""       # 封面图
     summary: str = ""         # 简介
-    type: str = "tv"          # tv | movie | ova
+    type: str = "unknown"     # anime | tv | movie | unknown
     lang: str = ""            # ja | zh | en
-    year: int = 2024          # 年份
+    year: int = 0             # 0 = unknown
     status: int = 0           # 0=连载 1=完结
     episode_count: int = 0    # 总集数
     latest_episode: int = 0   # 最新集数
@@ -125,9 +125,9 @@ class SubjectDetail:
     cover_url: str = ""
     banner_url: str = ""
     summary: str = ""
-    type: str = "tv"
+    type: str = "unknown"
     lang: str = ""
-    year: int = 2024
+    year: int = 0
     status: int = 0
     tags: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)

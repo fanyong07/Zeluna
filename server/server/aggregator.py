@@ -218,9 +218,22 @@ def _source_match_score(
             # lifts first-season/edition variants above the acceptance gate,
             # while a different season year remains below it.
             score = max(score, 68)
-    if expected_type and candidate_type:
-        normalized_expected = "tv" if expected_type == "series" else expected_type
-        score += 8 if candidate_type == normalized_expected else -25
+    normalized_candidate_type = (candidate_type or "").strip().lower()
+    normalized_expected_type = (expected_type or "").strip().lower()
+    if normalized_candidate_type == "series":
+        normalized_candidate_type = "tv"
+    if normalized_expected_type == "series":
+        normalized_expected_type = "tv"
+    known_types = {"anime", "movie", "tv"}
+    if (
+        normalized_candidate_type in known_types
+        and normalized_expected_type in known_types
+    ):
+        score += (
+            8
+            if normalized_candidate_type == normalized_expected_type
+            else -25
+        )
     if expected_year and candidate_year:
         distance = abs(expected_year - candidate_year)
         score += 10 if distance == 0 else (4 if distance == 1 else -12)
@@ -311,9 +324,9 @@ class AggregatedSubject:
     cover_url: str = ""
     banner_url: str = ""
     summary: str = ""
-    content_type: str = "tv"
+    content_type: str = "unknown"
     language: str = ""
-    year: int = 2024
+    year: int = 0
     regions: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)
     rating: float = 0.0
@@ -626,7 +639,10 @@ class ContentAggregator:
         diagnostics: dict[str, SourceDiscoveryDiagnostic] | None = None,
     ) -> list[SourceMatch]:
         expected_type = "series" if content_type == "tv" else content_type
-        if expected_type and expected_type not in scraper.content_types:
+        if (
+            expected_type in {"anime", "series", "movie"}
+            and expected_type not in scraper.content_types
+        ):
             return []
         if provider == "maccms":
             raise ValueError(
@@ -775,7 +791,10 @@ class ContentAggregator:
         if not self._provider_enabled("aggregate.maccms"):
             return
         expected_type = "series" if content_type == "tv" else content_type
-        if expected_type and expected_type not in self._maccms.content_types:
+        if (
+            expected_type in {"anime", "series", "movie"}
+            and expected_type not in self._maccms.content_types
+        ):
             return
         sources = [
             DiscoverySource(
@@ -1325,8 +1344,8 @@ class ContentAggregator:
                 seen_titles.add(dedup_key)
 
                 ct = type_override or (
-                    s.get("type", "tv") if isinstance(s, dict)
-                    else getattr(s, 'type', 'tv')
+                    s.get("type", "unknown") if isinstance(s, dict)
+                    else getattr(s, 'type', 'unknown')
                 )
 
                 # 若 orig_id 已是带源前缀的完整可反查 ID (maccms:/tvbox:/intl:),
@@ -1349,7 +1368,7 @@ class ContentAggregator:
                     summary=s.get("summary", "") if isinstance(s, dict) else getattr(s, 'summary', ''),
                     content_type=ct,
                     language=s.get("lang", "") if isinstance(s, dict) else getattr(s, 'lang', ''),
-                    year=s.get("year", 2024) if isinstance(s, dict) else getattr(s, 'year', 2024),
+                    year=s.get("year", 0) if isinstance(s, dict) else getattr(s, 'year', 0),
                     sources=[source_label],
                     _source_refs={source_label: orig_id},
                 ))

@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from server.scrapers.base import SubjectResult
-from server.scrapers.maccms import MacCmsScraper, parse_vod_play_url
+from server.scrapers.maccms import (
+    MacCmsScraper,
+    episode_number_from_label,
+    parse_vod_play_url,
+)
 from server.scrapers.maccms_sites import MACCMS_SITES, precache_sites
 
 
@@ -15,6 +19,21 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.scraper.aclose()
+
+    def _configure_single_site(self, item: dict, *, precache: bool = False) -> dict:
+        site = {
+            "name": "测试站",
+            "api": "https://source.example/api.php/provide/vod",
+        }
+        if precache:
+            site["precache"] = True
+        self.scraper._sites = [site]
+        self.scraper._client.get = AsyncMock(return_value=httpx.Response(
+            200,
+            json={"list": [item]},
+            request=httpx.Request("GET", site["api"]),
+        ))
+        return site
 
     def test_parse_vod_play_url_keeps_sources_and_episode_order(self):
         parsed = parse_vod_play_url(
@@ -39,6 +58,37 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             parsed[0][0]["url"],
             "https://cdn.example/media/opaque-token",
         )
+
+    def test_episode_number_parser_supports_normal_labels_and_rejects_specials(self):
+        cases = {
+            "第1集": 1,
+            "第01集": 1,
+            "第1话": 1,
+            "第01话": 1,
+            "1": 1,
+            "01": 1,
+            "EP1": 1,
+            "EP01": 1,
+            "E1": 1,
+            "E01": 1,
+            "Episode 1": 1,
+            "S01E03": 3,
+            "S02E03": 3,
+            "SP": None,
+            "SP1": None,
+            "OVA": None,
+            "OAD": None,
+            "PV": None,
+            "预告": None,
+            "花絮": None,
+            "特别篇": None,
+            "总集篇": None,
+            "幕后": None,
+        }
+
+        for label, expected in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(episode_number_from_label(label), expected)
 
     async def test_unknown_url_is_not_labeled_mp4_and_safe_site_headers_survive(self):
         self.scraper._sites = [{
@@ -73,6 +123,193 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             "Referer": "https://source.example/",
             "Origin": "https://source.example",
         })
+
+    async def test_video_urls_use_explicit_episode_number_after_special(self):
+        self._configure_single_site({
+            "vod_play_url": (
+                "第1集$https://cdn.example/1.m3u8"
+                "#第2集$https://cdn.example/2.m3u8"
+                "#SP$https://cdn.example/sp.m3u8"
+                "#第3集$https://cdn.example/3.m3u8"
+            ),
+        })
+
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 3)
+
+        self.assertEqual(
+            [(line.title, line.url) for line in lines],
+            [("第3集", "https://cdn.example/3.m3u8")],
+        )
+
+    async def test_detail_does_not_number_special_as_a_normal_episode(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_play_url": (
+                "第1集$https://cdn.example/1.m3u8"
+                "#第2集$https://cdn.example/2.m3u8"
+                "#SP$https://cdn.example/sp.m3u8"
+                "#第3集$https://cdn.example/3.m3u8"
+            ),
+        })
+
+        detail = await self.scraper.get_detail("maccms:测试站:1")
+
+        self.assertIsNotNone(detail)
+        self.assertEqual(
+            [(episode.number, episode.title) for episode in detail.episodes],
+            [(1, "第1集"), (2, "第2集"), (3, "第3集")],
+        )
+
+    async def test_video_urls_do_not_position_fallback_to_specials(self):
+        self._configure_single_site({
+            "vod_play_url": (
+                "SP$https://cdn.example/sp.m3u8"
+                "#OVA$https://cdn.example/ova.m3u8"
+            ),
+        })
+
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 1)
+
+        self.assertEqual(lines, [])
+
+    async def test_detail_position_fallback_ignores_special_labels(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_play_url": (
+                "预告$https://cdn.example/preview.m3u8"
+                "#上集$https://cdn.example/a.m3u8"
+                "#下集$https://cdn.example/b.m3u8"
+            ),
+        })
+
+        detail = await self.scraper.get_detail("maccms:测试站:1")
+
+        self.assertIsNotNone(detail)
+        self.assertEqual(
+            [(episode.number, episode.title) for episode in detail.episodes],
+            [(1, "上集"), (2, "下集")],
+        )
+
+    async def test_video_urls_map_each_playback_group_by_episode_label(self):
+        self._configure_single_site({
+            "vod_play_url": (
+                "第1集$https://a.example/1.m3u8"
+                "#第2集$https://a.example/2.m3u8"
+                "#SP$https://a.example/sp.m3u8"
+                "#第3集$https://a.example/3.m3u8"
+                "$$$"
+                "S02E03$https://b.example/3.m3u8"
+                "#EP01$https://b.example/1.m3u8"
+                "#EP02$https://b.example/2.m3u8"
+            ),
+        })
+
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 3)
+
+        self.assertEqual(
+            [line.url for line in lines],
+            ["https://a.example/3.m3u8", "https://b.example/3.m3u8"],
+        )
+
+    async def test_video_urls_only_fallback_when_group_has_no_episode_numbers(self):
+        self._configure_single_site({
+            "vod_play_url": (
+                "上集$https://a.example/upper.m3u8"
+                "#下集$https://a.example/lower.m3u8"
+                "$$$"
+                "第1集$https://b.example/1.m3u8"
+                "#第3集$https://b.example/3.m3u8"
+            ),
+        })
+
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 2)
+
+        self.assertEqual(
+            [line.url for line in lines],
+            ["https://a.example/lower.m3u8"],
+        )
+
+    async def test_search_preserves_unknown_year_and_type(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_year": "",
+            "type_name": "",
+        })
+
+        outcome = await self.scraper.search_source("测试站", "测试作品")
+
+        self.assertEqual(
+            (outcome.results[0].year, outcome.results[0].type),
+            (0, "unknown"),
+        )
+
+    async def test_detail_preserves_unknown_year_and_type(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_year": "未知",
+            "type_name": "",
+        })
+
+        detail = await self.scraper.get_detail("maccms:测试站:1")
+
+        self.assertIsNotNone(detail)
+        self.assertEqual((detail.year, detail.type), (0, "unknown"))
+
+    async def test_latest_preserves_unknown_year_and_type(self):
+        site = self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_year": "未知",
+            "type_name": "",
+        }, precache=True)
+
+        with patch(
+            "server.scrapers.maccms.precache_sites",
+            return_value=[site],
+        ):
+            results = await self.scraper.get_latest()
+
+        self.assertEqual((results[0].year, results[0].type), (0, "unknown"))
+
+    async def test_search_keeps_explicit_series_type(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试剧集",
+            "vod_year": "2025",
+            "type_name": "国产剧",
+        })
+
+        outcome = await self.scraper.search_source("测试站", "测试剧集")
+
+        self.assertEqual(outcome.results[0].type, "tv")
+
+    async def test_search_does_not_treat_genre_name_as_tv_type(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_year": "2025",
+            "type_name": "喜剧",
+        })
+
+        outcome = await self.scraper.search_source("测试站", "测试作品")
+
+        self.assertEqual(outcome.results[0].type, "unknown")
+
+    async def test_search_treats_unparseable_year_as_unknown(self):
+        self._configure_single_site({
+            "vod_id": "1",
+            "vod_name": "测试作品",
+            "vod_year": "未知",
+            "type_name": "动漫",
+        })
+
+        outcome = await self.scraper.search_source("测试站", "测试作品")
+
+        self.assertEqual(outcome.results[0].year, 0)
 
     async def test_search_interleaves_sites_by_priority(self):
         high = {"name": "高优先", "api": "https://high.example", "weight": 100}

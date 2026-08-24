@@ -17,6 +17,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -56,6 +57,63 @@ class MacCmsSource:
     name: str
     weight: int
     preferred: bool
+
+
+def _year_from_value(value: object) -> int:
+    match = re.match(r"^(?:18|19|20|21)\d{2}", str(value or "").strip())
+    return int(match.group(0)) if match else 0
+
+
+def _is_special_episode_label(label: str) -> bool:
+    return bool(re.search(
+        r"(?:\b(?:SP|OVA|OAD|PV)\s*\d*\b|预告|花絮|特别篇|总集篇|幕后)",
+        str(label or "").strip(),
+        flags=re.IGNORECASE,
+    ))
+
+
+def episode_number_from_label(label: str) -> int | None:
+    text = str(label or "").strip()
+    if not text:
+        return None
+    if _is_special_episode_label(text):
+        return None
+
+    patterns = (
+        r"\bS\d+E0*(\d+)\b",
+        r"\b(?:Episode|EP|E)\s*0*(\d+)\b",
+        r"第\s*0*(\d+)\s*[集话]",
+        r"^0*(\d+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            number = int(match.group(1))
+            return number if number > 0 else None
+    return None
+
+
+def _episode_from_group(group: list[dict], episode: int) -> dict | None:
+    numbered = [
+        (item, episode_number_from_label(str(item.get("name") or "")))
+        for item in group
+    ]
+    if any(number is not None for _, number in numbered):
+        return next(
+            (item for item, number in numbered if number == episode),
+            None,
+        )
+    fallback_group = [
+        item
+        for item in group
+        if not _is_special_episode_label(str(item.get("name") or ""))
+    ]
+    index = episode - 1
+    return (
+        fallback_group[index]
+        if 0 <= index < len(fallback_group)
+        else None
+    )
 
 
 def parse_vod_play_url(raw: str) -> list[list[dict]]:
@@ -132,12 +190,22 @@ class MacCmsScraper(BaseScraper):
         await self._client.aclose()
 
     def _guess_type(self, type_name: str) -> str:
-        t = (type_name or "").lower()
-        if any(k in type_name for k in ("动漫", "动画", "番")) or "anime" in t:
+        raw = (type_name or "").strip()
+        t = raw.lower()
+        if any(k in raw for k in ("动漫", "动画", "番")) or "anime" in t:
             return "anime"
-        if any(k in type_name for k in ("电影", "影片")) or "movie" in t:
+        if any(k in raw for k in ("电影", "影片")) or "movie" in t:
             return "movie"
-        return "tv"
+        if (
+            any(k in raw for k in (
+                "电视剧", "连续剧", "剧集", "国产剧", "大陆剧", "内地剧",
+                "港台剧", "香港剧", "台湾剧", "欧美剧", "美剧", "英剧",
+                "日剧", "韩剧", "泰剧", "海外剧", "短剧", "网剧", "综艺",
+            ))
+            or any(k in t for k in ("tv", "series", "drama", "show"))
+        ):
+            return "tv"
+        return "unknown"
 
     async def _site_search_outcome(
         self,
@@ -215,7 +283,7 @@ class MacCmsScraper(BaseScraper):
                 summary=(it.get("vod_blurb", "") or it.get("vod_content", "") or "")[:500],
                 type=self._guess_type(it.get("type_name", "")),
                 lang="zh",
-                year=int(str(it.get("vod_year", "") or "0")[:4] or 0) or 2024,
+                year=_year_from_value(it.get("vod_year")),
                 extra={"site": site["name"], "vod_id": vid,
                        "remarks": it.get("vod_remarks", "")},
             ))
@@ -362,9 +430,30 @@ class MacCmsScraper(BaseScraper):
         raw_url = it.get("vod_play_url", "") or ""
         sources = parse_vod_play_url(raw_url)
         if sources:
-            for i, ep in enumerate(sources[0], 1):
-                num_match = __import__("re").search(r"(\d+)", ep["name"])
-                ep_num = int(num_match.group(1)) if num_match else i
+            group = sources[0]
+            parsed_numbers = [
+                episode_number_from_label(ep["name"])
+                for ep in group
+            ]
+            has_explicit_numbers = any(
+                number is not None for number in parsed_numbers
+            )
+            seen_numbers: set[int] = set()
+            fallback_number = 0
+            for i, (ep, parsed_number) in enumerate(
+                zip(group, parsed_numbers),
+                1,
+            ):
+                if parsed_number is None:
+                    if has_explicit_numbers or _is_special_episode_label(ep["name"]):
+                        continue
+                    fallback_number += 1
+                    ep_num = fallback_number
+                else:
+                    ep_num = parsed_number
+                if ep_num in seen_numbers:
+                    continue
+                seen_numbers.add(ep_num)
                 episodes.append(EpisodeInfo(
                     number=ep_num,
                     title=ep["name"],
@@ -378,7 +467,7 @@ class MacCmsScraper(BaseScraper):
             summary=(it.get("vod_blurb", "") or it.get("vod_content", "") or "")[:500],
             type=self._guess_type(it.get("type_name", "")),
             lang="zh",
-            year=int(str(it.get("vod_year", "") or "0")[:4] or 0) or 2024,
+            year=_year_from_value(it.get("vod_year")),
             status=1 if "完结" in (it.get("vod_remarks", "") or "") else 0,
             episodes=episodes,
             extra={"site": site_name, "vod_id": vod_id,
@@ -427,11 +516,10 @@ class MacCmsScraper(BaseScraper):
             and str(value).strip()
         }
         lines: list[VideoLine] = []
-        ep_idx = episode - 1  # 0-based
         for src_idx, source_eps in enumerate(sources):
-            if ep_idx >= len(source_eps):
+            ep = _episode_from_group(source_eps, episode)
+            if ep is None:
                 continue
-            ep = source_eps[ep_idx]
             url = ep["url"]
             if not url:
                 continue
@@ -491,7 +579,7 @@ class MacCmsScraper(BaseScraper):
                 cover_url=it.get("vod_pic", "") or "",
                 type=self._guess_type(it.get("type_name", "")),
                 lang="zh",
-                year=int(str(it.get("vod_year", "") or "0")[:4] or 0) or 2024,
+                year=_year_from_value(it.get("vod_year")),
                 extra={"site": site["name"], "vod_id": vid},
             ))
         return out
