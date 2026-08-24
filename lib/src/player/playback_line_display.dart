@@ -269,13 +269,18 @@ class PlaybackLineDiagnosticGroups {
 }
 
 PlaybackLineDiagnosticGroups groupPlaybackLinesForDiagnostics(
-  Iterable<PlaybackLine> lines,
-) {
+  Iterable<PlaybackLine> lines, {
+  String? selectedLineId,
+}) {
   final ordered = allPlaybackLinesForDisplay(lines);
+  final sourceCards = _playbackSourceCardsForDisplay(
+    ordered,
+    selectedLineId: selectedLineId,
+  );
   final indexedPrimary = <(int, int, PlaybackLine)>[];
   final other = <PlaybackLine>[];
-  for (var index = 0; index < ordered.length; index++) {
-    final line = ordered[index];
+  for (var index = 0; index < sourceCards.length; index++) {
+    final line = sourceCards[index];
     final priority = _diagnosticPrimaryPriority(line);
     if (priority == null) {
       other.add(line);
@@ -293,6 +298,61 @@ PlaybackLineDiagnosticGroups groupPlaybackLinesForDiagnostics(
     ),
     other: List<PlaybackLine>.unmodifiable(other),
   );
+}
+
+List<PlaybackLine> _playbackSourceCardsForDisplay(
+  Iterable<PlaybackLine> lines, {
+  String? selectedLineId,
+}) {
+  final cards = <String, PlaybackLine>{};
+  for (final line in lines) {
+    final key = _playbackSourceCardIdentityKey(line);
+    final previous = cards[key];
+    if (previous == null ||
+        _playbackSourceCardPriority(line, selectedLineId: selectedLineId) >
+            _playbackSourceCardPriority(
+              previous,
+              selectedLineId: selectedLineId,
+            )) {
+      cards[key] = line;
+    }
+  }
+  return List<PlaybackLine>.unmodifiable(cards.values);
+}
+
+String _playbackSourceCardIdentityKey(PlaybackLine line) {
+  final providerId = line.providerId.trim().toLowerCase();
+  final sourceName = line.sourceName.trim().toLowerCase();
+  if (providerId == 'managed.urls' || providerId.startsWith('managed:')) {
+    return 'line|${line.id}';
+  }
+  if (sourceName.isEmpty) return 'line|${line.id}';
+  return '$providerId|$sourceName';
+}
+
+int _playbackSourceCardPriority(PlaybackLine line, {String? selectedLineId}) {
+  if (selectedLineId != null && line.id == selectedLineId) return 2000;
+  if (line.available && (line.url?.trim().isNotEmpty ?? false)) return 1000;
+  if (line.serverVerified) return 950;
+  if (line.requiresClientProbe) return 850;
+  return switch (line.diagnosticStatus) {
+    PlaybackDiscoveryStatus.serverVerified => 900,
+    PlaybackDiscoveryStatus.clientProbeRequired => 800,
+    PlaybackDiscoveryStatus.routeUnavailable => 700,
+    PlaybackDiscoveryStatus.matchedNoEpisode => 600,
+    PlaybackDiscoveryStatus.matched => 550,
+    PlaybackDiscoveryStatus.circuitSuppressed => 500,
+    PlaybackDiscoveryStatus.searchHitNoMatch => 400,
+    PlaybackDiscoveryStatus.searchTimeout => 350,
+    PlaybackDiscoveryStatus.searchError => 340,
+    PlaybackDiscoveryStatus.searchMiss => 300,
+    PlaybackDiscoveryStatus.searching => 200,
+    PlaybackDiscoveryStatus.notQueried => 100,
+    PlaybackDiscoveryStatus.quarantined => 50,
+    PlaybackDiscoveryStatus.retired => 0,
+    _ when line.url?.trim().isNotEmpty == true => 450,
+    _ => 10,
+  };
 }
 
 int? _diagnosticPrimaryPriority(PlaybackLine line) {

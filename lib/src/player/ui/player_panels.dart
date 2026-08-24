@@ -681,7 +681,10 @@ class _LinePanelBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final displayLines = allPlaybackLinesForDisplay(lines);
-    final groups = groupPlaybackLinesForDiagnostics(displayLines);
+    final groups = groupPlaybackLinesForDiagnostics(
+      displayLines,
+      selectedLineId: selected?.id,
+    );
     final summary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
     return ListView(

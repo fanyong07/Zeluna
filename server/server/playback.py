@@ -545,7 +545,6 @@ class PlaybackService:
         )
         if not aliases:
             data = self._complete_site_inventory([])
-            await self._store_cache(session, stable_id, episode, title, data)
             return [
                 {
                     **item,
@@ -628,7 +627,8 @@ class PlaybackService:
             diagnostics=diagnostics,
             discovery_diagnostics=discovery_diagnostics,
         )
-        await self._store_cache(session, stable_id, episode, title, data)
+        if self._should_store_full_result(data):
+            await self._store_cache(session, stable_id, episode, title, data)
         return [
             {
                 **item,
@@ -936,7 +936,7 @@ class PlaybackService:
             diagnostics=diagnostics,
         )
         remaining = deadline - time.monotonic()
-        if remaining > 0:
+        if remaining > 0 and self._has_usable_cached_route(data):
             try:
                 await asyncio.wait_for(
                     self._store_cache(session, stable_id, episode, title, data),
@@ -1197,9 +1197,45 @@ class PlaybackService:
             episode=episode,
             title=title,
             lines_json=json.dumps(lines, ensure_ascii=False),
-            line_count=sum(1 for line in lines if line.get("available") is True),
+            line_count=sum(
+                1
+                for line in lines
+                if isinstance(line, dict)
+                and self._has_usable_cached_route([line])
+            ),
             verified_at=time.time(),
         )
+
+    @classmethod
+    def _should_store_full_result(cls, items: list[dict]) -> bool:
+        return cls._has_usable_cached_route(items) or (
+            cls._full_negative_cache_is_confirmed(items)
+        )
+
+    @staticmethod
+    def _full_negative_cache_is_confirmed(items: list[dict]) -> bool:
+        observations = [item for item in items if isinstance(item, dict)]
+        if not observations:
+            return False
+        confirmed_statuses = {
+            SourceDiscoveryStatus.SEARCH_MISS.value,
+            SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH.value,
+            SourceDiscoveryStatus.MATCHED_NO_EPISODE.value,
+        }
+        for item in observations:
+            if item.get("queried") is not True:
+                return False
+            status = str(item.get("diagnostic_status") or "").strip().lower()
+            if status in confirmed_statuses:
+                continue
+            if (
+                status == SourceDiscoveryStatus.ROUTE_UNAVAILABLE.value
+                and str(item.get("error_category") or "")
+                in _DETERMINISTIC_SOURCE_FAILURES
+            ):
+                continue
+            return False
+        return True
 
     def _line_dict(self, line: AggregatedVideoLine) -> dict:
         server_verified = line.verification_status == SERVER_VERIFIED

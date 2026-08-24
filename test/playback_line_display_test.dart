@@ -209,6 +209,85 @@ void main() {
     expect(groups.other.map((line) => line.id), ['miss', 'pending', 'circuit']);
   });
 
+  test('source cards prefer a real route over its placeholder', () {
+    final groups = groupPlaybackLinesForDiagnostics([
+      _line(
+        'placeholder',
+        providerId: 'aggregate.maccms',
+        sourceName: '魔都2',
+        diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+        available: false,
+        url: '',
+      ),
+      _line(
+        'verified',
+        providerId: 'aggregate.maccms',
+        sourceName: '魔都2',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        serverVerified: true,
+        latencyMs: 320,
+      ),
+      _line(
+        'verified-slower',
+        providerId: 'aggregate.maccms',
+        sourceName: '魔都2',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        serverVerified: true,
+        latencyMs: 640,
+      ),
+    ]);
+
+    expect(groups.primary.map((line) => line.id), ['verified']);
+    expect(groups.other, isEmpty);
+  });
+
+  test(
+    'managed lines keep independent cards even with the same source name',
+    () {
+      final groups = groupPlaybackLinesForDiagnostics([
+        _line(
+          'managed-a',
+          providerId: 'managed.urls',
+          sourceName: 'official',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+          serverVerified: true,
+        ),
+        _line(
+          'managed-b',
+          providerId: 'managed.urls',
+          sourceName: 'official',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+          serverVerified: true,
+        ),
+      ]);
+
+      expect(groups.primary.map((line) => line.id), ['managed-a', 'managed-b']);
+    },
+  );
+
+  test('selected route represents a deduplicated source card', () {
+    final groups = groupPlaybackLinesForDiagnostics([
+      _line(
+        'fast-route',
+        providerId: 'aggregate.maccms',
+        sourceName: '如意',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        serverVerified: true,
+        latencyMs: 120,
+      ),
+      _line(
+        'selected-route',
+        providerId: 'aggregate.maccms',
+        sourceName: '如意',
+        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        serverVerified: true,
+        latencyMs: 480,
+      ),
+    ], selectedLineId: 'selected-route');
+
+    expect(groups.primary.map((line) => line.id), ['selected-route']);
+  });
+
   test('diagnostic status labels do not collapse into generic unavailable', () {
     expect(
       playbackLineFailureLabel(

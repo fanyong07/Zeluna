@@ -196,4 +196,71 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  testWidgets('source panel renders one card and keeps the real source state', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const verified = PlaybackLine(
+      id: 'verified-modu',
+      episodeId: 1,
+      providerId: 'aggregate.maccms',
+      providerName: '在线服务 · 魔都2',
+      sourceName: '魔都2',
+      title: '第1集',
+      quality: '1080P',
+      format: 'HLS',
+      url: 'https://media.example/modu/index.m3u8',
+      diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+      queried: true,
+      matched: true,
+      serverVerified: true,
+      available: true,
+    );
+    const placeholder = PlaybackLine(
+      id: 'placeholder-modu',
+      episodeId: 1,
+      providerId: 'aggregate.maccms',
+      providerName: '在线服务 · 魔都2',
+      sourceName: '魔都2',
+      title: '魔都2',
+      quality: '',
+      format: '',
+      diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+      queried: true,
+      matched: false,
+      available: false,
+      message: '当前站点没有匹配到这部作品',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(useMaterial3: true),
+        home: Scaffold(
+          body: PlaybackSourcePanel(
+            selected: verified,
+            lines: const [placeholder, verified],
+            failedLineIds: const {},
+            scanning: false,
+            completedRules: 1,
+            totalRules: 1,
+            onSelected: (_) {},
+            onPickLocal: () async {},
+            onOpenNetwork: (_, _) async {},
+            onSearch: () async {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('1 来源 · 1 已查 · 1 匹配 · 1 可播'), findsOneWidget);
+    expect(find.text('在线服务 · 魔都2'), findsOneWidget);
+    expect(find.text('其它来源（1）'), findsNothing);
+    expect(find.text('当前站点没有匹配到这部作品'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }
