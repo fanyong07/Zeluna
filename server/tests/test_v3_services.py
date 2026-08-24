@@ -43,6 +43,7 @@ from server.repositories.catalog import SqlCatalogRepository
 from server.scrapers.base import SubjectResult
 from server.scrapers.maccms import MacCmsScraper
 from server.scrapers.maccms_sites import MACCMS_SITES
+from server.title_matching import SourceMatchEvidence
 
 
 class CatalogServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -703,7 +704,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 return [
                     SubjectResult(
                         source_id="work-1",
-                        title="熔断诊断测试特别版",
+                        title="熔断诊断测试剧场版",
                         type="anime",
                         year=2026,
                     )
@@ -2183,6 +2184,14 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             content_type="anime",
             year=0,
             score=108,
+            evidence=SourceMatchEvidence(
+                exact_title=True,
+                matched_alias="团子大家族 第二季",
+                expected_season=2,
+                candidate_season=2,
+                media_type_known=True,
+                media_type_match=True,
+            ),
         )
         line = AggregatedVideoLine(
             url="https://cdn.example/clannad-after-story.mp4",
@@ -2264,6 +2273,14 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             content_type="anime",
             year=0,
             score=108,
+            evidence=SourceMatchEvidence(
+                exact_title=True,
+                matched_alias="团子大家族 第二季",
+                expected_season=2,
+                candidate_season=2,
+                media_type_known=True,
+                media_type_match=True,
+            ),
         )
         line = AggregatedVideoLine(
             url="https://cdn.example/clannad-after-story.mp4",
@@ -2272,6 +2289,14 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             source="crawler:girigiri",
             verification_status=SERVER_VERIFIED,
         )
+        metadata = {
+            "stable_id": "bangumi:876",
+            "title": "团子大家族 第二季",
+            "original_title": "CLANNAD 〜AFTER STORY〜",
+            "aliases": ["团子大家族 第2季"],
+            "media_type": "anime",
+            "date": "2008-10-02",
+        }
         async with self.sessions() as session:
             session.add(SourceHealth(
                 source_name="girigiri",
@@ -2294,6 +2319,18 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("server.playback.time.time", return_value=now),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=[
+                    "团子大家族 第二季",
+                    "团子大家族 第2季",
+                    "CLANNAD AFTER STORY",
+                ]),
+            ),
             patch.object(
                 aggregator,
                 "_enabled_provider_ids",
@@ -2319,12 +2356,202 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                     original_title="CLANNAD 〜AFTER STORY〜",
                     content_type="anime",
                     year=2008,
+                    deadline=time.monotonic() + 30,
                 )
 
         self.assertEqual(
             [item["url"] for item in items if item.get("url")],
             ["https://cdn.example/clannad-after-story.mp4"],
         )
+
+    async def test_ranking_score_alone_cannot_recover_open_source(self):
+        now = 1_800_000_000.0
+        match = SourceMatch(
+            source_id="crawler:girigiri:movie",
+            source_name="girigiri",
+            title="目标作品 剧场版",
+            content_type="anime",
+            year=2024,
+            score=999,
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/wrong-edition.mp4",
+            title="目标作品 剧场版",
+            format="mp4",
+            source="crawler:girigiri",
+            verification_status=SERVER_VERIFIED,
+        )
+        metadata = {
+            "stable_id": "bangumi:999998",
+            "title": "目标作品 第二季",
+            "original_title": "Target Season 2",
+            "aliases": ["目标作品 第2季"],
+            "media_type": "anime",
+            "date": "2024-01-01",
+        }
+        async with self.sessions() as session:
+            session.add(SourceHealth(
+                source_name="girigiri",
+                failure_count=8,
+                consecutive_failures=8,
+                last_status="unhealthy",
+                last_error_category="provider_error",
+                last_checked_at=now,
+                last_failure_at=now,
+                recent_success_rate=0.0,
+            ))
+            await session.commit()
+
+        async def resolve(candidates, **_kwargs):
+            if candidates:
+                return [line], {"girigiri": SERVER_VERIFIED}, {}
+            return [], {}, {}
+
+        with (
+            patch("server.playback.time.time", return_value=now),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.girigiri"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=[
+                    "目标作品 第二季",
+                    "目标作品 第2季",
+                    "Target Season 2",
+                ]),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=[match]),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(side_effect=resolve),
+            ) as resolver,
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(
+                    "bangumi:999998",
+                    1,
+                    session,
+                )
+
+        self.assertFalse(any(item.get("available") for item in items))
+        self.assertEqual(resolver.await_args.args[0], [])
+
+    async def test_trusted_binding_can_recover_unrelated_provider_circuit(self):
+        now = 1_800_000_000.0
+        stable_id = "bangumi:999997"
+        async with self.sessions() as session:
+            session.add(SourceBinding(
+                stable_id=stable_id,
+                source_id="crawler:girigiri:4086",
+                source_name="girigiri",
+                matched_title="团子大家族 第二季",
+                media_type="anime",
+                year=2008,
+                score=80,
+                success_count=3,
+                failure_count=0,
+                last_success_at=now - 10,
+                last_failure_at=now - 20,
+                updated_at=now,
+            ))
+            session.add(SourceBinding(
+                stable_id=stable_id,
+                source_id="crawler:girigiri:stale-binding",
+                source_name="girigiri",
+                matched_title="团子大家族 第二季",
+                media_type="anime",
+                year=2008,
+                score=80,
+                success_count=3,
+                failure_count=1,
+                last_success_at=now - 30,
+                last_failure_at=now - 5,
+                updated_at=now,
+            ))
+            session.add(SourceHealth(
+                source_name="girigiri",
+                failure_count=8,
+                consecutive_failures=8,
+                last_status="unhealthy",
+                last_error_category="provider_error",
+                last_checked_at=now,
+                last_failure_at=now,
+                recent_success_rate=0.0,
+            ))
+            await session.commit()
+
+        line = AggregatedVideoLine(
+            url="https://cdn.example/trusted-binding.mp4",
+            title="团子大家族 第二季",
+            format="mp4",
+            source="crawler:girigiri",
+            verification_status=SERVER_VERIFIED,
+        )
+        metadata = {
+            "stable_id": stable_id,
+            "title": "团子大家族 第二季",
+            "original_title": "CLANNAD AFTER STORY",
+            "aliases": ["团子大家族 第2季"],
+            "media_type": "anime",
+            "date": "2008-10-02",
+        }
+
+        async def resolve(candidates, **_kwargs):
+            if candidates:
+                return [line], {"girigiri": SERVER_VERIFIED}, {}
+            return [], {}, {}
+
+        with (
+            patch("server.playback.time.time", return_value=now),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=[
+                    "团子大家族 第二季",
+                    "团子大家族 第2季",
+                    "CLANNAD AFTER STORY",
+                ]),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(side_effect=resolve),
+            ) as resolver,
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(stable_id, 1, session)
+
+        available = [item for item in items if item.get("available")]
+        self.assertEqual(
+            [item["url"] for item in available],
+            ["https://cdn.example/trusted-binding.mp4"],
+        )
+        resolved_matches = resolver.await_args.args[0]
+        self.assertEqual([item.source_name for item in resolved_matches], ["girigiri"])
+        self.assertEqual(
+            [item.source_id for item in resolved_matches],
+            ["crawler:girigiri:4086"],
+        )
+        self.assertTrue(resolved_matches[0].evidence.allows_circuit_recovery)
 
     async def test_client_probe_candidate_never_opens_source_circuit(self):
         now = 1_800_000_000.0

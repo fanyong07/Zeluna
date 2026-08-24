@@ -14,6 +14,7 @@ from ..database import (
     SourceHealth,
     upsert_playback_cache,
 )
+from ..playback_health import SourceFailureScope
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class SourceHealthObservation:
     status: str
     latency_ms: int
     error_category: str
+    failure_scope: SourceFailureScope = SourceFailureScope.PROVIDER
 
 
 class PlaybackRepository(Protocol):
@@ -303,6 +305,14 @@ class SqlPlaybackRepository:
                     row.failure_count += 1
                     row.last_failure_at = checked_at
                 row.enabled = True
+
+            if (
+                observation.status == unavailable_status
+                and observation.failure_scope != SourceFailureScope.PROVIDER
+            ):
+                # Route/media failures belong to this work binding. They must
+                # not open or extend the provider-level circuit.
+                continue
 
             source = await self._session.scalar(
                 select(SourceHealth).where(

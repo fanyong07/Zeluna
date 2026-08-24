@@ -62,6 +62,7 @@ from .managed_lines.service import (
     managed_line_service as default_managed_line_service,
 )
 from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
+from .playback_health import SourceFailureScope
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -76,12 +77,12 @@ from .scrapers.base import (
     PLAYER_PAGE_URL,
     classify_media_url,
 )
+from .title_matching import analyze_source_match
 
 
 logger = logging.getLogger(__name__)
 
 _SOURCE_HEALTH_EMA_ALPHA = 0.35
-_CIRCUIT_RECOVERY_MATCH_SCORE = 108
 _DETERMINISTIC_SOURCE_FAILURES = {
     STALE_ROUTE,
     MALFORMED_MANIFEST,
@@ -561,6 +562,9 @@ class PlaybackService:
             session,
             stable_id,
             source_health=source_health,
+            aliases=aliases,
+            content_type=content_type,
+            year=year,
         )
         configured_sites = aggregator.configured_source_names
         matched_sites = {
@@ -716,6 +720,9 @@ class PlaybackService:
                     session,
                     stable_id,
                     source_health=source_health,
+                    aliases=aliases,
+                    content_type=content_type,
+                    year=year,
                 ),
                 timeout=remaining,
             )
@@ -960,6 +967,9 @@ class PlaybackService:
         stable_id: str,
         *,
         source_health: dict[str, SourceHealthEntry] | None = None,
+        aliases: list[str] | None = None,
+        content_type: str = "",
+        year: int = 0,
     ) -> list[SourceMatch]:
         now = time.time()
         cutoff = now - SOURCE_BINDING_HOURS * 3600
@@ -970,22 +980,38 @@ class PlaybackService:
         health = source_health
         if health is None:
             health = await self._load_source_health(session)
-        rows = [
-            row
-            for row in rows
-            if not self._source_circuit_is_open(
+        analyzed_rows = []
+        for row in rows:
+            analysis = analyze_source_match(
+                row.matched_title,
+                aliases or [],
+                candidate_type=row.media_type,
+                expected_type=content_type,
+                candidate_year=row.year,
+                expected_year=year,
+            )
+            circuit_open = self._source_circuit_is_open(
                 health.get(row.source_name),
                 now,
             )
-        ]
-        rows.sort(
-            key=lambda row: self._source_binding_rank(
-                row,
-                health.get(row.source_name),
+            trusted_binding = (
+                bool(aliases)
+                and row.success_count > 0
+                and row.last_success_at > 0
+                and row.last_success_at >= row.last_failure_at
+                and analysis.evidence.allows_circuit_recovery
+            )
+            if circuit_open and not trusted_binding:
+                continue
+            analyzed_rows.append((row, analysis.evidence))
+        analyzed_rows.sort(
+            key=lambda item: self._source_binding_rank(
+                item[0],
+                health.get(item[0].source_name),
             ),
             reverse=True,
         )
-        rows = rows[:len(aggregator.source_inventory) + 8]
+        analyzed_rows = analyzed_rows[:len(aggregator.source_inventory) + 8]
         return [
             SourceMatch(
                 source_id=row.source_id,
@@ -995,8 +1021,9 @@ class PlaybackService:
                 year=row.year,
                 episode_count=row.episode_count,
                 score=row.score,
+                evidence=evidence,
             )
-            for row in rows
+            for row, evidence in analyzed_rows
         ]
 
     async def _load_source_health(
@@ -1040,11 +1067,9 @@ class PlaybackService:
     ) -> bool:
         if not cls._source_circuit_is_open(health, now):
             return True
-        # Health is tracked per site, not per work. A run of failures on
-        # unrelated titles must not suppress an exact newly discovered title
-        # indefinitely. The discovery score of 108 represents an exact title
-        # plus matching media type; the negative cache still bounds retries.
-        return match.score >= _CIRCUIT_RECOVERY_MATCH_SCORE
+        # Ranking includes provider priority and is not correctness evidence.
+        # Only explicit title/season/type/year facts may authorize recovery.
+        return match.evidence.allows_circuit_recovery
 
     @staticmethod
     def _source_binding_rank(
@@ -1170,6 +1195,11 @@ class PlaybackService:
                     status=status,
                     latency_ms=latency_ms,
                     error_category=error_category,
+                    failure_scope=getattr(
+                        diagnostic,
+                        "failure_scope",
+                        SourceFailureScope.PROVIDER,
+                    ),
                 )
             )
         await self._repository_factory(session).record_health(
