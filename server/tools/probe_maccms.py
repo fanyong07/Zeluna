@@ -47,7 +47,6 @@ from server.aggregator import (  # noqa: E402
     ContentAggregator,
     LineVerificationResult,
     _is_public_http_url,
-    _source_match_score,
 )
 from server.scrapers.base import (  # noqa: E402
     INVALID_MEDIA_URL,
@@ -62,6 +61,7 @@ from server.scrapers.maccms import (  # noqa: E402
     year_from_value,
 )
 from server.scrapers.maccms_sites import MACCMS_SITES  # noqa: E402
+from server.title_matching import analyze_source_match  # noqa: E402
 from tools.maccms_coverage import (  # noqa: E402
     DEFAULT_CANDIDATE_REGISTRY_PATH,
     DEFAULT_COVERAGE_CASES_PATH,
@@ -510,7 +510,7 @@ async def probe_coverage_case(
             vod_id = str(item.get("vod_id") or "").strip()
             if not title or not vod_id:
                 continue
-            score = _source_match_score(
+            analysis = analyze_source_match(
                 title,
                 list(case.search_aliases),
                 candidate_type=media_type_from_name(
@@ -520,8 +520,8 @@ async def probe_coverage_case(
                 candidate_year=year_from_value(item.get("vod_year")),
                 expected_year=case.year,
             )
-            if score >= 65:
-                accepted.append((score, item))
+            if analysis.accepted:
+                accepted.append((analysis.ranking_score, item))
         if accepted:
             break
     result["search_latency_ms"] = max(

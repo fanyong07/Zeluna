@@ -23,10 +23,10 @@ from server.aggregator import (
     LineVerificationResult,
     SourceMatch,
     _mp4_startup_profile,
-    _source_match_score,
 )
 from server.scrapers.base import SubjectDetail, SubjectResult, VideoLine
 from server.scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
+from server.title_matching import analyze_source_match
 
 
 def _mp4_startup_sample(*, moov_before_mdat: bool) -> bytes:
@@ -53,30 +53,30 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             await aggregator.aclose()
 
     def test_short_chinese_title_accepts_only_same_year_edition_suffix(self):
-        first_season = _source_match_score(
+        first_season = analyze_source_match(
             "庆余年 第一季",
             ["庆余年"],
             candidate_type="tv",
             expected_type="tv",
             candidate_year=2019,
             expected_year=2019,
-        )
-        wrong_season = _source_match_score(
+        ).ranking_score
+        wrong_season = analyze_source_match(
             "庆余年 第二季",
             ["庆余年"],
             candidate_type="tv",
             expected_type="tv",
             candidate_year=2024,
             expected_year=2019,
-        )
-        spinoff = _source_match_score(
+        ).ranking_score
+        spinoff = analyze_source_match(
             "庆余年之帝王业",
             ["庆余年"],
             candidate_type="tv",
             expected_type="tv",
             candidate_year=2019,
             expected_year=2019,
-        )
+        ).ranking_score
 
         self.assertGreaterEqual(first_season, 65)
         self.assertLess(wrong_season, 65)
@@ -88,30 +88,30 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             "团子大家族",
             "CLANNAD AFTER STORY",
         ]
-        correct = _source_match_score(
+        correct = analyze_source_match(
             "团子大家族第二季",
             aliases,
             candidate_type="anime",
             expected_type="anime",
             candidate_year=2008,
             expected_year=2008,
-        )
-        first_season = _source_match_score(
+        ).ranking_score
+        first_season = analyze_source_match(
             "团子大家族",
             aliases,
             candidate_type="anime",
             expected_type="anime",
             candidate_year=2007,
             expected_year=2008,
-        )
-        movie = _source_match_score(
+        ).ranking_score
+        movie = analyze_source_match(
             "团子大家族 剧场版",
             aliases,
             candidate_type="anime",
             expected_type="anime",
             candidate_year=2007,
             expected_year=2008,
-        )
+        ).ranking_score
 
         self.assertGreaterEqual(correct, 65)
         self.assertLess(first_season, 65)
@@ -119,22 +119,22 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_unknown_metadata_is_neutral_in_source_match_score(self):
         scores = (
-            _source_match_score(
+            analyze_source_match(
                 "Exact Title",
                 ["Exact Title"],
                 candidate_type="unknown",
                 expected_type="anime",
                 candidate_year=0,
                 expected_year=2025,
-            ),
-            _source_match_score(
+            ).ranking_score,
+            analyze_source_match(
                 "Exact Title",
                 ["Exact Title"],
                 candidate_type="anime",
                 expected_type="unknown",
                 candidate_year=2025,
                 expected_year=0,
-            ),
+            ).ranking_score,
         )
 
         self.assertEqual(scores, (100, 100))
@@ -985,6 +985,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lines, [])
         self.assertEqual(health, {"dead": UNAVAILABLE})
         self.assertEqual(diagnostics["dead"].error_category, STALE_ROUTE)
+        self.assertEqual(diagnostics["dead"].failure_scope, "route")
 
     async def test_malformed_hls_manifest_keeps_structured_error_category(self):
         self.aggregator = ContentAggregator(

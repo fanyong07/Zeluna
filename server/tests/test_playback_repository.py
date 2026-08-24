@@ -116,7 +116,9 @@ class PlaybackRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repository.write["episode"], 2)
         self.assertEqual(repository.write["line_count"], 1)
 
-    async def test_sql_repository_preserves_binding_and_health_updates(self):
+    async def test_route_failure_updates_binding_without_poisoning_provider_health(
+        self,
+    ):
         async with self.sessions() as session:
             repository = SqlPlaybackRepository(session)
             await repository.upsert_bindings(
@@ -175,6 +177,7 @@ class PlaybackRepositoryTests(unittest.IsolatedAsyncioTestCase):
                         status="unavailable",
                         latency_ms=300,
                         error_category="malformed_manifest",
+                        failure_scope="route",
                     )
                 ],
                 checked_at=40,
@@ -197,10 +200,10 @@ class PlaybackRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bindings[0].success_count, 1)
         self.assertEqual(bindings[0].failure_count, 1)
         self.assertEqual(health["test"].success_count, 1)
-        self.assertEqual(health["test"].failure_count, 1)
-        self.assertEqual(health["test"].consecutive_failures, 2)
-        self.assertEqual(health["test"].last_error_category, "malformed_manifest")
-        self.assertEqual(health["test"].latency_ms, 170)
+        self.assertEqual(health["test"].failure_count, 0)
+        self.assertEqual(health["test"].consecutive_failures, 0)
+        self.assertEqual(health["test"].last_error_category, "")
+        self.assertEqual(health["test"].latency_ms, 100)
 
     async def test_playback_service_delegates_binding_and_health_persistence(self):
         class FakeRepository:

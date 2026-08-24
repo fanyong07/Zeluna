@@ -27,6 +27,7 @@ from .playback_discovery.strategy import (
     DiscoverySource,
     progressive_alias_search,
 )
+from .playback_health import SourceFailureScope
 from .scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
 from .scrapers.maccms_sites import site_priority
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
@@ -57,6 +58,7 @@ from .config import (
     SOURCE_MAX_CONCURRENCY,
 )
 from .stable_identity import stable_digest
+from .title_matching import SourceMatchEvidence, analyze_source_match
 
 logger = logging.getLogger(__name__)
 
@@ -103,35 +105,6 @@ _ERROR_CATEGORY_PRIORITY = {
 DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 
 
-def _normalized_match_title(value: str) -> str:
-    import re
-
-    cleaned = (value or "").casefold()
-    cleaned = re.sub(r"第\s*\d+\s*[季部期]", "", cleaned)
-    cleaned = re.sub(r"\bseason\s*\d+\b", "", cleaned)
-    return "".join(char for char in cleaned if char.isalnum())
-
-
-def _is_safe_short_title_variant(candidate: str, target: str) -> bool:
-    """Allow short CJK titles only when the remaining suffix is an edition tag."""
-    import re
-
-    if len(target) < 3 or not candidate.startswith(target):
-        return False
-    suffix = candidate[len(target):]
-    return bool(
-        suffix
-        and re.fullmatch(
-            r"(?:"
-            r"第?[一二三四五六七八九十\d]+[季部期]"
-            r"|season\d+|s\d+"
-            r"|特别版|完整版|导演剪辑版|国语|粤语|日语|英语"
-            r")+",
-            suffix,
-        )
-    )
-
-
 def _prepare_discovery_aliases(values: list[str]) -> list[str]:
     """Deduplicate aliases and put precise season titles before broad names."""
 
@@ -172,72 +145,6 @@ def _prepare_discovery_aliases(values: list[str]) -> list[str]:
         value
         for _index, value in sorted(enumerate(unique), key=priority)
     ]
-
-
-def _source_match_score(
-    candidate: str,
-    aliases: list[str],
-    *,
-    candidate_type: str,
-    expected_type: str,
-    candidate_year: int,
-    expected_year: int,
-) -> int:
-    normalized = _normalized_match_title(candidate)
-    targets = [_normalized_match_title(alias) for alias in aliases]
-    season_specific_bases: dict[str, str] = {}
-    for target in targets:
-        match = re.search(
-            r"(?:第?[一二三四五六七八九十百两\d]+季|season\d+|s\d+)$",
-            target,
-        )
-        if match and target[:match.start()]:
-            season_specific_bases[target] = target[:match.start()]
-    season_bases = set(season_specific_bases.values())
-    score = 0
-    for target in targets:
-        if not target:
-            continue
-        if normalized == season_specific_bases.get(target):
-            continue
-        if target in season_bases and (
-            normalized == target or normalized.startswith(target)
-        ):
-            # Once a verified season-specific alias exists, a bare base title
-            # or a different edition (for example a theatrical movie) must not
-            # outrank that season merely because it is an exact short match.
-            continue
-        if normalized == target:
-            score = max(score, 100)
-        elif min(len(normalized), len(target)) >= 4 and (
-            normalized in target or target in normalized
-        ):
-            score = max(score, 72)
-        elif _is_safe_short_title_variant(normalized, target):
-            # Keep this below the normal partial-match score. A matching year
-            # lifts first-season/edition variants above the acceptance gate,
-            # while a different season year remains below it.
-            score = max(score, 68)
-    normalized_candidate_type = (candidate_type or "").strip().lower()
-    normalized_expected_type = (expected_type or "").strip().lower()
-    if normalized_candidate_type == "series":
-        normalized_candidate_type = "tv"
-    if normalized_expected_type == "series":
-        normalized_expected_type = "tv"
-    known_types = {"anime", "movie", "tv"}
-    if (
-        normalized_candidate_type in known_types
-        and normalized_expected_type in known_types
-    ):
-        score += (
-            8
-            if normalized_candidate_type == normalized_expected_type
-            else -25
-        )
-    if expected_year and candidate_year:
-        distance = abs(expected_year - candidate_year)
-        score += 10 if distance == 0 else (4 if distance == 1 else -12)
-    return score
 
 
 def _is_public_ip(value: str) -> bool:
@@ -370,6 +277,7 @@ class SourceMatch:
     year: int
     episode_count: int = 0
     score: int = 0
+    evidence: SourceMatchEvidence = field(default_factory=SourceMatchEvidence)
 
 
 @dataclass(frozen=True)
@@ -457,6 +365,7 @@ class SourceResolutionOutcome:
     status: str
     error_category: str = ""
     latency_ms: int = 0
+    failure_scope: SourceFailureScope = SourceFailureScope.PROVIDER
 
     def __iter__(self) -> Iterator[object]:
         # Existing callers intentionally keep the historical three-value
@@ -743,7 +652,7 @@ class ContentAggregator:
     ) -> list[SourceMatch]:
         matches: dict[str, SourceMatch] = {}
         for result in results:
-            score = _source_match_score(
+            analysis = analyze_source_match(
                 result.title,
                 aliases,
                 candidate_type=result.type,
@@ -751,7 +660,7 @@ class ContentAggregator:
                 candidate_year=result.year,
                 expected_year=year,
             )
-            if score < 65:
+            if not analysis.accepted:
                 continue
             parts = result.source_id.split(":", 2)
             if provider in {"maccms", "tvbox"} and len(parts) == 3:
@@ -768,10 +677,14 @@ class ContentAggregator:
                 year=result.year,
                 episode_count=result.episode_count,
                 score=(
-                    score + site_priority(source_name) // 10
+                    analysis.ranking_score + site_priority(source_name) // 10
                     if provider == "maccms"
-                    else score + DIRECT_SOURCE_PRIORITIES.get(provider, 0)
+                    else (
+                        analysis.ranking_score
+                        + DIRECT_SOURCE_PRIORITIES.get(provider, 0)
+                    )
                 ),
+                evidence=analysis.evidence,
             )
             previous = matches.get(source_id)
             if previous is None or candidate.score > previous.score:
@@ -1152,6 +1065,7 @@ class ContentAggregator:
                         lines=lines,
                         status=(CLIENT_PROBE_REQUIRED if lines else UNAVAILABLE),
                         error_category="" if lines else EMPTY_MEDIA,
+                        failure_scope=SourceFailureScope.ROUTE,
                         latency_ms=max(
                             0,
                             int((time.monotonic() - started_at) * 1000),
@@ -1232,6 +1146,7 @@ class ContentAggregator:
                     lines=lines,
                     status=status,
                     error_category=error_category,
+                    failure_scope=SourceFailureScope.ROUTE,
                     latency_ms=max(
                         0,
                         int((time.monotonic() - started_at) * 1000),
