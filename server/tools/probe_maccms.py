@@ -945,6 +945,31 @@ def build_coverage_report(
         results,
         registered_candidate_count=registered_candidate_count,
     )
+    configured_results = [
+        result
+        for result in results
+        if result.get("origin") == CONFIGURED_ORIGIN
+    ]
+    enabled_production_results = [
+        result
+        for result in configured_results
+        if result.get("enabled") is True
+    ]
+    candidate_results = [
+        result
+        for result in results
+        if result.get("origin") == CANDIDATE_ORIGIN
+    ]
+
+    def coverage_scope(
+        scoped_results: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "source_count": len(scoped_results),
+            "kpis": build_coverage_kpis(scoped_results),
+            "baselines": build_legacy_coverage_baselines(scoped_results),
+        }
+
     return {
         "schema": "zeluna.maccms-probe.v3",
         "profile": profile,
@@ -971,6 +996,14 @@ def build_coverage_report(
         "source_inventory": inventory,
         "coverage_kpis": build_coverage_kpis(results),
         "coverage_baselines": build_legacy_coverage_baselines(results),
+        "coverage_scopes": {
+            "selected": coverage_scope(results),
+            "configured_all": coverage_scope(configured_results),
+            "enabled_production": coverage_scope(
+                enabled_production_results
+            ),
+            "candidates": coverage_scope(candidate_results),
+        },
         "results": results,
     }
 

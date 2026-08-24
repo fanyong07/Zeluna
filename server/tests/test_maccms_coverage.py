@@ -17,7 +17,12 @@ from tools.maccms_coverage import (
     recommend_source_tier,
     summarize_source_coverage,
 )
-from tools.probe_maccms import main, probe_coverage_case, probe_site_coverage
+from tools.probe_maccms import (
+    build_coverage_report,
+    main,
+    probe_coverage_case,
+    probe_site_coverage,
+)
 
 
 class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
@@ -351,6 +356,54 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
                 "subject_with_any_playable_route_rate"
             ],
             0.5,
+        )
+
+    def test_report_separates_enabled_production_from_disabled_sources(self):
+        cases = [CoverageCase(
+            case_id="anime-a-episode-1",
+            query="Anime A",
+            aliases=("Anime A Alias",),
+            content_type="anime",
+            year=2025,
+            episode=1,
+            tags=("anime",),
+            subject_id="anime-a",
+        )]
+        enabled_case = {
+            "case_id": "anime-a-episode-1",
+            "subject_id": "anime-a",
+            "sample_kind": "episode_1",
+            "content_type": "anime",
+            "server_verified": True,
+            "verified_media_hosts": ["enabled.example"],
+        }
+        disabled_case = {
+            **enabled_case,
+            "verified_media_hosts": ["disabled.example"],
+        }
+        report = build_coverage_report(
+            [
+                {
+                    "origin": "configured",
+                    "enabled": True,
+                    "cases": [enabled_case],
+                },
+                {
+                    "origin": "configured",
+                    "enabled": False,
+                    "cases": [disabled_case],
+                },
+            ],
+            cases,
+            candidate_count=2,
+        )
+
+        self.assertEqual(report["coverage_scopes"]["selected"]["source_count"], 2)
+        production = report["coverage_scopes"]["enabled_production"]
+        self.assertEqual(production["source_count"], 1)
+        self.assertEqual(
+            production["kpis"]["subject_with_any_playable_route_rate"],
+            1.0,
         )
 
     def test_promotion_recommendations_never_bypass_manual_review(self):
