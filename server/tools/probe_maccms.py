@@ -56,17 +56,19 @@ from server.scrapers.base import (  # noqa: E402
 )
 from server.scrapers.maccms import (  # noqa: E402
     episode_from_group,
+    episode_number_from_label,
     media_type_from_name,
     parse_vod_play_url,
     year_from_value,
 )
 from server.scrapers.maccms_sites import MACCMS_SITES  # noqa: E402
-from server.title_matching import analyze_source_match  # noqa: E402
+from server.title_matching import SourceMatchAnalysis, analyze_source_match  # noqa: E402
 from tools.maccms_coverage import (  # noqa: E402
     DEFAULT_CANDIDATE_REGISTRY_PATH,
     DEFAULT_COVERAGE_CASES_PATH,
     CoverageCase,
     build_coverage_kpis,
+    build_legacy_coverage_baselines,
     build_source_promotion_pipeline,
     load_coverage_cases,
     recommend_source_tier,
@@ -458,6 +460,8 @@ async def probe_coverage_case(
     """Exercise search, match, detail, episode mapping, and media verification."""
     result: dict[str, object] = {
         "case_id": case.case_id,
+        "subject_id": case.subject_id or case.case_id,
+        "sample_kind": case.sample_kind,
         "content_type": case.content_type,
         "year": case.year,
         "episode": case.episode,
@@ -468,10 +472,16 @@ async def probe_coverage_case(
         "accepted_match": False,
         "matched_title": "",
         "matched_score": None,
+        "matched_alias": "",
+        "matched_alias_index": None,
+        "matched_content_type": "unknown",
+        "matched_year": 0,
         "wrong_match": None,
         "season_conflict": None,
         "detail_success": False,
         "episode_found": False,
+        "episode_labels": [],
+        "episode_mapping_modes": [],
         "wrong_episode": None,
         "server_verified": False,
         "client_probe_required": False,
@@ -485,9 +495,9 @@ async def probe_coverage_case(
         "error_category": "",
     }
     search_started = time.monotonic()
-    accepted: list[tuple[int, dict]] = []
+    accepted: list[tuple[int, int, dict, SourceMatchAnalysis]] = []
     search_errors: list[str] = []
-    for alias in case.search_aliases:
+    for alias_index, alias in enumerate(case.search_aliases):
         result["aliases_attempted"] += 1
         data, error = await _fetch_json(
             client,
@@ -521,7 +531,12 @@ async def probe_coverage_case(
                 expected_year=case.year,
             )
             if analysis.accepted:
-                accepted.append((analysis.ranking_score, item))
+                accepted.append((
+                    analysis.ranking_score,
+                    alias_index,
+                    item,
+                    analysis,
+                ))
         if accepted:
             break
     result["search_latency_ms"] = max(
@@ -538,10 +553,29 @@ async def probe_coverage_case(
         )
         return result
 
-    score, matched = max(accepted, key=lambda pair: pair[0])
+    score, alias_index, matched, analysis = max(
+        accepted,
+        key=lambda pair: pair[0],
+    )
     result["accepted_match"] = True
     result["matched_title"] = str(matched.get("vod_name") or "").strip()
     result["matched_score"] = score
+    result["matched_alias"] = case.search_aliases[alias_index]
+    result["matched_alias_index"] = alias_index
+    result["matched_content_type"] = media_type_from_name(
+        str(matched.get("type_name") or "")
+    )
+    result["matched_year"] = year_from_value(matched.get("vod_year"))
+    evidence = analysis.evidence
+    result["season_conflict"] = evidence.season_conflict
+    if (
+        evidence.season_conflict
+        or (evidence.media_type_known and not evidence.media_type_match)
+        or (evidence.year_known and not evidence.year_compatible)
+    ):
+        result["wrong_match"] = True
+    elif evidence.allows_circuit_recovery:
+        result["wrong_match"] = False
     vod_id = str(matched.get("vod_id") or "").strip()
     detail, detail_error = await _fetch_json(
         client,
@@ -569,15 +603,50 @@ async def probe_coverage_case(
         return result
     result["detail_success"] = True
     groups = parse_vod_play_url(str(detail_item.get("vod_play_url") or ""))
-    selected = [
-        episode
-        for group in groups
-        if (episode := episode_from_group(group, case.episode)) is not None
-    ][:8]
-    if not selected:
+    selected_with_mapping: list[tuple[dict, str, int | None]] = []
+    for group in groups:
+        selected_episode = episode_from_group(group, case.episode)
+        if selected_episode is None:
+            continue
+        group_numbers = [
+            episode_number_from_label(str(item.get("name") or ""))
+            for item in group
+        ]
+        explicit = any(number is not None for number in group_numbers)
+        selected_with_mapping.append((
+            selected_episode,
+            "explicit" if explicit else "position_fallback",
+            episode_number_from_label(
+                str(selected_episode.get("name") or "")
+            ),
+        ))
+        if len(selected_with_mapping) >= 8:
+            break
+    if not selected_with_mapping:
         result["error_category"] = "episode_not_found"
         return result
     result["episode_found"] = True
+    selected = [item for item, _mode, _number in selected_with_mapping]
+    result["episode_labels"] = list(dict.fromkeys(
+        str(item.get("name") or "").strip()
+        for item in selected
+        if str(item.get("name") or "").strip()
+    ))
+    result["episode_mapping_modes"] = list(dict.fromkeys(
+        mode for _item, mode, _number in selected_with_mapping
+    ))
+    explicit_numbers = [
+        number
+        for _item, mode, number in selected_with_mapping
+        if mode == "explicit" and number is not None
+    ]
+    if any(number != case.episode for number in explicit_numbers):
+        result["wrong_episode"] = True
+    elif selected_with_mapping and all(
+        mode == "explicit" and number == case.episode
+        for _item, mode, number in selected_with_mapping
+    ):
+        result["wrong_episode"] = False
 
     media_headers = _safe_site_headers(site)
     checks: list[dict[str, object]] = []
@@ -877,16 +946,21 @@ def build_coverage_report(
         registered_candidate_count=registered_candidate_count,
     )
     return {
-        "schema": "zeluna.maccms-probe.v2",
+        "schema": "zeluna.maccms-probe.v3",
         "profile": profile,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target_egress": "runtime-host",
         "candidate_count": candidate_count,
         "selected_source_count": candidate_count,
+        "benchmark_subject_count": len({
+            case.subject_id or case.case_id for case in cases
+        }),
         "benchmark_case_count": len(cases),
         "benchmark_cases": [
             {
                 "case_id": case.case_id,
+                "subject_id": case.subject_id or case.case_id,
+                "sample_kind": case.sample_kind,
                 "content_type": case.content_type,
                 "year": case.year,
                 "episode": case.episode,
@@ -896,6 +970,7 @@ def build_coverage_report(
         ],
         "source_inventory": inventory,
         "coverage_kpis": build_coverage_kpis(results),
+        "coverage_baselines": build_legacy_coverage_baselines(results),
         "results": results,
     }
 
@@ -945,7 +1020,8 @@ def _render_coverage_summary(
 ) -> None:
     kpis = report["coverage_kpis"]
     print(
-        f"Coverage：{report['benchmark_case_count']} 个案例，"
+        f"Coverage：{report['benchmark_subject_count']} 部作品 / "
+        f"{report['benchmark_case_count']} 个分集案例，"
         f"{len(results)} 个来源\n"
     )
     print(
@@ -969,6 +1045,14 @@ def _render_coverage_summary(
         f"任一真实可播 {kpis['subject_with_any_playable_route_rate']:.1%} · "
         f"零可播 {kpis['zero_playable_rate']:.1%} · "
         f"多 Host {kpis['multi_host_rate']:.1%}"
+    )
+    baselines = report["coverage_baselines"]
+    legacy = baselines["legacy_alias0_first_match"]
+    print(
+        "旧策略同批观测模型："
+        f"任一真实可播 "
+        f"{legacy['subject_with_any_playable_route_rate']:.1%} · "
+        f"零可播 {legacy['zero_playable_rate']:.1%}"
     )
 
 

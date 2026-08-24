@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -8,6 +11,7 @@ from tools.maccms_coverage import (
     DEFAULT_COVERAGE_CASES_PATH,
     CoverageCase,
     build_coverage_kpis,
+    build_legacy_coverage_baselines,
     build_source_promotion_pipeline,
     load_coverage_cases,
     recommend_source_tier,
@@ -17,11 +21,14 @@ from tools.probe_maccms import main, probe_coverage_case, probe_site_coverage
 
 
 class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
-    def test_default_dataset_has_mixed_36_to_60_case_coverage(self):
+    def test_default_dataset_has_100_subject_episode1_and_midpoint_coverage(self):
         cases = load_coverage_cases(DEFAULT_COVERAGE_CASES_PATH)
+        subjects: dict[str, list[CoverageCase]] = {}
+        for case in cases:
+            subjects.setdefault(case.subject_id, []).append(case)
 
-        self.assertGreaterEqual(len(cases), 36)
-        self.assertLessEqual(len(cases), 60)
+        self.assertGreaterEqual(len(subjects), 100)
+        self.assertGreaterEqual(len(cases), 160)
         self.assertEqual(
             {case.content_type for case in cases},
             {"anime", "tv", "movie"},
@@ -29,9 +36,83 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({case.case_id for case in cases}), len(cases))
         self.assertTrue(all(case.aliases for case in cases))
         self.assertTrue(all(case.episode >= 1 for case in cases))
+        subject_types = {
+            subject_id: subject_cases[0].content_type
+            for subject_id, subject_cases in subjects.items()
+        }
+        for content_type in ("anime", "tv", "movie"):
+            self.assertGreaterEqual(
+                sum(value == content_type for value in subject_types.values()),
+                30,
+            )
+        for subject_id, subject_cases in subjects.items():
+            self.assertEqual(
+                sum(case.sample_kind == "episode_1" for case in subject_cases),
+                1,
+                subject_id,
+            )
+            if subject_cases[0].content_type in {"anime", "tv"}:
+                midpoint = [
+                    case
+                    for case in subject_cases
+                    if case.sample_kind == "mid_episode"
+                ]
+                self.assertEqual(len(midpoint), 1, subject_id)
+                self.assertGreater(midpoint[0].episode, 1, subject_id)
+            self.assertTrue(
+                any(
+                    tag in {"popular", "mid-tail", "long-tail"}
+                    for tag in subject_cases[0].tags
+                ),
+                subject_id,
+            )
         self.assertGreaterEqual(
             sum("difficult" in case.tags for case in cases),
-            8,
+            30,
+        )
+        all_tags = {tag for case in cases for tag in case.tags}
+        self.assertTrue({
+            "chinese",
+            "japanese",
+            "western",
+            "korean",
+            "hong-kong",
+            "taiwan",
+        }.issubset(all_tags))
+        years = [subject_cases[0].year for subject_cases in subjects.values()]
+        self.assertGreaterEqual(sum(year <= 1999 for year in years), 6)
+        self.assertGreaterEqual(sum(2000 <= year <= 2014 for year in years), 20)
+        self.assertGreaterEqual(sum(year >= 2015 for year in years), 50)
+
+    def test_v2_subject_dataset_expands_episode_samples_without_duplication(self):
+        payload = {
+            "schema": "zeluna.maccms-coverage-subjects.v2",
+            "subjects": [{
+                "subject_id": "anime-example",
+                "query": "示例动画",
+                "aliases": ["Example Anime"],
+                "content_type": "anime",
+                "year": 2025,
+                "episode_samples": [1, 6],
+                "tags": ["anime", "japanese", "mid-tail"],
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "coverage.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            cases = load_coverage_cases(path)
+
+        self.assertEqual(
+            [case.case_id for case in cases],
+            ["anime-example-episode-1", "anime-example-episode-6"],
+        )
+        self.assertEqual([case.subject_id for case in cases], ["anime-example"] * 2)
+        self.assertEqual(
+            [case.sample_kind for case in cases],
+            ["episode_1", "mid_episode"],
         )
 
     def test_source_metrics_keep_verified_client_and_manual_quality_separate(self):
@@ -154,6 +235,124 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kpis["anime_coverage"], 1.0)
         self.assertEqual(kpis["tv_coverage"], 0.0)
 
+    def test_cross_source_kpis_separate_subject_and_episode_coverage(self):
+        source_a = {
+            "cases": [
+                {
+                    "case_id": "anime-a-episode-1",
+                    "subject_id": "anime-a",
+                    "sample_kind": "episode_1",
+                    "content_type": "anime",
+                    "server_verified": True,
+                    "verified_media_hosts": ["a.example"],
+                },
+                {
+                    "case_id": "anime-a-episode-6",
+                    "subject_id": "anime-a",
+                    "sample_kind": "mid_episode",
+                    "content_type": "anime",
+                    "server_verified": False,
+                    "verified_media_hosts": [],
+                },
+                {
+                    "case_id": "tv-b-episode-1",
+                    "subject_id": "tv-b",
+                    "sample_kind": "episode_1",
+                    "content_type": "tv",
+                    "server_verified": False,
+                    "verified_media_hosts": [],
+                },
+                {
+                    "case_id": "tv-b-episode-5",
+                    "subject_id": "tv-b",
+                    "sample_kind": "mid_episode",
+                    "content_type": "tv",
+                    "server_verified": True,
+                    "verified_media_hosts": ["c.example"],
+                },
+            ],
+        }
+        source_b = {
+            "cases": [{
+                "case_id": "anime-a-episode-1",
+                "subject_id": "anime-a",
+                "sample_kind": "episode_1",
+                "content_type": "anime",
+                "server_verified": True,
+                "verified_media_hosts": ["b.example"],
+            }],
+        }
+
+        kpis = build_coverage_kpis([source_a, source_b])
+
+        self.assertEqual(kpis["benchmark_subjects"], 2)
+        self.assertEqual(kpis["benchmark_cases"], 4)
+        self.assertEqual(kpis["episode_1_cases"], 2)
+        self.assertEqual(kpis["mid_episode_cases"], 2)
+        self.assertEqual(kpis["subject_with_any_playable_route_rate"], 0.5)
+        self.assertEqual(kpis["episode_with_any_playable_route_rate"], 0.5)
+        self.assertEqual(kpis["zero_playable_rate"], 0.5)
+        self.assertEqual(kpis["zero_playable_episode_rate"], 0.5)
+        self.assertEqual(kpis["multi_host_rate"], 0.5)
+
+    def test_legacy_baselines_model_alias0_and_first_match_failures(self):
+        site_results = [
+            {
+                "cases": [{
+                    "case_id": "anime-a-episode-1",
+                    "subject_id": "anime-a",
+                    "sample_kind": "episode_1",
+                    "content_type": "anime",
+                    "accepted_match": True,
+                    "matched_alias_index": 0,
+                    "search_latency_ms": 10,
+                    "server_verified": False,
+                    "verified_media_hosts": [],
+                }],
+            },
+            {
+                "cases": [{
+                    "case_id": "anime-a-episode-1",
+                    "subject_id": "anime-a",
+                    "sample_kind": "episode_1",
+                    "content_type": "anime",
+                    "accepted_match": True,
+                    "matched_alias_index": 0,
+                    "search_latency_ms": 30,
+                    "server_verified": True,
+                    "verified_media_hosts": ["good.example"],
+                }],
+            },
+            {
+                "cases": [{
+                    "case_id": "movie-b-episode-1",
+                    "subject_id": "movie-b",
+                    "sample_kind": "episode_1",
+                    "content_type": "movie",
+                    "accepted_match": True,
+                    "matched_alias_index": 1,
+                    "search_latency_ms": 20,
+                    "server_verified": True,
+                    "verified_media_hosts": ["alias.example"],
+                }],
+            },
+        ]
+
+        baselines = build_legacy_coverage_baselines(site_results)
+
+        self.assertEqual(
+            baselines["legacy_alias0_first_match"][
+                "subject_with_any_playable_route_rate"
+            ],
+            0.0,
+        )
+        self.assertEqual(
+            baselines["legacy_alias0_candidate_cap_6"][
+                "subject_with_any_playable_route_rate"
+            ],
+            0.5,
+        )
+
     def test_promotion_recommendations_never_bypass_manual_review(self):
         core = recommend_source_tier({
             "search_response_rate": 0.95,
@@ -235,7 +434,7 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(unsafe["eligible_for_manual_review"])
         self.assertEqual(unsafe["safety_failures"], ["non_public_target"])
 
-    async def test_coverage_profile_loads_dataset_and_emits_v2_report(self):
+    async def test_coverage_profile_loads_dataset_and_emits_v3_report(self):
         case = CoverageCase(
             case_id="coverage-cli",
             query="Coverage CLI",
@@ -296,9 +495,11 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
 
         load_cases.assert_called_once_with(DEFAULT_COVERAGE_CASES_PATH)
         probe_site.assert_awaited_once()
-        self.assertEqual(report["schema"], "zeluna.maccms-probe.v2")
+        self.assertEqual(report["schema"], "zeluna.maccms-probe.v3")
         self.assertEqual(report["profile"], "coverage")
+        self.assertEqual(report["benchmark_subject_count"], 1)
         self.assertEqual(report["benchmark_case_count"], 1)
+        self.assertIn("legacy_alias0_first_match", report["coverage_baselines"])
         self.assertEqual(
             report["source_inventory"]["configured_source_count"],
             1,
@@ -507,6 +708,8 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
             year=2025,
             episode=3,
             tags=("anime", "difficult"),
+            subject_id="anime-alias",
+            sample_kind="mid_episode",
         )
         site = {
             "name": "coverage-source",
@@ -549,8 +752,16 @@ class MacCmsCoverageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["search_responded"])
         self.assertTrue(result["search_hit"])
         self.assertTrue(result["accepted_match"])
+        self.assertEqual(result["subject_id"], "anime-alias")
+        self.assertEqual(result["sample_kind"], "mid_episode")
+        self.assertEqual(result["matched_alias_index"], 1)
+        self.assertEqual(result["matched_alias"], "Alternate Anime")
+        self.assertFalse(result["wrong_match"])
         self.assertTrue(result["detail_success"])
         self.assertTrue(result["episode_found"])
+        self.assertFalse(result["wrong_episode"])
+        self.assertEqual(result["episode_labels"], ["第3集"])
+        self.assertEqual(result["episode_mapping_modes"], ["explicit"])
         self.assertTrue(result["server_verified"])
         self.assertFalse(result["deterministic_failure"])
         self.assertEqual(result["matched_title"], "Alternate Anime")
