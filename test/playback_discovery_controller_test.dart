@@ -80,6 +80,81 @@ void main() {
   });
 
   test(
+    'expanded lookup includes enabled rule lines when backend is already playable',
+    () async {
+      var ruleCalls = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              <PlaybackLine>[_line('backend-line', provider: 'zeluna:backend')],
+        ),
+        rule: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async {
+            ruleCalls++;
+            return <PlaybackLine>[
+              _line('enabled-rule-line', provider: 'rule:enabled'),
+            ];
+          },
+        ),
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+
+      final lines = await controller.linesForEpisodeMode(
+        _subject,
+        _episode,
+        expandAll: true,
+      );
+
+      expect(ruleCalls, 1);
+      expect(
+        lines.map((line) => line.id),
+        containsAll(<String>['backend-line', 'enabled-rule-line']),
+      );
+    },
+  );
+
+  test(
+    'quick lookup still returns a playable backend line without waiting for rules',
+    () async {
+      var ruleCalls = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              <PlaybackLine>[_line('backend-line', provider: 'zeluna:backend')],
+        ),
+        rule: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async {
+            ruleCalls++;
+            return <PlaybackLine>[
+              _line('enabled-rule-line', provider: 'rule:enabled'),
+            ];
+          },
+        ),
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+
+      final lines = await controller.linesForEpisodeMode(_subject, _episode);
+
+      expect(ruleCalls, 0);
+      expect(lines.map((line) => line.id), <String>['backend-line']);
+    },
+  );
+
+  test(
     'cancellation suppresses a late progressive verification result',
     () async {
       final verification = Completer<void>();
@@ -197,6 +272,79 @@ void main() {
         isTrue,
       );
       expect(snapshots.last.phase, PlaybackLineLookupPhase.complete);
+    },
+  );
+
+  test(
+    'enabled rule lookup publishes before slow backend verification completes',
+    () async {
+      final verification = Completer<void>();
+      var verifyCalls = 0;
+      var ruleStreamCalls = 0;
+      final backend = _FakePlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async => [
+          _line('slow-backend', available: false, serverVerified: true),
+        ],
+      );
+      final rule = _FakePlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async => const [],
+        updates: (_, _, {cancellationToken}) async* {
+          ruleStreamCalls++;
+          yield PlaybackLineLookupUpdate(
+            lines: <PlaybackLine>[
+              _line('enabled-rule-line', provider: 'rule:enabled'),
+            ],
+            completedRules: 1,
+            totalRules: 1,
+            phase: PlaybackLineLookupPhase.complete,
+          );
+        },
+      );
+      final controller = _controller(
+        backend: backend,
+        rule: rule,
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              verifyCalls++;
+              await verification.future;
+              return _verified(line);
+            },
+      );
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .forEach(snapshots.add);
+      addTearDown(() async {
+        if (!verification.isCompleted) verification.complete();
+        await done;
+        controller.dispose();
+      });
+
+      await _waitUntil(() => verifyCalls == 1);
+
+      expect(ruleStreamCalls, 1);
+      await _waitUntil(
+        () => snapshots.any(
+          (update) =>
+              update.lines.any((line) => line.id == 'enabled-rule-line'),
+        ),
+      );
+      expect(verification.isCompleted, isFalse);
+
+      verification.complete();
+      await done;
     },
   );
 
@@ -1464,7 +1612,7 @@ void _load(
 );
 
 class _FakePlaybackRepository implements PlaybackSourceRepository {
-  _FakePlaybackRepository({required this.load});
+  _FakePlaybackRepository({required this.load, this.updates});
 
   factory _FakePlaybackRepository.empty() => _FakePlaybackRepository(
     load: (_, _, {required expandAll, cancellationToken}) async => const [],
@@ -1477,6 +1625,12 @@ class _FakePlaybackRepository implements PlaybackSourceRepository {
     RulePlaybackCancellationToken? cancellationToken,
   })
   load;
+  final Stream<PlaybackLineLookupUpdate> Function(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  })?
+  updates;
   @override
   Future<List<PlaybackLine>> linesForEpisode(
     AnimeSubject subject,
@@ -1507,7 +1661,9 @@ class _FakePlaybackRepository implements PlaybackSourceRepository {
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) => const Stream<PlaybackLineLookupUpdate>.empty();
+  }) =>
+      updates?.call(subject, episode, cancellationToken: cancellationToken) ??
+      const Stream<PlaybackLineLookupUpdate>.empty();
 }
 
 final class _FakePreferredPlaybackRepository extends _FakePlaybackRepository

@@ -221,7 +221,7 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
           rightRail: _HomeRightRail(feed: state.homeFeed, onOpen: _openDetail),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
-            progress: _watchProgress(state.history),
+            progress: _historyPlaybackProgress(state.history),
           ),
           child: _body(
             state.homeFeed,
@@ -241,14 +241,6 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
       AnimeHomeTab.category => ChromeDestination.series,
       AnimeHomeTab.tag => ChromeDestination.movie,
     };
-  }
-
-  double _watchProgress(List<LibraryEntry> history) {
-    if (history.isEmpty) return 0.62;
-    final latest = history.first.episode?.number ?? 1;
-    final total = history.first.subject.totalEpisodes;
-    if (total <= 0) return 0.35;
-    return (latest / total).clamp(0.05, 1);
   }
 
   Widget _body(
@@ -527,7 +519,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
           ),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
-            progress: _watchProgress(state.history),
+            progress: _historyPlaybackProgress(state.history),
           ),
           child: FutureBuilder<List<AnimeSubject>>(
             future: _subjectsFuture ??= _loadSubjects(ref),
@@ -899,14 +891,6 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
             _matchesLanguage(subject, '韩语')),
       _ => true,
     };
-  }
-
-  double _watchProgress(List<LibraryEntry> history) {
-    if (history.isEmpty) return 0.62;
-    final latest = history.first.episode?.number ?? 1;
-    final total = history.first.subject.totalEpisodes;
-    if (total <= 0) return 0.35;
-    return (latest / total).clamp(0.05, 1);
   }
 
   String _metadataText(AnimeSubject subject) {
@@ -2300,7 +2284,7 @@ class _DetailPageState extends ConsumerState<DetailPage> {
             ),
             bottomPlayer: _MiniNowPlaying(
               subject: bundle.subject,
-              progress: 0.58,
+              progress: historyEntry?.playbackProgress,
             ),
             child: Stack(
               children: [
@@ -2547,11 +2531,21 @@ class _HomeRightRail extends StatelessWidget {
   }
 }
 
+/// Real playback progress of the most recent history entry, or null when no
+/// entry carries a usable position/duration pair.
+double? _historyPlaybackProgress(List<LibraryEntry> history) {
+  for (final entry in history) {
+    final progress = entry.playbackProgress;
+    if (progress != null) return progress;
+  }
+  return null;
+}
+
 class _MiniNowPlaying extends StatelessWidget {
-  const _MiniNowPlaying({required this.subject, required this.progress});
+  const _MiniNowPlaying({required this.subject, this.progress});
 
   final AnimeSubject subject;
-  final double progress;
+  final double? progress;
 
   @override
   Widget build(BuildContext context) {
@@ -2584,13 +2578,16 @@ class _MiniNowPlaying extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          LinearProgressIndicator(
-            value: progress,
-            minHeight: 4,
-            borderRadius: BorderRadius.circular(4),
-            backgroundColor: AppColors.border,
-            color: AppColors.primary,
-          ),
+          if (progress != null)
+            LinearProgressIndicator(
+              value: progress,
+              minHeight: 4,
+              borderRadius: BorderRadius.circular(4),
+              backgroundColor: AppColors.border,
+              color: AppColors.primary,
+            )
+          else
+            const SizedBox(height: 4),
           const SizedBox(height: 12),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,

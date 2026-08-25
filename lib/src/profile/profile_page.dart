@@ -2511,12 +2511,7 @@ void _scrollToHistory(BuildContext context) {
   );
 }
 
-double? _entryProgress(LibraryEntry entry) {
-  final total = entry.subject.totalEpisodes;
-  final number = entry.episode?.number ?? 1;
-  if (total <= 0) return null;
-  return (number / total).clamp(0.05, 1.0);
-}
+double? _entryProgress(LibraryEntry entry) => entry.playbackProgress;
 
 bool _isFinishedEntry(LibraryEntry entry) {
   final total = entry.subject.totalEpisodes;

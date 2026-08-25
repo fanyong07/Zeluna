@@ -990,6 +990,8 @@ class PlaybackService:
                 candidate_year=row.year,
                 expected_year=year,
             )
+            if aliases and not analysis.playback_eligible:
+                continue
             circuit_open = self._source_circuit_is_open(
                 health.get(row.source_name),
                 now,

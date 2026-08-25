@@ -33,16 +33,28 @@ class SourceMatchEvidence:
     season_conflict: bool = False
     media_type_known: bool = False
     media_type_match: bool = False
+    media_type_compatible: bool = False
     year_known: bool = False
     year_compatible: bool = False
+
+    @property
+    def has_explicit_identity_conflict(self) -> bool:
+        return (
+            self.season_conflict
+            or (
+                self.media_type_known
+                and not (
+                    self.media_type_match or self.media_type_compatible
+                )
+            )
+            or (self.year_known and not self.year_compatible)
+        )
 
     @property
     def allows_circuit_recovery(self) -> bool:
         return (
             (self.exact_title or self.safe_title_variant)
-            and not self.season_conflict
-            and (not self.media_type_known or self.media_type_match)
-            and (not self.year_known or self.year_compatible)
+            and not self.has_explicit_identity_conflict
         )
 
 
@@ -51,6 +63,11 @@ class SourceMatchAnalysis:
     ranking_score: int
     accepted: bool
     evidence: SourceMatchEvidence
+
+    @property
+    def playback_eligible(self) -> bool:
+        """Allow ranking ambiguity, but never an explicit identity conflict."""
+        return self.accepted and not self.evidence.has_explicit_identity_conflict
 
 
 def _normalized_match_title(value: str) -> str:
@@ -62,6 +79,17 @@ def _normalized_match_title(value: str) -> str:
 
 def _normalized_evidence_title(value: str) -> str:
     return "".join(char for char in (value or "").casefold() if char.isalnum())
+
+
+def _normalized_media_type(value: str) -> str:
+    normalized = (value or "").strip().lower()
+    return "tv" if normalized == "series" else normalized
+
+
+def _media_types_compatible(candidate_type: str, expected_type: str) -> bool:
+    if candidate_type == expected_type:
+        return True
+    return {candidate_type, expected_type} == {"anime", "movie"}
 
 
 def _is_safe_short_title_variant(candidate: str, target: str) -> bool:
@@ -176,17 +204,19 @@ def _ranking_score(
         elif _is_safe_short_title_variant(normalized, target):
             score = max(score, 68)
 
-    normalized_candidate_type = (candidate_type or "").strip().lower()
-    normalized_expected_type = (expected_type or "").strip().lower()
-    if normalized_candidate_type == "series":
-        normalized_candidate_type = "tv"
-    if normalized_expected_type == "series":
-        normalized_expected_type = "tv"
+    normalized_candidate_type = _normalized_media_type(candidate_type)
+    normalized_expected_type = _normalized_media_type(expected_type)
     if (
         normalized_candidate_type in _KNOWN_MEDIA_TYPES
         and normalized_expected_type in _KNOWN_MEDIA_TYPES
     ):
-        score += 8 if normalized_candidate_type == normalized_expected_type else -25
+        if normalized_candidate_type == normalized_expected_type:
+            score += 8
+        elif not _media_types_compatible(
+            normalized_candidate_type,
+            normalized_expected_type,
+        ):
+            score -= 25
     if expected_year and candidate_year:
         distance = abs(expected_year - candidate_year)
         score += 10 if distance == 0 else (4 if distance == 1 else -12)
@@ -225,12 +255,8 @@ def analyze_source_match(
         None,
     )
     candidate_season = _season_number(candidate)
-    normalized_candidate_type = (
-        "tv" if candidate_type == "series" else (candidate_type or "").lower()
-    )
-    normalized_expected_type = (
-        "tv" if expected_type == "series" else (expected_type or "").lower()
-    )
+    normalized_candidate_type = _normalized_media_type(candidate_type)
+    normalized_expected_type = _normalized_media_type(expected_type)
     media_type_known = (
         normalized_candidate_type in _KNOWN_MEDIA_TYPES
         and normalized_expected_type in _KNOWN_MEDIA_TYPES
@@ -251,6 +277,13 @@ def analyze_source_match(
         media_type_match=(
             media_type_known
             and normalized_candidate_type == normalized_expected_type
+        ),
+        media_type_compatible=(
+            media_type_known
+            and _media_types_compatible(
+                normalized_candidate_type,
+                normalized_expected_type,
+            )
         ),
         year_known=year_known,
         year_compatible=(
