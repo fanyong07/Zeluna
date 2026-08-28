@@ -111,8 +111,10 @@ PLAYBACK_STALE_HOURS = max(1, int(os.getenv("PLAYBACK_STALE_HOURS", "24")))
 PLAYBACK_QUICK_TIMEOUT_SECONDS = max(
     0.5, min(8.0, float(os.getenv("PLAYBACK_QUICK_TIMEOUT_SECONDS", "4.5")))
 )
+# 首播优先取够这么多条可播线路即可开播;其余来源仍会在完整扫描里查完,
+# 列表不会因此缺项(缺项只会短暂出现在 quick 响应里)。
 PLAYBACK_QUICK_LINE_COUNT = max(
-    1, min(5, int(os.getenv("PLAYBACK_QUICK_LINE_COUNT", "3")))
+    1, min(12, int(os.getenv("PLAYBACK_QUICK_LINE_COUNT", "6")))
 )
 PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES = max(
     1,

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
@@ -65,6 +66,9 @@ _PAREN_SPLIT_RE = re.compile(r"[()()【】\[\]]")
 _LEADING_NUMBER_RE = re.compile(r"^\d+\s*·\s*")
 _SEARCH_PAGE_LIMIT = 20
 _OWN_CDN_TOKENS = ANICH_OWN_CDN_HOST_TOKENS
+#: 剧集表缓存时长。实测该请求约 1s,叠加串行节流后每次取流要多等两秒以上;
+#  而集数表在一集的生命周期内几乎不变,短期缓存是安全的。
+ANICH_EPISODES_CACHE_SECONDS = 900.0
 
 
 def resolve_global_sort(episodes: list[dict], episode: int) -> Optional[int]:
@@ -121,18 +125,30 @@ def _is_own_cdn(url: str) -> bool:
     return any(token in host for token in _OWN_CDN_TOKENS)
 
 
-# 线上实测的交付形态权重(单集 61 条线路的域名分布分析):
-#   自建 CDN 官方二压 > 边缘代取流 > 对象存储转存 > 采集站原始 m3u8。
-# caption 带画质括注的只占少数,因此域名类别必须是主排序信号,
-# 画质词只作同类内的次级加分。
-_DELIVERY_REWARD = 60.0
-_PROXY_REWARD = 40.0
-_OBJECT_STORE_REWARD = 20.0
+# 交付形态权重 —— **按实测延迟排序,不按画质**。
+#
+# 2026-08-28 实测(客户端侧首字节):
+#   大厂对象存储(快手/字节)   396~407ms   ← 最快
+#   采集站原始 HLS            478ms
+#   边缘代取流                1783~3000ms
+#   自建 CDN 官方二压         2029~2915ms ← 画质最好但最慢
+#
+# 大厂 CDN 的边缘节点远强于个人运营的自建 CDN,差距 5~7 倍。画质档
+# (官方简中/4K)因此降为**同类内的次级加分**:先让用户快速起播,
+# 想要更高画质可以手动切到二压线路(它们仍在列表里)。
+_OBJECT_STORE_REWARD = 60.0
+_SITE_HLS_REWARD = 45.0
+#: 二压与代取流实测延迟接近(2029~2915ms vs 1783~3000ms),给二压略高的
+#  底分,使"慢但画质好"的线路不会掉到"同样慢且画质未知"的代取流之后。
+_DELIVERY_REWARD = 25.0
+_PROXY_REWARD = 20.0
 _OBJECT_STORE_TOKENS = (
     "adkwai.com",
+    "kwai.net",
     "ibyteimg.com",
     "xiaohongshu.com",
     "scsusercontent.cn",
+    "myqcloud.com",
 )
 # 线上混入的转发/过滤入口:脚本端点带 query 参数,不是媒体本体。
 # 例:player.91ju.cc/wgart/api.php?action=ad_filter_proxy&video_url=...
@@ -148,27 +164,50 @@ def _is_script_endpoint(url: str) -> bool:
 
 
 def line_rank(url: str, caption: str) -> float:
-    """服务端排序分;分数越高越优先。"""
-    score = _QUALITY_REWARD.get(caption_quality(caption), 0.0)
+    """服务端排序分;分数越高越优先。**主信号是预期延迟,不是画质。**"""
     host = (urlparse(url).hostname or "").lower()
-    if any(token in host for token in ANICH_OWN_CDN_HOST_TOKENS):
-        # 自建 CDN 的两种形态:官方二压目录 vs 边缘代取流
-        score += _DELIVERY_REWARD if "vod-cdn" in host else _PROXY_REWARD
-    elif any(token in host for token in _OBJECT_STORE_TOKENS):
-        score += _OBJECT_STORE_REWARD
-    if ".m3u8" in url.lower():
-        score += 5.0
+    lowered = url.lower()
+    if any(token in host for token in _OBJECT_STORE_TOKENS):
+        score = _OBJECT_STORE_REWARD          # 大厂 CDN,实测最快
+    elif any(token in host for token in ANICH_OWN_CDN_HOST_TOKENS):
+        # 自建 CDN 的两种形态都偏慢:官方二压目录 vs 边缘代取流
+        score = _DELIVERY_REWARD if "vod-cdn" in host else _PROXY_REWARD
+    elif ".m3u8" in lowered:
+        score = _SITE_HLS_REWARD              # 采集站原始 HLS,实测次快
+    else:
+        score = _PROXY_REWARD
+    # 画质只在同类内破平(想要二压画质仍可手动切,线路都在列表里)
+    score += _QUALITY_REWARD.get(caption_quality(caption), 0.0) * 0.5
+    if ".m3u8" in lowered:
+        score += 2.0
     return score
 
 
 class AniChScraper(BaseScraper):
     """AniCh 聚合后端 anime-only 只读适配器。"""
 
-    def __init__(self, *, transport=None, max_lines: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transport=None,
+        max_lines: int | None = None,
+        episodes_cache_seconds: float | None = None,
+        clock=time.monotonic,
+    ) -> None:
         super().__init__()
         self._name = "anich"
         self._transport = transport or AniChTransport()
         self._max_lines = max_lines
+        self._clock = clock
+        self._episodes_ttl = (
+            ANICH_EPISODES_CACHE_SECONDS
+            if episodes_cache_seconds is None
+            else episodes_cache_seconds
+        )
+        #: bangumi_id → (取回时刻, 剧集表)。集数表在一集的生命周期内几乎不变,
+        #  而每次取流都要先拿它:实测该请求本身约 1s,加上串行节流的最小间隔,
+        #  不缓存等于给每次播放白加两秒多。
+        self._episodes_cache: dict[int, tuple[float, list[dict]]] = {}
 
     @property
     def content_types(self) -> list[str]:
@@ -202,18 +241,13 @@ class AniChScraper(BaseScraper):
             return None
         detail_payload = await self._transport.request(anich_detail_path(bangumi_id))
         meta = _detail_meta(detail_payload, bangumi_id)
-        episodes_payload = await self._transport.request(
-            anich_episodes_path(bangumi_id)
-        )
         episodes = [
             EpisodeInfo(
                 number=index + 1,
                 title=(entry.get("title") or f"第{index + 1}集"),
                 source_episode_id=str(entry.get("sort") or index + 1),
             )
-            for index, entry in enumerate(
-                anich_proto.decode_episodes(episodes_payload)
-            )
+            for index, entry in enumerate(await self._episodes(bangumi_id))
         ]
         return SubjectDetail(
             source_id=str(bangumi_id),
@@ -233,11 +267,8 @@ class AniChScraper(BaseScraper):
         bangumi_id = _parse_bangumi_id(source_id)
         if bangumi_id is None:
             return []
-        episodes_payload = await self._transport.request(
-            anich_episodes_path(bangumi_id)
-        )
         global_sort = resolve_global_sort(
-            anich_proto.decode_episodes(episodes_payload), int(episode)
+            await self._episodes(bangumi_id), int(episode)
         )
         if global_sort is None:
             return []
@@ -267,6 +298,10 @@ class AniChScraper(BaseScraper):
             ) in {INVALID_MEDIA_URL, PLAYER_PAGE_URL}:
                 continue
             seen_urls.add(key)
+            # 每条线路必须有独立身份:客户端按 providerId|sourceName 折叠卡片,
+            # 共用一个名字会把数十条压成一张卡。直接用上游的线路标识
+            # (hb-10/jk-18/xk-12…)作展示名:天然唯一,且不暴露聚合源名称。
+            tag = (item.get("source") or "").strip()
             scored.append(
                 (
                     line_rank(url, caption),
@@ -277,16 +312,37 @@ class AniChScraper(BaseScraper):
                         quality=caption_quality(caption),
                         format=declared_format,
                         headers={},
-                        source_name=self.name,
+                        source_name=tag or f"line-{index + 1}",
                     ),
                 )
             )
         scored.sort(key=lambda entry: (-entry[0], entry[1]))
-        selected = [line for _, _, line in scored[: self._effective_max_lines()]]
-        for position, line in enumerate(selected, 1):
+        lines = [line for _, _, line in scored]
+        seen_names: dict[str, int] = {}
+        for position, line in enumerate(lines, 1):
             if not line.title:
                 line.title = f"线路{position}"
-        return selected
+            # 同一线路标识可能出现多次(不同画质档),补序号保证展示身份唯一
+            count = seen_names.get(line.source_name, 0) + 1
+            seen_names[line.source_name] = count
+            if count > 1:
+                line.source_name = f"{line.source_name}-{count}"
+        return lines
+
+    async def _episodes(self, bangumi_id: int) -> list[dict]:
+        """取剧集表,带短期缓存。
+
+        取流必须先拿这张表,而它本身约 1s、还要占一次串行节流额度。
+        集数表在一集的生命周期内几乎不变,因此短期缓存不会导致集号错位。
+        """
+        cached = self._episodes_cache.get(bangumi_id)
+        if cached is not None and (self._clock() - cached[0]) < self._episodes_ttl:
+            return cached[1]
+        payload = await self._transport.request(anich_episodes_path(bangumi_id))
+        episodes = anich_proto.decode_episodes(payload)
+        if episodes:
+            self._episodes_cache[bangumi_id] = (self._clock(), episodes)
+        return episodes
 
     async def aclose(self) -> None:
         close = getattr(self._transport, "aclose", None)
@@ -295,6 +351,7 @@ class AniChScraper(BaseScraper):
 
     # ── 内部 ────────────────────────────────────────────────
     def _effective_max_lines(self) -> int:
+        """保留给测试与诊断:线路本身全量返回,此值只表达"建议优先验证的条数"。"""
         if self._max_lines is not None:
             return max(1, int(self._max_lines))
         from ... import config

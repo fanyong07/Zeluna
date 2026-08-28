@@ -72,14 +72,19 @@ _VOD_LINES = [
 ]
 
 
+#: 上游的线路标识(字段5),用作 UI 展示名
+_VOD_TAGS = ("hb-10", "aw-11", "jk-18", "dl-7", "bf-3", "xs-6")
+
+
 def _vod_items_bytes() -> bytes:
     import json as _json
 
     items = []
-    for url, caption in _VOD_LINES:
+    for index, (url, caption) in enumerate(_VOD_LINES):
         inner = _string_field(1, _variant_b64(url)) + _field_varint(2, 38)
         if caption:
             inner += _string_field(4, caption)
+        inner += _string_field(5, _VOD_TAGS[index % len(_VOD_TAGS)])
         pb_item = _field_bytes(1, inner)
         items.extend(int(b) for b in pb_item)
     junk_pb = _field_bytes(1, _string_field(1, _variant_b64("not-a-url")))
@@ -170,12 +175,30 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(line_display_title("第10话"), "")
         self.assertEqual(line_display_title("10(繁体中文)"), "繁体中文")
 
-    def test_line_rank_prefers_own_cdn_then_m3u8(self):
-        cdn = line_rank("https://a.vod-cdn.sends.eu.org.cdn.cloudflare.net/v/x", "x")
-        plain_m3u8 = line_rank("https://plain.example/a.m3u8", "x")
-        plain_mp4_no_caption = line_rank("https://plain.example/a.mp4", "")
-        self.assertGreater(cdn, plain_m3u8)
-        self.assertGreater(plain_m3u8, plain_mp4_no_caption)
+    def test_line_rank_prefers_low_latency_delivery(self):
+        """排序主信号是实测延迟:大厂对象存储 ~400ms,自建 CDN ~2000ms+。"""
+        object_store = line_rank("https://v1.adkwai.com/bs2/adVideoLp/x", "")
+        site_hls = line_rank("https://m3u8.site.example/a/index.m3u8", "")
+        own_cdn = line_rank(
+            "https://a.vod-cdn.sends.eu.org.cdn.cloudflare.net/v/x",
+            "第1集(官方简中-全高清-1080P)",
+        )
+        proxy = line_rank("https://v-cdn.emmmm.eu.org/video/x", "")
+        self.assertGreater(object_store, site_hls)
+        self.assertGreater(site_hls, own_cdn)
+        self.assertGreater(own_cdn, proxy)  # 二压带画质加分,略高于纯代取流
+
+    def test_quality_only_breaks_ties_within_a_delivery_class(self):
+        base = "https://v1.adkwai.com/bs2/adVideoLp/"
+        premium = line_rank(base + "a", "第1集(官方简中-全高清-1080P)")
+        plain = line_rank(base + "b", "第1集")
+        self.assertGreater(premium, plain)
+        # 但画质加分不足以让慢的交付形态翻到快的前面
+        slow_premium = line_rank(
+            "https://vod-cdn.sends.eu.org.cdn.cloudflare.net/video/zs/x",
+            "第1集(官方简中-全高清-1080P)",
+        )
+        self.assertGreater(plain, slow_premium)
 
 
 class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
@@ -208,7 +231,14 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         urls = [line.url for line in lines]
         self.assertIn("https://v-cdn.emmmm.eu.org/video/Dg9Zlwn", urls)
         self.assertNotIn("not-a-url", "".join(urls).lower())
-        self.assertTrue(all(line.source_name == "anich" for line in lines))
+        # 每条线路都要有独立身份,否则客户端按 providerId|sourceName 折叠时
+        # 数十条会被压成一张卡;展示名用上游线路标识,不出现聚合源名称
+        names = [line.source_name for line in lines]
+        self.assertEqual(len(set(names)), len(names), f"sourceName 有重复: {names}")
+        self.assertFalse(
+            any("anich" in name.lower() for name in names),
+            f"展示名不应暴露聚合源名称: {names}",
+        )
         self.assertTrue(all(line.headers == {} for line in lines))
 
     async def test_script_forwarding_endpoint_is_rejected(self):
@@ -231,28 +261,50 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(line.title for line in lines))
         self.assertTrue(any(line.title.startswith("线路") for line in lines))
 
-    async def test_delivery_class_outranks_quality_words(self):
-        subject = _scraper(_Handler(), max_lines=12)
+    async def test_delivery_class_ordering_follows_measured_latency(self):
+        subject = _scraper(_Handler())
         try:
             lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
         finally:
             await subject.aclose()
         hosts = [line.url.split("/")[2] for line in lines]
-        # 自建 CDN 官方二压 > 代取流 > 对象存储转存 > 采集站
-        self.assertTrue(hosts[0].startswith("vod-cdn"))
-        self.assertTrue(hosts[1].startswith("v-cdn"))
-        self.assertIn("adkwai", hosts[2])
+        # 实测延迟序:大厂对象存储 < 采集站 HLS < 自建 CDN/代取流
+        self.assertIn("adkwai", hosts[0])
+        self.assertTrue(
+            any("playxf" in h or "m3u8" in h for h in hosts[1:3]),
+            f"采集站 HLS 应排在自建 CDN 之前: {hosts}",
+        )
 
-    async def test_lines_are_ranked_and_capped(self):
-        subject = _scraper(self.handler, max_lines=3)
+    async def test_display_names_use_upstream_line_tags(self):
+        subject = _scraper(_Handler())
         try:
             lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
         finally:
             await subject.aclose()
-        self.assertEqual(len(lines), 3)
-        # 头名必须是自建 CDN 官方二压且保留画质标注
-        self.assertTrue(lines[0].url.startswith("https://vod-cdn"))
-        self.assertEqual(lines[0].quality, "官方简中·1080P")
+        names = [line.source_name for line in lines]
+        # 展示名应是 hb-10 / jk-18 这类线路标识
+        self.assertTrue(
+            all(name in _VOD_TAGS or name.rsplit("-", 1)[0] in _VOD_TAGS
+                for name in names),
+            f"展示名未使用上游线路标识: {names}",
+        )
+
+    async def test_all_lines_are_returned_and_ranked(self):
+        """线路全量返回(不截断),排序把预期延迟最低的放最前。"""
+        subject = _scraper(self.handler)
+        try:
+            lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
+        finally:
+            await subject.aclose()
+        # fixture 六条原始行:一条同址重复、一条脚本端点被拒 → 全量 4 条
+        self.assertEqual(len(lines), 4)
+        # 头名是大厂对象存储(实测 ~400ms),而非最慢的自建 CDN 二压
+        self.assertIn("adkwai", lines[0].url)
+        # 官方二压仍在列表里,只是不再默认排第一
+        self.assertTrue(any("vod-cdn" in line.url for line in lines))
+        self.assertTrue(
+            any(line.quality == "官方简中·1080P" for line in lines)
+        )
 
     async def test_duplicate_urls_are_deduplicated(self):
         subject = _scraper(_Handler(), max_lines=12)
@@ -264,6 +316,26 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         # fixture 六条原始行:一条同址重复、一条脚本端点被拒 → 剩 4 条
         self.assertEqual(len(urls), 4)
         self.assertEqual(len(urls), len(set(urls)))
+
+    async def test_episodes_are_cached_across_calls(self):
+        """剧集表约 1s 且占一次串行节流额度,重复取流不应重复拉取。"""
+        now = [1000.0]
+        subject = _scraper(
+            self.handler, episodes_cache_seconds=600.0, clock=lambda: now[0]
+        )
+        try:
+            await subject.get_video_urls(str(BANGUMI_ID), 1)
+            first = self.handler.calls.count(f"/bangumi/episodes/{BANGUMI_ID}")
+            await subject.get_video_urls(str(BANGUMI_ID), 1)
+            cached = self.handler.calls.count(f"/bangumi/episodes/{BANGUMI_ID}")
+            self.assertEqual(first, 1)
+            self.assertEqual(cached, 1, "缓存内不应重复拉取剧集表")
+            now[0] += 601  # TTL 过期
+            await subject.get_video_urls(str(BANGUMI_ID), 1)
+            expired = self.handler.calls.count(f"/bangumi/episodes/{BANGUMI_ID}")
+            self.assertEqual(expired, 2, "TTL 过期后应重新拉取")
+        finally:
+            await subject.aclose()
 
     async def test_unsolvable_episode_returns_empty_without_vod_call(self):
         lines = await self.scraper.get_video_urls(str(BANGUMI_ID), 999)

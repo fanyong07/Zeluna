@@ -188,7 +188,14 @@ def decode_vod(payload: bytes) -> list[dict]:
     for field_number, wire_type, value in iter_fields(payload):
         if field_number != 1 or wire_type != _WIRE_LEN or not isinstance(value, bytes):
             continue
-        item = {"url_raw": "", "sort": 0, "type": "", "caption": ""}
+        item = {
+            "url_raw": "",
+            "sort": 0,
+            "type": "",
+            "caption": "",
+            "source": "",
+            "subject_title": "",
+        }
         for fno, _wtype, inner in iter_fields(value):
             if fno == 1 and isinstance(inner, bytes):
                 item["url_raw"] = _text(inner)
@@ -198,6 +205,13 @@ def decode_vod(payload: bytes) -> list[dict]:
                 item["type"] = _text(inner)
             elif fno == 4 and isinstance(inner, bytes):
                 item["caption"] = _text(inner)
+            elif fno == 5 and isinstance(inner, bytes):
+                # 上游对该线路的权威来源标识(如 wk-21 / ek-20)。
+                # 单集数十条线路横跨约 52 个标识,是让每条线路在 UI 上
+                # 拥有独立身份的关键——否则同名线路会被折叠成一张卡。
+                item["source"] = _text(inner)
+            elif fno == 6 and isinstance(inner, bytes):
+                item["subject_title"] = _text(inner)
         items.append(item)
     return items
 
