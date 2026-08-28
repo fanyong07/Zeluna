@@ -3260,5 +3260,39 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class AniChLineTtlStampTests(unittest.TestCase):
+    """crawler.anich 无签名直链在缓存行内单独盖短 TTL;其他来源不受影响。"""
+
+    def setUp(self):
+        from server.aggregator import AggregatedVideoLine
+
+        self._line_cls = AggregatedVideoLine
+        # 只为复用 _stamped_line_expiry 的纯函数逻辑,不起数据库
+        self.service = PlaybackService.__new__(PlaybackService)
+
+    def test_anich_line_without_signature_gets_configured_ttl(self):
+        line = self._line_cls(url="https://media.example/a.mp4", source="crawler.anich")
+        with patch("server.playback.PLAYBACK_ANICH_LINE_TTL_HOURS", 2.0):
+            stamped = self.service._stamped_line_expiry(line)
+        expected = int(time.time()) + 2 * 3600
+        self.assertLessEqual(abs(stamped - expected), 3)
+
+    def test_signed_urls_keep_their_own_expiry_even_for_anich(self):
+        url = f"https://media.example/a.m3u8?expires={int(time.time()) + 3600}"
+        line = self._line_cls(url=url, source="crawler.anich")
+        stamped = self.service._stamped_line_expiry(line)
+        self.assertEqual(stamped, int(time.time()) + 3600)
+
+    def test_ttl_stamp_disabled_by_non_positive_setting(self):
+        line = self._line_cls(url="https://media.example/a.mp4", source="crawler.anich")
+        with patch("server.playback.PLAYBACK_ANICH_LINE_TTL_HOURS", 0):
+            self.assertEqual(self.service._stamped_line_expiry(line), 0)
+
+    def test_other_sources_untouched_by_stamp(self):
+        for source in ("aggregate.maccms", "crawler.girigiri", ""):
+            line = self._line_cls(url="https://media.example/x.mp4", source=source)
+            self.assertEqual(self.service._stamped_line_expiry(line), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

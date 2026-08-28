@@ -64,6 +64,10 @@ from .managed_lines.service import (
 )
 from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
 from .playback_health import SourceFailureScope
+from .premium_catalog import (
+    build_record as build_premium_record,
+    record_premium_line,
+)
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -671,6 +675,9 @@ class PlaybackService:
         )
         if self._should_store_full_result(data):
             await self._store_cache(session, stable_id, episode, title, data)
+        await self._record_premium_lines(
+            session, stable_id, episode, title, data
+        )
         return [
             {
                 **item,
@@ -680,6 +687,35 @@ class PlaybackService:
             }
             for item in data
         ]
+
+    async def _record_premium_lines(
+        self,
+        session: AsyncSession,
+        stable_id: str,
+        episode: int,
+        title: str,
+        items: list[dict],
+    ) -> None:
+        """把见到的高画质档登记进清单(只记元数据,失败不影响播放)。"""
+        try:
+            for item in items:
+                record = build_premium_record(
+                    subject_stable_id=stable_id,
+                    episode=episode,
+                    url=str(item.get("url") or ""),
+                    quality_label=str(item.get("quality") or ""),
+                    source_tag=str(item.get("source_name") or ""),
+                    provider_id=str(item.get("provider_id") or item.get("source") or ""),
+                    subject_title=title,
+                    container=str(item.get("format") or ""),
+                    reachable=str(item.get("status") or "") == SERVER_VERIFIED,
+                )
+                if record is not None:
+                    await record_premium_line(session, record)
+        except Exception as error:  # noqa: BLE001 - 清单是旁路,不得阻断播放
+            logger.debug(
+                "premium catalog skipped: %s", type(error).__name__
+            )
 
     async def _playback_context(
         self,

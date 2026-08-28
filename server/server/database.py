@@ -584,6 +584,52 @@ class ManagedPlaybackLine(Base):
     revoked_at: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
 
 
+class PremiumLineCatalog(Base):
+    """高画质线路的**元数据清单**,供运维人工评估与自行留存。
+
+    这张表刻意不存放可直接播放的地址,也永远不含媒体字节:
+      * 只记媒体主机名与路径摘要(``path_digest``),不记完整 URL 与查询串;
+      * 临时直链天数级失效,存完整地址既无用又扩大暴露面;
+      * 清单的用途是回答"这一集见过哪些画质档、来自哪个来源标识",
+        实际取流仍须现场重新解析。
+    """
+
+    __tablename__ = "premium_line_catalog"
+    __table_args__ = (
+        CheckConstraint("episode >= 0", name="ck_premium_line_episode"),
+        Index(
+            "ix_premium_line_lookup",
+            "subject_stable_id",
+            "episode",
+            "quality_label",
+        ),
+        UniqueConstraint(
+            "subject_stable_id",
+            "episode",
+            "source_tag",
+            "path_digest",
+            name="uq_premium_line_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    subject_stable_id: Mapped[str] = mapped_column(String(200), index=True)
+    episode: Mapped[int] = mapped_column(Integer, default=0)
+    subject_title: Mapped[str] = mapped_column(String(300), default="")
+    quality_label: Mapped[str] = mapped_column(String(60), default="")
+    source_tag: Mapped[str] = mapped_column(String(60), default="")
+    provider_id: Mapped[str] = mapped_column(String(60), default="")
+    media_host: Mapped[str] = mapped_column(String(200), default="")
+    #: 媒体路径的 sha256 前 16 位。用于跨次去重,不可还原成地址。
+    path_digest: Mapped[str] = mapped_column(String(32), default="")
+    container: Mapped[str] = mapped_column(String(20), default="")
+    discovered_at: Mapped[float] = mapped_column(Float, default=0.0)
+    last_seen_at: Mapped[float] = mapped_column(Float, default=0.0)
+    #: 最近一次服务端验证可达的时间(0 = 未验证通过)
+    reachable_at: Mapped[float] = mapped_column(Float, default=0.0)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+
 # ---------------------------------------------------------------------------
 # 统一内容目录与播放源绑定
 # ---------------------------------------------------------------------------

@@ -60,6 +60,12 @@ MANAGED_PLAYBACK_LINES_ENABLED=false
 MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL=true
 MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE=8
 MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS=12
+ANICH_MIN_REQUEST_INTERVAL_SECONDS=1.2
+ANICH_HTTP_TIMEOUT_SECONDS=15
+ANICH_BACKOFF_MAX_SECONDS=20
+ANICH_BASE_COOLDOWN_SECONDS=300
+ANICH_MAX_LINES_PER_EPISODE=6
+PLAYBACK_ANICH_LINE_TTL_HOURS=2
 ```
 
 - `TMDB_READ_ACCESS_TOKEN`：TMDB v4 Read Access Token，电视剧和电影目录必需。
@@ -84,6 +90,12 @@ MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS=12
 - `MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL`：默认 `true`。保持开启时，验线成功后仍必须由管理员批准；关闭时，验线通过会自动批准，但新建和批量导入仍始终从 draft 开始。
 - `MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE`：单集最多参与合并的管理线路数，默认 `8`。
 - `MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS`：单条远程 URL 验线总超时，默认 `12` 秒。验线只在内存中有限读取清单、密钥或首段样本，不写入磁盘。
+- `ANICH_*`：番剧聚合源 `crawler.anich` 的按需代取参数。该源必须在 `PLAYBACK_PROVIDER_IDS` 中显式点名才会启用（灰度示例：`PLAYBACK_PROVIDER_IDS=aggregate.maccms,crawler.anich`），去掉该 ID 即完成回滚。
+  - `ANICH_MIN_REQUEST_INTERVAL_SECONDS`：同进程串行请求的最小间隔，默认 `1.2` 秒。上游有风控，调低会显著提高 `403/429` 概率。
+  - `ANICH_HTTP_TIMEOUT_SECONDS` / `ANICH_BACKOFF_MAX_SECONDS`：单请求超时与限流退避上限，默认 `15` / `20` 秒。
+  - `ANICH_BASE_COOLDOWN_SECONDS`：某个上游候选域失败后的冷却时长，默认 `300` 秒；冷却期间自动顺延到下一候选。
+  - `ANICH_MAX_LINES_PER_EPISODE`：单集参与后续验证的线路上限，默认 `6`（上游单集可返回数十条，不截断会放大并发探测）。
+  - `PLAYBACK_ANICH_LINE_TTL_HOURS`：该源直链无签名参数但按天易腐，默认对其单独盖 `2` 小时逐线过期；设为 `0` 关闭盖章，改由整行缓存 TTL 兜底。
 
 ## 管理远程播放线路
 

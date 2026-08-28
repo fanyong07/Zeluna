@@ -31,6 +31,8 @@ from .config import (
     PRECACHE_INTERVAL_HOURS,
     PRECACHE_MAX_SUBJECTS,
     PRIVACY_CLEANUP_INTERVAL_HOURS,
+    SITE_INDEX_PAGES,
+    SITE_INDEX_REBUILD_HOURS,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,7 @@ class ContentScheduler:
         self._tasks["metadata"] = asyncio.create_task(self._metadata_loop())
         self._tasks["health"] = asyncio.create_task(self._health_loop())
         self._tasks["privacy"] = asyncio.create_task(self._privacy_loop())
+        self._tasks["site_index"] = asyncio.create_task(self._site_index_loop())
 
         logger.info("Scheduler started")
 
@@ -202,6 +205,51 @@ class ContentScheduler:
                 break
             except Exception as error:
                 logger.warning("Playback refresh loop failed: %s", type(error).__name__)
+
+    async def _site_index_loop(self):
+        """为站内搜索不可用的站点重建本地标题索引。
+
+        这类站的搜索被边缘缓存冻结或首访即弹验证码,只能靠列表页建
+        ``title → sid`` 索引。没有索引时它们的 ``search()`` 恒返回空,
+        等于该源没接上,所以这个循环是它们能工作的前提。
+        """
+        while self._running:
+            try:
+                if not self._has_active_playback_provider():
+                    await asyncio.sleep(300)
+                    continue
+                built = await self._rebuild_site_indexes()
+                if built:
+                    self._stats["site_index"] = built
+                await asyncio.sleep(SITE_INDEX_REBUILD_HOURS * 3600)
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                logger.warning(
+                    "Site index loop failed: %s", type(error).__name__
+                )
+                await asyncio.sleep(30 * 60)
+
+    async def _rebuild_site_indexes(self) -> dict[str, int]:
+        """给需要索引的已启用站点各建一次索引。→ {站点: 条目数}"""
+        built: dict[str, int] = {}
+        for name, scraper in aggregator.active_crawler_scrapers.items():
+            builder = getattr(scraper, "build_local_index", None)
+            if not callable(builder):
+                continue
+            index = getattr(scraper, "index", None)
+            if index is not None and index.age_hours() < SITE_INDEX_REBUILD_HOURS:
+                continue
+            try:
+                result = await builder(pages=SITE_INDEX_PAGES)
+            except Exception as error:  # noqa: BLE001 - 单站失败不影响其它站
+                logger.debug(
+                    "Site index build failed [%s]: %s", name, type(error).__name__
+                )
+                continue
+            built[name] = result.size
+            logger.info("Site index rebuilt [%s]: %d 条", name, result.size)
+        return built
 
     async def _metadata_loop(self):
         """把三类热门目录保持在本地，客户端无需持有个人 API Token。"""

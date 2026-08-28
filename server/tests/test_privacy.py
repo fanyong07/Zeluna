@@ -148,13 +148,20 @@ def test_scheduler_registers_and_cancels_privacy_retention_task():
         scheduler._metadata_loop = idle_loop
         scheduler._health_loop = idle_loop
         scheduler._privacy_loop = idle_loop
+        scheduler._site_index_loop = idle_loop
         await scheduler.start()
         task_names = set(scheduler._tasks)
         await scheduler.stop()
         return task_names, scheduler._tasks
 
     task_names, remaining = asyncio.run(exercise())
-    assert task_names == {"cache_refresh", "metadata", "health", "privacy"}
+    assert task_names == {
+        "cache_refresh",
+        "metadata",
+        "health",
+        "privacy",
+        "site_index",
+    }
     assert remaining == {}
 
 

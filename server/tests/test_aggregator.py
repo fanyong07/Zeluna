@@ -186,6 +186,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             set(self.aggregator._crawler_scrapers),
             {
                 "age",
+                "anich",
                 "dm706",
                 "dbku",
                 "girigiri",
@@ -194,6 +195,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 "ppnix",
                 "wedm",
                 "xgcartoon",
+                "yhdmm",
                 "yinghua2",
             },
         )
@@ -1399,6 +1401,79 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             status = await self.aggregator._line_verification_status(line)
 
         self.assertEqual(status, CLIENT_PROBE_REQUIRED)
+
+
+class _FakeAniChScraper:
+    """Duck-typed AniCh 站位:记录 search 收到的关键词序。"""
+
+    def __init__(self) -> None:
+        self.search_calls: list[str] = []
+        self.closed = False
+
+    @property
+    def content_types(self):
+        return ["anime"]
+
+    async def search(self, keyword: str):
+        self.search_calls.append(keyword)
+        return [
+            SubjectResult(
+                source_id="37654",
+                title=keyword,
+                type="anime",
+                year=2024,
+            )
+        ]
+
+    async def get_detail(self, source_id: str):
+        return SubjectDetail(source_id=source_id, title="", type="anime")
+
+    async def get_video_urls(self, source_id: str, episode: int = 1):
+        return []
+
+    async def get_latest(self, page: int = 1):
+        return []
+
+    async def get_home(self):
+        return []
+
+    async def aclose(self):
+        self.closed = True
+
+
+class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_discovery_alias_budget_limits_anich_search_calls(self):
+        scraper = _FakeAniChScraper()
+        aggregator = ContentAggregator(
+            crawler_scrapers={"anich": scraper},
+            enabled_provider_ids=frozenset({"crawler.anich"}),
+            resolver_search_enabled=False,
+        )
+        try:
+            matches = await aggregator.discover_source_matches(
+                ["葬送的芙莉莲 第二季", "葬送的芙莉莲", "Frieren Season 2"],
+                content_type="anime",
+                year=2024,
+            )
+        finally:
+            await aggregator.aclose()
+        # 别名预算 1:三个别名只允许发出一次搜索(anich ≥1.2s 串行约束)
+        self.assertEqual(scraper.search_calls, ["葬送的芙莉莲 第二季"])
+        matched = [match for match in matches if match.source_name == "anich"]
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(matched[0].source_id, "crawler:anich:37654")
+
+    def test_provider_timeout_table_reserves_slow_lane_for_anich(self):
+        from server.aggregator import (
+            DIRECT_SOURCE_PRIORITIES,
+            _PROVIDER_SEARCH_ALIAS_BUDGET,
+            _PROVIDER_SEARCH_TIMEOUTS,
+        )
+
+        self.assertEqual(_PROVIDER_SEARCH_TIMEOUTS["anich"], 8.0)
+        self.assertEqual(_PROVIDER_SEARCH_ALIAS_BUDGET["anich"], 1)
+        # 缺省档位保持不变,DIRECT 源排名加成不被 anich 侵占
+        self.assertNotIn("anich", DIRECT_SOURCE_PRIORITIES)
 
 
 if __name__ == "__main__":

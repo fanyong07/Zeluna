@@ -34,10 +34,12 @@ from .scrapers.tvbox_adapter import TvBoxAdapterScraper
 from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
 from .scrapers.anime.age import AgeScraper
+from .scrapers.anime.anich import AniChScraper
 from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
 from .scrapers.anime.xgcartoon import XgCartoonScraper
+from .scrapers.anime.yhdmm import YhdmmScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
 from .scrapers.base import (
     DIRECT_MEDIA_URL,
@@ -444,7 +446,11 @@ class ContentAggregator:
                 "age": AgeScraper(),
                 "dm706": Dm706Scraper(),
                 "girigiri": GiriGiriScraper(),
+                "anich": AniChScraper(),
                 "xgcartoon": XgCartoonScraper(),
+                # 2026-08-28 真机实测 4/4 hls-media 206;站内搜索被缓存冻结,
+                # 依赖本地标题索引(见 scrapers/anime/anime_sites.py)
+                "yhdmm": YhdmmScraper(),
                 **create_html_direct_anime_scrapers(),
                 "nivod": NivodScraper(),
                 "ppnix": PpnixScraper(),
@@ -516,6 +522,11 @@ class ContentAggregator:
             for name, scraper in self._crawler_scrapers.items()
             if self._provider_enabled(f"crawler.{name}")
         }
+
+    @property
+    def active_crawler_scrapers(self) -> dict[str, MediaProvider]:
+        """已启用的独立站适配器。供后台任务(如索引重建)使用。"""
+        return self._active_crawler_scrapers
 
     @property
     def source_inventory(self) -> tuple[tuple[str, str], ...]:
@@ -829,7 +840,9 @@ class ContentAggregator:
             (
                 name,
                 scraper,
-                5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+                _PROVIDER_SEARCH_TIMEOUTS.get(
+                    name, 5 if name in DIRECT_SOURCE_PRIORITIES else 2
+                ),
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )
@@ -939,7 +952,9 @@ class ContentAggregator:
             (
                 name,
                 scraper,
-                5 if name in DIRECT_SOURCE_PRIORITIES else 2,
+                _PROVIDER_SEARCH_TIMEOUTS.get(
+                    name, 5 if name in DIRECT_SOURCE_PRIORITIES else 2
+                ),
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )

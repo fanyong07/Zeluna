@@ -166,6 +166,12 @@ PLAYBACK_ANICH_LINE_TTL_HOURS = float(
     os.getenv("PLAYBACK_ANICH_LINE_TTL_HOURS", "2")
 )
 
+# 部分动漫站的站内搜索被边缘缓存冻结或首访即弹验证码,只能抓列表页建
+# 本地 title→sid 索引。没有索引这些源等于没接上,所以由调度器定期重建。
+SITE_INDEX_REBUILD_HOURS = max(
+    1, min(168, int(os.getenv("SITE_INDEX_REBUILD_HOURS", "12")))
+)
+SITE_INDEX_PAGES = max(1, min(20, int(os.getenv("SITE_INDEX_PAGES", "4"))))
 MANAGED_PLAYBACK_LINES_ENABLED = _env_bool(
     "MANAGED_PLAYBACK_LINES_ENABLED", False
 )
