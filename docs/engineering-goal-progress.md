@@ -4,6 +4,14 @@
 
 本文件记录 Zeluna 从当前快速播放基线推进到产品级工程状态的可复现证据。AniCh 材料仅用于理解架构思路；项目不得依赖 AniCh API，也不得保存其真实播放 URL、域名池、Cookie 或采样结果。
 
+> **勘误（2026-08-27，维护者决策）**：上一段中"项目不得依赖 AniCh API"这一条边界已被显式修订，原文保留以记录当时口径。现行边界为：
+>
+> - 允许在服务端以 **按需代取 provider**（`crawler.anich`）调用该上游，仅限番剧内容，默认关闭，须在 `PLAYBACK_PROVIDER_IDS` 中显式点名启用；
+> - 仍然禁止：全量镜像其片库、把上游直链持久保存为长期数据、把主机名散落到运行时各处；
+> - 主机名、UA 与 URL 构造收敛在唯一白名单模块 `server/server/scrapers/anime/anich_transport.py`，由 `server/tests/test_independent_backend.py` 双向校验（其余运行时文件零出现 + 白名单文件必须真实承载，防豁免漂移）；
+> - 客户端（`lib/`）不因此产生任何改动；
+> - 实测结论：该上游目录只收录动画类条目（TV 动画 / 剧场版 / OVA），真人影视继续由既有 MacCMS 管线供给，两者互不替代。
+
 ## Baseline
 
 - Branch: `codex/media-player-overhaul`

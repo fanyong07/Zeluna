@@ -143,6 +143,29 @@ MACCMS_FALLBACK_WAVE_DELAY_SECONDS = max(
         float(os.getenv("MACCMS_FALLBACK_WAVE_DELAY_SECONDS", "0.35")),
     ),
 )
+# AniCh 聚合源(按需代取)。上游有风控:请求间隔必须保底,否则 403/429。
+ANICH_MIN_REQUEST_INTERVAL_SECONDS = max(
+    0.2, min(10, float(os.getenv("ANICH_MIN_REQUEST_INTERVAL_SECONDS", "1.2")))
+)
+ANICH_HTTP_TIMEOUT_SECONDS = max(
+    3.0, min(60.0, float(os.getenv("ANICH_HTTP_TIMEOUT_SECONDS", "15")))
+)
+ANICH_BACKOFF_MAX_SECONDS = max(
+    1.0, min(120.0, float(os.getenv("ANICH_BACKOFF_MAX_SECONDS", "20")))
+)
+ANICH_BASE_COOLDOWN_SECONDS = max(
+    30.0, min(3600.0, float(os.getenv("ANICH_BASE_COOLDOWN_SECONDS", "300")))
+)
+# 单集线路截断:上游单集可达 58 条,不截断会让后续并发探测打洪峰。
+ANICH_MAX_LINES_PER_EPISODE = max(
+    1, min(12, int(os.getenv("ANICH_MAX_LINES_PER_EPISODE", "6")))
+)
+# crawler.anich 直链无签名参数(逐线 expires_at 恒为 0),但实测天级易腐:
+# 在混合来源缓存行上为该源单独盖短 TTL,0/负值关闭盖章行为。
+PLAYBACK_ANICH_LINE_TTL_HOURS = float(
+    os.getenv("PLAYBACK_ANICH_LINE_TTL_HOURS", "2")
+)
+
 MANAGED_PLAYBACK_LINES_ENABLED = _env_bool(
     "MANAGED_PLAYBACK_LINES_ENABLED", False
 )

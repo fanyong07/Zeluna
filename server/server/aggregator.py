@@ -104,6 +104,12 @@ _ERROR_CATEGORY_PRIORITY = {
 # lower-confidence bulk collection sites when the per-title result cap applies.
 DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 
+# 发现路径的 per-provider 超时与别名预算(独立于排名加成)。
+# anich 每次搜索必须保持 ≥1.2s 礼貌间隔且串行排队,
+# 缺省的 crawler 档位(2s/3别名)必然把它误判成 SEARCH_TIMEOUT。
+_PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {"anich": 8.0}
+_PROVIDER_SEARCH_ALIAS_BUDGET: dict[str, int] = {"anich": 1}
+
 
 def _prepare_discovery_aliases(values: list[str]) -> list[str]:
     """Deduplicate aliases and put precise season titles before broad names."""
@@ -559,7 +565,9 @@ class ContentAggregator:
             )
 
         started_at = time.monotonic()
-        attempted_aliases = aliases[:3]
+        attempted_aliases = aliases[
+            : _PROVIDER_SEARCH_ALIAS_BUDGET.get(provider, 3)
+        ]
         failures: list[BaseException] = []
         successful_searches = 0
         search_hit_count = 0

@@ -190,13 +190,40 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         return const [];
       }
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-      if (decoded is! List) return const [];
+      final rawItems = decoded is List
+          ? decoded
+          : decoded is Map && decoded['lines'] is List
+          ? decoded['lines']
+          : decoded is Map && decoded['data'] is List
+          ? decoded['data']
+          : const <Object?>[];
+      final items = rawItems is List ? rawItems : const <Object?>[];
+      final orderedItems = items.indexed.toList(growable: false)
+        ..sort((left, right) {
+          final leftScore = _nullableInt(
+            left.$2 is Map ? (left.$2 as Map)['score'] : null,
+          );
+          final rightScore = _nullableInt(
+            right.$2 is Map ? (right.$2 as Map)['score'] : null,
+          );
+          if (leftScore != null && rightScore != null) {
+            final scoreOrder = rightScore.compareTo(leftScore);
+            if (scoreOrder != 0) return scoreOrder;
+          } else if (leftScore != null) {
+            return -1;
+          } else if (rightScore != null) {
+            return 1;
+          }
+          return left.$1.compareTo(right.$1);
+        });
       final lines = <PlaybackLine>[];
-      for (var index = 0; index < decoded.length; index++) {
-        final item = decoded[index];
+      for (final entry in orderedItems) {
+        final index = entry.$1;
+        final item = entry.$2;
         if (item is! Map) continue;
         final json = item.cast<Object?, Object?>();
-        final url = json['url']?.toString().trim() ?? '';
+        final rawUrl = json['url']?.toString().trim() ?? '';
+        final url = _decodeAniChUrl(rawUrl);
         final mediaUri = Uri.tryParse(url);
         if (mediaUri != null && _isObviousPlaybackPageUri(mediaUri)) {
           continue;
@@ -225,6 +252,15 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           continue;
         }
         final source = json['source']?.toString().trim() ?? '';
+        final tag = _trustedServerText(json['tag'], maxLength: 80);
+        final sourceHost = _trustedServerText(
+          json['source_host'] ?? json['origin_host'] ?? json['delivery_host'],
+          maxLength: 253,
+        );
+        final sourceAddress = _trustedServerText(
+          json['source_address'] ?? json['origin_url'] ?? json['source_url'],
+          maxLength: 2048,
+        );
         final headers = <String, String>{};
         final rawHeaders = json['headers'];
         if (rawHeaders is Map) {
@@ -281,6 +317,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         );
         final providerId = serverProviderId.isNotEmpty
             ? serverProviderId
+            : tag.isNotEmpty
+            ? tag
             : _providerKey(source, stableId);
         final episodeKey = stableEpisodeKey(
           subjectKey: stableId,
@@ -303,6 +341,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             providerId: providerId,
             providerName: serverProviderName.isNotEmpty
                 ? serverProviderName
+                : tag.isNotEmpty
+                ? tag
                 : _providerName(source),
             title: json['title']?.toString().trim().isNotEmpty == true
                 ? json['title'].toString().trim()
@@ -327,7 +367,12 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             sourceErrorCategory: sourceErrorCategory,
             sourceName: sourceName.isNotEmpty
                 ? sourceName
+                : tag.isNotEmpty
+                ? tag
+                : sourceHost.isNotEmpty
+                ? sourceHost
                 : _sourceName(source),
+            sourceAddress: sourceAddress,
             diagnosticStatus: diagnosticStatus,
             queried: queried,
             aliasesAttempted: aliasesAttempted,
@@ -341,11 +386,13 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             expiresAt: expiresAt,
             available: available,
             message: available
-                ? (stale
-                      ? '来自可用缓存，正在后台更新线路'
-                      : cached
-                      ? '来自在线服务（已缓存）'
-                      : '在线服务已确认可播')
+                ? _playableLineMessage(
+                    stale: stale,
+                    cached: cached,
+                    tag: tag,
+                    sourceHost: sourceHost,
+                    sourceAddress: sourceAddress,
+                  )
                 : requiresClientProbe
                 ? '正在用你的网络确认是否可播'
                 : (json['message']?.toString().trim().isNotEmpty == true
@@ -377,6 +424,33 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
 
   void dispose() {
     if (_ownsClient) _client.close();
+  }
+}
+
+String _playableLineMessage({
+  required bool stale,
+  required bool cached,
+  required String tag,
+  required String sourceHost,
+  required String sourceAddress,
+}) {
+  if (stale) return '来自可用缓存，正在后台更新线路';
+  if (cached) return '来自在线服务（已缓存）';
+  return '在线服务已确认可播';
+}
+
+String _decodeAniChUrl(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty || trimmed.contains('://')) return trimmed;
+  if (trimmed.length < 5) return trimmed;
+  try {
+    final normalized = base64.normalize(
+      trimmed.substring(0, 3) + trimmed.substring(4),
+    );
+    final decoded = utf8.decode(base64.decode(normalized));
+    return decoded.trim();
+  } catch (_) {
+    return trimmed;
   }
 }
 

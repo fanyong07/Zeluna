@@ -42,6 +42,7 @@ from .catalog import catalog_service, parse_stable_id
 from .config import (
     MANAGED_PLAYBACK_LINES_ENABLED,
     MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE,
+    PLAYBACK_ANICH_LINE_TTL_HOURS,
     PLAYBACK_CACHE_HOURS,
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
@@ -81,6 +82,9 @@ from .title_matching import analyze_source_match
 
 
 logger = logging.getLogger(__name__)
+
+# AniCh 按需代取线路在 AggregatedVideoLine.source 中的标识形态
+ANICH_LINE_SOURCE = "crawler.anich"
 
 _SOURCE_HEALTH_EMA_ALPHA = 0.35
 _DETERMINISTIC_SOURCE_FAILURES = {
@@ -1365,8 +1369,17 @@ class PlaybackService:
                 if client_probe_required
                 else "当前线路验证失败"
             ),
-            "expires_at": self._line_expiry(line.url),
+            "expires_at": self._stamped_line_expiry(line),
         }
+
+    def _stamped_line_expiry(self, line: AggregatedVideoLine) -> int:
+        """逐线过期时间;易腐的按需代取源在无签名可解析时单独盖短 TTL。"""
+        expiry = self._line_expiry(line.url)
+        if expiry == 0 and line.source == ANICH_LINE_SOURCE:
+            ttl_hours = PLAYBACK_ANICH_LINE_TTL_HOURS
+            if ttl_hours > 0:
+                return int(time.time() + ttl_hours * 3600)
+        return expiry
 
     def _merge_matches(
         self,

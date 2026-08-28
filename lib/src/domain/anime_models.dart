@@ -309,6 +309,7 @@ class PlaybackLine {
     this.cacheState = 'unknown',
     this.sourceErrorCategory = '',
     this.sourceName = '',
+    this.sourceAddress = '',
     this.diagnosticStatus = '',
     this.queried,
     this.aliasesAttempted,
@@ -356,6 +357,7 @@ class PlaybackLine {
   final String cacheState;
   final String sourceErrorCategory;
   final String sourceName;
+  final String sourceAddress;
   final String diagnosticStatus;
   final bool? queried;
   final int? aliasesAttempted;

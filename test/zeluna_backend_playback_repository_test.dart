@@ -385,6 +385,48 @@ void main() {
     expect(lines.single.serverVerified, isTrue);
   });
 
+  test('兼容 AniCh 风格包装响应并保留 tag、score 与源站地址', () async {
+    final encoded = base64Encode(
+      utf8.encode('https://media.example/movie.m3u8'),
+    );
+    final wrapped = '${encoded.substring(0, 3)}0${encoded.substring(3)}';
+    final client = MockClient((request) async {
+      return _jsonResponse({
+        'schema_version': 1,
+        'content_type': 'movie',
+        'lines': [
+          {
+            'url': wrapped,
+            'tag': 'fc',
+            'score': 5,
+            'source_name': '樱花线路',
+            'source_host': 'm3u8.example',
+            'source_address': 'https://origin.example/movie.m3u8',
+            'provider_id': 'fc',
+            'line_id': 'fc-movie-1',
+            'format': 'hls',
+            'status': 'server_verified',
+          },
+        ],
+      });
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(
+      subject.copyWith(source: 'tmdb:movie:1'),
+      episode,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.providerId, 'fc');
+    expect(lines.single.sourceName, '樱花线路');
+    expect(lines.single.url, 'https://media.example/movie.m3u8');
+    expect(lines.single.message, '在线服务已确认可播');
+  });
   test('不受支持的旧来源不会再触发后端或本地规则查源', () async {
     var requests = 0;
     final client = MockClient((request) async {
