@@ -121,5 +121,80 @@ class SourceTitleMatchingTests(unittest.TestCase):
         self.assertTrue(analysis.playback_eligible)
 
 
+class DerivativeContentTests(unittest.TestCase):
+    """采集站把预告/解说/前传当独立条目收录,标题与正片高度相似。
+
+    用例全部取自 2026-08-28 在生产出口的实测返回。
+    """
+
+    def _analyze(self, candidate: str, alias: str, **kwargs):
+        params = {
+            "candidate_type": "movie",
+            "expected_type": "movie",
+            "candidate_year": 2019,
+            "expected_year": 2019,
+        }
+        params.update(kwargs)
+        return analyze_source_match(candidate, [alias], **params)
+
+    def test_commentary_edition_is_not_playable_as_the_feature(self):
+        analysis = self._analyze("流浪地球[电影解说]", "流浪地球")
+        self.assertTrue(analysis.evidence.derivative_conflict)
+        self.assertEqual(analysis.evidence.derivative_kind, "derivative")
+        self.assertFalse(analysis.playback_eligible)
+
+    def test_trailer_is_not_playable_as_the_feature(self):
+        analysis = self._analyze("流浪地球3(上)（预告片）", "流浪地球")
+        self.assertTrue(analysis.evidence.derivative_conflict)
+        self.assertFalse(analysis.playback_eligible)
+
+    def test_spinoff_series_is_not_playable_as_the_feature(self):
+        analysis = self._analyze(
+            "权力的游戏前传：龙族",
+            "权力的游戏",
+            candidate_type="tv",
+            expected_type="tv",
+            candidate_year=2022,
+            expected_year=2011,
+        )
+        self.assertTrue(analysis.evidence.derivative_conflict)
+        self.assertEqual(analysis.evidence.derivative_kind, "spinoff")
+        self.assertFalse(analysis.playback_eligible)
+
+    def test_derivative_score_falls_below_the_acceptance_line(self):
+        feature = self._analyze("流浪地球", "流浪地球")
+        commentary = self._analyze("流浪地球[电影解说]", "流浪地球")
+        self.assertTrue(feature.accepted)
+        self.assertLess(commentary.ranking_score, feature.ranking_score)
+        self.assertFalse(commentary.accepted)
+
+    def test_feature_itself_is_unaffected(self):
+        analysis = self._analyze("流浪地球", "流浪地球")
+        self.assertFalse(analysis.evidence.derivative_conflict)
+        self.assertEqual(analysis.evidence.derivative_kind, "")
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_user_asking_for_a_derivative_still_gets_it(self):
+        """两边都带标记时不算冲突——用户本就在找解说版。"""
+        analysis = self._analyze("流浪地球[电影解说]", "流浪地球 电影解说")
+        self.assertFalse(analysis.evidence.derivative_conflict)
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_english_markers_are_recognized(self):
+        for candidate in (
+            "The Wandering Earth Official Trailer",
+            "The Wandering Earth - Teaser",
+            "The Wandering Earth Recap",
+        ):
+            analysis = self._analyze(candidate, "The Wandering Earth")
+            self.assertTrue(
+                analysis.evidence.derivative_conflict, f"未识别: {candidate}"
+            )
+
+    def test_circuit_recovery_is_denied_for_derivatives(self):
+        analysis = self._analyze("流浪地球（预告片）", "流浪地球")
+        self.assertFalse(analysis.evidence.allows_circuit_recovery)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,7 +49,12 @@ async def scan_subject(
     verbose: bool = True,
 ) -> tuple[int, int]:
     """→ (登记条数, 新建条数)"""
-    hits = await scraper.search(title)
+    try:
+        hits = await scraper.search(title)
+    except Exception as error:  # noqa: BLE001 - 单部失败不该中断整批扫描
+        if verbose:
+            print(f"  {title[:24]:<26} 搜索失败 {type(error).__name__}")
+        return 0, 0
     if not hits:
         if verbose:
             print(f"  {title[:24]:<26} 搜索无结果")
@@ -102,7 +107,11 @@ async def main_async(args: argparse.Namespace) -> int:
 
     try:
         if args.latest:
-            latest = await scraper.get_latest()
+            try:
+                latest = await scraper.get_latest()
+            except Exception as error:  # noqa: BLE001
+                print(f"取最新列表失败 {type(error).__name__};改用 --title 指定作品")
+                latest = []
             for item in latest[: args.latest]:
                 if item.title and item.title not in titles:
                     titles.append(item.title)
@@ -117,16 +126,21 @@ async def main_async(args: argparse.Namespace) -> int:
         total_logged = total_created = 0
         started = time.monotonic()
 
-        async with async_session() as session:
-            for title in titles:
-                logged, created = await scan_subject(
-                    scraper,
-                    title=title,
-                    episodes=args.episodes,
-                    session=session,
-                )
-                total_logged += logged
-                total_created += created
+        for title in titles:
+            # 每部独立开会话并提交:一部失败不牵连已登记的数据
+            async with async_session() as session:
+                try:
+                    logged, created = await scan_subject(
+                        scraper,
+                        title=title,
+                        episodes=args.episodes,
+                        session=session,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    print(f"  {title[:24]:<26} 跳过 {type(error).__name__}")
+                    continue
+            total_logged += logged
+            total_created += created
 
         elapsed = time.monotonic() - started
         print("\n" + "=" * 74)

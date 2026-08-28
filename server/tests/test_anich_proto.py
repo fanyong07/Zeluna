@@ -61,6 +61,42 @@ class BangumiListDecodingTests(unittest.TestCase):
         self.assertEqual(entry["tagline"], "魔法使旅程再开")
 
 
+class LatestListDecodingTests(unittest.TestCase):
+    """latest 与 search 的 wire 布局不同,必须分别解码。"""
+
+    def _payload(self) -> bytes:
+        inner = (
+            _field_varint(1, 0)
+            + _field_varint(2, 37959)        # id 在字段 2(search 是字段 1)
+            + _field_varint(3, 22)           # episode
+            + _field_double(4, 1711116000000.0)
+            + _field_varint(5, 120)
+            + _string_field(6, "https://img.example/cover.jpg")
+            + _string_field(7, "轻松熊")      # title 在字段 7(search 是字段 2)
+            + _string_field(8, "第22集 #22")
+        )
+        return _field_bytes(1, inner)
+
+    def test_latest_layout_is_decoded(self):
+        items = anich_proto.decode_latest_list(self._payload())
+        self.assertEqual(len(items), 1)
+        entry = items[0]
+        self.assertEqual(entry["id"], 37959)
+        self.assertEqual(entry["title"], "轻松熊")
+        self.assertEqual(entry["episode"], 22)
+        self.assertEqual(entry["image"], "https://img.example/cover.jpg")
+
+    def test_search_decoder_on_latest_payload_yields_blanks(self):
+        """回归防护:用 search 解码器读 latest 会得到空 id/title。
+
+        外部参考实现就是这么坏掉的(整数被当字符串读),这里固化差异,
+        避免将来有人把两个解码器合并。
+        """
+        wrong = anich_proto.decode_bangumi_list(self._payload())
+        self.assertEqual(len(wrong), 1)
+        self.assertFalse(wrong[0]["title"])
+
+
 class EpisodesDecodingTests(unittest.TestCase):
     def test_decode_episodes_with_sites_and_dirty_duration(self):
         site = _string_field(1, "tmdb") + _string_field(2, "121212")

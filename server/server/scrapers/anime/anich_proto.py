@@ -125,6 +125,50 @@ def decode_bangumi_list(payload: bytes) -> list[dict]:
     return items
 
 
+def decode_latest_list(payload: bytes) -> list[dict]:
+    """``/bangumi/latest`` 的 wire 布局与 ``/bangumi/search`` **不同**。
+
+    实测(2026-08-28 逐字段枚举)::
+
+        1 varint  ?(常为 0)      5 varint  ?(常为 120)
+        2 varint  id             6 bytes   image
+        3 varint  episode        7 bytes   title
+        4 f64     date           8 bytes   episode_label(如 "第22集 #22")
+
+    复用 search 的解码器会把整数当字符串读,得到一批 id=0/title="" 的空条目
+    ——这正是外部参考实现踩过的坑,这里独立处理。
+    """
+    items: list[dict] = []
+    for field_number, wire_type, value in iter_fields(payload):
+        if field_number != 1 or wire_type != _WIRE_LEN or not isinstance(value, bytes):
+            continue
+        entry = {
+            "id": None,
+            "title": "",
+            "episode": 0,
+            "episodes_total": 0,
+            "status": "",
+            "date": 0.0,
+            "image": "",
+            "tagline": "",
+        }
+        for fno, wtype, inner in iter_fields(value):
+            if fno == 2 and wtype == _WIRE_VARINT:
+                entry["id"] = int(inner)
+            elif fno == 3 and wtype == _WIRE_VARINT:
+                entry["episode"] = int(inner)
+            elif fno == 4 and wtype == _WIRE_FIXED64:
+                entry["date"] = _fixed64_double(inner)
+            elif fno == 6 and wtype == _WIRE_LEN:
+                entry["image"] = _text(inner)
+            elif fno == 7 and wtype == _WIRE_LEN:
+                entry["title"] = _text(inner)
+            elif fno == 8 and wtype == _WIRE_LEN:
+                entry["tagline"] = _text(inner)
+        items.append(entry)
+    return items
+
+
 # ── bangumi_episodes_ { repeated bangumi_episodes_data_ data = 1; } ──
 def decode_sites(payload: bytes) -> dict[str, str]:
     site = {"site": "", "id": ""}

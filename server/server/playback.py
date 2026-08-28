@@ -51,6 +51,7 @@ from .config import (
     PLAYBACK_QUICK_TIMEOUT_SECONDS,
     PLAYBACK_STALE_HOURS,
     PLAYBACK_STABLE_LINE_COUNT,
+    PUBLIC_BASE_URL,
     SOURCE_BINDING_HOURS,
     SOURCE_CIRCUIT_BASE_COOLDOWN_SECONDS,
     SOURCE_CIRCUIT_FAILURE_THRESHOLD,
@@ -64,10 +65,13 @@ from .managed_lines.service import (
 )
 from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
 from .playback_health import SourceFailureScope
+from .auth import AuthConfigurationError
+from .playlist_tokens import PlaylistTokenError, issue_playlist_token
 from .premium_catalog import (
     build_record as build_premium_record,
     record_premium_line,
 )
+from .scrapers.hls_clean import needs_clean
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -89,6 +93,17 @@ logger = logging.getLogger(__name__)
 
 # AniCh 按需代取线路在 AggregatedVideoLine.source 中的标识形态
 ANICH_LINE_SOURCE = "crawler.anich"
+
+#: 贴片广告高发的媒体主机片段(采集站及其 CDN)。
+#  自建 CDN 的官方转存通常没有贴片,不在此列,避免无谓的清单重写。
+AD_RISK_HOST_HINTS: tuple[str, ...] = (
+    "lzcdn", "cdnlz", "lz-cdn", "lziapi",
+    "fsvod", "ffzy", "yzzy", "dytt",
+    "baofeng", "fengbao", "bfllvip", "bfzy",
+    "xgplay", "jisuzy", "rrcdnbf", "ddbbffcdn",
+    "yhdmm3u8", "dlidli", "xfvod", "moedot", "92cj",
+    "vipsrc", "kuaiplay", "haiwaikan",
+)
 
 _SOURCE_HEALTH_EMA_ALPHA = 0.35
 _DETERMINISTIC_SOURCE_FAILURES = {
@@ -1382,7 +1397,7 @@ class PlaybackService:
             line.verification_status == CLIENT_PROBE_REQUIRED
         )
         return {
-            "url": line.url,
+            "url": self._playable_url(line),
             "title": line.title,
             "quality": line.quality,
             "format": line.format,
@@ -1407,6 +1422,37 @@ class PlaybackService:
             ),
             "expires_at": self._stamped_line_expiry(line),
         }
+
+    def _playable_url(self, line: AggregatedVideoLine) -> str:
+        """线路对外的播放地址;采集站 HLS 换成已剪广告的清单地址。
+
+        客户端不需要知道"广告"这件事,也不需要任何开关:拿到的地址直接播,
+        贴片已经在服务端剪掉了。剪裁是即时的清单文本重写,分片仍指向源站
+        CDN,服务端不落盘、不代理媒体字节。
+
+        只对命中风险名单的采集站主机替换 —— 自建 CDN 的官方转存通常没有
+        贴片,无谓重写只会白加一跳延迟。
+        """
+        url = (line.url or "").strip()
+        if not url or not needs_clean(url, line.format):
+            return url
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return url
+        if not any(token in host for token in AD_RISK_HOST_HINTS):
+            return url
+        base = PUBLIC_BASE_URL.strip().rstrip("/")
+        if not base:
+            return url          # 未配置对外基址时无法给出绝对地址
+        try:
+            token = issue_playlist_token(
+                url, referer=(line.headers or {}).get("Referer", "")
+            )
+        except (PlaylistTokenError, AuthConfigurationError):
+            # 密钥不合规时保留原地址,不用弱密钥签发
+            return url
+        return f"{base}/api/v3/playlist/{token}"
 
     def _stamped_line_expiry(self, line: AggregatedVideoLine) -> int:
         """逐线过期时间;易腐的按需代取源在无签名可解析时单独盖短 TTL。"""

@@ -21,6 +21,32 @@ _CHINESE_DIGITS = {
 }
 
 
+#: 衍生内容标记。采集站会把预告、解说、花絮、合集当独立条目收录,标题与
+#  正片高度相似(「流浪地球[电影解说]」「权力的游戏前传:龙族」),仅靠包含
+#  关系判断会当成正片下发。这类条目播出来不是用户想看的内容,按身份冲突处理。
+_DERIVATIVE_MARKS: tuple[str, ...] = (
+    "预告", "預告", "先导", "先導", "抢先", "搶先", "花絮", "片花",
+    "解说", "解說", "讲解", "吐槽", "盘点", "盤點", "混剪", "剪辑版",
+    "reaction", "trailer", "teaser", "preview", "recap",
+    "幕后", "幕後", "特辑", "特輯", "宣传", "宣傳", "pv", "cm",
+    "合集", "全集解说", "速看", "看点", "看點",
+)
+#: 前传/衍生剧标记。与正片是不同作品,不能互相顶替。
+_SPINOFF_MARKS: tuple[str, ...] = (
+    "前传", "前傳", "外传", "外傳", "衍生", "番外", "spin-off", "spinoff",
+)
+
+
+def _derivative_kind(title: str) -> str:
+    """→ ""(正片) / "derivative"(预告解说类) / "spinoff"(前传外传)"""
+    lowered = (title or "").casefold()
+    if any(mark in lowered for mark in _DERIVATIVE_MARKS):
+        return "derivative"
+    if any(mark in lowered for mark in _SPINOFF_MARKS):
+        return "spinoff"
+    return ""
+
+
 @dataclass(frozen=True)
 class SourceMatchEvidence:
     """Facts that may authorize correctness-sensitive playback decisions."""
@@ -36,11 +62,15 @@ class SourceMatchEvidence:
     media_type_compatible: bool = False
     year_known: bool = False
     year_compatible: bool = False
+    #: 候选是衍生内容(预告/解说/前传…)而请求的是正片
+    derivative_conflict: bool = False
+    derivative_kind: str = ""
 
     @property
     def has_explicit_identity_conflict(self) -> bool:
         return (
             self.season_conflict
+            or self.derivative_conflict
             or (
                 self.media_type_known
                 and not (
@@ -262,10 +292,16 @@ def analyze_source_match(
         and normalized_expected_type in _KNOWN_MEDIA_TYPES
     )
     year_known = candidate_year > 0 and expected_year > 0
+    # 衍生内容判据:候选带预告/解说/前传标记而请求的别名都不带,说明用户要的
+    # 是正片而候选不是。两边都带则是用户本就在找衍生内容,不算冲突。
+    candidate_derivative = _derivative_kind(candidate)
+    wanted_derivative = any(_derivative_kind(str(alias or "")) for alias in aliases)
     evidence = SourceMatchEvidence(
         exact_title=exact_title,
         safe_title_variant=safe_title_variant,
         matched_alias=matched_alias,
+        derivative_kind=candidate_derivative,
+        derivative_conflict=bool(candidate_derivative) and not wanted_derivative,
         expected_season=expected_season,
         candidate_season=candidate_season,
         season_conflict=(
@@ -290,6 +326,11 @@ def analyze_source_match(
             year_known and abs(candidate_year - expected_year) <= 1
         ),
     )
+    # 衍生内容即便标题分很高也不该顶替正片:扣到接受线以下,
+    # 让它既不被选中播放,也不会挤占正片的排名位置。
+    if evidence.derivative_conflict:
+        penalty = 45 if candidate_derivative == "derivative" else 30
+        ranking_score = max(0, ranking_score - penalty)
     return SourceMatchAnalysis(
         ranking_score=ranking_score,
         accepted=ranking_score >= 65,

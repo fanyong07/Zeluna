@@ -50,6 +50,9 @@ MACCMS_SITES: list[dict] = [
     {"name": "如意", "api": "https://cj.rycjapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 98, "content_types": ["anime", "tv", "movie"]},
     {"name": "豪华", "api": "https://hhzyapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 96, "content_types": ["anime", "tv", "movie"]},
     # 目标出口复测未达到生产可播门槛，保留记录但完全禁用。
+    # 2026-08-28 复检:API 仍活(搜索命中 6 条 / 1.3s)，但媒体全部 ConnectError；
+    # 同族候选域(www./cj./jisuzy.com/api.jisuzyapi.com)也拿不到可播线路。
+    # 属"解析通、货源没了"，不是站点关停 —— 货源恢复即可重新启用。
     {"name": "极速", "api": "https://jszyapi.com/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 94, "content_types": ["anime", "tv", "movie"]},
     {"name": "猫眼", "api": "https://api.maoyanapi.top/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 92, "content_types": ["anime", "tv", "movie"]},
     {"name": "魔都2", "api": "https://www.mdzyapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 90, "content_types": ["anime", "tv", "movie"]},
@@ -58,6 +61,9 @@ MACCMS_SITES: list[dict] = [
     {"name": "红牛", "api": "https://www.hongniuzy2.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 84, "content_types": ["anime", "tv", "movie"]},
     # 2026-08-24 目标 VPS Smoke 与平衡 Coverage 均为 API http_444；
     # 保留来源身份用于诊断，但不再进入任何用户查询入口。
+    # 2026-08-28 复检:原域仍 HTTP 444(nginx 主动断连)，三个同族候选域
+    # (dongmandaquan.com / fcvod.com / api.fengchezy.com)均 ConnectError。
+    # 与极速/暴风不同，这个站是真的关停了，不是货源问题。
     {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
     # —— 第二梯队：VPS 实测部分类型可播(注释标注命中类型) ——
     {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 78, "content_types": ["anime", "movie"]},
@@ -65,6 +71,9 @@ MACCMS_SITES: list[dict] = [
     {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 74, "content_types": ["anime", "tv"]},
     # 2026-08-24 目标 VPS 能搜索详情，但 Smoke 18/18、Coverage 6/6
     # 媒体线路均为 stale_route；不是单纯机房受限，直接隔离。
+    # 2026-08-28 复检:API 仍活(搜索命中 6 条)，但媒体地址返回 HTML 而非媒体；
+    # 同族候选域(www./api.bfzy.tv/bfzy.tv/cj.)分别 ConnectError 或 403。
+    # 同属"解析通、货源没了"，货源恢复即可重新启用。
     {"name": "暴风", "api": "https://bfzyapi.com/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 72, "content_types": ["anime", "tv", "movie"]},
     # —— 第三梯队：三类内容均能完成搜索、详情和媒体候选解析；当前本机
     #    Fake-IP 出口无法做服务端首分片定论，因此只作为客户端复验候选，

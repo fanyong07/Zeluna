@@ -227,10 +227,11 @@ class AniChScraper(BaseScraper):
 
     async def get_latest(self, page: int = 1) -> list[SubjectResult]:
         # 只取首页:precache 场景足够,深翻页对该源没有增量价值。
+        # 注意 latest 与 search 的 wire 布局不同,必须用专用解码器。
         if page > 1:
             return []
         payload = await self._transport.request(anich_latest_path())
-        return self._list_results(anich_proto.decode_bangumi_list(payload))
+        return self._list_results(anich_proto.decode_latest_list(payload))
 
     async def get_home(self) -> list[SubjectResult]:
         return []
