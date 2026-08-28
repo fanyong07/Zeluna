@@ -25,6 +25,10 @@ class PlaybackCacheEntry:
     lines_json: str
     line_count: int
     verified_at: float
+    # "quick" rows only cover the first discovery wave; "full" rows went
+    # through a complete round. Defaulted for older repository doubles that
+    # predate the field.
+    scan_scope: str = "full"
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,7 @@ class PlaybackRepository(Protocol):
         lines_json: str,
         line_count: int,
         verified_at: float,
+        scan_scope: str = "full",
     ) -> None: ...
 
     async def oldest_cache(self, *, limit: int) -> list[PlaybackCacheEntry]: ...
@@ -140,6 +145,7 @@ def _cache_entry(row: PlaybackCache) -> PlaybackCacheEntry:
         lines_json=row.lines_json,
         line_count=row.line_count,
         verified_at=row.verified_at,
+        scan_scope=str(getattr(row, "scan_scope", "") or "full"),
     )
 
 
@@ -204,6 +210,7 @@ class SqlPlaybackRepository:
         lines_json: str,
         line_count: int,
         verified_at: float,
+        scan_scope: str = "full",
     ) -> None:
         await upsert_playback_cache(
             self._session,
@@ -213,6 +220,7 @@ class SqlPlaybackRepository:
             lines_json=lines_json,
             line_count=line_count,
             verified_at=verified_at,
+            scan_scope=scan_scope,
         )
 
     async def oldest_cache(self, *, limit: int) -> list[PlaybackCacheEntry]:

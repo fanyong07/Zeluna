@@ -172,6 +172,7 @@ class PlaybackService:
                 session,
                 stable_id,
                 episode,
+                require_full=True,
             )
             if cache_state == "fresh":
                 self._metrics["fresh_hit"] += 1
@@ -462,58 +463,42 @@ class PlaybackService:
     ) -> list[dict] | None:
         if force:
             return None
-        state, items = await self._cache_lookup(session, stable_id, episode)
+        state, items = await self._cache_lookup(
+            session,
+            stable_id,
+            episode,
+            require_full=True,
+        )
         if state == "fresh" or (allow_stale and state == "stale"):
             return items
         return None
+
+    @staticmethod
+    def _cached_scan_scope(row: object) -> str:
+        scope = str(getattr(row, "scan_scope", "") or "").strip().lower()
+        # Repository doubles and pre-migration rows carry no scope. Treating
+        # the unknown case as "full" keeps their behaviour unchanged.
+        return scope if scope in {"quick", "full"} else "full"
 
     async def _cache_lookup(
         self,
         session: AsyncSession,
         stable_id: str,
         episode: int,
+        *,
+        require_full: bool = False,
     ) -> tuple[str, list[dict]]:
         row = await self._repository_factory(session).get_cache(stable_id, episode)
         if row is None:
             return "miss", []
-        if row.line_count <= 0:
-            ttl = PLAYBACK_NEGATIVE_CACHE_MINUTES * 60
-        elif row.line_count < PLAYBACK_STABLE_LINE_COUNT:
-            # Slower sites may still be absent from an early positive result.
-            ttl = PLAYBACK_PARTIAL_CACHE_MINUTES * 60
-        else:
-            ttl = PLAYBACK_CACHE_HOURS * 3600
-        try:
-            items = json.loads(row.lines_json)
-        except (json.JSONDecodeError, TypeError):
+        # A quick refresh only reaches the first discovery wave and pads the
+        # rest of the inventory with not_queried placeholders. Serving that as
+        # a full answer would hide every unreached source until the row went
+        # stale, so a full request treats it as a miss and runs its own scan.
+        if require_full and self._cached_scan_scope(row) != "full":
             return "miss", []
-        if not isinstance(items, list):
-            return "miss", []
-        now = time.time()
-        fresh_items: list[dict] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            if not self._is_safe_cached_item(item):
-                continue
-            try:
-                expires_at = float(item.get("expires_at") or 0)
-            except (TypeError, ValueError):
-                expires_at = 0
-            if expires_at <= 0 or expires_at > now + 15:
-                fresh_items.append(item)
-        if row.line_count > 0 and not self._has_usable_cached_route(fresh_items):
-            return "miss", []
-        age = max(0.0, now - row.verified_at)
-        if age < ttl:
-            state = "fresh"
-        elif (
-            row.line_count > 0
-            and age < PLAYBACK_STALE_HOURS * 3600
-            and self._has_usable_cached_route(fresh_items)
-        ):
-            state = "stale"
-        else:
+        state, fresh_items = self._cache_state_and_items(row)
+        if state == "miss":
             return "miss", []
         return state, [
             {
@@ -524,6 +509,60 @@ class PlaybackService:
             }
             for item in self._complete_site_inventory(fresh_items)
         ]
+
+    @classmethod
+    def _cache_state_and_items(cls, row: object) -> tuple[str, list[dict]]:
+        """Judge one cache row's freshness and return its still-valid items."""
+        try:
+            line_count = int(getattr(row, "line_count", 0) or 0)
+        except (TypeError, ValueError):
+            return "miss", []
+        if line_count <= 0:
+            ttl = PLAYBACK_NEGATIVE_CACHE_MINUTES * 60
+        elif line_count < PLAYBACK_STABLE_LINE_COUNT:
+            # Slower sites may still be absent from an early positive result.
+            ttl = PLAYBACK_PARTIAL_CACHE_MINUTES * 60
+        else:
+            ttl = PLAYBACK_CACHE_HOURS * 3600
+        try:
+            items = json.loads(getattr(row, "lines_json", "") or "")
+        except (json.JSONDecodeError, TypeError):
+            return "miss", []
+        if not isinstance(items, list):
+            return "miss", []
+        now = time.time()
+        fresh_items: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if not cls._is_safe_cached_item(item):
+                continue
+            try:
+                expires_at = float(item.get("expires_at") or 0)
+            except (TypeError, ValueError):
+                expires_at = 0
+            if expires_at <= 0 or expires_at > now + 15:
+                fresh_items.append(item)
+        if line_count > 0 and not cls._has_usable_cached_route(fresh_items):
+            return "miss", []
+        try:
+            verified_at = float(getattr(row, "verified_at", 0) or 0)
+        except (TypeError, ValueError):
+            return "miss", []
+        age = max(0.0, now - verified_at)
+        if age < ttl:
+            return "fresh", fresh_items
+        if (
+            line_count > 0
+            and age < PLAYBACK_STALE_HOURS * 3600
+            and cls._has_usable_cached_route(fresh_items)
+        ):
+            return "stale", fresh_items
+        return "miss", []
+
+    @classmethod
+    def _cache_state_for(cls, row: object) -> str:
+        return cls._cache_state_and_items(row)[0]
 
     async def _refresh(
         self,
@@ -566,44 +605,39 @@ class PlaybackService:
             content_type=content_type,
             year=year,
         )
-        configured_sites = aggregator.configured_source_names
-        matched_sites = {
-            match.source_name
-            for match in matches
-            if match.source_name in configured_sites
-        }
-        if len(matched_sites) < len(configured_sites):
-            discovery = await aggregator.discover_source_matches(
-                aliases,
-                content_type=content_type,
-                year=year,
-                max_matches=len(aggregator.source_inventory) + 8,
-                include_diagnostics=True,
-            )
-            if isinstance(discovery, tuple):
-                discovered, discovery_diagnostics = discovery
-            else:
-                discovered = discovery
-                discovery_diagnostics = {}
-            now = time.time()
-            probeable: list[SourceMatch] = []
-            for match in discovered:
-                if self._discovered_match_can_probe(
-                    match,
-                    source_health.get(match.source_name),
-                    now,
-                ):
-                    probeable.append(match)
-                    continue
-                diagnostic = discovery_diagnostics.get(match.source_name)
-                if diagnostic is not None:
-                    diagnostic.status = (
-                        SourceDiscoveryStatus.CIRCUIT_SUPPRESSED
-                    )
-                    diagnostic.matched = True
-            discovered = probeable
-            matches = self._merge_matches(matches, discovered)
-            await self._store_bindings(session, stable_id, matches)
+        # A historical binding is a useful resolution shortcut, but it is not
+        # evidence that its source was queried during this full refresh. Always
+        # run discovery so every enabled source gets a current diagnostic and
+        # the result cannot be cached as "full" with not_queried placeholders.
+        discovery = await aggregator.discover_source_matches(
+            aliases,
+            content_type=content_type,
+            year=year,
+            max_matches=len(aggregator.source_inventory) + 8,
+            include_diagnostics=True,
+        )
+        if isinstance(discovery, tuple):
+            discovered, discovery_diagnostics = discovery
+        else:
+            discovered = discovery
+            discovery_diagnostics = {}
+        now = time.time()
+        probeable: list[SourceMatch] = []
+        for match in discovered:
+            if self._discovered_match_can_probe(
+                match,
+                source_health.get(match.source_name),
+                now,
+            ):
+                probeable.append(match)
+                continue
+            diagnostic = discovery_diagnostics.get(match.source_name)
+            if diagnostic is not None:
+                diagnostic.status = SourceDiscoveryStatus.CIRCUIT_SUPPRESSED
+                diagnostic.matched = True
+        discovered = probeable
+        matches = self._merge_matches(matches, discovered)
+        await self._store_bindings(session, stable_id, matches)
 
         resolution = await aggregator.resolve_source_matches(
             matches,
@@ -946,7 +980,14 @@ class PlaybackService:
         if remaining > 0 and self._has_usable_cached_route(data):
             try:
                 await asyncio.wait_for(
-                    self._store_cache(session, stable_id, episode, title, data),
+                    self._store_cache(
+                        session,
+                        stable_id,
+                        episode,
+                        title,
+                        data,
+                        scan_scope="quick",
+                    ),
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:
@@ -1223,8 +1264,22 @@ class PlaybackService:
         episode: int,
         title: str,
         lines: list[dict],
+        *,
+        scan_scope: str = "full",
     ) -> None:
-        await self._repository_factory(session).upsert_cache(
+        repository = self._repository_factory(session)
+        if scan_scope == "quick":
+            # A quick result must never replace a full round that is still
+            # usable, otherwise every player start would downgrade the cache
+            # to a partial inventory.
+            existing = await repository.get_cache(stable_id, episode)
+            if (
+                existing is not None
+                and self._cached_scan_scope(existing) == "full"
+                and self._cache_state_for(existing) != "miss"
+            ):
+                return
+        await repository.upsert_cache(
             subject_id=stable_id,
             episode=episode,
             title=title,
@@ -1236,10 +1291,22 @@ class PlaybackService:
                 and self._has_usable_cached_route([line])
             ),
             verified_at=time.time(),
+            scan_scope=scan_scope,
         )
 
     @classmethod
     def _should_store_full_result(cls, items: list[dict]) -> bool:
+        incomplete_statuses = {
+            SourceDiscoveryStatus.NOT_QUERIED.value,
+            SourceDiscoveryStatus.SEARCHING.value,
+        }
+        if any(
+            str(item.get("diagnostic_status") or "").strip().lower()
+            in incomplete_statuses
+            for item in items
+            if isinstance(item, dict)
+        ):
+            return False
         return cls._has_usable_cached_route(items) or (
             cls._full_negative_cache_is_confirmed(items)
         )

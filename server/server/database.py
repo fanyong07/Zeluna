@@ -475,6 +475,14 @@ class PlaybackCache(Base):
     # JSON: [{"url","title","format","source"}] —— 只存验证过可达的线路
     lines_json: Mapped[str] = mapped_column(Text, default="[]")
     line_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "quick" 只覆盖了首批来源，"full" 走完了整轮发现。缺少这个标记时
+    # 一份 quick 结果会被后续 full 请求当成完整清单，让未查询的站
+    # 在整个 TTL 窗口内一直显示"本轮未查询该来源"。
+    scan_scope: Mapped[str] = mapped_column(
+        String(10),
+        default="full",
+        server_default="full",
+    )
     verified_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
     created_at: Mapped[float] = mapped_column(Float, default=lambda: datetime.datetime.now(datetime.timezone.utc).timestamp())
 
@@ -781,29 +789,32 @@ async def upsert_playback_cache(
     lines_json: str,
     line_count: int,
     verified_at: float,
+    scan_scope: str = "full",
 ) -> PlaybackCache:
     """Store one cache row and recover cleanly from concurrent inserts."""
     query = select(PlaybackCache).where(
         PlaybackCache.subject_id == subject_id,
         PlaybackCache.episode == episode,
     )
+
+    def apply(target: PlaybackCache) -> None:
+        target.title = title
+        target.lines_json = lines_json
+        target.line_count = line_count
+        target.verified_at = verified_at
+        target.scan_scope = scan_scope
+
     row = (await session.execute(query)).scalar_one_or_none()
     if row is None:
         row = PlaybackCache(subject_id=subject_id, episode=episode)
         session.add(row)
-    row.title = title
-    row.lines_json = lines_json
-    row.line_count = line_count
-    row.verified_at = verified_at
+    apply(row)
     try:
         await session.commit()
         return row
     except IntegrityError:
         await session.rollback()
         row = (await session.execute(query)).scalar_one()
-        row.title = title
-        row.lines_json = lines_json
-        row.line_count = line_count
-        row.verified_at = verified_at
+        apply(row)
         await session.commit()
         return row

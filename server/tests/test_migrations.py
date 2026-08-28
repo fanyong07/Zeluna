@@ -107,7 +107,10 @@ def test_managed_line_migration_round_trip_has_no_local_media_fields(tmp_path):
     finally:
         engine.dispose()
 
-    command.downgrade(config, "-1")
+    # Downgrade to the revision before the one that creates this table, so the
+    # assertion keeps testing that migration rather than whichever revision
+    # happens to be head.
+    command.downgrade(config, "0012_community_danmaku")
     engine = create_engine(f"sqlite:///{database_path.as_posix()}")
     try:
         assert "managed_playback_lines" not in inspect(engine).get_table_names()
@@ -118,6 +121,84 @@ def test_managed_line_migration_round_trip_has_no_local_media_fields(tmp_path):
     engine = create_engine(f"sqlite:///{database_path.as_posix()}")
     try:
         assert "managed_playback_lines" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_playback_cache_scan_scope_migration_rechecks_legacy_rows(tmp_path):
+    database_path = tmp_path / "playback-cache-scope.db"
+    config = _config(database_path)
+
+    command.upgrade(config, "0013_managed_playback_lines")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO playback_cache (
+                subject_id, episode, title, lines_json, line_count,
+                verified_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "bangumi:legacy-cache",
+                1,
+                "Legacy",
+                "[]",
+                0,
+                1.0,
+                1.0,
+            ),
+        )
+
+    command.upgrade(config, "head")
+    with sqlite3.connect(database_path) as connection:
+        legacy_scope = connection.execute(
+            """
+            SELECT scan_scope FROM playback_cache
+            WHERE subject_id = ? AND episode = ?
+            """,
+            ("bangumi:legacy-cache", 1),
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO playback_cache (
+                subject_id, episode, title, lines_json, line_count,
+                verified_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "bangumi:new-cache",
+                1,
+                "New",
+                "[]",
+                0,
+                2.0,
+                2.0,
+            ),
+        )
+        new_scope = connection.execute(
+            """
+            SELECT scan_scope FROM playback_cache
+            WHERE subject_id = ? AND episode = ?
+            """,
+            ("bangumi:new-cache", 1),
+        ).fetchone()[0]
+
+    assert legacy_scope == "quick"
+    assert new_scope == "full"
+
+    command.downgrade(config, "0013_managed_playback_lines")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("playback_cache")
+        }
+        assert "scan_scope" not in columns
+        with engine.connect() as connection:
+            count = connection.execute(
+                text("SELECT COUNT(*) FROM playback_cache")
+            ).scalar_one()
+        assert count == 2
     finally:
         engine.dispose()
 

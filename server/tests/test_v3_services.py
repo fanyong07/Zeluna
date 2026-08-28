@@ -777,7 +777,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             content_types = ["anime"]
 
             async def search(self, _keyword: str):
-                raise AssertionError("fresh binding must skip discovery search")
+                return []
 
             async def get_video_urls(self, _source_id: str, _episode: int):
                 return []
@@ -838,8 +838,8 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             items[0]["diagnostic_status"],
             "matched_no_episode",
         )
-        self.assertFalse(items[0]["queried"])
-        self.assertEqual(items[0]["aliases_attempted"], 0)
+        self.assertTrue(items[0]["queried"])
+        self.assertEqual(items[0]["aliases_attempted"], 1)
         self.assertTrue(items[0]["matched"])
         self.assertFalse(items[0]["episode_found"])
 
@@ -918,6 +918,29 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         enabled_provider_ids = frozenset(
             item.provider_id for item in aggregator.provider_metadata
         )
+
+        async def discover_with_complete_diagnostics(*_args, **_kwargs):
+            diagnostics = {
+                name: SourceDiscoveryDiagnostic(
+                    source_name=name,
+                    provider_id=(
+                        "aggregate.maccms"
+                        if provider == "maccms"
+                        else f"crawler.{name}"
+                    ),
+                    queried=True,
+                    aliases_attempted=1,
+                    status=SourceDiscoveryStatus.SEARCH_MISS,
+                )
+                for provider, name in aggregator.source_inventory
+            }
+            for match in matches:
+                diagnostics[match.source_name].matched = True
+                diagnostics[match.source_name].status = (
+                    SourceDiscoveryStatus.MATCHED
+                )
+            return matches, diagnostics
+
         with (
             patch.object(
                 aggregator,
@@ -930,7 +953,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "server.playback.aggregator.discover_source_matches",
-                new=AsyncMock(return_value=matches),
+                new=AsyncMock(side_effect=discover_with_complete_diagnostics),
             ) as discover,
             patch(
                 "server.playback.aggregator.resolve_source_matches",
@@ -965,7 +988,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             first_by_source["魔都"]["diagnostic_status"],
             "route_unavailable",
         )
-        self.assertFalse(first_by_source["iKun"]["queried"])
+        self.assertTrue(first_by_source["iKun"]["queried"])
         self.assertEqual(discover.await_count, 1)
         self.assertEqual(resolve.await_count, 1)
         async with self.sessions() as session:
@@ -973,6 +996,87 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             binding_count = await session.scalar(select(func.count(SourceBinding.id)))
         self.assertEqual(cache_count, 1)
         self.assertEqual(binding_count, 2)
+
+    async def test_full_refresh_requeries_sources_covered_by_old_bindings(self):
+        stable_id = "bangumi:999006"
+        now = time.time()
+        async with self.sessions() as session:
+            session.add(SourceBinding(
+                stable_id=stable_id,
+                source_id="crawler:girigiri:legacy-binding",
+                source_name="girigiri",
+                matched_title="完整检索测试",
+                media_type="anime",
+                year=2026,
+                score=100,
+                success_count=3,
+                failure_count=0,
+                last_success_at=now,
+                last_failure_at=0,
+                enabled=True,
+                updated_at=now,
+            ))
+            await session.commit()
+
+        metadata = {
+            "stable_id": stable_id,
+            "title": "完整检索测试",
+            "original_title": "Full Scan Test",
+            "aliases": ["完整检索测试"],
+            "media_type": "anime",
+            "date": "2026-01-01",
+        }
+        discovery_diagnostic = SourceDiscoveryDiagnostic(
+            source_name="girigiri",
+            provider_id="crawler.girigiri",
+            queried=True,
+            aliases_attempted=1,
+            status=SourceDiscoveryStatus.SEARCH_MISS,
+        )
+        with (
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.girigiri"}),
+            ),
+            patch(
+                "server.playback.catalog_service.get_subject",
+                new=AsyncMock(return_value=metadata),
+            ),
+            patch(
+                "server.playback.catalog_service.playback_aliases",
+                new=AsyncMock(return_value=["完整检索测试"]),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=([], {
+                    "girigiri": discovery_diagnostic,
+                })),
+            ) as discover,
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(return_value=([], {}, {})),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service.lines(stable_id, 1, session)
+
+        discover.assert_awaited_once()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["source"], "crawler:girigiri")
+        self.assertTrue(items[0]["queried"])
+        self.assertEqual(items[0]["diagnostic_status"], "search_miss")
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == stable_id,
+                    PlaybackCache.episode == 1,
+                )
+            )
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached.scan_scope, "full")
 
     async def test_playback_context_uses_catalog_crosswalk_alias_order(self):
         metadata = {
@@ -1202,6 +1306,111 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+        self.assertIsNone(cached)
+
+    async def test_full_result_with_unqueried_source_is_not_cached_as_full(self):
+        match = SourceMatch(
+            source_id="crawler.one:matched",
+            source_name="one",
+            title="Partial Full Result",
+            content_type="anime",
+            year=2026,
+            score=100,
+        )
+        line = AggregatedVideoLine(
+            url="https://cdn.example/partial-full.m3u8",
+            title="Partial Full Result",
+            format="hls",
+            source="crawler:one",
+            verification_status=SERVER_VERIFIED,
+        )
+        diagnostics = {
+            "one": SourceDiscoveryDiagnostic(
+                source_name="one",
+                provider_id="crawler.one",
+                queried=True,
+                aliases_attempted=1,
+                matched=True,
+                status=SourceDiscoveryStatus.MATCHED,
+            ),
+            "two": SourceDiscoveryDiagnostic(
+                source_name="two",
+                provider_id="crawler.two",
+            ),
+        }
+        with (
+            patch.object(
+                self.service,
+                "_playback_context",
+                new=AsyncMock(return_value=(
+                    "Partial Full Result",
+                    "anime",
+                    2026,
+                    ["Partial Full Result"],
+                )),
+            ),
+            patch.object(
+                self.service,
+                "_load_source_health",
+                new=AsyncMock(return_value={}),
+            ),
+            patch.object(
+                self.service,
+                "_load_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch.object(
+                aggregator,
+                "_crawler_scrapers",
+                {"one": object(), "two": object()},
+            ),
+            patch.object(
+                aggregator,
+                "_enabled_provider_ids",
+                frozenset({"crawler.one", "crawler.two"}),
+            ),
+            patch.object(
+                aggregator,
+                "discover_source_matches",
+                new=AsyncMock(return_value=([match], diagnostics)),
+            ),
+            patch.object(
+                aggregator,
+                "resolve_source_matches",
+                new=AsyncMock(return_value=(
+                    [line],
+                    {"one": SERVER_VERIFIED},
+                    {},
+                )),
+            ),
+        ):
+            async with self.sessions() as session:
+                items = await self.service._refresh(
+                    "bangumi:991007",
+                    1,
+                    session,
+                    title="Partial Full Result",
+                    original_title="",
+                    content_type="anime",
+                    year=2026,
+                )
+
+        self.assertEqual(sum(item["available"] for item in items), 1)
+        self.assertEqual(
+            [
+                item["source"]
+                for item in items
+                if item["diagnostic_status"] == "not_queried"
+            ],
+            ["crawler:two"],
+        )
+        async with self.sessions() as session:
+            cached = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:991007",
+                    PlaybackCache.episode == 1,
+                )
+            )
         self.assertIsNone(cached)
 
     async def test_full_confirmed_miss_keeps_bounded_negative_cache(self):
@@ -1435,6 +1644,212 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.service.cache_metrics["stale_hit"], 2)
         self.assertEqual(self.service.cache_metrics["refresh_success"], 1)
+
+    def _add_cache_row(
+        self,
+        session,
+        *,
+        subject_id: str,
+        scan_scope: str,
+        verified_at: float,
+    ) -> None:
+        """A quick-shaped row: one playable line plus an unreached source."""
+        session.add(
+            PlaybackCache(
+                subject_id=subject_id,
+                episode=1,
+                title="Partial",
+                lines_json=json.dumps(
+                    [
+                        {
+                            "url": "https://cdn.example/quick.m3u8",
+                            "source": "maccms:iKun",
+                            "available": True,
+                            "status": SERVER_VERIFIED,
+                            "expires_at": 0,
+                        },
+                        {
+                            "url": "",
+                            "source": "maccms:魔都",
+                            "available": False,
+                            "status": "unavailable",
+                            "diagnostic_status": "not_queried",
+                            "queried": False,
+                            "expires_at": 0,
+                        },
+                    ]
+                ),
+                line_count=1,
+                verified_at=verified_at,
+                scan_scope=scan_scope,
+            )
+        )
+
+    async def test_quick_scope_cache_does_not_satisfy_a_full_request(self):
+        """A quick refresh only reaches the first wave of sources, so its row
+        must not stand in for a full scan. Otherwise every unreached source
+        reports "not queried" for the whole TTL window."""
+        async with self.sessions() as session:
+            self._add_cache_row(
+                session,
+                subject_id="bangumi:992001",
+                scan_scope="quick",
+                verified_at=time.time(),
+            )
+            await session.commit()
+
+        refresh_calls = 0
+
+        async def full_refresh(*_args, **_kwargs):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            return [
+                {
+                    "url": "https://cdn.example/full.m3u8",
+                    "source": "maccms:魔都",
+                    "available": True,
+                    "diagnostic_status": "server_verified",
+                    "queried": True,
+                }
+            ]
+
+        with patch.object(self.service, "_refresh", new=full_refresh):
+            async with self.sessions() as session:
+                items = await self.service.lines("bangumi:992001", 1, session)
+
+        self.assertEqual(refresh_calls, 1)
+        self.assertEqual(
+            [item["url"] for item in items],
+            ["https://cdn.example/full.m3u8"],
+        )
+        self.assertEqual(
+            [
+                item["source"]
+                for item in items
+                if item.get("diagnostic_status") == "not_queried"
+            ],
+            [],
+        )
+
+    async def test_full_scope_cache_still_short_circuits_a_full_request(self):
+        async with self.sessions() as session:
+            self._add_cache_row(
+                session,
+                subject_id="bangumi:992002",
+                scan_scope="full",
+                verified_at=time.time(),
+            )
+            await session.commit()
+
+        async def unexpected_refresh(*_args, **_kwargs):
+            raise AssertionError("a fresh full cache must not trigger a refresh")
+
+        with patch.object(self.service, "_refresh", new=unexpected_refresh):
+            async with self.sessions() as session:
+                items = await self.service.lines("bangumi:992002", 1, session)
+
+        self.assertTrue(items)
+        self.assertTrue(all(item["cached"] for item in items))
+        self.assertEqual(self.service.cache_metrics["fresh_hit"], 1)
+
+    async def test_quick_scope_cache_still_serves_a_quick_request(self):
+        async with self.sessions() as session:
+            self._add_cache_row(
+                session,
+                subject_id="bangumi:992003",
+                scan_scope="quick",
+                verified_at=time.time(),
+            )
+            await session.commit()
+
+        async def unexpected_refresh(*_args, **_kwargs):
+            raise AssertionError("a fresh quick cache must serve quick requests")
+
+        with patch.object(self.service, "_refresh_quick", new=unexpected_refresh):
+            async with self.sessions() as session:
+                items = await self.service.quick_lines(
+                    "bangumi:992003",
+                    1,
+                    session,
+                )
+
+        self.assertEqual(
+            [item["url"] for item in items],
+            ["https://cdn.example/quick.m3u8"],
+        )
+
+    async def test_quick_result_does_not_downgrade_a_fresh_full_cache(self):
+        async with self.sessions() as session:
+            self._add_cache_row(
+                session,
+                subject_id="bangumi:992004",
+                scan_scope="full",
+                verified_at=time.time(),
+            )
+            await session.commit()
+
+        async with self.sessions() as session:
+            await self.service._store_cache(
+                session,
+                "bangumi:992004",
+                1,
+                "Quick",
+                [
+                    {
+                        "url": "https://cdn.example/quick-only.m3u8",
+                        "source": "maccms:iKun",
+                        "available": True,
+                        "status": SERVER_VERIFIED,
+                        "expires_at": 0,
+                    }
+                ],
+                scan_scope="quick",
+            )
+
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:992004"
+                )
+            )
+        self.assertEqual(row.scan_scope, "full")
+        self.assertEqual(row.title, "Partial")
+
+    async def test_full_result_replaces_a_quick_cache_row(self):
+        async with self.sessions() as session:
+            self._add_cache_row(
+                session,
+                subject_id="bangumi:992005",
+                scan_scope="quick",
+                verified_at=time.time(),
+            )
+            await session.commit()
+
+        async with self.sessions() as session:
+            await self.service._store_cache(
+                session,
+                "bangumi:992005",
+                1,
+                "Full",
+                [
+                    {
+                        "url": "https://cdn.example/full.m3u8",
+                        "source": "maccms:魔都",
+                        "available": True,
+                        "status": SERVER_VERIFIED,
+                        "expires_at": 0,
+                    }
+                ],
+            )
+
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(PlaybackCache).where(
+                    PlaybackCache.subject_id == "bangumi:992005"
+                )
+            )
+        self.assertEqual(row.scan_scope, "full")
+        self.assertEqual(row.title, "Full")
 
     async def test_concurrent_cache_misses_share_one_server_refresh(self):
         started = asyncio.Event()
