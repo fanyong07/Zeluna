@@ -276,7 +276,7 @@ class RuleImporter {
       groupId: groupId,
       priority: tier,
       legacyIds: ['custom:animeko-unsupported:${_hash(legacySeed)}'],
-      unsupportedReason: '当前还没有接入 Animeko 的 $factoryId 源执行器。',
+      unsupportedReason: '这类来源暂时不支持。',
       note: description.trim().isEmpty ? '从 Animeko 源导入。' : description,
     );
   }

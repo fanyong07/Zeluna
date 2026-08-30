@@ -20,8 +20,11 @@ final class Anime4KDisplayStatus {
   final bool previewingOriginal;
 }
 
-/// Owns Anime4K shader operations, frame-rate detection, performance
-/// monitoring and fallback decisions for one native player.
+/// Owns Anime4K shader operations for one native player.
+///
+/// The tier the user picked is the tier that runs. There is no frame-drop
+/// monitor and no tier fallback: if the pipeline cannot be applied the feature
+/// is disabled and says so, rather than quietly substituting a weaker chain.
 final class Anime4KController extends ChangeNotifier {
   Anime4KController({
     required TargetPlatform platform,
@@ -30,21 +33,17 @@ final class Anime4KController extends ChangeNotifier {
     Anime4KPipelineInstaller? installPipeline,
     Anime4KSupportResolver? resolveSupport,
     Anime4KShaderManager? shaderManager,
-    Duration performanceSampleInterval = const Duration(seconds: 4),
-  }) : _platform = platform,
-       _getProperty = getProperty,
-       _resolveSupport =
+  }) : _resolveSupport =
            resolveSupport ??
-           (() => Anime4KShaderManager.currentPlatformSupport),
-       _performanceSampleInterval = performanceSampleInterval {
+           (() => Anime4KShaderManager.currentPlatformSupport) {
     final shaders = shaderManager ?? Anime4KShaderManager();
     _runtime = Anime4KMpvRuntime(
       platform: platform,
       installPipeline:
           installPipeline ??
-          (profile, tier, customShaderNames) => shaders.ensureInstalled(
-            profile,
-            tier: tier,
+          (tier, mode, customShaderNames) => shaders.ensureInstalled(
+            tier,
+            mode: mode,
             customShaderNames: customShaderNames,
           ),
       getProperty: getProperty,
@@ -52,37 +51,24 @@ final class Anime4KController extends ChangeNotifier {
     );
   }
 
-  final TargetPlatform _platform;
-  final Anime4KPropertyGetter _getProperty;
   final Anime4KSupportResolver _resolveSupport;
-  final Duration _performanceSampleInterval;
   late final Anime4KMpvRuntime _runtime;
 
   PlaybackSettings _settings = const PlaybackSettings();
   String? _appliedKey;
-  Anime4KProfile? _activeProfile;
-  Anime4KTier? _activeTier;
   Anime4KSelection? _activeSelection;
   int _sourceWidth = 0;
   int _sourceHeight = 0;
   Size _viewportPhysicalSize = Size.zero;
-  double? _sourceFramesPerSecond;
-  bool _frameRateIsMeasured = false;
-  int _frameRateQuerySerial = 0;
   String? _statusMessage;
   Future<void> _operationQueue = Future<void>.value();
-  bool _handlingFailure = false;
   bool _previewingOriginal = false;
-  Timer? _performanceTimer;
-  final Map<String, int> _performanceCounters = {};
-  int _overloadSamples = 0;
   int _applySerial = 0;
-  bool _playing = false;
-  bool _buffering = false;
   bool _disposed = false;
 
   Anime4KSelection? get activeSelection => _activeSelection;
-  Anime4KTier? get activeTier => _activeTier;
+  Anime4KTier? get activeTier => _activeSelection?.tier;
+  Anime4KMode? get activeMode => _activeSelection?.mode;
   String? get statusMessage => _statusMessage;
   bool get previewingOriginal => _previewingOriginal;
   bool get isActive => _activeSelection != null && !_previewingOriginal;
@@ -92,22 +78,16 @@ final class Anime4KController extends ChangeNotifier {
   Anime4KDisplayStatus? get displayStatus {
     final selection = _activeSelection;
     if (selection == null) return null;
-    final mode = _previewingOriginal
+    final title = _previewingOriginal
         ? '原画预览'
         : selection.expectsUpscale
         ? '超分运行中'
-        : selection.resolvedProfile.restoresWithoutScaling
-        ? '画质修复中'
-        : '当前尺寸无需放大';
-    final dimensions = selection.resolutionDescription(
-      previewingOriginal: _previewingOriginal,
-    );
-    final frameRate = selection.frameRateLabel;
+        : '画质修复中';
     return Anime4KDisplayStatus(
-      title: mode,
+      title: title,
       detail:
-          '$dimensions${frameRate == null ? '' : ' · $frameRate'} · '
-          '${selection.activeModeLabel} · ${selection.tier.label}',
+          '${selection.resolutionDescription(previewingOriginal: _previewingOriginal)}'
+          ' · ${selection.activeModeLabel}',
       previewingOriginal: _previewingOriginal,
     );
   }
@@ -118,15 +98,13 @@ final class Anime4KController extends ChangeNotifier {
     final selection = _selectionFor(settings);
     final customShaders = settings.superResolutionCustomShaders;
     final key =
-        '${settings.superResolution}:${selection.requestedProfile.settingValue}:'
-        '${selection.resolvedProfile.settingValue}:${selection.tier.settingValue}:'
-        '${selection.pipelineProfile.settingValue}:'
-        '${customShaders.join('|')}';
+        '${settings.superResolution}:${selection.tier.settingValue}:'
+        '${selection.mode.settingValue}:${customShaders.join('|')}';
     if (!force && _appliedKey == key) {
-      final activeTier = _activeTier;
-      if (activeTier != null && _activeProfile == selection.resolvedProfile) {
-        _activeSelection = selection.withTier(activeTier);
-      }
+      // Dimensions or viewport may have moved, so keep the status line current
+      // -- but only while a chain is actually running. Refreshing this when the
+      // feature is off would fabricate an active selection.
+      if (_activeSelection != null) _activeSelection = selection;
       return;
     }
 
@@ -162,9 +140,6 @@ final class Anime4KController extends ChangeNotifier {
     if (_disposed) return;
     _sourceWidth = 0;
     _sourceHeight = 0;
-    _sourceFramesPerSecond = null;
-    _frameRateIsMeasured = false;
-    _frameRateQuerySerial++;
   }
 
   void updateViewport(Size physicalSize) {
@@ -176,68 +151,6 @@ final class Anime4KController extends ChangeNotifier {
     _viewportPhysicalSize = physicalSize;
     refresh();
     notifyListeners();
-  }
-
-  void updatePlaybackState({required bool playing, required bool buffering}) {
-    _playing = playing;
-    _buffering = buffering;
-  }
-
-  Future<void> refreshFrameRate({required bool usesWebPlayer}) async {
-    if (_disposed || usesWebPlayer || _sourceWidth <= 0) return;
-    final serial = ++_frameRateQuerySerial;
-
-    Future<double?> readFrameRate(String property) async {
-      try {
-        return Anime4KShaderManager.parseFrameRate(
-          await _getProperty(property),
-        );
-      } catch (_) {
-        return null;
-      }
-    }
-
-    final measured = await readFrameRate('estimated-vf-fps');
-    if (_disposed || serial != _frameRateQuerySerial) return;
-    final container = measured == null
-        ? await readFrameRate('container-fps')
-        : null;
-    final value = measured ?? container;
-    if (_disposed || serial != _frameRateQuerySerial || value == null) return;
-
-    final isMeasured = measured != null;
-    final current = _sourceFramesPerSecond;
-    if (_frameRateIsMeasured && !isMeasured) return;
-    if (_frameRateIsMeasured == isMeasured &&
-        current != null &&
-        value <= current + 0.5) {
-      return;
-    }
-    _sourceFramesPerSecond = value;
-    _frameRateIsMeasured = isMeasured;
-    refresh();
-    notifyListeners();
-  }
-
-  void handlePlayerLog({required String prefix, required String text}) {
-    final activeProfile = _activeProfile;
-    final activeTier = _activeTier;
-    if (_disposed ||
-        activeProfile == null ||
-        activeTier == null ||
-        _handlingFailure ||
-        !_settings.superResolution) {
-      return;
-    }
-    final message = '$prefix $text'.toLowerCase();
-    final isShaderFailure =
-        message.contains('shader') &&
-        (message.contains('error') ||
-            message.contains('failed') ||
-            message.contains('compile') ||
-            message.contains('could not'));
-    if (!isShaderFailure) return;
-    _scheduleFallback(activeTier);
   }
 
   void setOriginalPreview(bool enabled) {
@@ -258,68 +171,17 @@ final class Anime4KController extends ChangeNotifier {
     );
   }
 
-  Future<void> samplePerformance() async {
-    final activeTier = _activeTier;
-    if (_disposed ||
-        activeTier == null ||
-        activeTier == Anime4KTier.performance ||
-        !_playing ||
-        _buffering ||
-        _previewingOriginal ||
-        _handlingFailure) {
-      return;
-    }
-
-    var largestDelta = 0;
-    var foundCounter = false;
-    for (final property in const [
-      'vo-drop-frame-count',
-      'mistimed-frame-count',
-      'delayed-frame-count',
-    ]) {
-      if (_disposed) return;
-      try {
-        final value = await _runtime.readCounter(property);
-        if (_disposed) return;
-        if (value == null) continue;
-        foundCounter = true;
-        final previous = _performanceCounters[property];
-        _performanceCounters[property] = value;
-        if (previous != null && value >= previous) {
-          final delta = value - previous;
-          if (delta > largestDelta) largestDelta = delta;
-        }
-      } catch (_) {
-        // Some libmpv builds do not expose every rendering counter.
-      }
-    }
-    if (_disposed || !foundCounter) return;
-    if (largestDelta >= 4) {
-      _overloadSamples++;
-    } else {
-      _overloadSamples = 0;
-    }
-    if (_overloadSamples < 2) return;
-
-    _overloadSamples = 0;
-    _scheduleFallback(activeTier);
-  }
-
   Future<void> _setShader({
     required bool enabled,
     required Anime4KSelection selection,
     required List<String> customShaderNames,
     required int serial,
-    Anime4KTier? skipTier,
   }) async {
     if (!_acceptsApply(serial)) return;
     try {
       if (!enabled) {
         await _runtime.disable();
         if (!_acceptsApply(serial)) return;
-        _stopPerformanceMonitor();
-        _activeProfile = null;
-        _activeTier = null;
         _activeSelection = null;
         _previewingOriginal = false;
         _statusMessage = null;
@@ -333,8 +195,7 @@ final class Anime4KController extends ChangeNotifier {
         _showUnavailable(support.reason ?? '当前平台不支持实时超分，已使用普通画质。');
         return;
       }
-      if (selection.resolvedProfile == Anime4KProfile.advanced &&
-          customShaderNames.isEmpty) {
+      if (selection.tier.isCustom && customShaderNames.isEmpty) {
         await _runtime.disable();
         if (!_acceptsApply(serial)) return;
         _showUnavailable('高级超分至少需要选择一个着色器。');
@@ -342,27 +203,20 @@ final class Anime4KController extends ChangeNotifier {
       }
 
       final result = await _runtime.enable(
-        selection.pipelineProfile,
-        requestedTier: selection.tier,
-        skipTier: skipTier,
+        tier: selection.tier,
+        mode: selection.mode,
         customShaderNames: customShaderNames,
       );
       if (!_acceptsApply(serial)) return;
       if (!result.enabled) {
-        _showUnavailable('当前设备无法运行 Anime4K 超分，已自动恢复普通画质。');
+        _showUnavailable('当前设备无法运行${selection.activeModeLabel}，已恢复普通画质。');
         return;
       }
 
-      _activeProfile = selection.resolvedProfile;
-      _activeTier = result.activeTier;
-      _activeSelection = selection.withTier(result.activeTier!);
+      _activeSelection = selection;
       _previewingOriginal = false;
-      _statusMessage = result.usedFallback
-          ? '${selection.resolvedProfile.label}已从${result.requestedTier.label}'
-                '降为${result.activeTier!.label}，保证播放流畅。'
-          : null;
+      _statusMessage = null;
       notifyListeners();
-      _startPerformanceMonitor();
     } catch (_) {
       if (!_acceptsApply(serial) || !enabled) return;
       _showUnavailable('当前播放器无法启用实时超分，已自动恢复普通画质。');
@@ -384,62 +238,22 @@ final class Anime4KController extends ChangeNotifier {
     if (outputSize == Size.zero && _sourceWidth > 0 && _sourceHeight > 0) {
       outputSize = Size(_sourceWidth.toDouble(), _sourceHeight.toDouble());
     }
-    return Anime4KShaderManager.select(
-      requestedProfile: Anime4KProfile.fromSetting(
-        settings.superResolutionProfile,
-      ),
-      platform: _platform,
+    return Anime4KSelection(
+      tier: Anime4KTier.fromSetting(settings.superResolutionTier),
+      mode: Anime4KMode.fromSetting(settings.superResolutionMode),
       sourceWidth: _sourceWidth,
       sourceHeight: _sourceHeight,
       displayWidth: outputSize.width.round(),
       displayHeight: outputSize.height.round(),
-      sourceFramesPerSecond: _sourceFramesPerSecond ?? 0,
     );
-  }
-
-  void _scheduleFallback(Anime4KTier activeTier) {
-    if (_disposed || _handlingFailure) return;
-    _handlingFailure = true;
-    final selection = _selectionFor(_settings);
-    final serial = ++_applySerial;
-    _operationQueue = _operationQueue
-        .then(
-          (_) => _setShader(
-            enabled: true,
-            selection: selection,
-            customShaderNames: _settings.superResolutionCustomShaders,
-            serial: serial,
-            skipTier: activeTier,
-          ),
-        )
-        .catchError((Object _) {})
-        .whenComplete(() => _handlingFailure = false);
   }
 
   void _showUnavailable(String message) {
     if (_disposed) return;
-    _stopPerformanceMonitor();
-    _activeProfile = null;
-    _activeTier = null;
     _activeSelection = null;
     _previewingOriginal = false;
     _statusMessage = message;
     notifyListeners();
-  }
-
-  void _startPerformanceMonitor() {
-    _stopPerformanceMonitor();
-    if (_disposed) return;
-    _performanceTimer = Timer.periodic(_performanceSampleInterval, (_) {
-      if (!_disposed) unawaited(samplePerformance());
-    });
-  }
-
-  void _stopPerformanceMonitor() {
-    _performanceTimer?.cancel();
-    _performanceTimer = null;
-    _performanceCounters.clear();
-    _overloadSamples = 0;
   }
 
   void _enqueue(Future<void> Function() operation, {VoidCallback? onError}) {
@@ -455,8 +269,6 @@ final class Anime4KController extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _applySerial++;
-    _frameRateQuerySerial++;
-    _stopPerformanceMonitor();
     super.dispose();
   }
 }

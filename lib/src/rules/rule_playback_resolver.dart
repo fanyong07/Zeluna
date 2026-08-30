@@ -225,7 +225,7 @@ class RulePlaybackResolver {
             rule,
             subject,
             episode,
-            rule.unsupportedReason ?? '该规则需要验证码或 WebView 手动处理，解析器不会绕过验证。',
+            rule.unsupportedReason ?? '这个来源要先在网页里手动过验证。',
           ),
         ];
       }
@@ -316,7 +316,7 @@ class RulePlaybackResolver {
               rule,
               subject,
               episode,
-              '该规则属于 ${rule.engine}，需要接入对应规则执行器后才能解析。',
+              '这类来源暂时不支持。',
             ),
           ],
         };
@@ -417,7 +417,7 @@ class RulePlaybackResolver {
           rule,
           episode,
           url: playableUrl,
-          title: '${episode.displayTitle} 路 $lineName',
+          title: '${episode.displayTitle} · $lineName',
           probe: probe,
           referer: referer,
           headers: headers,
@@ -660,7 +660,7 @@ class RulePlaybackResolver {
     final config = rule.animeko;
     if (config == null) {
       return [
-        _unavailableLine(rule, subject, episode, '该 Animeko 源缺少 CSS 解析配置。'),
+        _unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。'),
       ];
     }
 
@@ -790,7 +790,7 @@ class RulePlaybackResolver {
               headers,
               verifyPlayable: verifyPlayable,
             );
-            final title = '${episode.displayTitle} · 镜像线路 ${index + 1}';
+            final title = '${episode.displayTitle} · 线路 ${index + 1}';
             return probe.available
                 ? _availableLine(
                     rule,
@@ -877,7 +877,7 @@ class RulePlaybackResolver {
       return [_unavailableLine(rule, subject, episode, '没有匹配到当前集。')];
     }
     if (selected?['isVip'] == true) {
-      return [_unavailableLine(rule, subject, episode, '当前集需要站点会员，未加入播放线路。')];
+      return [_unavailableLine(rule, subject, episode, '这一集要站点会员才能看。')];
     }
 
     final lineCode = rule.rawConfig['lineCode']?.toString().trim();
@@ -1223,7 +1223,7 @@ class RulePlaybackResolver {
     final config = rule.kazumi;
     if (config == null) {
       return [
-        _unavailableLine(rule, subject, episode, '该 Kazumi 规则缺少 XPath 解析配置。'),
+        _unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。'),
       ];
     }
 
@@ -1394,7 +1394,7 @@ class RulePlaybackResolver {
   }) async {
     final config = rule.xbpq;
     if (config == null) {
-      return [_unavailableLine(rule, subject, episode, '该 XBPQ 规则缺少解析配置。')];
+      return [_unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。')];
     }
 
     final detailUrl = await _findXbpqDetailUrl(client, rule, config, subject);
@@ -1620,7 +1620,7 @@ class RulePlaybackResolver {
           rule,
           subject,
           episode,
-          '该 TVBox $apiLabel 源缺少有效接口地址。',
+          '这个来源的地址不对，用不了。',
         ),
       ];
     }
@@ -1817,7 +1817,7 @@ class RulePlaybackResolver {
     if (rule == null) return;
     if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
       throw StateError(
-        '规则请求超出已批准的${purpose == RuleUrlPurpose.page ? '页面' : '媒体'}域名范围。',
+        '这个来源想访问未授权的网站，已拦下。',
       );
     }
   }
@@ -1917,7 +1917,7 @@ class RulePlaybackResolver {
         if (redirect >= _maxRuleRedirects) {
           final subscription = response.stream.listen(null);
           await subscription.cancel();
-          throw StateError('规则页面重定向次数过多。');
+          throw StateError('这个来源的网页一直在跳转，已停下。');
         }
         final nextUri = currentUri.resolve(location.trim());
         _ensureSandboxedRuleUri(nextUri, RuleUrlPurpose.page);
@@ -2024,7 +2024,7 @@ class RulePlaybackResolver {
       clientVerified: probe.available,
       startupProfile: probe.startupProfile,
       available: true,
-      message: '已解析到当前集的播放地址。',
+      message: '可以播放。',
     );
   }
 
@@ -2348,7 +2348,7 @@ class RulePlaybackResolver {
       if (response.statusCode == 403) {
         return _PlayableProbeResult(
           false,
-          '视频 CDN 拒绝访问，可能有防盗链或地区限制。',
+          '视频服务器拒绝了访问，可能限制了地区或来源。',
           latency: totalLatency(),
         );
       }
@@ -5500,12 +5500,19 @@ String _cleanText(String value) {
       '';
 }
 
+/// User-facing text for a resolver exception.
+///
+/// Never interpolates the raw exception: `error.toString()` carries Dart's own
+/// prefixes ("Bad state:", "SocketException:") and, for the drpy runtime,
+/// English internal messages -- all of which used to reach Chinese UI verbatim.
+/// StateError messages are written for users, so those pass through directly.
 String _friendlyError(Object error) {
+  if (error is StateError) return error.message;
   final text = error.toString();
-  if (text.contains('TimeoutException')) return '解析超时，当前规则源响应太慢。';
-  if (text.contains('HTTP')) return '规则源请求失败：$text';
-  if (text.contains('SocketException')) return '网络不可用或规则源无法访问。';
-  return '解析失败：$text';
+  if (text.contains('TimeoutException')) return '解析超时，当前来源响应太慢。';
+  if (text.contains('HTTP')) return '这个来源请求失败了。';
+  if (text.contains('SocketException')) return '网络不可用，或这个来源连不上。';
+  return '这个来源暂时用不了。';
 }
 
 Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
@@ -5584,12 +5591,19 @@ String? _normalizedMediaOrigin(Uri uri) {
   return '$scheme://${uri.host.toLowerCase()}:$port';
 }
 
+/// Short user-facing text for a probe failure.
+///
+/// The old fallback truncated `error.toString()` to 60 characters and shipped
+/// it, which put raw exception text -- English drpy messages included -- in the
+/// line list.
 String _shortError(Object error) {
+  if (error is StateError) return error.message;
   final text = error.toString();
-  if (text.contains('SocketException')) return '网络不可用或源站无法访问';
-  if (text.contains('HandshakeException')) return '证书或 TLS 握手失败';
+  if (text.contains('SocketException')) return '网络不可用，或来源连不上';
+  if (text.contains('HandshakeException')) return '安全连接建立失败';
   if (text.contains('ClientException')) return '连接被中断';
-  return text.length > 60 ? '${text.substring(0, 60)}...' : text;
+  if (text.contains('TimeoutException')) return '连接超时';
+  return '暂时连不上';
 }
 
 String _formatForUrl(String url, String fallback) {
@@ -5626,7 +5640,7 @@ String? _resolutionLabelForUrl(String url) {
 }
 
 String? _probeSizeLabel(_PlayableProbeResult probe) {
-  if (probe.isLive) return '动态流';
+  if (probe.isLive) return '直播';
   final bytes = probe.sizeBytes;
   if (bytes == null || bytes <= 0) return null;
   final value = (bytes / 1024 / 1024).toStringAsFixed(1);

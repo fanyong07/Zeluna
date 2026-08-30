@@ -127,7 +127,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('允许不安全 HTTP？'), findsOneWidget);
-    expect(find.textContaining('不会向它发送云账号 Token'), findsOneWidget);
+    expect(find.textContaining('不会向它发送你的云账号登录凭据'), findsOneWidget);
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
 

@@ -62,16 +62,25 @@ void main() {
     await tester.tap(superResolution);
     await tester.pumpAndSettle();
     expect(changes.last.superResolution, isTrue);
+    expect(find.text('画质档位'), findsOneWidget);
     expect(find.text('超分模式'), findsOneWidget);
 
-    final profile = find.byKey(const ValueKey('setting_choice_超分模式'));
-    await tester.ensureVisible(profile);
-    await tester.tap(profile);
+    final tier = find.byKey(const ValueKey('setting_choice_画质档位'));
+    await tester.ensureVisible(tier);
+    await tester.tap(tier);
     await tester.pumpAndSettle();
     expect(find.byType(BottomSheet), findsNothing);
-    await tester.tap(find.text('动画清晰').last);
+    await tester.tap(find.text('均衡').last);
     await tester.pumpAndSettle();
-    expect(changes.last.superResolutionProfile, 'clear');
+    expect(changes.last.superResolutionTier, 'balance');
+
+    final mode = find.byKey(const ValueKey('setting_choice_超分模式'));
+    await tester.ensureVisible(mode);
+    await tester.tap(mode);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('模式C+A').last);
+    await tester.pumpAndSettle();
+    expect(changes.last.superResolutionMode, 'ca');
 
     final autoFullscreen = find.byKey(const ValueKey('setting_switch_自动全屏'));
     await tester.ensureVisible(autoFullscreen);
@@ -137,7 +146,7 @@ void main() {
       _SettingsHarness(
         initialSettings: const PlaybackSettings(
           superResolution: true,
-          superResolutionProfile: 'advanced',
+          superResolutionTier: 'custom',
         ),
         onChanged: changes.add,
       ),
@@ -155,7 +164,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(changes, isNotEmpty);
-    expect(changes.last.superResolutionProfile, 'advanced');
+    expect(changes.last.superResolutionTier, 'custom');
     expect(changes.last.superResolutionCustomShaders, [
       'Anime4K_Clamp_Highlights.glsl',
     ]);
@@ -170,7 +179,7 @@ void main() {
         initialSettings: PlaybackSettings(superResolution: true),
         superResolutionStatus: Text(
           '画质修复中 · 片源 1920×1080 · 显示区域 1080×608 · '
-          '仅画质修复 · 59.94fps · 动画清晰 · 标准',
+          '画质修复 · 模式A · 质量',
         ),
       ),
     );
@@ -178,8 +187,7 @@ void main() {
     expect(find.textContaining('画质修复中'), findsOneWidget);
     expect(find.textContaining('片源 1920×1080'), findsOneWidget);
     expect(find.textContaining('显示区域 1080×608'), findsOneWidget);
-    expect(find.textContaining('仅画质修复'), findsOneWidget);
-    expect(find.textContaining('59.94fps'), findsOneWidget);
+    expect(find.textContaining('模式A · 质量'), findsOneWidget);
   });
 
   testWidgets('移动端和桌面端布局均无溢出', (tester) async {

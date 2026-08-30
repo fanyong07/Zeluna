@@ -44,7 +44,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
     if (_looksLikeDashMedia(uri, request.format)) {
       return const MediaDownloadResult(
         outcome: MediaDownloadOutcome.unsupported,
-        message: '当前离线下载暂不支持 DASH 分片线路',
+        message: '该线路不支持离线下载',
       );
     }
     if (_looksLikeHlsMedia(uri, request.format)) {
@@ -258,7 +258,7 @@ class IoMediaDownloadBackend implements MediaDownloadBackend {
       if (_isSegmentedContentType(contentType)) {
         return MediaDownloadResult(
           outcome: MediaDownloadOutcome.unsupported,
-          message: '该线路返回了 HLS/DASH 清单，暂不支持离线下载',
+          message: '该线路不支持离线下载',
           temporaryPath: temporary.path,
           bytes: existingBytes,
           etag: etag,

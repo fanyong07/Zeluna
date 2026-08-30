@@ -297,7 +297,7 @@ void main() {
           available: false,
         ),
       ),
-      '未查询',
+      '未检查',
     );
     expect(
       playbackLineFailureLabel(
@@ -327,7 +327,7 @@ void main() {
           available: false,
         ),
       ),
-      '暂缓请求',
+      '暂时跳过',
     );
   });
 

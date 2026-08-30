@@ -1264,7 +1264,8 @@ class PlaybackSettings {
   const PlaybackSettings({
     this.volumeBoost = 0.26,
     this.superResolution = false,
-    this.superResolutionProfile = 'auto',
+    this.superResolutionTier = 'quality',
+    this.superResolutionMode = 'a',
     this.superResolutionCustomShaders = const [],
     this.videoScale = '适应',
     this.speed = 1.0,
@@ -1289,7 +1290,12 @@ class PlaybackSettings {
 
   final double volumeBoost;
   final bool superResolution;
-  final String superResolutionProfile;
+
+  /// Anime4K quality tier: `quality` / `balance` / `efficiency` / `custom`.
+  final String superResolutionTier;
+
+  /// Anime4K mode: `a` / `b` / `c` / `aa` / `bb` / `ca`.
+  final String superResolutionMode;
   final List<String> superResolutionCustomShaders;
   final String videoScale;
   final double speed;
@@ -1314,7 +1320,8 @@ class PlaybackSettings {
   PlaybackSettings copyWith({
     double? volumeBoost,
     bool? superResolution,
-    String? superResolutionProfile,
+    String? superResolutionTier,
+    String? superResolutionMode,
     List<String>? superResolutionCustomShaders,
     String? videoScale,
     double? speed,
@@ -1339,8 +1346,8 @@ class PlaybackSettings {
     return PlaybackSettings(
       volumeBoost: volumeBoost ?? this.volumeBoost,
       superResolution: superResolution ?? this.superResolution,
-      superResolutionProfile:
-          superResolutionProfile ?? this.superResolutionProfile,
+      superResolutionTier: superResolutionTier ?? this.superResolutionTier,
+      superResolutionMode: superResolutionMode ?? this.superResolutionMode,
       superResolutionCustomShaders:
           superResolutionCustomShaders ?? this.superResolutionCustomShaders,
       videoScale: videoScale ?? this.videoScale,
@@ -1369,7 +1376,8 @@ class PlaybackSettings {
   Map<String, dynamic> toJson() => {
     'volumeBoost': volumeBoost,
     'superResolution': superResolution,
-    'superResolutionProfile': superResolutionProfile,
+    'superResolutionTier': superResolutionTier,
+    'superResolutionMode': superResolutionMode,
     'superResolutionCustomShaders': superResolutionCustomShaders,
     'videoScale': videoScale,
     'speed': speed,
@@ -1396,8 +1404,11 @@ class PlaybackSettings {
     return PlaybackSettings(
       volumeBoost: (json['volumeBoost'] as num?)?.toDouble() ?? 0.26,
       superResolution: json['superResolution'] as bool? ?? false,
-      superResolutionProfile: _normalizeSuperResolutionProfile(
-        json['superResolutionProfile'],
+      superResolutionTier: _normalizeSuperResolutionTier(
+        json['superResolutionTier'] ?? json['superResolutionProfile'],
+      ),
+      superResolutionMode: _normalizeSuperResolutionMode(
+        json['superResolutionMode'],
       ),
       superResolutionCustomShaders: _stringListFromJson(
         json['superResolutionCustomShaders'],
@@ -1425,20 +1436,27 @@ class PlaybackSettings {
     );
   }
 
-  static String _normalizeSuperResolutionProfile(Object? value) {
-    final profile = value?.toString();
-    if (profile == 'performance') return 'low_resolution';
-    if (profile == 'balanced') return 'auto';
-    if (profile == 'quality') return 'clear';
-    if (profile == 'auto' ||
-        profile == 'clear' ||
-        profile == 'soft' ||
-        profile == 'low_resolution' ||
-        profile == 'strong' ||
-        profile == 'advanced') {
-      return profile!;
-    }
-    return 'auto';
+  /// Accepts both the current tier names and the profile names written by the
+  /// previous single-field UI, so stored settings survive the upgrade.
+  static String _normalizeSuperResolutionTier(Object? value) {
+    final tier = value?.toString();
+    return switch (tier) {
+      'quality' || 'balance' || 'efficiency' || 'custom' => tier!,
+      // Legacy profile values.
+      'performance' => 'efficiency',
+      'balanced' => 'balance',
+      'advanced' => 'custom',
+      'auto' || 'clear' || 'soft' || 'low_resolution' || 'strong' => 'quality',
+      _ => 'quality',
+    };
+  }
+
+  static String _normalizeSuperResolutionMode(Object? value) {
+    final mode = value?.toString();
+    return switch (mode) {
+      'a' || 'b' || 'c' || 'aa' || 'bb' || 'ca' => mode!,
+      _ => 'a',
+    };
   }
 }
 

@@ -274,6 +274,7 @@ class SettingsChoiceRow<T> extends StatefulWidget {
     required this.labelOf,
     required this.onChanged,
     this.subtitle,
+    this.descriptionOf,
     this.presentation = SettingsChoicePresentation.sheet,
   });
 
@@ -282,6 +283,10 @@ class SettingsChoiceRow<T> extends StatefulWidget {
   final T value;
   final List<T> options;
   final String Function(T value) labelOf;
+
+  /// Per-option explanation, shown under the option's label. Use it where the
+  /// choice has real trade-offs the label cannot carry on its own.
+  final String Function(T value)? descriptionOf;
   final ValueChanged<T> onChanged;
   final SettingsChoicePresentation presentation;
 
@@ -399,12 +404,38 @@ class _SettingsChoiceRowState<T> extends State<SettingsChoiceRow<T>> {
                                   vertical: 13,
                                 ),
                                 child: Row(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.center,
                                   children: [
                                     Expanded(
-                                      child: Text(
-                                        widget.labelOf(widget.options[index]),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            widget.labelOf(
+                                              widget.options[index],
+                                            ),
+                                          ),
+                                          if (widget.descriptionOf
+                                              case final describe?) ...[
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              describe(widget.options[index]),
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .bodySmall
+                                                  ?.copyWith(
+                                                    color:
+                                                        scheme.onSurfaceVariant,
+                                                    height: 1.45,
+                                                  ),
+                                            ),
+                                          ],
+                                        ],
                                       ),
                                     ),
+                                    const SizedBox(width: 10),
                                     if (widget.options[index] == widget.value)
                                       Icon(
                                         Icons.check_rounded,
@@ -429,6 +460,7 @@ class _SettingsChoiceRowState<T> extends State<SettingsChoiceRow<T>> {
 
   void _showChoiceSheet(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final describe = widget.descriptionOf;
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -449,7 +481,21 @@ class _SettingsChoiceRowState<T> extends State<SettingsChoiceRow<T>> {
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(AppRadius.md),
                   ),
+                  isThreeLine: describe != null,
                   title: Text(widget.labelOf(option)),
+                  subtitle: describe == null
+                      ? null
+                      : Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            describe(option),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                  height: 1.45,
+                                ),
+                          ),
+                        ),
                   trailing: option == widget.value
                       ? Icon(Icons.check, color: scheme.primary)
                       : null,

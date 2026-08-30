@@ -40,7 +40,7 @@ final class SubtitleController extends ChangeNotifier {
   Future<SubtitleActionResult> select(SubtitleCandidate candidate) async {
     final url = candidate.downloadUrl?.trim() ?? '';
     if (!candidate.available || url.isEmpty) {
-      return SubtitleActionResult.unavailable(candidate.message ?? '该字幕暂不可用');
+      return SubtitleActionResult.unavailable(candidate.message ?? '这条字幕暂时不能用');
     }
     if (_disposed) return const SubtitleActionResult.stale();
     final serial = ++_actionSerial;

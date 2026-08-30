@@ -389,7 +389,8 @@ Map<String, dynamic> _namedImagePayload(
 Map<String, dynamic> _playbackSettingsPayload(PlaybackSettings settings) => {
   'volumeBoost': settings.volumeBoost.clamp(0, 2),
   'superResolution': settings.superResolution,
-  'superResolutionProfile': _boundedString(settings.superResolutionProfile, 40),
+  'superResolutionTier': _boundedString(settings.superResolutionTier, 40),
+  'superResolutionMode': _boundedString(settings.superResolutionMode, 8),
   'superResolutionCustomShaders': settings.superResolutionCustomShaders
       .where((item) => item.isNotEmpty)
       .map((item) => _boundedString(item, 160))

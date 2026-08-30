@@ -175,7 +175,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             children: [
               const SectionTitle(
                 title: '登录与安全',
-                subtitle: '密码由云端验证，登录状态保存在系统安全凭据中',
+                subtitle: '密码在云端校验，登录信息保存在系统的加密存储里',
                 icon: Icons.shield_outlined,
               ),
               const SizedBox(height: 12),
@@ -441,7 +441,7 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
               const SizedBox(height: 14),
               Text(
                 firstAccount
-                    ? '首次创建账号后，当前游客的收藏、追番、历史、下载和私密源配置会安全迁移进新账号，游客空间随后清空。'
+                    ? '创建账号后，你现在的收藏、追番、历史和下载会转入新账号，游客空间会被清空。'
                     : '新账号会从空白资料开始，不会看到其他账号的收藏、历史和个人偏好。',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: context.inkMuted,
@@ -1234,7 +1234,7 @@ String _syncStatusLabel(SyncStatus status) => switch (status.phase) {
   SyncPhase.checking => '正在检查同步',
   SyncPhase.pending =>
     status.pendingMutations == 0 ? '等待同步' : '${status.pendingMutations} 项等待同步',
-  SyncPhase.synced => '已安全同步',
+  SyncPhase.synced => '已同步',
   SyncPhase.offline =>
     status.pendingMutations == 0
         ? '离线使用本机缓存'
@@ -1421,7 +1421,7 @@ class _CloudAccountNotice extends StatelessWidget {
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              '账号由 Zeluna 云端统一验证，可在安卓和 Windows 使用同一邮箱登录。登录令牌只保存在系统安全凭据中；收藏、追番、历史、播放位置和选定偏好会先保存在本机，再通过账号安全同步。下载文件、Cookie、私密 Header、API Key 和临时播放地址不会上传。',
+              '同一个邮箱可以在安卓和 Windows 上登录。登录信息保存在系统的加密存储里。收藏、追番、历史和播放进度会同步到账号；下载的视频和你自己填写的来源账号信息只留在本机，不会上传。',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: context.inkMuted,
                 height: 1.45,

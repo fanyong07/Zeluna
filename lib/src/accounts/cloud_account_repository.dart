@@ -443,7 +443,7 @@ class CloudAccountRepository
     );
     final body = _decodeSuccess(response);
     if (body['schema_version'] != 1 || body['account'] is! Map) {
-      throw const AccountException('服务器返回的账号数据导出格式无效');
+      throw const AccountException('账号数据导出失败，请稍后重试');
     }
     return Uint8List.fromList(response.bodyBytes);
   }
@@ -465,7 +465,7 @@ class CloudAccountRepository
         requestedAt == null ||
         dueAt == null ||
         !dueAt.isAfter(requestedAt)) {
-      throw const AccountException('服务器返回的账号删除时间无效');
+      throw const AccountException('删除申请没有提交成功，请稍后重试');
     }
     try {
       await _tokenStore.delete();
@@ -539,7 +539,7 @@ class CloudAccountRepository
   Future<void> deleteDanmaku(String commentId) async {
     final normalized = commentId.trim().replaceFirst('zeluna-', '');
     if (!RegExp(r'^\d+$').hasMatch(normalized)) {
-      throw const AccountException('弹幕编号无效，无法删除');
+      throw const AccountException('这条弹幕已经不存在了');
     }
     final token = await _requiredToken();
     final response = await _send(
@@ -553,12 +553,12 @@ class CloudAccountRepository
 
   Future<LocalAccount> _persistSession(Map<String, dynamic> body) async {
     final token = body['access_token']?.toString().trim() ?? '';
-    if (token.isEmpty) throw const AccountException('服务器没有返回登录状态，请重试');
+    if (token.isEmpty) throw const AccountException('登录没有完成，请重试');
     final account = _accountFrom(body['user']);
     try {
       await _persistCredentialsBody(body);
     } catch (_) {
-      throw const AccountException('无法安全保存登录状态，请检查系统凭据存储');
+      throw const AccountException('登录信息保存失败，请重启应用后重试');
     }
     return account;
   }
@@ -566,7 +566,7 @@ class CloudAccountRepository
   Future<void> _persistCredentialsBody(Map<String, dynamic> body) async {
     final token = body['access_token']?.toString().trim() ?? '';
     if (token.isEmpty) {
-      throw const AccountException('服务器没有返回登录状态，请重试');
+      throw const AccountException('登录没有完成，请重试');
     }
     final session = body['session'];
     final sessionMap = session is Map
@@ -576,7 +576,7 @@ class CloudAccountRepository
     final store = _credentialStore;
     if (store != null) {
       if (refreshToken == null || refreshToken.isEmpty) {
-        throw const AccountException('服务器没有返回可续期的登录状态，请重试');
+        throw const AccountException('登录没有完成，请重试');
       }
       await store.writeCredentials(
         CloudAccountCredentials(
@@ -601,14 +601,14 @@ class CloudAccountRepository
 
   Map<String, dynamic> _decodeJsonBody(http.Response response) {
     if (response.bodyBytes.isEmpty) {
-      throw const AccountException('账号服务器返回了空数据');
+      throw const AccountException('账号服务暂时无法使用，请稍后重试');
     }
     try {
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       if (decoded is! Map) throw const FormatException();
       return decoded.cast<String, dynamic>();
     } on Object {
-      throw const AccountException('账号服务器返回了无法识别的数据');
+      throw const AccountException('账号服务暂时无法使用，请稍后重试');
     }
   }
 
@@ -710,7 +710,7 @@ class CloudAccountRepository
       final streamed = await _client.send(request).timeout(requestTimeout);
       final declaredLength = streamed.contentLength;
       if (declaredLength != null && declaredLength > maxResponseBytes) {
-        throw const AccountException('账号服务返回的数据过大，已停止读取');
+        throw const AccountException('数据读取失败，请稍后重试');
       }
       final responseBytes = await _readBoundedBytes(
         streamed.stream,
@@ -730,7 +730,7 @@ class CloudAccountRepository
     } on http.ClientException {
       throw const AccountException('无法连接账号服务器，请检查网络后重试');
     } on NetworkSecurityException {
-      throw const AccountException('账号服务器未通过安全连接检查');
+      throw const AccountException('网络连接不安全，请检查网络后重试');
     }
   }
 
@@ -741,7 +741,7 @@ class CloudAccountRepository
         final decoded = jsonDecode(utf8.decode(response.bodyBytes));
         if (decoded is Map) body = decoded.cast<String, dynamic>();
       } catch (_) {
-        throw const AccountException('账号服务器返回了无法识别的数据');
+        throw const AccountException('账号服务暂时无法使用，请稍后重试');
       }
     }
     if (response.statusCode >= 200 && response.statusCode < 300) return body;
@@ -777,13 +777,13 @@ class CloudAccountRepository
   }
 
   LocalAccount _accountFrom(Object? value) {
-    if (value is! Map) throw const AccountException('服务器没有返回账号信息');
+    if (value is! Map) throw const AccountException('账号信息读取失败，请稍后重试');
     final json = value.cast<Object?, Object?>();
     final id = json['id']?.toString().trim() ?? '';
     final email = json['email']?.toString().trim().toLowerCase() ?? '';
     final nickname = json['nickname']?.toString().trim() ?? '';
     if (id.isEmpty || email.isEmpty || nickname.isEmpty) {
-      throw const AccountException('服务器返回的账号信息不完整');
+      throw const AccountException('账号信息读取失败，请稍后重试');
     }
     final createdSeconds = switch (json['created_at']) {
       final num value => value.toDouble(),
@@ -890,7 +890,7 @@ class CloudAccountRepository
         color == null ||
         color < 0 ||
         color > 0xFFFFFF) {
-      throw const AccountException('服务器返回的弹幕格式无效');
+      throw const AccountException('弹幕加载失败，请稍后重试');
     }
     final author = json['author'];
     final authorMap = author is Map
@@ -1017,7 +1017,7 @@ Future<Uint8List> _readBoundedBytes(
   final bytes = BytesBuilder(copy: false);
   await for (final chunk in stream) {
     if (bytes.length + chunk.length > maxResponseBytes) {
-      throw const AccountException('账号服务返回的数据过大，已停止读取');
+      throw const AccountException('数据读取失败，请稍后重试');
     }
     bytes.add(chunk);
   }

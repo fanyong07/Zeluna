@@ -33,7 +33,7 @@ void main() {
     expect(find.text('登录'), findsWidgets);
     expect(find.text('创建新账号'), findsOneWidget);
     expect(find.text('忘记密码'), findsOneWidget);
-    expect(find.textContaining('账号由 Zeluna 云端统一验证'), findsOneWidget);
+    expect(find.textContaining('同一个邮箱可以在安卓和 Windows 上登录'), findsOneWidget);
     expect(find.textContaining('fanyong'), findsNothing);
 
     await tester.tap(find.text('忘记密码'));

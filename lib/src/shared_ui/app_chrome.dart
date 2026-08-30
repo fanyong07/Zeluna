@@ -141,7 +141,7 @@ class AppChrome extends StatelessWidget {
 enum ChromeDestination {
   home(Icons.home_rounded, '首页', '/'),
   anime(Icons.explore_outlined, '番剧', '/anime'),
-  schedule(Icons.calendar_month_outlined, '周期表', '/schedule'),
+  schedule(Icons.calendar_month_outlined, '新番时间表', '/schedule'),
   series(Icons.live_tv_outlined, '剧集', '/series'),
   movie(Icons.movie_outlined, '电影', '/movies'),
   favorite(Icons.person_outline_rounded, '我的', '/profile'),
@@ -714,7 +714,9 @@ class _SideNavigation extends StatelessWidget {
                   ),
                   const SizedBox(height: AppSpacing.md),
                   _NavigationGroup(
-                    label: '资料库',
+                    // 资料库 read as a metadata library; this group holds the
+                    // user's own 我的 / 下载 / 历史.
+                    label: '我的内容',
                     active: active,
                     items: _libraryDestinations,
                   ),
@@ -1273,7 +1275,11 @@ class _SearchFieldState extends ConsumerState<_SearchField> {
                         minHeight: 48,
                         maxHeight: 48,
                       ),
-                      hintText: '搜索番剧、剧集、电影、演员',
+                      // 演员 was in this list, but nothing searches people:
+                      // the backend query sends content_type 'anime,tv,movie'
+                      // and search_ranking only scores title/originalTitle, so
+                      // a cast search always came back empty.
+                      hintText: '搜索番剧、剧集、电影',
                       fillColor: Theme.of(context)
                           .colorScheme
                           .surfaceContainerHigh

@@ -1112,20 +1112,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             PlaybackSessionEvent.playbackStateChanged(value),
           );
           setState(() => _playing = value);
-          _anime4kController.updatePlaybackState(
-            playing: value,
-            buffering: _buffering,
-          );
           _resetPlaybackStallWatchdog(
             grace: value ? const Duration(seconds: 2) : Duration.zero,
           );
           if (value) {
             _scheduleControlsHide();
-            unawaited(
-              _anime4kController.refreshFrameRate(
-                usesWebPlayer: _usesWebPlayer,
-              ),
-            );
             _scheduleSingleBackupLookup();
           } else {
             unawaited(_persistPlaybackProgress(force: true));
@@ -1220,9 +1211,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             width: value.w ?? 0,
             height: value.h ?? 0,
           );
-          unawaited(
-            _anime4kController.refreshFrameRate(usesWebPlayer: _usesWebPlayer),
-          );
         }),
       )
       ..track(
@@ -1256,10 +1244,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             );
           }
           setState(() => _buffering = value);
-          _anime4kController.updatePlaybackState(
-            playing: _playing,
-            buffering: value,
-          );
           if (value) {
             _resetNextEpisodePrefetch();
             _backupLookupDelayTimer?.cancel();
@@ -1299,14 +1283,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           if (!_acceptsNativeMedia(_player.state)) return;
           _handlePlayerError(error);
         }),
-      )
-      ..track(
-        _player.stream.log.listen(
-          (log) => _anime4kController.handlePlayerLog(
-            prefix: log.prefix,
-            text: log.text,
-          ),
-        ),
       );
   }
 
@@ -1668,7 +1644,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         ).inMilliseconds,
       },
     );
-    _handleRuntimeLineFailure(current, message: '播放连续缓冲，正在尝试恢复当前线路。');
+    _handleRuntimeLineFailure(current, message: '画面一直在缓冲，正在尝试恢复这条线路。');
   }
 
   void _scheduleSingleBackupLookup({
@@ -1855,7 +1831,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _loadedUrl = null;
         _loadingLine = false;
         _playbackFailed = true;
-        _playerMessage = line.message ?? '这条线路没有返回可播放内容。';
+        // line.message is resolver-internal text (HLS 子清单、DASH 媒体分片、
+        // CDN 状态码...). Sanitize it before it reaches the error banner.
+        _playerMessage = playbackLineFailureLabel(line);
       });
       return;
     }
@@ -1969,7 +1947,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _handleWebError(
             serial,
             message: event.phase == WebStartupTimeoutPhase.soft
-                ? '7 秒内没有出画面，已尝试切换备用线路。'
+                ? '这条线路一直没有出画面，已切换到备用线路。'
                 : '长时间未能开始播放，已尝试切换其他线路。',
           );
         },
@@ -2644,7 +2622,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       id: 'network:$id',
       episodeId: _episode.id,
       providerId: 'network',
-      providerName: '网络直链',
+      providerName: '网络视频',
       title: uri.host,
       quality: '原始',
       format: _directPlaybackFormat(value),
@@ -2838,7 +2816,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     try {
       final bytes = await _player.screenshot(format: 'image/png');
       if (bytes == null || bytes.isEmpty) {
-        _showPlayerToast('当前平台或视频线路不支持截图');
+        _showPlayerToast('这个视频暂时不能截图');
         return;
       }
       final safeTitle = widget.request.subject.title.replaceAll(
@@ -2875,7 +2853,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       builder: (context) => AlertDialog(
         title: const Text('投屏与外部播放'),
         content: const Text(
-          '已复制当前播放地址。可以粘贴到支持 DLNA、AirPlay 或 Chromecast 的播放器中。应用内原生投屏仍取决于设备平台能力。',
+          '已复制当前播放地址，可以粘贴到电视或投屏 App（支持 AirPlay、Chromecast 等）里播放。',
         ),
         actions: [
           TextButton(
@@ -2909,7 +2887,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     if (settings.blockKeywords.any(value.contains)) {
-      _showPlayerToast('内容命中了本地屏蔽词');
+      _showPlayerToast('这条弹幕包含了你设置的屏蔽词');
       return;
     }
     if (!loggedIn) {
@@ -2920,7 +2898,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       case LocalDanmakuSendResult.disabled:
         _showPlayerToast('请先在弹幕设置中启用弹幕');
       case LocalDanmakuSendResult.blocked:
-        _showPlayerToast('内容命中了本地屏蔽词');
+        _showPlayerToast('这条弹幕包含了你设置的屏蔽词');
       case LocalDanmakuSendResult.accepted:
         try {
           final comment = await ref
@@ -2987,7 +2965,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (current == null) return;
     _handleRuntimeLineFailure(
       current,
-      message: message ?? '网页播放器暂时打不开当前线路，可能是网络限制或对方不允许网页直接播放。',
+      message: message ?? '这条线路在浏览器里打不开，可能是网络限制或对方不允许直接播放。',
     );
   }
 

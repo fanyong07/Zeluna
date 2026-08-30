@@ -411,7 +411,7 @@ Map<String, dynamic>? _migrateLegacyDownloadEntry(Map<String, dynamic> entry) {
     'lastModified': null,
     'completedUnits': completed ? 1 : 0,
     'totalUnits': completed ? 1 : 0,
-    'message': completed ? '从旧版下载记录迁移' : '旧下载记录无法继续，请重新下载',
+    'message': completed ? '旧版本的下载' : '旧下载记录无法继续，请重新下载',
   };
 }
 

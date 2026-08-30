@@ -258,7 +258,7 @@ final class AccountController {
       importGuestData: shouldImportGuestData,
     );
     final pending = _localRepository.pendingRegistration();
-    if (pending == null) throw const AccountException('账号初始化失败，请重试');
+    if (pending == null) throw const AccountException('账号创建没有完成，请重试');
     await _resumePendingRegistration(pending);
     await _activate(pending.account);
     await _localRepository.finalizeRegistration(pending.account.id);
@@ -593,6 +593,6 @@ final class AccountController {
   }
 
   void _requireInitialized() {
-    if (!_initialized) throw const AccountException('应用状态尚未准备好');
+    if (!_initialized) throw const AccountException('应用还在启动，请稍后再试');
   }
 }

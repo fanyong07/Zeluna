@@ -18,7 +18,7 @@ class SourceManagementPage extends ConsumerWidget {
         return AppChrome(
           active: ChromeDestination.favorite,
           showSearch: false,
-          title: '外部源目录',
+          title: '外部来源',
           onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
           rightRail: _SourceStatsRail(catalog: catalog),
           child: ListView(
@@ -68,7 +68,7 @@ class _SourceHeader extends StatelessWidget {
               Expanded(
                 child: SectionTitle(
                   title: '已登记外部资源',
-                  subtitle: 'TVBox 参与影视查源，M3U 提供直播，BT 资源交给外部客户端',
+                  subtitle: 'TVBox 用于查找影视播放地址，M3U 提供直播，BT 资源交给外部客户端',
                 ),
               ),
             ],
@@ -76,7 +76,7 @@ class _SourceHeader extends StatelessWidget {
           const SizedBox(height: 18),
           Row(
             children: [
-              _SourceMetric(label: '目录', value: '${catalog.importedCount}'),
+              _SourceMetric(label: '来源', value: '${catalog.importedCount}'),
               const SizedBox(width: 10),
               _SourceMetric(label: '启用', value: '${catalog.enabledCount}'),
               const SizedBox(width: 10),
@@ -86,7 +86,7 @@ class _SourceHeader extends StatelessWidget {
           if (catalog.generatedAt != null) ...[
             const SizedBox(height: 12),
             Text(
-              '目录生成于 ${_formatDate(catalog.generatedAt!)}，版本 ${catalog.version}',
+              '来源更新于 ${_formatDate(catalog.generatedAt!)}，版本 ${catalog.version}',
               style: Theme.of(
                 context,
               ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
@@ -311,7 +311,7 @@ class _SourceText extends StatelessWidget {
             if (source.usesNativePlayer) const SmallBadge(label: '原生播放'),
             if (source.kind == VideoSourceKind.tvBox)
               SmallBadge(
-                label: '接入 $playbackRuleCount 条规则',
+                label: '已启用 $playbackRuleCount 条规则',
                 active: source.enabled && playbackRuleCount > 0,
               ),
             if (source.antiCrawlerEnabled) const SmallBadge(label: '需验证'),
@@ -393,7 +393,7 @@ class _SourceStatsRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '源状态', subtitle: '按本地目录汇总'),
+              const SectionTitle(title: '源状态', subtitle: '按已导入的源统计'),
               const SizedBox(height: 14),
               _RailSourceLine(
                 icon: Icons.account_tree_outlined,
@@ -417,7 +417,7 @@ class _SourceStatsRail extends StatelessWidget {
               ),
               _RailSourceLine(
                 icon: Icons.rule_folder_outlined,
-                label: '参与播放查源',
+                label: '可查找播放地址',
                 value: '${catalog.activePlaybackRuleCount}',
               ),
             ],
@@ -428,10 +428,10 @@ class _SourceStatsRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SectionTitle(title: '目录与规则'),
+              SectionTitle(title: '来源与规则'),
               SizedBox(height: 12),
               _RailNote(text: '启用/禁用会保存到本地设置'),
-              _RailNote(text: 'TVBox JSON/XBPQ 可解析项会自动加入播放查源'),
+              _RailNote(text: '能识别的 TVBox 站点会自动用于查找播放地址'),
               _RailNote(text: 'M3U、BT 和公开媒体仍按各自功能使用'),
             ],
           ),
@@ -521,7 +521,7 @@ class _SourceLoadError extends StatelessWidget {
           const Icon(Icons.error_outline, color: AppColors.primary, size: 34),
           const SizedBox(height: 12),
           Text(
-            '源目录读取失败',
+            '来源读取失败',
             style: Theme.of(context).textTheme.titleLarge?.copyWith(
               color: context.ink,
               fontWeight: FontWeight.w900,
@@ -560,7 +560,7 @@ class _SourceEmpty extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            '生成 sources_catalog.json 后，这里会展示可管理的外部资源目录。',
+            '导入外部源之后，这里会列出可管理的资源。',
             textAlign: TextAlign.center,
             style: Theme.of(
               context,

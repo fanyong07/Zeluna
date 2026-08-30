@@ -111,11 +111,11 @@ String? androidCspUnsupportedReason(
 }) {
   final md5 = androidCspSpiderMd5(rawConfig);
   if (md5 == null || !auditedAndroidCspApisByMd5.containsKey(md5)) {
-    return '规则已保留，但它引用的 CSP 包未通过当前版本的固定哈希审计。';
+    return '规则已保留，但它依赖的组件未通过安全校验。';
   }
   final api = androidCspApi(rawConfig, fallback: fallbackApi);
   if (!(auditedAndroidCspApisByMd5[md5]?.contains(api) ?? false)) {
-    return '规则已保留，但固定 CSP 包中没有可安全加载的 $api 类。';
+    return '规则已保留，但缺少可用的解析组件。';
   }
   return null;
 }

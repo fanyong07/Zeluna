@@ -6,6 +6,7 @@ import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/anime4k_shader_manager.dart';
+import '../player/playback_line_display.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/settings_ui.dart';
 import '../shared_ui/app_navigation.dart';
@@ -411,7 +412,7 @@ class PlaybackSettingsView extends StatelessWidget {
                     _SettingsSection(
                       icon: Icons.volume_up_outlined,
                       title: '声音',
-                      subtitle: '调整播放器的额外音量增益',
+                      subtitle: '放大播放器的最大音量',
                       child: _VolumeCard(
                         settings: settings,
                         onChanged: onChanged,
@@ -446,29 +447,47 @@ class PlaybackSettingsView extends StatelessWidget {
                               presentation: compact
                                   ? SettingsChoicePresentation.inline
                                   : SettingsChoicePresentation.sheet,
-                              title: '超分模式',
-                              subtitle: _superResolutionProfileDescription(
-                                settings.superResolutionProfile,
+                              title: '画质档位',
+                              subtitle: _superResolutionTierDescription(
+                                settings.superResolutionTier,
                               ),
-                              value: settings.superResolutionProfile,
+                              value: settings.superResolutionTier,
                               options: const [
-                                'auto',
-                                'clear',
-                                'soft',
-                                'low_resolution',
-                                'strong',
-                                'advanced',
+                                'quality',
+                                'balance',
+                                'efficiency',
+                                'custom',
                               ],
-                              labelOf: _superResolutionProfileLabel,
+                              labelOf: _superResolutionTierLabel,
+                              descriptionOf: _superResolutionTierDescription,
                               onChanged: (value) => onChanged(
-                                settings.copyWith(
-                                  superResolutionProfile: value,
-                                ),
+                                settings.copyWith(superResolutionTier: value),
+                              ),
+                            ),
+                          // The mode picks the chain shape, so it is meaningless
+                          // for the custom tier where the user builds the chain.
+                          if (settings.superResolution &&
+                              superResolutionSupport.supported &&
+                              settings.superResolutionTier != 'custom')
+                            SettingsChoiceRow<String>(
+                              presentation: compact
+                                  ? SettingsChoicePresentation.inline
+                                  : SettingsChoicePresentation.sheet,
+                              title: '超分模式',
+                              subtitle: _superResolutionModeDescription(
+                                settings.superResolutionMode,
+                              ),
+                              value: settings.superResolutionMode,
+                              options: const ['a', 'b', 'c', 'aa', 'bb', 'ca'],
+                              labelOf: _superResolutionModeLabel,
+                              descriptionOf: _superResolutionModeDetail,
+                              onChanged: (value) => onChanged(
+                                settings.copyWith(superResolutionMode: value),
                               ),
                             ),
                           if (settings.superResolution &&
                               superResolutionSupport.supported &&
-                              settings.superResolutionProfile == 'advanced')
+                              settings.superResolutionTier == 'custom')
                             _Anime4KShaderPicker(
                               selected: settings.superResolutionCustomShaders,
                               onChanged: (value) => onChanged(
@@ -1096,13 +1115,12 @@ String _textOrFallback(String? value) {
 String _playbackStatusText(PlaybackLine? line, String? playbackMessage) {
   final message = playbackMessage?.trim();
   if (line == null) return message?.isNotEmpty == true ? message! : '等待选线';
-  final lineMessage = line.message?.trim();
-  if (!line.available) {
-    return lineMessage?.isNotEmpty == true ? lineMessage! : '不可用';
-  }
-  if ((line.url ?? '').trim().isEmpty) {
-    return lineMessage?.isNotEmpty == true ? lineMessage! : '未返回播放地址';
-  }
+  // Route failures through playbackLineFailureLabel instead of surfacing
+  // line.message directly. The raw message is resolver-internal text -- things
+  // like "HLS 子清单已经失效。" or "DASH 清单没有可验证的初始化或媒体分片。" --
+  // and this status row is user-facing.
+  if (!line.available) return playbackLineFailureLabel(line);
+  if ((line.url ?? '').trim().isEmpty) return playbackLineFailureLabel(line);
   return message?.isNotEmpty == true ? message! : '可播放';
 }
 
@@ -1242,7 +1260,7 @@ class ServiceSettingsPage extends ConsumerWidget {
                       _ => [
                         const _InfoCard(
                           title: '未知设置',
-                          lines: ['这个入口暂时没有对应配置。'],
+                          lines: ['这个页面暂时没有可调整的设置。'],
                         ),
                       ],
                     },
@@ -1409,7 +1427,7 @@ class ServiceSettingsPage extends ConsumerWidget {
           builder: (dialogContext) => AlertDialog(
             title: const Text('允许不安全 HTTP？'),
             content: const Text(
-              'HTTP 流量可能被同一网络中的其他人读取或篡改。此模式只用于你主动配置的自托管服务，Zeluna 不会向它发送云账号 Token、Cookie 或 Authorization。',
+              'HTTP 流量可能被同一网络中的其他人读取或篡改。此模式只用于你主动配置的自托管服务，Zeluna 不会向它发送你的云账号登录凭据。',
             ),
             actions: [
               TextButton(
@@ -1438,8 +1456,8 @@ class ServiceSettingsPage extends ConsumerWidget {
         lines: [
           'Zeluna 用户弹幕默认接入：游客可读取，登录后可发送，也可删除自己发送的弹幕。',
           '弹弹play 使用官方开放平台按番名和集数匹配弹幕库，需要填写 AppId 和 AppSecret。',
-          '通过 B 站公开番剧搜索匹配当前集 cid，再读取公开弹幕 XML。',
-          '自建弹幕库仍保留为用户自己的接口补充。',
+          '通过 B 站公开番剧搜索匹配到对应分集，再读取该集的公开弹幕。',
+          '你也可以填自己的弹幕接口，作为补充来源。',
         ],
       ),
       const SizedBox(height: 12),
@@ -1724,12 +1742,24 @@ class _InfoCard extends StatelessWidget {
   }
 }
 
-String _superResolutionProfileLabel(String value) {
-  return Anime4KProfile.fromSetting(value).label;
+String _superResolutionTierLabel(String value) {
+  return Anime4KTier.fromSetting(value).label;
 }
 
-String _superResolutionProfileDescription(String value) {
-  return Anime4KProfile.fromSetting(value).description;
+String _superResolutionTierDescription(String value) {
+  return Anime4KTier.fromSetting(value).description;
+}
+
+String _superResolutionModeLabel(String value) {
+  return Anime4KMode.fromSetting(value).label;
+}
+
+String _superResolutionModeDescription(String value) {
+  return Anime4KMode.fromSetting(value).description;
+}
+
+String _superResolutionModeDetail(String value) {
+  return Anime4KMode.fromSetting(value).detailedDescription;
 }
 
 class _Anime4KShaderPicker extends StatelessWidget {

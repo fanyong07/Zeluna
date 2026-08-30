@@ -181,7 +181,7 @@ void main() {
         ),
       );
 
-      expect(find.text('4 来源 · 3 已查 · 2 匹配 · 1 可播'), findsOneWidget);
+      expect(find.text('共 4 个来源，1 个可以播放'), findsOneWidget);
       expect(find.text('在线服务 · iKun'), findsOneWidget);
       expect(find.text('在线服务 · 线路失败源'), findsOneWidget);
       expect(find.text('其它来源（2）'), findsOneWidget);
@@ -257,7 +257,7 @@ void main() {
       ),
     );
 
-    expect(find.text('1 来源 · 1 已查 · 1 匹配 · 1 可播'), findsOneWidget);
+    expect(find.text('共 1 个来源，1 个可以播放'), findsOneWidget);
     expect(find.text('在线服务 · 魔都2'), findsOneWidget);
     expect(find.text('其它来源（1）'), findsNothing);
     expect(find.text('当前站点没有匹配到这部作品'), findsNothing);

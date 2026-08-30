@@ -1302,7 +1302,7 @@ class ExternalServiceRepository {
       final first = episodeRuntimes.map(_intValue).whereType<int>().firstOrNull;
       if (first != null && first > 0) return _formatMinutes(first);
     }
-    return '待补';
+    return '未知';
   }
 
   String _tmdbStatus(String? status, bool isSeries, int totalEpisodes) {
@@ -1622,7 +1622,7 @@ LIMIT $limit
   }
 
   String _formatMinutes(int minutes) {
-    if (minutes <= 0) return '待补';
+    if (minutes <= 0) return '未知';
     return '$minutes 分钟';
   }
 

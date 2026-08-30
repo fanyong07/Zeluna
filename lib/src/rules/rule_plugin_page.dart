@@ -117,7 +117,7 @@ class RuleManagementPage extends ConsumerWidget {
                             .read(animeControllerProvider.notifier)
                             .setAllInstalledRulePluginsEnabled(true);
                         if (context.mounted) {
-                          _showSnack(context, '已启用官方及已授权来源');
+                          _showSnack(context, '已启用全部扩展来源');
                         }
                       },
                 onDisableAll: installedEnabledCount == 0 && noCatalogEnabled
@@ -328,7 +328,7 @@ class _RuleHero extends StatelessWidget {
                   title: '扩展播放来源',
                   subtitle:
                       '番剧、电视剧、电影分开管理 · $repositoryCount 个合集'
-                      '${catalogPlaybackCount > 0 ? ' · 自动接入 $catalogPlaybackCount 条' : ''}',
+                      '${catalogPlaybackCount > 0 ? ' · 已自动启用 $catalogPlaybackCount 个来源' : ''}',
                 ),
               ),
             ],
@@ -430,7 +430,10 @@ class _AutomaticRulePackages extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SectionTitle(title: '自动来源包', subtitle: '已并入扩展来源，无需单独管理'),
+          const SectionTitle(
+            title: '自动来源',
+            subtitle: '跟着在线服务自动更新，不用单独管理',
+          ),
           const SizedBox(height: 10),
           for (var index = 0; index < groups.length; index++) ...[
             _AutomaticRulePackageRow(
@@ -479,9 +482,9 @@ class _AutomaticRulePackageRow extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   group.sources.length == 1
-                      ? '提供 ${group.candidateRuleCount} 条可执行播放规则'
-                      : '合并 ${group.sources.length} 个同名规则包 · '
-                            '${group.candidateRuleCount} 条候选规则，查源时自动去重',
+                      ? '可以提供 ${group.candidateRuleCount} 条播放线路'
+                      : '合并了 ${group.sources.length} 个同名来源，共 '
+                            '${group.candidateRuleCount} 条线路，找线路时会自动去掉重复的',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: _surfaceMuted(context),
                   ),
@@ -634,7 +637,7 @@ class _InstalledRuleGroupState extends State<_InstalledRuleGroup> {
                 title: title,
                 subtitle:
                     '${widget.rules.length} 个已安装 · '
-                    '$enabledCount/${executableRules.length} 个可执行规则已开启',
+                    '$enabledCount/${executableRules.length} 个可用的已开启',
               );
               if (constraints.maxWidth < 720) {
                 return Column(
@@ -735,7 +738,7 @@ class _InstalledRuleRow extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(child: _RuleCardText(rule: rule)),
               Tooltip(
-                message: canExecute ? '切换规则启用状态' : rule.executionStatus.label,
+                message: canExecute ? '开启或关闭这个规则' : rule.executionStatus.label,
                 child: Switch(
                   key: ValueKey('ruleToggle:${rule.id}'),
                   value: effectiveEnabled,
@@ -798,16 +801,16 @@ void _showRuleActionSheet(
               _RuleAction(
                 icon: Icons.refresh_rounded,
                 title: '更新规则',
-                subtitle: '从当前规则仓库检查这个规则的最新版本',
+                subtitle: '当前使用内置版本，暂时没有更新',
                 onTap: () {
                   Navigator.of(sheetContext).pop();
-                  _showSnack(context, '${rule.name} 已是当前仓库版本');
+                  _showSnack(context, '${rule.name} 用的是内置版本，暂时没有更新');
                 },
               ),
               _RuleAction(
                 icon: Icons.delete_outline,
                 title: '删除规则',
-                subtitle: '从已安装列表移除，之后可在规则仓库重新安装',
+                subtitle: '删掉之后还能从来源合集里重新装回来',
                 destructive: true,
                 onTap: () {
                   Navigator.of(sheetContext).pop();
@@ -907,7 +910,7 @@ class _RepositoryHeader extends StatelessWidget {
               const Expanded(
                 child: SectionTitle(
                   title: '自定义仓库',
-                  subtitle: '粘贴仓库地址，扫描候选文件，再逐条选择规则',
+                  subtitle: '粘贴地址，先看清楚里面有哪些规则，再挑要装的',
                 ),
               ),
               OutlinedButton.icon(
@@ -929,7 +932,7 @@ class _RepositoryHeader extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
               child: Text(
-                '使用方法：① 粘贴 GitHub 仓库首页或 raw JSON；② 从扫描结果中选择一个配置文件；③ 勾选需要的规则。导入后默认关闭，由你自己逐条启用。',
+                '用法：① 粘贴 GitHub 仓库地址，或直接粘贴规则文件地址；② 从列出的文件里选一个；③ 勾选要装的规则。装好后默认都是关着的，你自己逐个打开。',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                   height: 1.5,
@@ -1035,14 +1038,14 @@ class _RuleCardText extends StatelessWidget {
           spacing: 7,
           runSpacing: 7,
           children: [
-            SmallBadge(label: rule.engine),
+            SmallBadge(label: _ruleEngineLabel(rule.engine)),
             SmallBadge(label: rule.sourceLabel),
             SmallBadge(
               label: rule.effectiveManifest.trustLevel.label,
               active:
                   rule.effectiveManifest.trustLevel == RuleTrustLevel.official,
             ),
-            if (rule.requiresCaptcha) const SmallBadge(label: 'captcha'),
+            if (rule.requiresCaptcha) const SmallBadge(label: '需验证码'),
             SmallBadge(
               label: _ruleStatusLabel(rule),
               active: rule.canResolveNatively,
@@ -1125,8 +1128,8 @@ class _RulePermissionDialog extends StatelessWidget {
               const SizedBox(height: 12),
               _PermissionLine(label: '来源', value: manifest.sourceRepository),
               _PermissionLine(
-                label: '内容哈希',
-                value: manifest.contentHash,
+                label: '版本指纹',
+                value: _permissionFingerprint(manifest.contentHash),
                 monospace: true,
               ),
               _PermissionLine(label: '信任等级', value: manifest.trustLevel.label),
@@ -1151,16 +1154,16 @@ class _RulePermissionDialog extends StatelessWidget {
                 value: _permissionBool(manifest.webViewSniffing),
               ),
               _PermissionLine(
-                label: '明文 HTTP',
+                label: '不加密的连接（HTTP）',
                 value: _permissionBool(manifest.cleartextHttp),
               ),
               _PermissionLine(
-                label: '自定义 Header',
+                label: '自定义请求头',
                 value: _permissionList(customHeaders),
               ),
               const SizedBox(height: 10),
               Text(
-                '仅批准当前内容和权限。规则更新后需要重新确认。',
+                '这次只授权当前这个版本；规则更新后会再问你一次。',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: _surfaceMuted(context)),
@@ -1231,21 +1234,45 @@ String _permissionList(Iterable<String> values) {
   return normalized.isEmpty ? '无' : normalized.join('、');
 }
 
+/// 只展示指纹前 8 位，完整摘要对用户没有判断价值。
+String _permissionFingerprint(String hash) {
+  final normalized = hash.trim();
+  if (normalized.length <= 8) return normalized;
+  return normalized.substring(0, 8);
+}
+
 String _ruleStatusLabel(RulePlugin rule) {
   return rule.executionStatus.label;
+}
+
+/// 把内部引擎代号换成可读的规则类型名，避免 `xbpq` / `drpy-js` 这类裸代号上屏。
+String _ruleEngineLabel(String engine) {
+  return switch (engine.trim().toLowerCase()) {
+    'xbpq' => 'XBPQ 规则',
+    'drpy-js' => 'drpy 规则',
+    'animeko-web-selector' => '网页规则',
+    'animeko-rss' => '订阅来源',
+    'tvbox-json-api' || 'tvbox-xml-api' => 'TVBox 接口',
+    'tvbox-spider' => 'TVBox 扩展',
+    'android-csp' || 'csp' => 'CSP 规则',
+    'native' => '内置规则',
+    'aikanbot-api' || 'sorani-api' => '站点接口',
+    'repository-link' => '合集地址',
+    _ => '其他规则',
+  };
 }
 
 String _ruleDisplayNote(RulePlugin rule) {
   final reason = rule.unsupportedReason?.trim() ?? '';
   if (!rule.canResolveNatively && reason.isNotEmpty) return reason;
   if (rule.canResolveNatively) {
-    return rule.note.trim().isEmpty ? '规则字段完整，可参与播放查源。' : rule.note;
+    return rule.note.trim().isEmpty ? '这个来源可以直接用来找线路。' : rule.note;
   }
   return switch (rule.executionStatus) {
-    RuleExecutionStatus.needsWebView => '需要在 WebView 中完成人机验证或页面交互。',
+    RuleExecutionStatus.needsWebView => '需要你在网页里手动过一次验证。',
     RuleExecutionStatus.needsPrivateAuth => '需要登录、Cookie 或其他私密授权后才能使用。',
-    RuleExecutionStatus.missingConfig => '规则缺少当前解析器必需的搜索或播放字段。',
-    RuleExecutionStatus.unsupportedEngine => '当前版本还没有接入 ${rule.engine} 执行器。',
+    RuleExecutionStatus.missingConfig => '这条规则信息不全，暂时用不了。',
+    RuleExecutionStatus.unsupportedEngine => '这类来源暂时不支持。',
     RuleExecutionStatus.executable => rule.note,
   };
 }
@@ -1312,7 +1339,7 @@ class _RuleStatsRail extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const SectionTitle(title: '规则状态', subtitle: '按内容类型隔离'),
+              const SectionTitle(title: '规则状态', subtitle: '番剧、电视剧、电影分开管理'),
               const SizedBox(height: 14),
               for (final type in RuleContentType.values)
                 _RailRuleTypeLine(
@@ -1336,8 +1363,8 @@ class _RuleStatsRail extends StatelessWidget {
             children: [
               SectionTitle(title: '筛选原则'),
               SizedBox(height: 12),
-              _RailNote(text: '保留字段完整、可搜索、分类明确的规则'),
-              _RailNote(text: '过滤直播、教育、网盘授权源和本地代理源'),
+              _RailNote(text: '只收信息齐全、能搜索、分类清楚的来源'),
+              _RailNote(text: '不收直播、教育，以及要登录网盘或走本地代理的来源'),
               _RailNote(text: '番剧、电视剧、电影分别安装和启停'),
             ],
           ),
@@ -1569,7 +1596,7 @@ void _showImportSheet(BuildContext context, WidgetRef ref) {
               _ImportAction(
                 icon: Icons.edit_note_rounded,
                 title: '新建规则',
-                subtitle: '填写名称、搜索地址和解析字段，保存到本地规则库',
+                subtitle: '填名称和搜索地址，存在这台设备上',
                 onTap: () {
                   Navigator.of(sheetContext).pop();
                   _showManualRuleDialog(context, ref);
@@ -1602,8 +1629,8 @@ void _showImportSheet(BuildContext context, WidgetRef ref) {
               const SizedBox(height: 10),
               _ImportAction(
                 icon: Icons.add_link_rounded,
-                title: '粘贴 GitHub 仓库或 raw JSON',
-                subtitle: '先扫描并预览候选文件，只导入你明确勾选的规则',
+                title: '粘贴 GitHub 仓库或规则文件地址',
+                subtitle: '先列出里面的文件给你看，只装你勾选的那些',
                 onTap: () {
                   Navigator.of(sheetContext).pop();
                   _showRepositoryUrlDialog(context, ref);
@@ -1712,7 +1739,7 @@ Future<bool> _handleRepositoryAddress(
 ) async {
   final trimmed = url.trim();
   if (trimmed.isEmpty) {
-    _showSnack(context, '请输入 GitHub 仓库或 raw JSON 地址');
+    _showSnack(context, '请输入 GitHub 仓库或规则文件地址');
     return false;
   }
   try {
@@ -1754,7 +1781,7 @@ Future<void> _showGitHubCandidateDialog(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '默认分支：${scan.defaultBranch}。请选择一个候选文件预览，系统不会自动导入整仓。',
+                    '这个仓库用的是 ${scan.defaultBranch} 分支。挑一个文件看看内容，不会一次性全导进来。',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: colors.onSurfaceVariant,
                     ),
@@ -1762,14 +1789,14 @@ Future<void> _showGitHubCandidateDialog(
                   if (scan.truncated) ...[
                     const SizedBox(height: 6),
                     Text(
-                      'GitHub 返回的文件树已截断，当前仅展示可见候选。',
+                      '仓库文件太多，这里只列出了一部分。',
                       style: TextStyle(color: colors.tertiary),
                     ),
                   ],
                   const SizedBox(height: 12),
                   Expanded(
                     child: scan.candidates.isEmpty
-                        ? const Center(child: Text('没有找到 JSON/TXT 候选文件'))
+                        ? const Center(child: Text('这个仓库里没有能导入的规则文件'))
                         : ListView.separated(
                             itemCount: scan.candidates.length,
                             separatorBuilder: (_, _) =>
@@ -1790,7 +1817,7 @@ Future<void> _showGitHubCandidateDialog(
                                 title: Text(candidate.path),
                                 subtitle: Text(
                                   candidate.blockedReason ??
-                                      '${candidate.sizeLabel} · 只读预览后再选择规则',
+                                      '${candidate.sizeLabel} · 先看内容，再决定装哪些',
                                 ),
                                 secondary: Icon(
                                   candidate.canImport
@@ -1881,7 +1908,7 @@ Future<void> _showRuleSelectionDialog(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '默认不勾选。导入后可在播放规则中自行启用执行。',
+                    '默认一个都不勾。装好之后到扩展来源里自己打开。',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: colors.onSurfaceVariant,
                     ),
@@ -1906,7 +1933,7 @@ Future<void> _showRuleSelectionDialog(
                           },
                           title: Text(rule.name),
                           subtitle: Text(
-                            '${rule.contentLabel} · ${rule.engine} · '
+                            '${rule.contentLabel} · ${_ruleEngineLabel(rule.engine)} · '
                             '${rule.executionStatus.label}',
                           ),
                           secondary: Icon(
@@ -1995,7 +2022,7 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '粘贴 GitHub 仓库首页时，会列出 JSON/TXT 文件；粘贴 raw JSON 时，会直接进入规则预览。',
+                    '粘贴仓库地址会先列出里面的文件；直接粘贴规则文件地址就会跳到规则预览。',
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: _surfaceMuted(context),
                       height: 1.5,
@@ -2007,13 +2034,13 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                     autofocus: true,
                     keyboardType: TextInputType.url,
                     decoration: const InputDecoration(
-                      labelText: 'GitHub 仓库或 raw JSON 地址',
+                      labelText: 'GitHub 仓库或规则文件地址',
                       hintText: 'https://github.com/owner/repo',
                     ),
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    '配置字段会按原样保留，导入后可在播放规则中自行启用。',
+                    '导入的内容不会被改动；装好后到扩展来源里自己打开。',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: _surfaceMuted(context),
                     ),

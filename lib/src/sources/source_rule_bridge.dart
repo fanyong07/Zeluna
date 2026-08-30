@@ -169,7 +169,7 @@ class SourceRuleBridge {
       priority: rule.priority,
       requestHeaders: {...source.headers, ...rule.requestHeaders},
       note: rule.note.trim().isEmpty
-          ? '由自动规则包“${source.displayName}”接入播放查源。'
+          ? '来自“${source.displayName}”，可用于查找播放地址。'
           : rule.note,
     );
   }

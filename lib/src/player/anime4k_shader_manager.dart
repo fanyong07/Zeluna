@@ -4,84 +4,230 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
-enum Anime4KProfile {
-  automatic('auto', '自动', '根据片源分辨率与显示尺寸自动选择'),
-  clear('clear', '动画清晰', '强化模糊线条并减少压缩痕迹'),
-  soft('soft', '自然柔和', '适合常见 720p 与轻度锯齿片源'),
-  lowResolution('low_resolution', '低清修复', '为 480p、低码率片源降噪后放大'),
-  strong('strong', '强力增强', '放大达到 2 倍时启用二次修复，低倍率自动避免过锐'),
-  advanced('advanced', '高级', '手动组合 Anime4K 着色器');
+/// Anime4K quality tier. Selects the CNN size the mode's chain is built at,
+/// mirroring upstream's two shipped templates plus one lighter step.
+///
+/// Measured against AniCh 1.5.23 on Android (see [Anime4KMode] for the chain
+/// shapes): `quality` reproduces upstream's High-end template exactly and
+/// `balance` reproduces Low-end exactly. `efficiency` has no upstream
+/// counterpart -- it drops to S and omits every stage that would use the
+/// secondary size, which was confirmed for both Mode A and Mode A+A.
+enum Anime4KTier {
+  quality('quality', '质量', '最高画质，需要较强 GPU', primary: 'VL', secondary: 'M'),
+  balance('balance', '均衡', '画质与性能兼顾', primary: 'M', secondary: 'S'),
+  efficiency('efficiency', '性能', '低开销，适合移动设备', primary: 'S'),
+  custom('custom', '高级', '手动组合 Anime4K 着色器');
 
-  const Anime4KProfile(this.settingValue, this.label, this.description);
+  const Anime4KTier(
+    this.settingValue,
+    this.label,
+    this.description, {
+    this.primary,
+    this.secondary,
+  });
 
   final String settingValue;
   final String label;
   final String description;
 
-  static Anime4KProfile fromSetting(String? value) {
-    // Preserve settings written by the original performance/balanced/quality
-    // UI while moving users to content-aware presets.
+  /// CNN size for the first restore/upscale pass. Null for [custom].
+  final String? primary;
+
+  /// CNN size for the second pass. Null when the tier runs a single pass.
+  final String? secondary;
+
+  bool get isCustom => this == Anime4KTier.custom;
+
+  static Anime4KTier fromSetting(String? value) {
     return switch (value) {
-      'performance' => Anime4KProfile.lowResolution,
-      'balanced' => Anime4KProfile.automatic,
-      'quality' => Anime4KProfile.clear,
+      // Settings written by the previous profile/tier UI.
+      'performance' => Anime4KTier.efficiency,
+      'balanced' => Anime4KTier.balance,
+      'auto' || 'clear' || 'soft' || 'low_resolution' || 'strong' =>
+        Anime4KTier.quality,
+      'advanced' => Anime4KTier.custom,
       _ => values.firstWhere(
-        (profile) => profile.settingValue == value,
-        orElse: () => Anime4KProfile.automatic,
+        (tier) => tier.settingValue == value,
+        orElse: () => Anime4KTier.quality,
       ),
     };
   }
-
-  bool get restoresWithoutScaling =>
-      this == Anime4KProfile.clear ||
-      this == Anime4KProfile.soft ||
-      this == Anime4KProfile.strong;
 }
 
-enum Anime4KTier {
-  performance('performance', '节能'),
-  balanced('balanced', '标准'),
-  quality('quality', '高质量');
+/// Anime4K mode. Selects the shape of the shader chain.
+///
+/// The stage order here is upstream's, transcribed from
+/// `md/Template/GLSL_Windows_High-end/input.conf` and confirmed by measuring
+/// AniCh. Note the deliberate asymmetry: A+A places its second restore pass
+/// *before* the AutoDownscalePre pair while B+B and C+A place theirs *after*.
+/// That is upstream's own ordering, not a transcription slip.
+enum Anime4KMode {
+  a(
+    'a',
+    '模式A',
+    bestFor: '大部分 1080p、部分较老的 720p，以及多数老旧标清片源',
+    upside: '重建大部分受损线条，去除压缩痕迹与大量模糊，同时降噪',
+    downside: '画面原有的振铃或色带会被一并放大，强降噪可能让纹理发糊',
+  ),
+  b(
+    'b',
+    '模式B',
+    bestFor: '大部分 720p，以及由 1080p 缩小而来的片源',
+    upside: '去除压缩痕迹，重建部分线条，减轻振铃与锯齿',
+    downside: '部分瑕疵去不掉，线条可能仍然偏软',
+  ),
+  c(
+    'c',
+    '模式C',
+    bestFor: '由 1080p 缩小到 480p 的片源，以及本身没有损伤的画面、插画、壁纸',
+    upside: '只降噪，最大限度保留原画细节',
+    downside: '观感提升有限，原有的振铃和缩放痕迹会被放大',
+  ),
+  aa(
+    'aa',
+    '模式A+A',
+    bestFor: '与模式A 相同，追求最强线条重建时使用',
+    upside: '几乎重建所有受损线条，观感最好',
+    downside: '可能引入明显振铃、色带与锯齿，比模式A 慢',
+  ),
+  bb(
+    'bb',
+    '模式B+B',
+    bestFor: '与模式B 相同，追求更好观感时使用',
+    upside: '在模式B 的基础上进一步提升观感',
+    downside: '与模式B 相同，且更慢',
+  ),
+  ca(
+    'ca',
+    '模式C+A',
+    bestFor: '与模式C 相同，希望降噪后补一轮线条重建时使用',
+    upside: '在模式C 的基础上略微提升观感',
+    downside: '与模式C 相同，且更慢',
+  );
 
-  const Anime4KTier(this.settingValue, this.label);
+  const Anime4KMode(
+    this.settingValue,
+    this.label, {
+    required this.bestFor,
+    required this.upside,
+    required this.downside,
+  });
 
   final String settingValue;
   final String label;
 
-  List<Anime4KTier> get fallbackOrder => switch (this) {
-    Anime4KTier.quality => const [
-      Anime4KTier.quality,
-      Anime4KTier.balanced,
-      Anime4KTier.performance,
-    ],
-    Anime4KTier.balanced => const [
-      Anime4KTier.balanced,
-      Anime4KTier.performance,
-    ],
-    Anime4KTier.performance => const [Anime4KTier.performance],
-  };
+  /// Which sources this mode targets, from upstream's "Optimized for?" column.
+  final String bestFor;
+
+  /// Upstream's "Positive effects".
+  final String upside;
+
+  /// Upstream's "Negative effects (If used incorrectly)". Worth surfacing:
+  /// picking the wrong mode makes the picture worse, not merely slower.
+  final String downside;
+
+  /// One-line summary for a collapsed settings row.
+  String get description => '适合$bestFor';
+
+  /// Full text for an expanded picker entry.
+  String get detailedDescription =>
+      '适合：$bestFor\n改善：$upside\n代价：$downside';
+
+  static Anime4KMode fromSetting(String? value) {
+    return values.firstWhere(
+      (mode) => mode.settingValue == value,
+      orElse: () => Anime4KMode.a,
+    );
+  }
+
+  /// Shader file names for this mode at [tier].
+  ///
+  /// When the tier has no secondary size every stage that would reference it is
+  /// dropped, which collapses the doubled modes onto their single-pass form.
+  /// Measured: Mode A and Mode A+A both yield the same five stages at
+  /// `efficiency`.
+  List<String> fileNames(Anime4KTier tier) {
+    final primary = tier.primary;
+    if (primary == null) {
+      throw ArgumentError('Tier ${tier.settingValue} has no built-in pipeline.');
+    }
+    final secondary = tier.secondary;
+
+    const clamp = 'Anime4K_Clamp_Highlights.glsl';
+    const downscale = [
+      'Anime4K_AutoDownscalePre_x2.glsl',
+      'Anime4K_AutoDownscalePre_x4.glsl',
+    ];
+    final tail = secondary == null
+        ? const <String>[]
+        : ['Anime4K_Upscale_CNN_x2_$secondary.glsl'];
+
+    return switch (this) {
+      Anime4KMode.a => [
+        clamp,
+        'Anime4K_Restore_CNN_$primary.glsl',
+        'Anime4K_Upscale_CNN_x2_$primary.glsl',
+        ...downscale,
+        ...tail,
+      ],
+      Anime4KMode.b => [
+        clamp,
+        'Anime4K_Restore_CNN_Soft_$primary.glsl',
+        'Anime4K_Upscale_CNN_x2_$primary.glsl',
+        ...downscale,
+        ...tail,
+      ],
+      Anime4KMode.c => [
+        clamp,
+        'Anime4K_Upscale_Denoise_CNN_x2_$primary.glsl',
+        ...downscale,
+        ...tail,
+      ],
+      // A+A restores again *before* the downscale pair -- upstream's ordering.
+      Anime4KMode.aa => [
+        clamp,
+        'Anime4K_Restore_CNN_$primary.glsl',
+        'Anime4K_Upscale_CNN_x2_$primary.glsl',
+        if (secondary != null) 'Anime4K_Restore_CNN_$secondary.glsl',
+        ...downscale,
+        ...tail,
+      ],
+      Anime4KMode.bb => [
+        clamp,
+        'Anime4K_Restore_CNN_Soft_$primary.glsl',
+        'Anime4K_Upscale_CNN_x2_$primary.glsl',
+        ...downscale,
+        if (secondary != null) 'Anime4K_Restore_CNN_Soft_$secondary.glsl',
+        ...tail,
+      ],
+      Anime4KMode.ca => [
+        clamp,
+        'Anime4K_Upscale_Denoise_CNN_x2_$primary.glsl',
+        ...downscale,
+        if (secondary != null) 'Anime4K_Restore_CNN_$secondary.glsl',
+        ...tail,
+      ],
+    };
+  }
 }
 
+/// What the player is currently running, for the status line.
 class Anime4KSelection {
   const Anime4KSelection({
-    required this.requestedProfile,
-    required this.resolvedProfile,
     required this.tier,
+    required this.mode,
     required this.sourceWidth,
     required this.sourceHeight,
     required this.displayWidth,
     required this.displayHeight,
-    this.sourceFramesPerSecond = 0,
   });
 
-  final Anime4KProfile requestedProfile;
-  final Anime4KProfile resolvedProfile;
   final Anime4KTier tier;
+  final Anime4KMode mode;
   final int sourceWidth;
   final int sourceHeight;
   final int displayWidth;
   final int displayHeight;
-  final double sourceFramesPerSecond;
 
   bool get hasKnownDimensions =>
       sourceWidth > 0 &&
@@ -90,69 +236,27 @@ class Anime4KSelection {
       displayHeight > 0;
 
   double get scaleFactor {
-    if (sourceWidth <= 0 ||
-        sourceHeight <= 0 ||
-        displayWidth <= 0 ||
-        displayHeight <= 0) {
-      return 1;
-    }
+    if (!hasKnownDimensions) return 1;
     final widthScale = displayWidth / sourceWidth;
     final heightScale = displayHeight / sourceHeight;
     return widthScale < heightScale ? widthScale : heightScale;
   }
 
+  /// AutoDownscalePre only engages between 1.2x and 2x (per its own `//!WHEN`
+  /// guard), so this reports whether real enlargement is happening rather than
+  /// whether the chain is active -- the chain still restores at 1:1.
   bool get expectsUpscale => scaleFactor > 1.2;
 
-  /// Anime4K's secondary A+A/B+B pass is intended for actual 2x (or higher)
-  /// enlargement. Below that threshold the single-pass pipeline is both safer
-  /// and substantially cheaper, while preserving the requested strong preset.
-  bool get usesSecondaryPass =>
-      resolvedProfile == Anime4KProfile.strong && scaleFactor >= 2.0;
-
-  Anime4KProfile get pipelineProfile =>
-      resolvedProfile == Anime4KProfile.strong && !usesSecondaryPass
-      ? Anime4KProfile.clear
-      : resolvedProfile;
-
   String get activeModeLabel =>
-      resolvedProfile == Anime4KProfile.strong && !usesSecondaryPass
-      ? '强力增强（当前倍率采用单次增强）'
-      : resolvedProfile.label;
-
-  String? get frameRateLabel {
-    if (sourceFramesPerSecond <= 0) return null;
-    final rounded = sourceFramesPerSecond.roundToDouble();
-    final value = (sourceFramesPerSecond - rounded).abs() < 0.05
-        ? rounded.toInt().toString()
-        : sourceFramesPerSecond.toStringAsFixed(2);
-    return '${value}fps';
-  }
+      tier.isCustom ? '${tier.label} · 自定义组合' : '${mode.label} · ${tier.label}';
 
   String resolutionDescription({bool previewingOriginal = false}) {
     if (!hasKnownDimensions) return '正在识别片源尺寸';
     final source = '片源 $sourceWidth×$sourceHeight';
     final display = '$displayWidth×$displayHeight';
-    if (previewingOriginal) {
-      return '$source · 显示区域 $display · 原画';
-    }
+    if (previewingOriginal) return '$source · 显示区域 $display · 原画';
     if (expectsUpscale) return '$source → 超分至 $display';
-    if (resolvedProfile.restoresWithoutScaling) {
-      return '$source · 显示区域 $display · 仅画质修复';
-    }
-    return '$source · 显示区域 $display · 当前尺寸无需放大';
-  }
-
-  Anime4KSelection withTier(Anime4KTier value) {
-    return Anime4KSelection(
-      requestedProfile: requestedProfile,
-      resolvedProfile: resolvedProfile,
-      tier: value,
-      sourceWidth: sourceWidth,
-      sourceHeight: sourceHeight,
-      displayWidth: displayWidth,
-      displayHeight: displayHeight,
-      sourceFramesPerSecond: sourceFramesPerSecond,
-    );
+    return '$source · 显示区域 $display · 画质修复';
   }
 }
 
@@ -170,21 +274,21 @@ class Anime4KPlatformSupport {
 
 class Anime4KShaderPipeline {
   const Anime4KShaderPipeline({
-    required this.profile,
     required this.tier,
+    required this.mode,
     required this.assetPaths,
     this.installedPaths = const [],
   });
 
-  final Anime4KProfile profile;
   final Anime4KTier tier;
+  final Anime4KMode mode;
   final List<String> assetPaths;
   final List<String> installedPaths;
 
   Anime4KShaderPipeline withInstalledPaths(List<String> paths) {
     return Anime4KShaderPipeline(
-      profile: profile,
       tier: tier,
+      mode: mode,
       assetPaths: assetPaths,
       installedPaths: List.unmodifiable(paths),
     );
@@ -193,21 +297,16 @@ class Anime4KShaderPipeline {
 
 class Anime4KApplyResult {
   const Anime4KApplyResult({
-    required this.requestedProfile,
-    required this.requestedTier,
-    this.activeProfile,
-    this.activeTier,
-    this.failures = const [],
+    required this.tier,
+    required this.mode,
+    this.enabled = false,
+    this.failure,
   });
 
-  final Anime4KProfile requestedProfile;
-  final Anime4KTier requestedTier;
-  final Anime4KProfile? activeProfile;
-  final Anime4KTier? activeTier;
-  final List<Object> failures;
-
-  bool get enabled => activeProfile != null;
-  bool get usedFallback => enabled && activeTier != requestedTier;
+  final Anime4KTier tier;
+  final Anime4KMode mode;
+  final bool enabled;
+  final Object? failure;
 }
 
 typedef Anime4KPropertyGetter = Future<String> Function(String property);
@@ -215,13 +314,17 @@ typedef Anime4KPropertySetter =
     Future<void> Function(String property, String value);
 typedef Anime4KPipelineInstaller =
     Future<Anime4KShaderPipeline> Function(
-      Anime4KProfile profile,
       Anime4KTier tier,
+      Anime4KMode mode,
       List<String> customShaderNames,
     );
 
 /// Owns the mpv property changes made by Anime4K and restores the previous
-/// shader list when the feature is disabled or every profile fails.
+/// shader list when the feature is disabled or the pipeline fails.
+///
+/// There is no tier fallback: the tier the user picked is the tier that runs.
+/// A failure disables the feature and surfaces a message instead of silently
+/// substituting a weaker chain.
 class Anime4KMpvRuntime {
   Anime4KMpvRuntime({
     required this.platform,
@@ -236,87 +339,52 @@ class Anime4KMpvRuntime {
   final Anime4KPropertySetter setProperty;
 
   String? _originalShaderList;
-  Anime4KProfile? _activeProfile;
   Anime4KTier? _activeTier;
+  Anime4KMode? _activeMode;
   String? _activeShaderList;
   bool _previewingOriginal = false;
 
-  Anime4KProfile? get activeProfile => _activeProfile;
   Anime4KTier? get activeTier => _activeTier;
+  Anime4KMode? get activeMode => _activeMode;
   bool get previewingOriginal => _previewingOriginal;
 
-  Future<Anime4KApplyResult> enable(
-    Anime4KProfile requestedProfile, {
-    required Anime4KTier requestedTier,
-    Anime4KTier? skipTier,
+  Future<Anime4KApplyResult> enable({
+    required Anime4KTier tier,
+    required Anime4KMode mode,
     List<String> customShaderNames = const [],
   }) async {
-    final failures = <Object>[];
     await _captureOriginalShaderList();
-
-    final tiers = requestedProfile == Anime4KProfile.advanced
-        ? <Anime4KTier>[requestedTier]
-        : requestedTier.fallbackOrder;
-    var canTryTier = skipTier == null;
-    for (final tier in tiers) {
-      if (!canTryTier) {
-        if (tier == skipTier) canTryTier = true;
-        continue;
+    try {
+      final pipeline = await installPipeline(tier, mode, customShaderNames);
+      final value = Anime4KShaderManager.buildMpvShaderList(
+        pipeline.installedPaths,
+        platform: platform,
+      );
+      if (value.isEmpty) {
+        throw StateError('Anime4K shader pipeline is empty.');
       }
-      try {
-        final pipeline = await installPipeline(
-          requestedProfile,
-          tier,
-          customShaderNames,
-        );
-        final value = Anime4KShaderManager.buildMpvShaderList(
-          pipeline.installedPaths,
-          platform: platform,
-        );
-        if (value.isEmpty) {
-          throw StateError('Anime4K shader pipeline is empty.');
-        }
-        await setProperty('glsl-shaders', value);
-        final applied = await getProperty('glsl-shaders');
-        if (!_containsEveryShader(applied, pipeline.installedPaths)) {
-          throw StateError('mpv did not accept the Anime4K shader pipeline.');
-        }
-        _activeProfile = requestedProfile;
-        _activeTier = tier;
-        _activeShaderList = value;
-        _previewingOriginal = false;
-        return Anime4KApplyResult(
-          requestedProfile: requestedProfile,
-          requestedTier: requestedTier,
-          activeProfile: requestedProfile,
-          activeTier: tier,
-          failures: List.unmodifiable(failures),
-        );
-      } catch (error) {
-        failures.add(error);
+      await setProperty('glsl-shaders', value);
+      final applied = await getProperty('glsl-shaders');
+      if (!_containsEveryShader(applied, pipeline.installedPaths)) {
+        throw StateError('mpv did not accept the Anime4K shader pipeline.');
       }
+      _activeTier = tier;
+      _activeMode = mode;
+      _activeShaderList = value;
+      _previewingOriginal = false;
+      return Anime4KApplyResult(tier: tier, mode: mode, enabled: true);
+    } catch (error) {
+      await disable();
+      return Anime4KApplyResult(tier: tier, mode: mode, failure: error);
     }
-
-    await disable();
-    return Anime4KApplyResult(
-      requestedProfile: requestedProfile,
-      requestedTier: requestedTier,
-      failures: List.unmodifiable(failures),
-    );
   }
 
   Future<void> setPreviewOriginal(bool enabled) async {
     final original = _originalShaderList;
     final active = _activeShaderList;
-    if (original == null || active == null || _activeProfile == null) return;
+    if (original == null || active == null || _activeTier == null) return;
     await setProperty('glsl-shaders', enabled ? original : active);
     _previewingOriginal = enabled;
-  }
-
-  Future<int?> readCounter(String property) async {
-    final value = (await getProperty(property)).trim();
-    if (value.isEmpty || value == 'N/A') return null;
-    return int.tryParse(value);
   }
 
   Future<void> disable() async {
@@ -324,8 +392,8 @@ class Anime4KMpvRuntime {
     if (original != null) {
       await setProperty('glsl-shaders', original);
     }
-    _activeProfile = null;
     _activeTier = null;
+    _activeMode = null;
     _activeShaderList = null;
     _previewingOriginal = false;
   }
@@ -427,190 +495,21 @@ class Anime4KShaderManager {
     return const Anime4KPlatformSupport.unsupported('当前平台不支持实时超分，已使用普通画质。');
   }
 
-  static Anime4KSelection select({
-    required Anime4KProfile requestedProfile,
-    required TargetPlatform platform,
-    required int sourceWidth,
-    required int sourceHeight,
-    required int displayWidth,
-    required int displayHeight,
-    double sourceFramesPerSecond = 0,
-  }) {
-    final widthScale = sourceWidth > 0 ? displayWidth / sourceWidth : 1.0;
-    final heightScale = sourceHeight > 0 ? displayHeight / sourceHeight : 1.0;
-    final scale = widthScale < heightScale ? widthScale : heightScale;
-    final resolvedProfile = requestedProfile == Anime4KProfile.automatic
-        ? _automaticProfileFor(
-            sourceWidth: sourceWidth,
-            sourceHeight: sourceHeight,
-            scale: scale,
-          )
-        : requestedProfile;
-    return Anime4KSelection(
-      requestedProfile: requestedProfile,
-      resolvedProfile: resolvedProfile,
-      tier: _recommendedTier(
-        profile: resolvedProfile,
-        platform: platform,
-        sourceHeight: sourceHeight,
-        outputPixels: displayWidth * displayHeight,
-        scale: scale,
-        sourceFramesPerSecond: sourceFramesPerSecond,
-      ),
-      sourceWidth: sourceWidth,
-      sourceHeight: sourceHeight,
-      displayWidth: displayWidth,
-      displayHeight: displayHeight,
-      sourceFramesPerSecond: sourceFramesPerSecond,
-    );
-  }
-
-  static Anime4KProfile _automaticProfileFor({
-    required int sourceWidth,
-    required int sourceHeight,
-    required double scale,
-  }) {
-    if (sourceHeight > 0 && sourceHeight <= 576) {
-      return Anime4KProfile.lowResolution;
-    }
-    final aspectRatio = sourceHeight > 0 ? sourceWidth / sourceHeight : 0.0;
-    if (sourceHeight <= 768 &&
-        scale >= 1.35 &&
-        aspectRatio > 0 &&
-        aspectRatio <= 1.5) {
-      // Older 4:3 animation commonly carries blur and resampling damage.
-      // Anime4K Mode A (clear) reconstructs those lines more visibly than
-      // the soft Mode B intended for ordinary downscaled 720p sources.
-      return Anime4KProfile.clear;
-    }
-    if (sourceHeight > 0 && sourceHeight <= 900) {
-      return Anime4KProfile.soft;
-    }
-    return Anime4KProfile.clear;
-  }
-
-  static Anime4KTier _recommendedTier({
-    required Anime4KProfile profile,
-    required TargetPlatform platform,
-    required int sourceHeight,
-    required int outputPixels,
-    required double scale,
-    required double sourceFramesPerSecond,
-  }) {
-    if (profile == Anime4KProfile.advanced) return Anime4KTier.balanced;
-    final highFrameRate = sourceFramesPerSecond >= 50;
-    final mobile =
-        platform == TargetPlatform.android || platform == TargetPlatform.iOS;
-    if (mobile) {
-      if (highFrameRate) return Anime4KTier.performance;
-      if (profile == Anime4KProfile.strong && sourceHeight <= 720) {
-        return Anime4KTier.balanced;
-      }
-      return Anime4KTier.performance;
-    }
-    if (highFrameRate) {
-      const maxBalancedPixels = 2560 * 1440;
-      if (profile == Anime4KProfile.strong ||
-          outputPixels > maxBalancedPixels) {
-        return Anime4KTier.performance;
-      }
-      return Anime4KTier.balanced;
-    }
-    if (profile == Anime4KProfile.strong) return Anime4KTier.quality;
-    const maxQualityPixels = 2560 * 1440;
-    if (sourceHeight > 0 &&
-        sourceHeight <= 1080 &&
-        scale > 1.2 &&
-        outputPixels > 0 &&
-        outputPixels <= maxQualityPixels) {
-      return Anime4KTier.quality;
-    }
-    return Anime4KTier.balanced;
-  }
-
-  static double? parseFrameRate(Object? value) {
-    final parsed = value is num
-        ? value.toDouble()
-        : double.tryParse(value?.toString().trim() ?? '');
-    if (parsed == null || !parsed.isFinite || parsed < 1 || parsed > 240) {
-      return null;
-    }
-    return parsed;
-  }
-
   static Anime4KShaderPipeline pipelineFor(
-    Anime4KProfile profile, {
-    Anime4KTier tier = Anime4KTier.balanced,
+    Anime4KTier tier, {
+    Anime4KMode mode = Anime4KMode.a,
     List<String> customShaderNames = const [],
   }) {
-    final names = profile == Anime4KProfile.advanced
+    final names = tier.isCustom
         ? availableShaderFileNames
               .where(customShaderNames.toSet().contains)
               .toList(growable: false)
-        : _pipelineFileNames(profile, tier);
+        : mode.fileNames(tier);
     return Anime4KShaderPipeline(
-      profile: profile,
       tier: tier,
+      mode: mode,
       assetPaths: List.unmodifiable(names.map((name) => '$_assetRoot$name')),
     );
-  }
-
-  static List<String> _pipelineFileNames(
-    Anime4KProfile profile,
-    Anime4KTier tier,
-  ) {
-    if (profile == Anime4KProfile.automatic ||
-        profile == Anime4KProfile.advanced) {
-      throw ArgumentError(
-        'Profile must be resolved before building a pipeline.',
-      );
-    }
-    final primary = switch (tier) {
-      Anime4KTier.performance => 'S',
-      Anime4KTier.balanced => 'M',
-      Anime4KTier.quality => 'L',
-    };
-    final secondary = switch (tier) {
-      Anime4KTier.performance => null,
-      Anime4KTier.balanced => 'S',
-      Anime4KTier.quality => 'M',
-    };
-    final clamp = 'Anime4K_Clamp_Highlights.glsl';
-    final downscale = <String>[
-      'Anime4K_AutoDownscalePre_x2.glsl',
-      'Anime4K_AutoDownscalePre_x4.glsl',
-    ];
-    final fallbackUpscale = secondary == null
-        ? 'Anime4K_Upscale_Original_x2.glsl'
-        : 'Anime4K_Upscale_CNN_x2_$secondary.glsl';
-
-    if (profile == Anime4KProfile.lowResolution) {
-      return [
-        clamp,
-        'Anime4K_Upscale_Denoise_CNN_x2_$primary.glsl',
-        ...downscale,
-        fallbackUpscale,
-      ];
-    }
-
-    final soft = profile == Anime4KProfile.soft;
-    final restorePrefix = soft
-        ? 'Anime4K_Restore_CNN_Soft_'
-        : 'Anime4K_Restore_CNN_';
-    final base = <String>[
-      clamp,
-      '$restorePrefix$primary.glsl',
-      'Anime4K_Upscale_CNN_x2_$primary.glsl',
-      ...downscale,
-    ];
-    if (profile == Anime4KProfile.strong && secondary != null) {
-      return [
-        ...base,
-        'Anime4K_Restore_CNN_$secondary.glsl',
-        'Anime4K_Upscale_CNN_x2_$secondary.glsl',
-      ];
-    }
-    return [...base, fallbackUpscale];
   }
 
   static String shaderCategory(String fileName) {
@@ -644,15 +543,16 @@ class Anime4KShaderManager {
   }
 
   Future<Anime4KShaderPipeline> ensureInstalled(
-    Anime4KProfile profile, {
-    Anime4KTier tier = Anime4KTier.balanced,
+    Anime4KTier tier, {
+    Anime4KMode mode = Anime4KMode.a,
     List<String> customShaderNames = const [],
   }) async {
     final key =
-        '${profile.settingValue}:${tier.settingValue}:${customShaderNames.join('|')}';
+        '${tier.settingValue}:${mode.settingValue}:'
+        '${customShaderNames.join('|')}';
     final cached = _installedPipelines[key];
     if (cached != null) return cached;
-    final install = _install(profile, tier, customShaderNames);
+    final install = _install(tier, mode, customShaderNames);
     _installedPipelines[key] = install;
     try {
       return await install;
@@ -665,13 +565,13 @@ class Anime4KShaderManager {
   }
 
   Future<Anime4KShaderPipeline> _install(
-    Anime4KProfile profile,
     Anime4KTier tier,
+    Anime4KMode mode,
     List<String> customShaderNames,
   ) async {
     final pipeline = pipelineFor(
-      profile,
-      tier: tier,
+      tier,
+      mode: mode,
       customShaderNames: customShaderNames,
     );
     final supportDirectory = await getApplicationSupportDirectory();

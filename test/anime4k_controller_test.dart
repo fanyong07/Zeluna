@@ -7,99 +7,184 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('shader apply owns quality to balanced fallback state', () async {
-    final harness = _Anime4KHarness(failTiers: {Anime4KTier.quality});
-    final controller = harness.controller();
-    addTearDown(controller.dispose);
-    controller
-      ..updateVideoDimensions(width: 1280, height: 720)
-      ..updateViewport(const Size(1920, 1080))
-      ..applySettings(_enabledSettings());
-
-    await controller.settled;
-
-    expect(harness.installedTiers, [Anime4KTier.quality, Anime4KTier.balanced]);
-    expect(controller.activeTier, Anime4KTier.balanced);
-    expect(controller.isActive, isTrue);
-    expect(controller.statusMessage, contains('降为标准'));
-    expect(controller.displayStatus?.title, '超分运行中');
-  });
-
-  test('shader log and sustained overload step down one tier', () async {
+  test('runs exactly the tier and mode the user picked', () async {
     final harness = _Anime4KHarness();
     final controller = harness.controller();
     addTearDown(controller.dispose);
     controller
       ..updateVideoDimensions(width: 1280, height: 720)
       ..updateViewport(const Size(1920, 1080))
-      ..applySettings(_enabledSettings());
+      ..applySettings(_settings(tier: 'quality', mode: 'bb'));
+
     await controller.settled;
+
+    expect(harness.installed, [(Anime4KTier.quality, Anime4KMode.bb)]);
     expect(controller.activeTier, Anime4KTier.quality);
-
-    controller.handlePlayerLog(prefix: 'vo/gpu', text: 'shader compile failed');
-    await controller.settled;
-    expect(controller.activeTier, Anime4KTier.balanced);
-
-    controller.updatePlaybackState(playing: true, buffering: false);
-    await controller.samplePerformance();
-    harness.incrementCounters(5);
-    await controller.samplePerformance();
-    harness.incrementCounters(5);
-    await controller.samplePerformance();
-    await controller.settled;
-    expect(controller.activeTier, Anime4KTier.performance);
+    expect(controller.activeMode, Anime4KMode.bb);
+    expect(controller.isActive, isTrue);
+    expect(controller.statusMessage, isNull);
+    expect(controller.displayStatus?.title, '超分运行中');
+    expect(controller.displayStatus?.detail, contains('模式B+B · 质量'));
   });
 
-  test(
-    'measured frame rate refreshes the active tier and display status',
-    () async {
-      final harness = _Anime4KHarness()..properties['estimated-vf-fps'] = '60';
-      final controller = harness.controller();
-      addTearDown(controller.dispose);
-      controller
-        ..updateVideoDimensions(width: 1280, height: 720)
-        ..updateViewport(const Size(1920, 1080))
-        ..applySettings(_enabledSettings());
-      await controller.settled;
-      expect(controller.activeTier, Anime4KTier.quality);
+  test('a failed pipeline disables instead of weakening the chain', () async {
+    final harness = _Anime4KHarness(failTiers: {Anime4KTier.quality});
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
 
-      await controller.refreshFrameRate(usesWebPlayer: false);
-      await controller.settled;
+    await controller.settled;
 
-      expect(controller.activeSelection?.sourceFramesPerSecond, 60);
-      expect(controller.activeTier, Anime4KTier.balanced);
-      expect(controller.displayStatus?.detail, contains('60fps'));
-    },
-  );
+    // One attempt only: no balance/efficiency retry behind the user's back.
+    expect(harness.installed, [(Anime4KTier.quality, Anime4KMode.a)]);
+    expect(controller.activeTier, isNull);
+    expect(controller.isActive, isFalse);
+    expect(controller.statusMessage, contains('模式A · 质量'));
+    expect(harness.properties['glsl-shaders'], '');
+  });
 
-  test('video reset invalidates a late frame rate read', () async {
-    final frameRate = Completer<String>();
+  test('changing the tier reinstalls at the new tier', () async {
+    final harness = _Anime4KHarness();
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+    await controller.settled;
+
+    controller.applySettings(_settings(tier: 'efficiency', mode: 'a'));
+    await controller.settled;
+
+    expect(harness.installed, [
+      (Anime4KTier.quality, Anime4KMode.a),
+      (Anime4KTier.efficiency, Anime4KMode.a),
+    ]);
+    expect(controller.activeTier, Anime4KTier.efficiency);
+  });
+
+  test('reapplying identical settings does not reinstall', () async {
+    final harness = _Anime4KHarness();
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'balance', mode: 'c'));
+    await controller.settled;
+
+    controller.applySettings(_settings(tier: 'balance', mode: 'c'));
+    await controller.settled;
+
+    expect(harness.installed, hasLength(1));
+  });
+
+  test('disabling restores the shader list mpv started with', () async {
+    final harness = _Anime4KHarness()
+      ..properties['glsl-shaders'] = 'preexisting.glsl';
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+    await controller.settled;
+    expect(harness.properties['glsl-shaders'], isNot('preexisting.glsl'));
+
+    controller.applySettings(const PlaybackSettings());
+    await controller.settled;
+
+    expect(harness.properties['glsl-shaders'], 'preexisting.glsl');
+    expect(controller.activeSelection, isNull);
+  });
+
+  test('custom tier without shaders explains itself', () async {
+    final harness = _Anime4KHarness();
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'custom', mode: 'a'));
+
+    await controller.settled;
+
+    expect(harness.installed, isEmpty);
+    expect(controller.isActive, isFalse);
+    expect(controller.statusMessage, contains('至少需要选择一个着色器'));
+  });
+
+  test('custom tier installs the chosen shaders', () async {
+    final harness = _Anime4KHarness();
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(
+        _settings(
+          tier: 'custom',
+          mode: 'a',
+          customShaders: const ['Anime4K_Clamp_Highlights.glsl'],
+        ),
+      );
+
+    await controller.settled;
+
+    expect(harness.installed, [(Anime4KTier.custom, Anime4KMode.a)]);
+    expect(harness.customShaders, ['Anime4K_Clamp_Highlights.glsl']);
+    expect(controller.displayStatus?.detail, contains('高级 · 自定义组合'));
+  });
+
+  test('an unsupported platform reports rather than installing', () async {
     final harness = _Anime4KHarness(
-      propertyOverride: (property) {
-        if (property == 'estimated-vf-fps') return frameRate.future;
-        return null;
-      },
+      support: const Anime4KPlatformSupport.unsupported('测试平台不支持'),
     );
     final controller = harness.controller();
     addTearDown(controller.dispose);
     controller
       ..updateVideoDimensions(width: 1280, height: 720)
       ..updateViewport(const Size(1920, 1080))
-      ..applySettings(_enabledSettings());
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+
     await controller.settled;
 
-    final pending = controller.refreshFrameRate(usesWebPlayer: false);
-    controller.resetVideo();
-    frameRate.complete('60');
-    await pending;
-    expect(controller.activeSelection?.sourceFramesPerSecond, 0);
+    expect(harness.installed, isEmpty);
+    expect(controller.statusMessage, '测试平台不支持');
   });
 
-  test('dispose rejects late shader completion', () async {
+  test('original preview swaps the shader list both ways', () async {
+    final harness = _Anime4KHarness()
+      ..properties['glsl-shaders'] = 'preexisting.glsl';
+    final controller = harness.controller();
+    addTearDown(controller.dispose);
+    controller
+      ..updateVideoDimensions(width: 1280, height: 720)
+      ..updateViewport(const Size(1920, 1080))
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+    await controller.settled;
+    final applied = harness.properties['glsl-shaders'];
+
+    controller.setOriginalPreview(true);
+    await controller.settled;
+    expect(harness.properties['glsl-shaders'], 'preexisting.glsl');
+    expect(controller.previewingOriginal, isTrue);
+    expect(controller.isActive, isFalse);
+    expect(controller.displayStatus?.title, '原画预览');
+
+    controller.setOriginalPreview(false);
+    await controller.settled;
+    expect(harness.properties['glsl-shaders'], applied);
+    expect(controller.isActive, isTrue);
+  });
+
+  test('dispose rejects a late shader completion', () async {
     final install = Completer<Anime4KShaderPipeline>();
     final harness = _Anime4KHarness(
-      installOverride: (profile, tier, customShaders) => install.future,
-      performanceSampleInterval: const Duration(milliseconds: 5),
+      installOverride: (tier, mode, customShaders) => install.future,
     );
     final controller = harness.controller();
     var notifications = 0;
@@ -107,14 +192,14 @@ void main() {
     controller
       ..updateVideoDimensions(width: 1280, height: 720)
       ..updateViewport(const Size(1920, 1080))
-      ..applySettings(_enabledSettings());
-    final notificationsBeforeDispose = notifications;
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+    final before = notifications;
     controller.dispose();
 
     install.complete(
       const Anime4KShaderPipeline(
-        profile: Anime4KProfile.clear,
         tier: Anime4KTier.quality,
+        mode: Anime4KMode.a,
         assetPaths: [],
         installedPaths: ['Anime4K_Test.glsl'],
       ),
@@ -124,106 +209,87 @@ void main() {
 
     expect(controller.isDisposed, isTrue);
     expect(controller.activeSelection, isNull);
-    expect(notifications, notificationsBeforeDispose);
+    expect(notifications, before);
   });
 
-  test('dispose cancels the controller-owned performance timer', () async {
-    final harness = _Anime4KHarness(
-      performanceSampleInterval: const Duration(milliseconds: 5),
-    );
+  test('a rejected shader list counts as a failure', () async {
+    // mpv can accept the property write yet not adopt the list.
+    final harness = _Anime4KHarness(swallowShaderWrites: true);
     final controller = harness.controller();
+    addTearDown(controller.dispose);
     controller
       ..updateVideoDimensions(width: 1280, height: 720)
       ..updateViewport(const Size(1920, 1080))
-      ..applySettings(_enabledSettings());
+      ..applySettings(_settings(tier: 'quality', mode: 'a'));
+
     await controller.settled;
-    controller.updatePlaybackState(playing: true, buffering: false);
 
-    await Future<void>.delayed(const Duration(milliseconds: 25));
-    expect(harness.performancePropertyReads, greaterThan(0));
-    controller.dispose();
-    final readsAfterDispose = harness.performancePropertyReads;
-    await Future<void>.delayed(const Duration(milliseconds: 25));
-
-    expect(harness.performancePropertyReads, readsAfterDispose);
+    expect(controller.isActive, isFalse);
+    expect(controller.statusMessage, contains('无法运行'));
   });
 }
 
-PlaybackSettings _enabledSettings() {
-  return const PlaybackSettings(
+PlaybackSettings _settings({
+  required String tier,
+  required String mode,
+  List<String> customShaders = const [],
+}) {
+  return PlaybackSettings(
     superResolution: true,
-    superResolutionProfile: 'clear',
+    superResolutionTier: tier,
+    superResolutionMode: mode,
+    superResolutionCustomShaders: customShaders,
   );
 }
-
-typedef _PropertyOverride = FutureOr<String>? Function(String property);
 
 final class _Anime4KHarness {
   _Anime4KHarness({
     this.failTiers = const {},
-    this.propertyOverride,
     this.installOverride,
-    this.performanceSampleInterval = const Duration(hours: 1),
+    this.support = const Anime4KPlatformSupport.supported(),
+    this.swallowShaderWrites = false,
   });
 
   final Set<Anime4KTier> failTiers;
-  final _PropertyOverride? propertyOverride;
   final Anime4KPipelineInstaller? installOverride;
-  final Duration performanceSampleInterval;
-  final List<Anime4KTier> installedTiers = [];
-  int performancePropertyReads = 0;
+  final Anime4KPlatformSupport support;
+
+  /// Simulates mpv accepting the write but keeping its previous shader list.
+  final bool swallowShaderWrites;
+
+  final List<(Anime4KTier, Anime4KMode)> installed = [];
+  List<String> customShaders = const [];
   final Map<String, String> properties = {
     'scale': 'ewa_lanczossharp',
     'glsl-shaders': '',
-    'vo-drop-frame-count': '0',
-    'mistimed-frame-count': '0',
-    'delayed-frame-count': '0',
   };
 
   Anime4KController controller() {
     return Anime4KController(
       platform: TargetPlatform.windows,
-      getProperty: (property) async {
-        if (property == 'vo-drop-frame-count' ||
-            property == 'mistimed-frame-count' ||
-            property == 'delayed-frame-count') {
-          performancePropertyReads++;
-        }
-        final override = propertyOverride?.call(property);
-        if (override != null) return await override;
-        return properties[property] ?? '';
+      getProperty: (property) async => properties[property] ?? '',
+      setProperty: (property, value) async {
+        if (swallowShaderWrites && property == 'glsl-shaders') return;
+        properties[property] = value;
       },
-      setProperty: (property, value) async => properties[property] = value,
       installPipeline: installOverride ?? _install,
-      resolveSupport: () => const Anime4KPlatformSupport.supported(),
-      performanceSampleInterval: performanceSampleInterval,
+      resolveSupport: () => support,
     );
   }
 
   Future<Anime4KShaderPipeline> _install(
-    Anime4KProfile profile,
     Anime4KTier tier,
-    List<String> customShaders,
+    Anime4KMode mode,
+    List<String> names,
   ) async {
-    installedTiers.add(tier);
+    installed.add((tier, mode));
+    customShaders = names;
     if (failTiers.contains(tier)) throw StateError('tier failed');
-    final path = 'C:\\Anime4K_${tier.settingValue}.glsl';
     return Anime4KShaderPipeline(
-      profile: profile,
       tier: tier,
+      mode: mode,
       assetPaths: const [],
-      installedPaths: [path],
+      installedPaths: ['C:\\Anime4K_${tier.settingValue}.glsl'],
     );
-  }
-
-  void incrementCounters(int delta) {
-    for (final property in const [
-      'vo-drop-frame-count',
-      'mistimed-frame-count',
-      'delayed-frame-count',
-    ]) {
-      properties[property] = (int.parse(properties[property]!) + delta)
-          .toString();
-    }
   }
 }

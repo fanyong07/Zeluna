@@ -750,17 +750,20 @@ String playbackLineLatencyLabel(PlaybackLine line) {
 
 String playbackLineFailureLabel(PlaybackLine line) {
   final diagnosticReason = switch (line.diagnosticStatus) {
-    PlaybackDiscoveryStatus.notQueried => '未查询',
+    // These land in the line list's status column, so they say what the user
+    // sees rather than naming the mechanism behind it: no 验线 (internal probe
+    // slang), 已隔离 (quarantine), or 暂缓请求 (circuit breaker).
+    PlaybackDiscoveryStatus.notQueried => '未检查',
     PlaybackDiscoveryStatus.searching => '搜索中',
     PlaybackDiscoveryStatus.searchTimeout => '搜索超时',
     PlaybackDiscoveryStatus.searchError => '来源异常',
     PlaybackDiscoveryStatus.searchMiss => '未找到匹配',
-    PlaybackDiscoveryStatus.searchHitNoMatch => '匹配不足',
-    PlaybackDiscoveryStatus.matched => '正在验线',
+    PlaybackDiscoveryStatus.searchHitNoMatch => '不是这部作品',
+    PlaybackDiscoveryStatus.matched => '正在测试',
     PlaybackDiscoveryStatus.matchedNoEpisode => '缺少本集',
-    PlaybackDiscoveryStatus.circuitSuppressed => '暂缓请求',
+    PlaybackDiscoveryStatus.circuitSuppressed => '暂时跳过',
     PlaybackDiscoveryStatus.routeUnavailable => '线路失败',
-    PlaybackDiscoveryStatus.quarantined => '已隔离',
+    PlaybackDiscoveryStatus.quarantined => '暂时停用',
     PlaybackDiscoveryStatus.retired => '已停用',
     _ => null,
   };
@@ -788,9 +791,21 @@ String playbackLineFailureLabel(PlaybackLine line) {
     reason = '需要验证';
   } else if (message.contains('执行器') || message.contains('不支持')) {
     reason = '当前不支持';
-  } else if (message.contains('未匹配') || message.contains('没有找到')) {
+  } else if (message.contains('会员') || message.contains('vip')) {
+    // Worth keeping distinct: the viewer can act on this one.
+    reason = '需要站点会员';
+  } else if (message.contains('地区') || message.contains('防盗链')) {
+    reason = '来源限制访问';
+  } else if (message.contains('未匹配') ||
+      message.contains('没有找到') ||
+      message.contains('没有匹配') ||
+      message.contains('没找到')) {
     reason = '未找到匹配';
-  } else if (message.contains('无法访问') || message.contains('网络')) {
+  } else if (message.contains('没有这一集') || message.contains('缺少本集')) {
+    reason = '缺少本集';
+  } else if (message.contains('无法访问') ||
+      message.contains('连不上') ||
+      message.contains('网络')) {
     reason = '网络异常';
   } else {
     reason = '暂时不可用';
@@ -812,7 +827,9 @@ String playbackLineMediaLabel(PlaybackLine line) {
 int _availabilityRank(PlaybackLine line) => line.available ? 0 : 1;
 
 String _sizeLabel(PlaybackLine line) {
-  if (line.isLive) return '动态流';
+  // 动态流 came from the HLS "no ENDLIST" / DASH dynamic-manifest check; what
+  // that actually means to a viewer is simply that it is live.
+  if (line.isLive) return '直播';
   final bytes = line.sizeBytes;
   if (bytes != null && bytes > 0) {
     final value = (bytes / 1024 / 1024).toStringAsFixed(1);

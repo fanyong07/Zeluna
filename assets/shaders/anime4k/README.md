@@ -1,28 +1,43 @@
 # Anime4K GLSL shaders
 
-These shaders are used by the native `media_kit`/libmpv player through mpv's
-`glsl-shaders` property. Web playback does not load them.
+Loaded by the native `media_kit`/libmpv player through mpv's `glsl-shaders`
+property. Web playback does not use them.
 
 Source: https://github.com/bloc97/Anime4K (v4 shader set, commit
 `7684e9586f8dcc738af08a1cdceb024cc184f426`)
 
-License: MIT. Each shader contains the upstream license header.
+License: MIT, except `Anime4K_AutoDownscalePre_x2.glsl` and
+`Anime4K_AutoDownscalePre_x4.glsl`, which upstream released into the public
+domain (Unlicense). Every file keeps its own upstream header.
 
-Player modes:
+## How the player picks a chain
 
-- Auto: selects Low-resolution repair, Natural soft, or Animation clear from
-  the source dimensions, aspect ratio, and actual enlargement ratio. Ordinary
-  720p sources keep the softer Mode B pipeline, while substantially enlarged
-  legacy 4:3 animation uses the more visible Mode A line reconstruction.
-- Animation clear: restores blurred line art before CNN upscaling.
-- Natural soft: uses the soft restoration model to avoid harsh outlines.
-- Low-resolution repair: denoises 480p/low-bitrate sources while upscaling.
-- Strong enhancement: adds the second restoration pass only at 2x or higher.
-- Advanced: lets the user compose shaders from the packaged catalog.
+Two independent choices, both the user's:
 
-Each automatic mode also selects a Performance, Balanced, or Quality tier from
-the platform, output size, scale ratio, and detected frame rate. The player
-falls back to a lighter tier when the active renderer starts dropping frames.
+- **Tier** sets the CNN size. `quality` = VL with an M second pass, `balance` =
+  M with an S second pass, `efficiency` = S with no second pass. `custom` skips
+  the built-in chains and runs whatever the user assembled.
+- **Mode** sets the chain shape: A, B, C and their stronger variants A+A, B+B,
+  C+A. A targets 1080p sources, B targets 720p, C targets 480p and undamaged
+  images.
 
-The older monolithic v3.2 shader remains packaged only for upgrade
-compatibility and is no longer selected by the player.
+`quality` and `balance` reproduce upstream's shipped High-end and Low-end
+templates exactly, stage for stage. `efficiency` has no upstream counterpart:
+dropping the second pass also drops the extra restore stage, so at that tier the
+doubled modes collapse onto their single-pass form.
+
+The tier the user picks is the tier that runs. There is no automatic downgrade
+by platform, resolution, or frame rate, and no fallback to a lighter tier when a
+chain fails to load -- a failure disables the feature and says so, because
+silently substituting a weaker chain makes the setting a lie.
+
+`test/anime4k_shader_manager_test.dart` pins every mode × tier chain against
+upstream's templates, including the deliberate asymmetry where A+A restores
+before the AutoDownscalePre pair while B+B and C+A restore after it.
+
+## Catalog
+
+All 49 shaders ship so the custom tier can offer the full set, including ones no
+built-in chain uses: the GAN variants, the bilateral denoisers, the line
+Darken/Thin passes, and `Anime4K_Upscale_Original_x2.glsl` (the v3.2-era
+non-CNN upscaler).

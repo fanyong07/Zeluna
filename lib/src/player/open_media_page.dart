@@ -50,15 +50,15 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const SectionTitle(
-                  title: '播放本地文件或网络直链',
-                  subtitle: '支持播放器可识别的 MP4、WebM、MKV、HLS 和 DASH 地址',
+                  title: '播放本地文件或网络视频',
+                  subtitle: '支持 MP4、WebM、MKV 等视频文件，以及 m3u8、mpd 直播地址',
                 ),
                 const SizedBox(height: 18),
                 TextField(
                   controller: _title,
                   decoration: const InputDecoration(
                     labelText: '标题（可选）',
-                    hintText: '例如：测试视频 / 第 1 集',
+                    hintText: '例如：第 1 集',
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -109,7 +109,7 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
                 SectionTitle(title: '说明'),
                 SizedBox(height: 10),
                 Text(
-                  '这里不会上传文件，也不会保存账号或 Cookie。带鉴权的视频可以填写必要请求头；请只播放你有权访问的内容。',
+                  '这里不会上传文件，也不会保存账号或 Cookie。需要登录才能看的视频可以填写必要请求头；请只播放你有权访问的内容。',
                   style: TextStyle(color: AppColors.muted, height: 1.6),
                 ),
               ],
@@ -127,7 +127,7 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
       _toast('请输入有效的媒体地址');
       return;
     }
-    await _open(value, provider: '网络直链');
+    await _open(value, provider: '网络视频');
   }
 
   Future<void> _pickLocalFile() async {

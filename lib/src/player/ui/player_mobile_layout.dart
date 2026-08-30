@@ -437,7 +437,7 @@ class _PortraitEpisodeCard extends StatelessWidget {
             ),
             const SizedBox(height: 2),
             Text(
-              episode.airdate ?? '播出日期待补',
+              episode.airdate ?? '播出日期未知',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: Theme.of(

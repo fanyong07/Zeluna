@@ -48,10 +48,10 @@ enum RuleSourceKind {
 
 enum RuleExecutionStatus {
   executable('可执行'),
-  needsWebView('需 WebView'),
+  needsWebView('需手动验证'),
   needsPrivateAuth('需授权'),
-  missingConfig('缺配置'),
-  unsupportedEngine('缺执行器');
+  missingConfig('缺少配置'),
+  unsupportedEngine('暂不支持');
 
   const RuleExecutionStatus(this.label);
 

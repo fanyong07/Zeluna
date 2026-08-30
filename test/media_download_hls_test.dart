@@ -628,7 +628,7 @@ segment.ts
     );
 
     expect(result.outcome, MediaDownloadOutcome.failed);
-    expect(result.message, contains('不是媒体内容'));
+    expect(result.message, contains('无法完成下载'));
     expect(await File(result.path!).exists(), isFalse);
   });
 
@@ -675,9 +675,9 @@ segment.ts
     expect(live.outcome, MediaDownloadOutcome.unsupported);
     expect(live.message, contains('直播'));
     expect(aes.outcome, MediaDownloadOutcome.unsupported);
-    expect(aes.message, contains('AES-128'));
+    expect(aes.message, contains('已加密'));
     expect(sample.outcome, MediaDownloadOutcome.unsupported);
-    expect(sample.message, contains('SAMPLE-AES'));
+    expect(sample.message, contains('版权保护'));
   });
 
   test('cross-origin HLS children do not inherit source credentials', () async {

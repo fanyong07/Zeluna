@@ -2,12 +2,50 @@ import 'dart:convert';
 
 import 'package:anime/src/data/bangumi_metadata_repository.dart';
 import 'package:anime/src/data/chinese_metadata_repository.dart';
+import 'package:anime/src/data/chinese_text.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  group('metadata placeholders', () {
+    test('every placeholder is recognised regardless of punctuation', () {
+      // The catalog used to gate blurbs on startsWith('暂无'), which let
+      // "内容资料正在完善。" through and rendered it as a real synopsis on the
+      // home hero, the detail hero, and the summary tab. Callers must use
+      // isMetadataPlaceholder so the whole set is covered.
+      for (final placeholder in const [
+        '暂无简介',
+        '暂无简介。',
+        '暂无中文简介',
+        '暂无资料',
+        '暂无中文资料',
+        '简介待补充',
+        '内容资料正在完善',
+        '内容资料正在完善。',
+        '角色资料待bangumi返回',
+        '  暂无简介  ',
+        '',
+      ]) {
+        expect(
+          isMetadataPlaceholder(placeholder),
+          isTrue,
+          reason: placeholder,
+        );
+      }
+    });
+
+    test('real synopses are not treated as placeholders', () {
+      for (final summary in const [
+        '猫娘尼古快缴不起房租了。',
+        '暂无门票的少年踏上旅程。',
+      ]) {
+        expect(isMetadataPlaceholder(summary), isFalse, reason: summary);
+      }
+    });
+  });
+
   group('ChineseMetadataRepository Wikidata enrichment', () {
     test(
       'batches IMDb IDs, preserves Chinese text, and caches misses',

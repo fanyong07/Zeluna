@@ -42,7 +42,7 @@ void main() {
     expect(find.text('media.example.net'), findsOneWidget);
     expect(find.text('仅当前任务'), findsOneWidget);
     expect(find.text('Referer、User-Agent'), findsOneWidget);
-    expect(find.textContaining('规则更新后需要重新确认'), findsOneWidget);
+    expect(find.textContaining('规则更新后会再问你一次'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();

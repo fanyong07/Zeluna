@@ -28,7 +28,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('离线缓存'), findsOneWidget);
+    expect(find.text('下载管理'), findsOneWidget);
     expect(find.text('全部下载'), findsOneWidget);
     expect(find.text('返回'), findsNothing);
     expect(find.text('正在下载'), findsOneWidget);
@@ -62,7 +62,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('离线缓存'), findsOneWidget);
+    expect(find.text('下载管理'), findsOneWidget);
     expect(find.byTooltip('暂停'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });

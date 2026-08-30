@@ -193,7 +193,7 @@ class LoadingState extends StatelessWidget {
   const LoadingState({
     super.key,
     this.title = '正在加载',
-    this.message = '正在整理内容，请稍候。',
+    this.message = '正在加载，请稍候。',
     this.compact = false,
   });
 

@@ -499,7 +499,7 @@ Future<_FetchedPlaylist> _fetchPlaylist(
     }
     final response = responseOrStop as http.StreamedResponse;
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw _HlsFailure('清单请求返回 HTTP ${response.statusCode}');
+      throw const _HlsFailure('无法连接该线路，可稍后重试');
     }
     final bytes = <int>[];
     iterator = StreamIterator<List<int>>(
@@ -516,14 +516,14 @@ Future<_FetchedPlaylist> _fetchPlaylist(
       if (nextOrStop == false) break;
       bytes.addAll(iterator.current);
       if (bytes.length > 2 * 1024 * 1024) {
-        throw const _HlsUnsupported('HLS 清单超过 2 MB，已停止处理');
+        throw const _HlsUnsupported('该线路数据异常，已停止下载');
       }
     }
     final text = utf8
         .decode(bytes, allowMalformed: true)
         .replaceFirst('\ufeff', '');
     if (!text.trimLeft().startsWith('#EXTM3U')) {
-      throw const _HlsFailure('返回内容不是有效的 HLS 清单');
+      throw const _HlsFailure('该线路无法离线下载');
     }
     final reportedUri = switch (response) {
       http.BaseResponseWithUrl(:final url) => url,
@@ -678,9 +678,9 @@ _HlsTrack _parseMediaPlaylist(
     output.add(line);
   }
   if (!hasEndList) {
-    throw const _HlsUnsupported('检测到直播或未结束的 HLS 清单，暂不支持离线缓存');
+    throw const _HlsUnsupported('直播内容无法离线下载');
   }
-  if (items.isEmpty) throw const _HlsFailure('HLS 清单没有可下载分片');
+  if (items.isEmpty) throw const _HlsFailure('该线路无法离线下载');
   return _HlsTrack(name: trackName, rewrittenLines: output, items: items);
 }
 
@@ -689,12 +689,12 @@ void _validateKey(String rawAttributes) {
   final method = (attributes['METHOD'] ?? '').toUpperCase();
   if (method.isEmpty || method == 'NONE') return;
   if (method == 'AES-128') {
-    throw const _HlsUnsupported('暂不支持 AES-128 加密 HLS 离线缓存');
+    throw const _HlsUnsupported('该线路已加密，暂不支持离线下载');
   }
   if (method.startsWith('SAMPLE-AES')) {
-    throw const _HlsUnsupported('暂不支持 SAMPLE-AES/DRM HLS 离线缓存');
+    throw const _HlsUnsupported('该线路受版权保护，无法离线下载');
   }
-  throw _HlsUnsupported('暂不支持加密 HLS：$method');
+  throw const _HlsUnsupported('该线路已加密，暂不支持离线下载');
 }
 
 Future<_HlsItemResult> _downloadHlsItem({
@@ -768,7 +768,7 @@ Future<_HlsItemResult> _downloadHlsItem({
         if (await partialFile.exists()) await partialFile.delete();
         onBytes(0);
         if (attempt >= 1) {
-          throw const _HlsFailure('HLS 分片长度持续变化，无法继续下载');
+          throw const _HlsFailure('该线路无法完成下载');
         }
         return _downloadHlsItem(
           item: item,
@@ -790,11 +790,11 @@ Future<_HlsItemResult> _downloadHlsItem({
         response.headers['content-range'],
       );
       if (responseStart != absoluteStart) {
-        throw const _HlsFailure('HLS 分片返回了错误的续传范围');
+        throw const _HlsFailure('该线路无法完成下载');
       }
       if (_validatorChanged(validator, responseValidator)) {
         if (await partialFile.exists()) await partialFile.delete();
-        if (attempt >= 1) throw const _HlsFailure('HLS 分片版本持续变化');
+        if (attempt >= 1) throw const _HlsFailure('该线路无法完成下载');
         return _downloadHlsItem(
           item: item,
           finalFile: finalFile,
@@ -811,15 +811,15 @@ Future<_HlsItemResult> _downloadHlsItem({
       }
     } else if (needsRange && response.statusCode == HttpStatus.ok) {
       if (item.rangeLength != null) {
-        throw const _HlsUnsupported('分片服务器不支持 EXT-X-BYTERANGE 范围请求');
+        throw const _HlsUnsupported('该线路不支持断点续传');
       }
       existing = 0;
     } else if (response.statusCode != HttpStatus.ok &&
         response.statusCode != HttpStatus.partialContent) {
-      throw _HlsFailure('分片请求返回 HTTP ${response.statusCode}');
+      throw const _HlsFailure('下载中断，可稍后继续');
     }
     if (_isUnexpectedHlsItemContentType(response.headers['content-type'])) {
-      throw const _HlsFailure('HLS 分片返回的不是媒体内容');
+      throw const _HlsFailure('该线路无法完成下载');
     }
     await onValidator(responseValidator);
     final append =
@@ -868,7 +868,7 @@ Future<_HlsItemResult> _downloadHlsItem({
     sink = null;
     if (control.isStopped) throw _HlsStopped(control.reason!);
     if (expected != null && downloaded != expected) {
-      throw const _HlsFailure('HLS 分片大小不完整，可稍后继续');
+      throw const _HlsFailure('下载中断，可稍后继续');
     }
     if (control.isStopped) throw _HlsStopped(control.reason!);
     await atomicReplaceFile(partialFile, finalFile);
@@ -888,11 +888,11 @@ Future<int> _verifyHlsPackage(
   for (final entry in itemFiles.entries) {
     final files = entry.value;
     if (!await files.finalFile.exists() || await files.partialFile.exists()) {
-      throw const _HlsFailure('HLS 离线包存在未完成分片');
+      throw const _HlsFailure('下载中断，可稍后继续');
     }
     final length = await files.finalFile.length();
     if (entry.key.rangeLength != null && length != entry.key.rangeLength) {
-      throw const _HlsFailure('HLS 离线包分片大小校验失败');
+      throw const _HlsFailure('该线路无法完成下载');
     }
     total += length;
   }

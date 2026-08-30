@@ -197,7 +197,7 @@ String _emptyLineMessage(
       source == 'wikidata';
   if (lines.isEmpty) {
     if (source.startsWith('m3u-channel:')) {
-      return '这个直播暂时无法打开。请稍后再试，或检查相关扩展是否已开启。';
+      return '这个直播暂时打不开。可以稍后再试，或到「扩展来源」确认直播源已开启。';
     }
     if (source.startsWith('archive:') ||
         source.startsWith('peertube:') ||
@@ -229,7 +229,7 @@ String playbackUnavailableMessage(List<PlaybackLine> lines, {int? count}) {
     return '找到了 $backendMediaCount 条视频线路，但当前网络下无法打开。请检查网络或代理后重试。';
   }
   if (backendLines.isNotEmpty) {
-    return '已查询 ${backendLines.length} 个在线来源，但没有返回可播放地址。当前作品可能使用了不同译名，或这些来源暂时没有资源。';
+    return '已经找过 ${backendLines.length} 个在线来源，都没有找到能播的地址。这部作品可能在这些来源里用了别的名字，或者暂时没有资源。';
   }
   final deadCount = unavailableLines
       .where((line) => (line.message ?? '').contains('视频 CDN'))
@@ -237,7 +237,7 @@ String playbackUnavailableMessage(List<PlaybackLine> lines, {int? count}) {
   if (deadCount > 0) {
     return '找到 $total 条线路，其中 $deadCount 条已失效或连接超时，暂时不能播放。';
   }
-  return '找到 $total 条线路，但需要额外验证或当前环境不支持，暂时无法直接播放。';
+  return '找到 $total 条线路，但都需要验证或当前设备打不开，暂时不能播放。';
 }
 
 String _friendlyPlaybackError(Object error) {
@@ -339,7 +339,7 @@ class _EpisodePanel extends StatelessWidget {
                             ),
                             const SizedBox(height: 2),
                             Text(
-                              episode.airdate ?? '播出日期待补',
+                              episode.airdate ?? '播出日期未知',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall
@@ -450,7 +450,7 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         context,
         icon: Icons.folder_open_rounded,
         title: '播放本地视频',
-        message: '选择设备中的 MP4、MKV、WebM、HLS 或 DASH 文件，不会上传文件。',
+        message: '选择设备里的视频文件，文件不会上传。',
         buttonLabel: '选择视频文件',
         onPressed: _pickLocal,
       ),
@@ -695,12 +695,9 @@ class _LinePanelBody extends StatelessWidget {
             loading: scanning,
             text: scanning
                 ? '正在查找可播放线路$progress · '
-                      '${summary.queriedSources} 已查 · '
-                      '${summary.playableSources} 可播'
-                : '${summary.totalSources} 来源 · '
-                      '${summary.queriedSources} 已查 · '
-                      '${summary.matchedSources} 匹配 · '
-                      '${summary.playableSources} 可播',
+                      '已找到 ${summary.playableSources} 条'
+                : '共 ${summary.totalSources} 个来源，'
+                      '${summary.playableSources} 个可以播放',
           ),
           const SizedBox(height: 12),
         ],
@@ -886,7 +883,7 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
                       '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
                   trailing: item.available
                       ? '${item.commentCount} 条'
-                      : item.message ?? '待配置',
+                      : item.message ?? '未启用',
                 ),
                 const SizedBox(height: 10),
               ],
@@ -1303,9 +1300,11 @@ class _LineTile extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
+                      // Available lines show where they point; failed ones show
+                      // a sanitized reason rather than the resolver's own text.
                       line.available
-                          ? line.url ?? line.message ?? '没有返回播放地址'
-                          : line.message ?? line.url ?? '没有返回播放地址',
+                          ? line.url ?? '没有可播放的地址'
+                          : playbackLineFailureLabel(line),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(

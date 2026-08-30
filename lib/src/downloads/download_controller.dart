@@ -643,7 +643,7 @@ final class DownloadController {
           status: MediaDownloadTaskStatus.failed,
           updatedAt: _now(),
           message: onlySegmented
-              ? '当前只找到 DASH 或不受支持的分片线路'
+              ? '没有找到可以离线下载的线路'
               : (lastResult?.message ?? '没有找到可直接下载的单文件线路'),
         ),
       );

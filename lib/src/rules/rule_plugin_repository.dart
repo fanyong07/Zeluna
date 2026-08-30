@@ -824,7 +824,7 @@ final legacyCuratedRuleDefinitions = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: true,
-    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
+    unsupportedReason: '这类来源暂时不支持。',
     note: 'TVBox 配置中的美剧专用源，未携带私密授权信息。',
   ),
   RulePlugin(
@@ -843,7 +843,7 @@ final legacyCuratedRuleDefinitions = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
-    unsupportedReason: '该规则属于 drpy-js，需要接入 JS 规则执行器后才能解析。',
+    unsupportedReason: '这类来源暂时不支持。',
     note: '综合影视源，优先在电视剧频道使用，电影频道另配专用电影源。',
   ),
   RulePlugin(
@@ -911,7 +911,7 @@ final legacyCuratedRuleDefinitions = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
-    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
+    unsupportedReason: '这类来源暂时不支持。',
     note: 'TVBox 中较常见的电影源，不需要本地授权信息。',
   ),
   RulePlugin(
@@ -930,7 +930,7 @@ final legacyCuratedRuleDefinitions = <RulePlugin>[
     quickSearch: true,
     filterable: true,
     installedByDefault: false,
-    unsupportedReason: '该规则属于 TVBox CSP，需要接入 CSP 执行器后才能解析。',
-    note: '电影向资源站，保留为可安装备用源。',
+    unsupportedReason: '这类来源暂时不支持。',
+    note: '电影来源，可以手动启用。',
   ),
 ];

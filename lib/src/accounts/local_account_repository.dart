@@ -195,10 +195,10 @@ class LocalAccountRepository {
         account.id.isEmpty ||
         account.email.isEmpty ||
         account.nickname.isEmpty) {
-      throw const AccountException('云端账号信息不完整');
+      throw const AccountException('账号信息读取失败，请重新登录');
     }
     if (pendingRegistration() != null) {
-      throw const AccountException('上一个账号仍在完成初始化，请重启应用后再试');
+      throw const AccountException('账号还没创建完成，请重启应用后再试');
     }
     final stored = _StoredLocalAccount.cloud(account);
     await _box.put(_pendingRegistrationKey, {
@@ -210,7 +210,7 @@ class LocalAccountRepository {
 
   Future<LocalAccount> rememberCloudAccount(LocalAccount account) async {
     if (!account.cloudAuthenticated) {
-      throw const AccountException('无法保存非云端账号');
+      throw const AccountException('账号保存失败，请重新登录');
     }
     for (final stored in _storedAccounts().toList(growable: false)) {
       if (stored.account.cloudAuthenticated &&
@@ -305,16 +305,16 @@ class LocalAccountRepository {
       throw const AccountException('这个邮箱已经注册过了');
     }
     if (pendingRegistration() != null) {
-      throw const AccountException('上一个账号仍在完成初始化，请重启应用后再试');
+      throw const AccountException('账号还没创建完成，请重启应用后再试');
     }
   }
 
   Future<void> completeRegistration(String accountId) async {
     final raw = _box.get(_pendingRegistrationKey);
-    if (raw is! Map) throw const AccountException('待完成的账号已不存在');
+    if (raw is! Map) throw const AccountException('账号创建流程已中断，请重新创建');
     final stored = _StoredLocalAccount.fromJson(raw.cast<String, dynamic>());
     if (stored.account.id != accountId) {
-      throw const AccountException('待完成的账号与当前操作不一致');
+      throw const AccountException('账号创建没有完成，请重新创建');
     }
     await _box.put(_recordKey(accountId), stored.toJson());
   }
@@ -324,10 +324,10 @@ class LocalAccountRepository {
     if (raw is! Map) return;
     final stored = _StoredLocalAccount.fromJson(raw.cast<String, dynamic>());
     if (stored.account.id != accountId) {
-      throw const AccountException('待完成的账号与当前操作不一致');
+      throw const AccountException('账号创建没有完成，请重新创建');
     }
     if (_readStored(accountId) == null) {
-      throw const AccountException('账号初始化尚未完成');
+      throw const AccountException('账号还没创建完成，请重试');
     }
     await _box.delete(_pendingRegistrationKey);
   }
@@ -461,7 +461,7 @@ class LocalAccountRepository {
     final pending = pendingDeletion();
     if (pending == null) return;
     if (pending.accountId != accountId) {
-      throw const AccountException('待清理账号与当前操作不一致');
+      throw const AccountException('清理没有完成，请稍后重试');
     }
     await _box.delete(_pendingDeletionKey);
   }

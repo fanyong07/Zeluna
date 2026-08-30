@@ -305,10 +305,10 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('周期表'));
+    await tester.tap(find.byTooltip('新番时间表'));
     await tester.pumpAndSettle();
 
-    expect(find.text('周期表'), findsWidgets);
+    expect(find.text('新番时间表'), findsWidgets);
     expect(find.text('周日'), findsOneWidget);
 
     final todayIndex = DateTime.now().weekday % 7;
@@ -365,7 +365,7 @@ void main() {
     );
     await tester.pump();
 
-    await tester.tap(find.byTooltip('周期表'));
+    await tester.tap(find.byTooltip('新番时间表'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('schedule-day-0')));
     await tester.pumpAndSettle();

@@ -22,8 +22,8 @@ void main() {
 
       final message = playbackUnavailableMessage(lines);
 
-      expect(message, contains('已查询 20 个在线来源'));
-      expect(message, contains('没有返回可播放地址'));
+      expect(message, contains('已经找过 20 个在线来源'));
+      expect(message, contains('都没有找到能播的地址'));
       expect(message, isNot(contains('20 条候选线路')));
       expect(message, isNot(contains('请检查网络或代理')));
     },

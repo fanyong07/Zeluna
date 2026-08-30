@@ -164,16 +164,6 @@ class _ProfileBanner extends StatelessWidget {
                                   fontWeight: FontWeight.w700,
                                 ),
                           ),
-                          if (!compact) ...[
-                            const SizedBox(height: 10),
-                            Text(
-                              '在浩瀚的星海之中，总有一束光是为你而亮。',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(color: AppColors.theaterInk),
-                            ),
-                          ],
                         ],
                       ),
                     ),
@@ -681,7 +671,7 @@ class _DownloadStrip extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           if (entries.isEmpty)
-            _InlineEmpty('暂无离线缓存任务')
+            _InlineEmpty('还没有下载任务')
           else
             for (final entry in entries.take(2)) _DownloadRow(entry: entry),
         ],
@@ -780,7 +770,7 @@ class DownloadManagementPage extends ConsumerWidget {
         return AppChrome(
           active: ChromeDestination.download,
           showSearch: false,
-          title: '离线缓存',
+          title: '下载管理',
           onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
           child: Padding(
             padding: EdgeInsets.fromLTRB(
@@ -810,7 +800,7 @@ class DownloadManagementPage extends ConsumerWidget {
                             AppPanel(
                               child: SectionTitle(
                                 title: '全部下载',
-                                subtitle: '${tasks.length} 个离线任务，可在这里暂停、继续或删除',
+                                subtitle: '${tasks.length} 个下载任务，可在这里暂停、继续或删除',
                                 icon: Icons.download_for_offline_outlined,
                               ),
                             ),
@@ -866,7 +856,7 @@ class _DownloadStoragePanel extends StatelessWidget {
           Expanded(
             child: Text(
               '当前账号 ${_downloadBytesLabel(usage.accountBytes)} · 本机总占用 ${_downloadBytesLabel(usage.totalBytes)}'
-              '${usage.orphanedPaths.isEmpty ? '' : ' · 未关联 ${usage.orphanedPaths.length} 项'}',
+              '${usage.orphanedPaths.isEmpty ? '' : ' · 可清理 ${usage.orphanedPaths.length} 个残留文件'}',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: context.inkMuted,
                 fontWeight: FontWeight.w700,
@@ -874,7 +864,7 @@ class _DownloadStoragePanel extends StatelessWidget {
             ),
           ),
           if (onCleanup != null)
-            TextButton(onPressed: onCleanup, child: const Text('清理未关联')),
+            TextButton(onPressed: onCleanup, child: const Text('清理残留文件')),
         ],
       ),
     );
@@ -889,8 +879,8 @@ Future<void> _confirmCleanupStorage(
   final confirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
-      title: const Text('清理未关联文件？'),
-      content: Text('将删除 ${paths.length} 个未关联的本地缓存项。旧版迁移文件也可能在其中，请确认后继续。'),
+      title: const Text('清理残留的下载文件？'),
+      content: Text('将删除 ${paths.length} 个不属于任何下载任务的视频文件，其中可能包含旧版本留下的文件。'),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(false),
@@ -1138,7 +1128,7 @@ class _ProfileRightRail extends StatelessWidget {
               const SizedBox(height: 8),
               Text(
                 state.accountSession.isSignedIn
-                    ? '收藏、追番、历史、播放位置和选定偏好会先写入本机，再按当前账号同步；下载文件和私密来源配置始终留在本机。'
+                    ? '收藏、追番、历史和播放进度会先保存在这台设备，再同步到你的账号；下载的视频和自建来源的账号信息只留在本机。'
                     : '登录或创建云端账号后，可在安卓和 Windows 使用同一邮箱；本机资料会按账号隔离。',
                 style: Theme.of(
                   context,
@@ -1579,7 +1569,7 @@ class HomeSettingsPage extends ConsumerWidget {
                   icon: Icons.restart_alt_rounded,
                   title: '重置推荐偏好',
                   subtitle: onResetRecommendationPreferences == null
-                      ? '推荐模块接入后可清除已学习的兴趣与展示记录'
+                      ? '暂不可用'
                       : '清除已学习的兴趣与展示记录，不会删除观看历史、收藏或追番',
                   onTap: onResetRecommendationPreferences == null
                       ? null
@@ -1654,7 +1644,7 @@ class AppearanceSettingsPage extends ConsumerWidget {
                 children: [
                   SettingsSwitchRow(
                     title: '跟随系统',
-                    subtitle: '后续接浅色主题时会优先使用系统设置',
+                    subtitle: '跟随系统的深色/浅色设置',
                     value: settings.followSystem,
                     onChanged: (value) => controller.updateAppearance(
                       settings.copyWith(followSystem: value),
@@ -1662,7 +1652,7 @@ class AppearanceSettingsPage extends ConsumerWidget {
                   ),
                   SettingsSwitchRow(
                     title: '深色模式',
-                    subtitle: '当前 AniCh 风格以暗色观影环境为主',
+                    subtitle: '深色界面更适合长时间观影',
                     value: settings.darkMode,
                     onChanged: (value) => controller.updateAppearance(
                       settings.copyWith(darkMode: value),
@@ -1779,15 +1769,15 @@ class MiscSettingsPage extends ConsumerWidget {
                 children: [
                   SettingsSwitchRow(
                     title: '播放时保持屏幕常亮',
-                    subtitle: '已连接系统唤醒锁，播放和长视频观看时生效',
+                    subtitle: '播放期间屏幕不会自动息屏',
                     value: settings.keepScreenOn,
                     onChanged: (value) => controller.updateMisc(
                       settings.copyWith(keepScreenOn: value),
                     ),
                   ),
                   const SettingsReadonlyRow(
-                    title: '离线下载',
-                    value: '支持常见视频文件与未加密点播流',
+                    title: '视频下载',
+                    value: '支持常见格式的视频下载',
                   ),
                   const SettingsReadonlyRow(title: '自动更新', value: '正式版发布后可开启'),
                   const SettingsReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
@@ -1831,7 +1821,7 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                   const SettingsReadonlyRow(
                     title: '播放能力',
-                    value: '在线播放 / 网络直链 / 本地文件',
+                    value: '在线播放 / 网络视频 / 本地文件',
                   ),
                   const SettingsReadonlyRow(
                     title: '播放器',
@@ -2420,15 +2410,15 @@ Future<bool> _confirmRemoveDownload(
 
 String _downloadSizeText(MediaDownloadTask task) {
   final downloaded = _downloadBytesLabel(task.downloadedBytes);
-  final units = task.totalUnits > 0
-      ? '${task.completedUnits}/${task.totalUnits} 分片'
+  final percent = task.totalUnits > 0
+      ? '${(task.completedUnits / task.totalUnits * 100).round()}%'
       : null;
   if (task.totalBytes <= 0) {
-    return units == null ? downloaded : '$units · $downloaded';
+    return percent == null ? downloaded : '$percent · $downloaded';
   }
   final bytes = '$downloaded / ${_downloadBytesLabel(task.totalBytes)}';
-  if (units != null && task.status != MediaDownloadTaskStatus.completed) {
-    return '$units · $bytes';
+  if (percent != null && task.status != MediaDownloadTaskStatus.completed) {
+    return '$percent · $bytes';
   }
   return bytes;
 }

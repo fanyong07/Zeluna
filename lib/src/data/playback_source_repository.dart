@@ -1471,7 +1471,7 @@ bool _containsAny(String text, List<String> patterns) {
 String _archiveQuality(String name) {
   final lower = name.toLowerCase();
   final match = RegExp(r'(2160|1440|1080|720|480)p').firstMatch(lower);
-  return match?.group(0)?.toUpperCase() ?? '公开原片';
+  return match?.group(0)?.toUpperCase() ?? '原画';
 }
 
 bool _archiveRightsAllowed(Map metadata) {
