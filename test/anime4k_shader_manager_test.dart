@@ -14,34 +14,46 @@ import 'package:flutter_test/flutter_test.dart';
 /// Note A+A restores again *before* the AutoDownscalePre pair while B+B and C+A
 /// restore *after* it. That asymmetry is upstream's own.
 const _quality = <Anime4KMode, String>{
-  Anime4KMode.a: 'Clamp_Highlights|Restore_CNN_VL|Upscale_CNN_x2_VL|'
+  Anime4KMode.a:
+      'Clamp_Highlights|Restore_CNN_VL|Upscale_CNN_x2_VL|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_M',
-  Anime4KMode.b: 'Clamp_Highlights|Restore_CNN_Soft_VL|Upscale_CNN_x2_VL|'
+  Anime4KMode.b:
+      'Clamp_Highlights|Restore_CNN_Soft_VL|Upscale_CNN_x2_VL|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_M',
-  Anime4KMode.c: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_VL|'
+  Anime4KMode.c:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_VL|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_M',
-  Anime4KMode.aa: 'Clamp_Highlights|Restore_CNN_VL|Upscale_CNN_x2_VL|'
+  Anime4KMode.aa:
+      'Clamp_Highlights|Restore_CNN_VL|Upscale_CNN_x2_VL|'
       'Restore_CNN_M|AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_M',
-  Anime4KMode.bb: 'Clamp_Highlights|Restore_CNN_Soft_VL|Upscale_CNN_x2_VL|'
+  Anime4KMode.bb:
+      'Clamp_Highlights|Restore_CNN_Soft_VL|Upscale_CNN_x2_VL|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Restore_CNN_Soft_M|'
       'Upscale_CNN_x2_M',
-  Anime4KMode.ca: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_VL|'
+  Anime4KMode.ca:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_VL|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Restore_CNN_M|Upscale_CNN_x2_M',
 };
 
 const _balance = <Anime4KMode, String>{
-  Anime4KMode.a: 'Clamp_Highlights|Restore_CNN_M|Upscale_CNN_x2_M|'
+  Anime4KMode.a:
+      'Clamp_Highlights|Restore_CNN_M|Upscale_CNN_x2_M|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_S',
-  Anime4KMode.b: 'Clamp_Highlights|Restore_CNN_Soft_M|Upscale_CNN_x2_M|'
+  Anime4KMode.b:
+      'Clamp_Highlights|Restore_CNN_Soft_M|Upscale_CNN_x2_M|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_S',
-  Anime4KMode.c: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_M|'
+  Anime4KMode.c:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_M|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_S',
-  Anime4KMode.aa: 'Clamp_Highlights|Restore_CNN_M|Upscale_CNN_x2_M|'
+  Anime4KMode.aa:
+      'Clamp_Highlights|Restore_CNN_M|Upscale_CNN_x2_M|'
       'Restore_CNN_S|AutoDownscalePre_x2|AutoDownscalePre_x4|Upscale_CNN_x2_S',
-  Anime4KMode.bb: 'Clamp_Highlights|Restore_CNN_Soft_M|Upscale_CNN_x2_M|'
+  Anime4KMode.bb:
+      'Clamp_Highlights|Restore_CNN_Soft_M|Upscale_CNN_x2_M|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Restore_CNN_Soft_S|'
       'Upscale_CNN_x2_S',
-  Anime4KMode.ca: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_M|'
+  Anime4KMode.ca:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_M|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4|Restore_CNN_S|Upscale_CNN_x2_S',
 };
 
@@ -50,17 +62,23 @@ const _balance = <Anime4KMode, String>{
 /// collapses the doubled modes onto their single-pass form. Measured for both
 /// Mode A and Mode A+A on AniCh.
 const _efficiency = <Anime4KMode, String>{
-  Anime4KMode.a: 'Clamp_Highlights|Restore_CNN_S|Upscale_CNN_x2_S|'
+  Anime4KMode.a:
+      'Clamp_Highlights|Restore_CNN_S|Upscale_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
-  Anime4KMode.b: 'Clamp_Highlights|Restore_CNN_Soft_S|Upscale_CNN_x2_S|'
+  Anime4KMode.b:
+      'Clamp_Highlights|Restore_CNN_Soft_S|Upscale_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
-  Anime4KMode.c: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_S|'
+  Anime4KMode.c:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
-  Anime4KMode.aa: 'Clamp_Highlights|Restore_CNN_S|Upscale_CNN_x2_S|'
+  Anime4KMode.aa:
+      'Clamp_Highlights|Restore_CNN_S|Upscale_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
-  Anime4KMode.bb: 'Clamp_Highlights|Restore_CNN_Soft_S|Upscale_CNN_x2_S|'
+  Anime4KMode.bb:
+      'Clamp_Highlights|Restore_CNN_Soft_S|Upscale_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
-  Anime4KMode.ca: 'Clamp_Highlights|Upscale_Denoise_CNN_x2_S|'
+  Anime4KMode.ca:
+      'Clamp_Highlights|Upscale_Denoise_CNN_x2_S|'
       'AutoDownscalePre_x2|AutoDownscalePre_x4',
 };
 

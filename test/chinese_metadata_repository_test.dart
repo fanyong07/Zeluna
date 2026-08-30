@@ -28,19 +28,12 @@ void main() {
         '  暂无简介  ',
         '',
       ]) {
-        expect(
-          isMetadataPlaceholder(placeholder),
-          isTrue,
-          reason: placeholder,
-        );
+        expect(isMetadataPlaceholder(placeholder), isTrue, reason: placeholder);
       }
     });
 
     test('real synopses are not treated as placeholders', () {
-      for (final summary in const [
-        '猫娘尼古快缴不起房租了。',
-        '暂无门票的少年踏上旅程。',
-      ]) {
+      for (final summary in const ['猫娘尼古快缴不起房租了。', '暂无门票的少年踏上旅程。']) {
         expect(isMetadataPlaceholder(summary), isFalse, reason: summary);
       }
     });

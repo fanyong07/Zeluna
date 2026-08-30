@@ -404,8 +404,7 @@ class _SettingsChoiceRowState<T> extends State<SettingsChoiceRow<T>> {
                                   vertical: 13,
                                 ),
                                 child: Row(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.center,
                                   children: [
                                     Expanded(
                                       child: Column(

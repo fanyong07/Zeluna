@@ -4100,9 +4100,9 @@ class _DetailRightRail extends StatelessWidget {
                 const SizedBox(height: 10),
                 Text(
                   '排名第 $rank',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: context.inkMuted,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
                 ),
               ],
             ],

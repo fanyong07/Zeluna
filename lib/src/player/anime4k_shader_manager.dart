@@ -43,8 +43,11 @@ enum Anime4KTier {
       // Settings written by the previous profile/tier UI.
       'performance' => Anime4KTier.efficiency,
       'balanced' => Anime4KTier.balance,
-      'auto' || 'clear' || 'soft' || 'low_resolution' || 'strong' =>
-        Anime4KTier.quality,
+      'auto' ||
+      'clear' ||
+      'soft' ||
+      'low_resolution' ||
+      'strong' => Anime4KTier.quality,
       'advanced' => Anime4KTier.custom,
       _ => values.firstWhere(
         (tier) => tier.settingValue == value,
@@ -130,8 +133,7 @@ enum Anime4KMode {
   String get description => '适合$bestFor';
 
   /// Full text for an expanded picker entry.
-  String get detailedDescription =>
-      '适合：$bestFor\n改善：$upside\n代价：$downside';
+  String get detailedDescription => '适合：$bestFor\n改善：$upside\n代价：$downside';
 
   static Anime4KMode fromSetting(String? value) {
     return values.firstWhere(
@@ -149,7 +151,9 @@ enum Anime4KMode {
   List<String> fileNames(Anime4KTier tier) {
     final primary = tier.primary;
     if (primary == null) {
-      throw ArgumentError('Tier ${tier.settingValue} has no built-in pipeline.');
+      throw ArgumentError(
+        'Tier ${tier.settingValue} has no built-in pipeline.',
+      );
     }
     final secondary = tier.secondary;
 

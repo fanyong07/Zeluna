@@ -430,10 +430,7 @@ class _AutomaticRulePackages extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const SectionTitle(
-            title: '自动来源',
-            subtitle: '跟着在线服务自动更新，不用单独管理',
-          ),
+          const SectionTitle(title: '自动来源', subtitle: '跟着在线服务自动更新，不用单独管理'),
           const SizedBox(height: 10),
           for (var index = 0; index < groups.length; index++) ...[
             _AutomaticRulePackageRow(

@@ -311,14 +311,7 @@ class RulePlaybackResolver {
             episode,
             verifyPlayable: verifyPlayable,
           ),
-          _ => [
-            _unavailableLine(
-              rule,
-              subject,
-              episode,
-              '这类来源暂时不支持。',
-            ),
-          ],
+          _ => [_unavailableLine(rule, subject, episode, '这类来源暂时不支持。')],
         };
       } catch (error) {
         if (cancellationToken?.isCancelled ?? false) return const [];
@@ -659,9 +652,7 @@ class RulePlaybackResolver {
   }) async {
     final config = rule.animeko;
     if (config == null) {
-      return [
-        _unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。'),
-      ];
+      return [_unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。')];
     }
 
     final detailUrl = await _findAnimekoDetailUrl(
@@ -1222,9 +1213,7 @@ class RulePlaybackResolver {
   }) async {
     final config = rule.kazumi;
     if (config == null) {
-      return [
-        _unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。'),
-      ];
+      return [_unavailableLine(rule, subject, episode, '这个来源的解析设置不全，用不了。')];
     }
 
     final detailUrl = await _findKazumiDetailUrl(client, rule, config, subject);
@@ -1615,14 +1604,7 @@ class RulePlaybackResolver {
   }) async {
     final endpoint = Uri.tryParse(rule.baseUrl.trim());
     if (endpoint == null || !endpoint.hasScheme || endpoint.host.isEmpty) {
-      return [
-        _unavailableLine(
-          rule,
-          subject,
-          episode,
-          '这个来源的地址不对，用不了。',
-        ),
-      ];
+      return [_unavailableLine(rule, subject, episode, '这个来源的地址不对，用不了。')];
     }
 
     final searches = <Future<_RankedResult<Map<String, dynamic>>?>>[];
@@ -1816,9 +1798,7 @@ class RulePlaybackResolver {
     final rule = _activeRulePlaybackResolveContext?.rule;
     if (rule == null) return;
     if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
-      throw StateError(
-        '这个来源想访问未授权的网站，已拦下。',
-      );
+      throw StateError('这个来源想访问未授权的网站，已拦下。');
     }
   }
 
