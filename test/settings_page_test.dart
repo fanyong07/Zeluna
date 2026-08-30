@@ -152,15 +152,18 @@ void main() {
       ),
     );
 
+    // The picker expands in place; ticking a shader applies it immediately,
+    // so there is no confirm button.
     final picker = find.byKey(const ValueKey('setting_choice_高级着色器'));
     await tester.ensureVisible(picker);
     await tester.tap(picker);
     await tester.pumpAndSettle();
-    expect(find.text('完成 (0)'), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.text('预处理'), findsOneWidget);
 
-    await tester.tap(find.text('Clamp Highlights'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('完成 (1)'));
+    final shader = find.text('Clamp Highlights');
+    await tester.ensureVisible(shader);
+    await tester.tap(shader);
     await tester.pumpAndSettle();
 
     expect(changes, isNotEmpty);

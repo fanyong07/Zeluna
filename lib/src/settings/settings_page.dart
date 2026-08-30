@@ -1762,166 +1762,193 @@ String _superResolutionModeDetail(String value) {
   return Anime4KMode.fromSetting(value).detailedDescription;
 }
 
-class _Anime4KShaderPicker extends StatelessWidget {
+/// Shader picker for the custom tier.
+///
+/// Expands in place inside the settings panel rather than opening a bottom
+/// sheet: the sheet covered the video, and on the desktop panel a modal for a
+/// checkbox list was heavier than the choice warrants. Ticking a shader applies
+/// it immediately, so there is no confirm button to reach for.
+class _Anime4KShaderPicker extends StatefulWidget {
   const _Anime4KShaderPicker({required this.selected, required this.onChanged});
 
   final List<String> selected;
   final ValueChanged<List<String>> onChanged;
 
   @override
+  State<_Anime4KShaderPicker> createState() => _Anime4KShaderPickerState();
+}
+
+class _Anime4KShaderPickerState extends State<_Anime4KShaderPicker> {
+  var _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final validCount = selected
+    final validCount = widget.selected
         .where(Anime4KShaderManager.availableShaderFileNames.contains)
         .length;
-    return InkWell(
-      key: const ValueKey('setting_choice_高级着色器'),
-      onTap: () => _showPicker(context),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 68),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '高级着色器',
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: scheme.onSurface,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      validCount == 0 ? '尚未选择' : '已选择 $validCount 个',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: validCount == 0
-                            ? scheme.error
-                            : scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Text(
-                '$validCount/${Anime4KShaderManager.availableShaderFileNames.length}',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Icon(
-                Icons.chevron_right_rounded,
-                color: scheme.onSurfaceVariant,
-                size: 21,
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showPicker(BuildContext context) async {
-    final result = await showModalBottomSheet<List<String>>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      useSafeArea: true,
-      builder: (context) {
-        final chosen = selected
-            .where(Anime4KShaderManager.availableShaderFileNames.contains)
-            .toSet();
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            final categories = <String, List<String>>{};
-            for (final shader
-                in Anime4KShaderManager.availableShaderFileNames) {
-              categories
-                  .putIfAbsent(
-                    Anime4KShaderManager.shaderCategory(shader),
-                    () => <String>[],
-                  )
-                  .add(shader);
-            }
-            return FractionallySizedBox(
-              heightFactor: 0.9,
-              child: Column(
+    return Column(
+      children: [
+        InkWell(
+          key: const ValueKey('setting_choice_高级着色器'),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 68),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 0, 12, 10),
-                    child: Row(
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(
-                          child: Text(
-                            '高级着色器',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
+                        Text(
+                          '高级着色器',
+                          style: Theme.of(context).textTheme.bodyLarge
+                              ?.copyWith(
+                                color: scheme.onSurface,
+                                fontWeight: FontWeight.w600,
+                              ),
                         ),
-                        TextButton(
-                          onPressed: chosen.isEmpty
-                              ? null
-                              : () => setModalState(chosen.clear),
-                          child: const Text('清空'),
-                        ),
-                        const SizedBox(width: 6),
-                        FilledButton(
-                          onPressed: () => Navigator.of(context).pop(
-                            Anime4KShaderManager.availableShaderFileNames
-                                .where(chosen.contains)
-                                .toList(growable: false),
-                          ),
-                          child: Text('完成 (${chosen.length})'),
+                        const SizedBox(height: 3),
+                        Text(
+                          validCount == 0 ? '尚未选择' : '已选择 $validCount 个',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(
+                                color: validCount == 0
+                                    ? scheme.error
+                                    : scheme.onSurfaceVariant,
+                              ),
                         ),
                       ],
                     ),
                   ),
-                  const Divider(height: 1),
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.only(bottom: 24),
-                      children: [
-                        for (final category in categories.entries) ...[
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 18, 20, 6),
-                            child: Text(
-                              category.key,
-                              style: Theme.of(context).textTheme.titleSmall
-                                  ?.copyWith(fontWeight: FontWeight.w700),
-                            ),
-                          ),
-                          for (final shader in category.value)
-                            CheckboxListTile(
-                              value: chosen.contains(shader),
-                              title: Text(
-                                Anime4KShaderManager.shaderLabel(shader),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              onChanged: (enabled) => setModalState(() {
-                                if (enabled == true) {
-                                  chosen.add(shader);
-                                } else {
-                                  chosen.remove(shader);
-                                }
-                              }),
-                            ),
-                        ],
-                      ],
+                  Text(
+                    '$validCount/${Anime4KShaderManager.availableShaderFileNames.length}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  AnimatedRotation(
+                    turns: _expanded ? 0.25 : 0,
+                    duration: AppMotion.quick,
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      color: scheme.onSurfaceVariant,
+                      size: 21,
                     ),
                   ),
                 ],
               ),
-            );
-          },
-        );
-      },
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: AppMotion.quick,
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: _expanded
+              ? _buildShaderList(context)
+              : const SizedBox.shrink(),
+        ),
+      ],
     );
-    if (result != null) onChanged(result);
+  }
+
+  void _toggle(String shader, bool enabled) {
+    final chosen = widget.selected
+        .where(Anime4KShaderManager.availableShaderFileNames.contains)
+        .toSet();
+    if (enabled) {
+      chosen.add(shader);
+    } else {
+      chosen.remove(shader);
+    }
+    // Emit in catalog order so the chain stays in a valid shader sequence
+    // regardless of the order the user ticked things.
+    widget.onChanged(
+      Anime4KShaderManager.availableShaderFileNames
+          .where(chosen.contains)
+          .toList(growable: false),
+    );
+  }
+
+  Widget _buildShaderList(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final chosen = widget.selected
+        .where(Anime4KShaderManager.availableShaderFileNames.contains)
+        .toSet();
+    final categories = <String, List<String>>{};
+    for (final shader in Anime4KShaderManager.availableShaderFileNames) {
+      categories
+          .putIfAbsent(
+            Anime4KShaderManager.shaderCategory(shader),
+            () => <String>[],
+          )
+          .add(shader);
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (chosen.isNotEmpty)
+              Align(
+                alignment: Alignment.centerRight,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(0, 4, 8, 0),
+                  child: TextButton(
+                    onPressed: () => widget.onChanged(const []),
+                    child: const Text('清空'),
+                  ),
+                ),
+              ),
+            for (final category in categories.entries) ...[
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  14,
+                  category.key == categories.keys.first && chosen.isEmpty
+                      ? 12
+                      : 6,
+                  14,
+                  2,
+                ),
+                child: Text(
+                  category.key,
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              for (final shader in category.value)
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                  controlAffinity: ListTileControlAffinity.trailing,
+                  value: chosen.contains(shader),
+                  title: Text(
+                    Anime4KShaderManager.shaderLabel(shader),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  onChanged: (enabled) => _toggle(shader, enabled == true),
+                ),
+            ],
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
   }
 }
 
