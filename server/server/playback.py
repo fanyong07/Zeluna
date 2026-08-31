@@ -1402,6 +1402,7 @@ class PlaybackService:
             "quality": line.quality,
             "format": line.format,
             "source": line.source,
+            **self._line_identity_fields(line),
             "headers": line.headers,
             "startup_profile": line.startup_profile,
             "startup_latency_ms": line.startup_latency_ms,
@@ -1421,6 +1422,24 @@ class PlaybackService:
                 else "当前线路验证失败"
             ),
             "expires_at": self._stamped_line_expiry(line),
+        }
+
+    def _line_identity_fields(self, line: AggregatedVideoLine) -> dict:
+        """线路对外的身份字段。
+
+        客户端在缺少显式字段时会从 ``source`` 反解来源名,那会把内部实现名
+        暴露到界面上。这里显式给出:每条线路用它自己的上游线路标识,聚合器
+        本身的名字不出现在任何用户可见字段里。
+        """
+        parts = [part for part in str(line.source or "").split(":") if part]
+        # crawler:<site>:<线路标识>  →  线路标识;crawler:<site> → 站名
+        tag = parts[2] if len(parts) >= 3 else (parts[1] if len(parts) >= 2 else "")
+        if not tag:
+            return {}
+        return {
+            "provider_id": tag,
+            "provider_name": tag,
+            "tag": tag,
         }
 
     def _playable_url(self, line: AggregatedVideoLine) -> str:

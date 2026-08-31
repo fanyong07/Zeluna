@@ -296,6 +296,26 @@ class LineVerificationResult:
     startup_profile: str = STARTUP_UNKNOWN
 
 
+def _crawler_line_source(site: str, line_source_name: str) -> str:
+    """独立站线路的来源标识。
+
+    适配器返回的 ``source_name`` 若已是具体线路标识(聚合类源单集会给出数十
+    条,各自带上游线路号),就用它——否则数十条线路会共用一个身份,客户端按
+    ``provider|来源名`` 折叠卡片时只剩一条。
+
+    标识里不包含上游服务名:那是实现细节,不该出现在用户可见的线路名上。
+    """
+    tag = (line_source_name or "").strip()
+    if not tag or tag == site:
+        return f"crawler:{site}"
+    # 适配器可能把站名当前缀(site:tag),只取后面的线路标识部分
+    if tag.startswith(f"{site}:"):
+        tag = tag[len(site) + 1:].strip() or site
+    if tag == site:
+        return f"crawler:{site}"
+    return f"crawler:{site}:{tag}"
+
+
 def _declared_startup_profile(line: AggregatedVideoLine) -> str:
     if line.startup_profile != STARTUP_UNKNOWN:
         return line.startup_profile
@@ -1552,7 +1572,10 @@ class ContentAggregator:
                             title=line.title,
                             quality=line.quality,
                             format=line.format,
-                            source=f"crawler:{parts[1]}",
+                            # 保留适配器给出的线路标识:聚合源单集可返回数十条
+                            # 线路,写死成站名会让它们共用一个身份,客户端按
+                            # provider|来源名 折叠时就只剩一条。
+                            source=_crawler_line_source(parts[1], line.source_name),
                             headers=line.headers,
                         ))
 

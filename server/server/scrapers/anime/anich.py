@@ -302,6 +302,8 @@ class AniChScraper(BaseScraper):
             # 每条线路必须有独立身份:客户端按 providerId|sourceName 折叠卡片,
             # 共用一个名字会把数十条压成一张卡。直接用上游的线路标识
             # (hb-10/jk-18/xk-12…)作展示名:天然唯一,且不暴露聚合源名称。
+            # 上游给的线路标识(hb-10 / jk-18 / xk-12…)。直接作为该线路的
+            # 来源名:它天然唯一,且不暴露聚合服务本身的名字。
             tag = (item.get("source") or "").strip()
             scored.append(
                 (
