@@ -121,6 +121,62 @@ class SourceTitleMatchingTests(unittest.TestCase):
         self.assertTrue(analysis.playback_eligible)
 
 
+class SeasonYearBaselineTests(unittest.TestCase):
+    """各库的年份基准不同(制作年 vs 播出年),标题精确到季时年份不该否决。
+
+    实测:上游把《葬送的芙莉莲 第二季》标为 2026(播出年),而请求侧给 2023,
+    ±1 年容差把这个正确的季判成了身份冲突。
+    """
+
+    def test_matching_season_survives_a_multi_year_gap(self):
+        analysis = analyze_source_match(
+            "葬送的芙莉莲 第二季",
+            ["葬送的芙莉莲 第二季", "葬送的芙莉莲"],
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2026,
+            expected_year=2023,
+        )
+        self.assertTrue(analysis.accepted)
+        self.assertTrue(analysis.evidence.year_compatible)
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_exact_title_survives_a_year_gap(self):
+        analysis = analyze_source_match(
+            "钢之炼金术师",
+            ["钢之炼金术师"],
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2009,
+            expected_year=2003,
+        )
+        self.assertTrue(analysis.evidence.year_compatible)
+
+    def test_season_conflict_still_wins_over_the_year_allowance(self):
+        # 年份放宽不能让错误的季蒙混过关
+        analysis = analyze_source_match(
+            "葬送的芙莉莲 第三季",
+            ["葬送的芙莉莲 第二季"],
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2026,
+            expected_year=2023,
+        )
+        self.assertTrue(analysis.evidence.season_conflict)
+        self.assertFalse(analysis.playback_eligible)
+
+    def test_unrelated_title_with_far_year_is_still_rejected(self):
+        analysis = analyze_source_match(
+            "Transformers: CYBERWORLD 第二季",
+            ["葬送的芙莉莲 第二季"],
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2026,
+            expected_year=2023,
+        )
+        self.assertFalse(analysis.accepted)
+
+
 class DerivativeContentTests(unittest.TestCase):
     """采集站把预告/解说/前传当独立条目收录,标题与正片高度相似。
 

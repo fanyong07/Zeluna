@@ -1465,8 +1465,13 @@ class PlaybackService:
         本身的名字不出现在任何用户可见字段里。
         """
         parts = [part for part in str(line.source or "").split(":") if part]
-        # crawler:<site>:<线路标识>  →  线路标识;crawler:<site> → 站名
-        tag = parts[2] if len(parts) >= 3 else (parts[1] if len(parts) >= 2 else "")
+        if not parts:
+            return {}
+        # crawler:<site>:<线路标识> → 线路标识
+        # crawler:<site>            → 站名
+        # <站名>(maccms 直接给站名)  → 站名
+        tag = parts[2] if len(parts) >= 3 else parts[-1]
+        tag = public_source_label(tag)
         if not tag:
             return {}
         return {

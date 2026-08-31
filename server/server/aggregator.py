@@ -110,7 +110,9 @@ DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 # anich 每次搜索必须保持 ≥1.2s 礼貌间隔且串行排队,
 # 缺省的 crawler 档位(2s/3别名)必然把它误判成 SEARCH_TIMEOUT。
 _PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {"anich": 8.0}
-_PROVIDER_SEARCH_ALIAS_BUDGET: dict[str, int] = {"anich": 1}
+#: 该源对短标题命中良好,对带季号的长关键词几乎全是噪声,所以要多给一个
+#  别名的余量(别名序里基础标题通常排在带季号的之后)。
+_PROVIDER_SEARCH_ALIAS_BUDGET: dict[str, int] = {"anich": 2}
 
 
 def _prepare_discovery_aliases(values: list[str]) -> list[str]:

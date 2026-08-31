@@ -323,7 +323,18 @@ def analyze_source_match(
         ),
         year_known=year_known,
         year_compatible=(
-            year_known and abs(candidate_year - expected_year) <= 1
+            year_known
+            and (
+                abs(candidate_year - expected_year) <= 1
+                # 标题已精确到季(两边季号一致或标题完全相同)时,年份不再有
+                # 否决权:各库的年份基准不同(制作年 vs 播出年),多季作品的
+                # 季播出年可以相差数年,实测因此误杀过正确的季。
+                or exact_title
+                or (
+                    expected_season is not None
+                    and candidate_season == expected_season
+                )
+            )
         ),
     )
     # 衍生内容即便标题分很高也不该顶替正片:扣到接受线以下,
