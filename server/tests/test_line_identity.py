@@ -1,7 +1,7 @@
 import unittest
 
 from server.aggregator import AggregatedVideoLine, _crawler_line_source
-from server.playback import PlaybackService
+from server.playback import PlaybackService, public_source_label
 
 
 class CrawlerLineSourceTests(unittest.TestCase):
@@ -79,6 +79,33 @@ class LineIdentityFieldsTests(unittest.TestCase):
             self._fields(f"crawler:anich:{tag}")["provider_name"] for tag in tags
         }
         self.assertEqual(len(names), len(tags))
+
+
+class PublicSourceLabelTests(unittest.TestCase):
+    """内部聚合服务名不得出现在任何用户可见字段里。"""
+
+    def test_bare_internal_name_is_replaced(self):
+        for value in ("anich", "ANICH", "crawler.anich", "crawler:anich"):
+            self.assertEqual(public_source_label(value), "聚合线路")
+
+    def test_line_tag_survives_the_prefix_strip(self):
+        self.assertEqual(public_source_label("crawler:anich:hb-10"), "hb-10")
+        self.assertEqual(public_source_label("crawler.anich:jk-18"), "jk-18")
+
+    def test_unrelated_names_pass_through(self):
+        for value in ("girigiri", "yhdmm", "iKun", "光速", "aggregate.maccms"):
+            self.assertEqual(public_source_label(value), value)
+
+    def test_blank_values_are_safe(self):
+        for value in ("", "   ", None):
+            self.assertEqual(public_source_label(value), str(value or "").strip())
+
+    def test_no_output_ever_contains_the_internal_name(self):
+        for value in (
+            "anich", "crawler.anich", "crawler:anich",
+            "crawler:anich:hb-10", "crawler.anich:xk-12",
+        ):
+            self.assertNotIn("anich", public_source_label(value).lower())
 
 
 if __name__ == "__main__":

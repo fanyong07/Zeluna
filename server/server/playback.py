@@ -94,6 +94,39 @@ logger = logging.getLogger(__name__)
 # AniCh 按需代取线路在 AggregatedVideoLine.source 中的标识形态
 ANICH_LINE_SOURCE = "crawler.anich"
 
+#: 内部聚合服务名 → 用户可见名。这些名字是实现细节,不该出现在界面上。
+#  值取"聚合线路",因为对用户而言它就是一批线路的来源,叫什么无关紧要。
+_INTERNAL_SOURCE_LABELS: dict[str, str] = {
+    "anich": "聚合线路",
+    "crawler.anich": "聚合线路",
+    "crawler:anich": "聚合线路",
+}
+
+
+def public_source_label(value: object) -> str:
+    """把内部来源标识换成用户可见名;非内部名原样返回。
+
+    聚合类源的每条线路各带自己的上游线路标识(hb-10/jk-18…),那些标识本身
+    可以直接示人;需要替换的只有聚合服务自己的名字。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return text
+    mapped = _INTERNAL_SOURCE_LABELS.get(text.lower())
+    if mapped:
+        return mapped
+    # crawler:anich:hb-10 / crawler.anich:hb-10 → 保留线路标识部分
+    for separator in (":", "."):
+        prefix = f"anich{separator}"
+        lowered = text.lower()
+        index = lowered.find(prefix)
+        if index >= 0:
+            tail = text[index + len(prefix):].strip(":. ")
+            if tail:
+                return tail
+    return text
+
+
 #: 贴片广告高发的媒体主机片段(采集站及其 CDN)。
 #  自建 CDN 的官方转存通常没有贴片,不在此列,避免无谓的清单重写。
 AD_RISK_HOST_HINTS: tuple[str, ...] = (
@@ -1401,7 +1434,7 @@ class PlaybackService:
             "title": line.title,
             "quality": line.quality,
             "format": line.format,
-            "source": line.source,
+            "source": public_source_label(line.source),
             **self._line_identity_fields(line),
             "headers": line.headers,
             "startup_profile": line.startup_profile,
@@ -1600,12 +1633,14 @@ class PlaybackService:
                     ),
                 )
             diagnostic_status = discovery.status.value
+            # 诊断占位行同样是用户可见的:上游聚合服务的内部名不该出现在这里
+            display_name = public_source_label(name)
             item = {
                 "url": "",
-                "title": name,
+                "title": display_name,
                 "quality": "",
                 "format": "",
-                "source": f"{provider}:{name}",
+                "source": f"{provider}:{display_name}",
                 "headers": {},
                 "available": False,
                 "status": self._legacy_discovery_status(diagnostic_status),
@@ -1630,8 +1665,9 @@ class PlaybackService:
         diagnostic: SourceDiscoveryDiagnostic,
     ) -> None:
         item.update({
-            "provider_id": diagnostic.provider_id,
-            "source_name": diagnostic.source_name,
+            # 诊断字段直达界面,内部聚合服务名在此统一脱敏
+            "provider_id": public_source_label(diagnostic.provider_id),
+            "source_name": public_source_label(diagnostic.source_name),
             "diagnostic_status": diagnostic.status.value,
             "queried": diagnostic.queried,
             "aliases_attempted": diagnostic.aliases_attempted,
