@@ -715,7 +715,10 @@ class PlaybackService:
             diagnostics=diagnostics,
         )
         data = self._complete_site_inventory(
-            [self._line_dict(line) for line in lines],
+            [
+                self._line_dict(line)
+                for line in self._ordered_for_display(lines)
+            ],
             matches=matches,
             health=health,
             diagnostics=diagnostics,
@@ -1059,7 +1062,10 @@ class PlaybackService:
                 except asyncio.TimeoutError:
                     pass
         data = self._complete_site_inventory(
-            [self._line_dict(line) for line in resolved.values()],
+            [
+                self._line_dict(line)
+                for line in self._ordered_for_display(list(resolved.values()))
+            ],
             matches=matches,
             health=health,
             diagnostics=diagnostics,
@@ -1456,6 +1462,28 @@ class PlaybackService:
             ),
             "expires_at": self._stamped_line_expiry(line),
         }
+
+    @staticmethod
+    def _ordered_for_display(
+        lines: list[AggregatedVideoLine],
+    ) -> list[AggregatedVideoLine]:
+        """可播的排前面,其余按原顺序跟随。
+
+        现在验不通的线路也会列出(客户端网络可能与服务端出口结论不同),所以
+        必须保证用户点到的第一条是已验证的那条,否则首播体验会被死线拖垮。
+        同一档内按实测首字节延迟升序 —— 快的先给。
+        """
+        def rank(item: tuple[int, AggregatedVideoLine]) -> tuple[int, int, int]:
+            index, line = item
+            tier = {
+                SERVER_VERIFIED: 0,
+                CLIENT_PROBE_REQUIRED: 1,
+            }.get(line.verification_status, 2)
+            latency = line.startup_latency_ms or 0
+            # 未验证档没有可信延迟,用原顺序(上游已按其自身排序给出)
+            return (tier, latency if tier == 0 else 0, index)
+
+        return [line for _index, line in sorted(enumerate(lines), key=rank)]
 
     def _line_identity_fields(self, line: AggregatedVideoLine) -> dict:
         """线路对外的身份字段。

@@ -86,6 +86,17 @@ SERVER_BLOCKED_CLIENT_CANDIDATE = "server_blocked_client_candidate"
 RATE_LIMITED = "rate_limited"
 UNKNOWN_EXCEPTION = "unknown_exception"
 
+#: 内容确定不存在/不是媒体 —— 换个网络结论也不会变,不必列给用户白点一次。
+#  其余(连接超时、读超时、DNS、被限流等)属网络可达性问题:客户端网络与服务端
+#  出口的结论可能相反,那类线路仍然列出并如实标注状态。
+_CONTENT_ABSENT_CATEGORIES = frozenset({
+    STALE_ROUTE,
+    MALFORMED_MANIFEST,
+    EMPTY_MEDIA,
+    PARSER_MISMATCH,
+    NON_PUBLIC_TARGET,
+})
+
 _ERROR_CATEGORY_PRIORITY = {
     SERVER_BLOCKED_CLIENT_CANDIDATE: 0,
     RATE_LIMITED: 20,
@@ -1166,7 +1177,25 @@ class ContentAggregator:
                                 ),
                                 startup_latency_ms=check.latency_ms,
                             ))
-                statuses = {line.verification_status for line in lines}
+                        elif check.error_category not in _CONTENT_ABSENT_CATEGORIES:
+                            # 网络类失败仍然列出:客户端网络与服务端出口的结论
+                            # 可能相反(实测同一条线在两端结果不同),用户也需要
+                            # 看到这一集到底有哪些线路。状态如实标注,排序排在
+                            # 已验证之后。
+                            #
+                            # 内容确定不存在的(404、解析不是媒体等)不列:那类
+                            # 换个网络也不会变,给出来只是让人白点一次。
+                            lines.append(replace(
+                                line,
+                                verification_status=UNAVAILABLE,
+                                startup_profile=_declared_startup_profile(line),
+                                startup_latency_ms=check.latency_ms,
+                            ))
+                statuses = {
+                    line.verification_status
+                    for line in lines
+                    if line.verification_status != UNAVAILABLE
+                }
                 status = (
                     SERVER_VERIFIED
                     if SERVER_VERIFIED in statuses
