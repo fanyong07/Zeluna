@@ -34,7 +34,7 @@ from server.database import (
     SourceBinding,
     SourceHealth,
 )
-from server.playback import PlaybackService
+from server.playback import PlaybackService, public_source_label
 from server.playback_discovery import (
     SourceDiscoveryDiagnostic,
     SourceDiscoveryStatus,
@@ -970,9 +970,11 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first[0]["cached"])
         self.assertTrue(second[0]["cached"])
         self.assertEqual(len(first), len(expected_inventory))
+        # 库存必须完整覆盖每个已配置来源;对外名经过脱敏(内部聚合服务名
+        # 不出现在响应里),所以预期侧也过同一个函数
         self.assertEqual(
             {item["source"].split(":", 1)[1] for item in first},
-            expected_source_names,
+            {public_source_label(name) for name in expected_source_names},
         )
         self.assertIn("crawler:dm706", {item["source"] for item in first})
         self.assertEqual(sum(item["available"] for item in first), 1)
