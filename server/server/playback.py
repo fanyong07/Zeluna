@@ -1464,14 +1464,18 @@ class PlaybackService:
         暴露到界面上。这里显式给出:每条线路用它自己的上游线路标识,聚合器
         本身的名字不出现在任何用户可见字段里。
         """
-        parts = [part for part in str(line.source or "").split(":") if part]
+        raw = str(line.source or "").strip()
+        # 内部 provider id 本身不是站名,不该出现在界面上:那类来源的站名由
+        # 各站自己的 source_name 提供,这里不覆盖
+        if not raw or raw.lower().startswith(("aggregate.", "crawler.")):
+            return {}
+        parts = [part for part in raw.split(":") if part]
         if not parts:
             return {}
         # crawler:<site>:<线路标识> → 线路标识
         # crawler:<site>            → 站名
         # <站名>(maccms 直接给站名)  → 站名
-        tag = parts[2] if len(parts) >= 3 else parts[-1]
-        tag = public_source_label(tag)
+        tag = public_source_label(parts[2] if len(parts) >= 3 else parts[-1])
         if not tag:
             return {}
         return {

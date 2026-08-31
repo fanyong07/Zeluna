@@ -68,10 +68,17 @@ class LineIdentityFieldsTests(unittest.TestCase):
         self.assertEqual(self._fields("crawler:girigiri")["tag"], "girigiri")
         self.assertEqual(self._fields("crawler:yhdmm")["tag"], "yhdmm")
 
-    def test_aggregate_sources_add_no_identity_fields(self):
-        # maccms 走各站自己的名字,不需要覆盖
+    def test_internal_provider_ids_add_no_identity_fields(self):
+        # 内部 provider id 不是站名:那类来源的站名由各站 source_name 提供
         self.assertEqual(self._fields("aggregate.maccms"), {})
+        self.assertEqual(self._fields("crawler.anich"), {})
         self.assertEqual(self._fields(""), {})
+
+    def test_plain_site_name_becomes_the_identity(self):
+        # maccms 的线路 source 就是站名本身,应据此给出身份,
+        # 否则整批线路身份全空、在客户端折叠成一条
+        self.assertEqual(self._fields("iKun")["tag"], "iKun")
+        self.assertEqual(self._fields("光速")["provider_name"], "光速")
 
     def test_each_line_gets_a_distinct_identity(self):
         tags = ("hb-10", "hc-5", "jk-18", "xk-12")

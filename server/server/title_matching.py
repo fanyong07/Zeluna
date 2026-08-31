@@ -326,12 +326,13 @@ def analyze_source_match(
             year_known
             and (
                 abs(candidate_year - expected_year) <= 1
-                # 标题已精确到季(两边季号一致或标题完全相同)时,年份不再有
-                # 否决权:各库的年份基准不同(制作年 vs 播出年),多季作品的
-                # 季播出年可以相差数年,实测因此误杀过正确的季。
-                or exact_title
+                # 双方季号明确且一致时年份不再否决:各库年份基准不同(制作年
+                # vs 播出年),多季作品的季播出年可以相差数年,实测因此误杀过
+                # 正确的季。仅标题相同不算 —— 同名重制片是另一部作品,那种
+                # 情况年份必须继续有否决权。
                 or (
                     expected_season is not None
+                    and candidate_season is not None
                     and candidate_season == expected_season
                 )
             )

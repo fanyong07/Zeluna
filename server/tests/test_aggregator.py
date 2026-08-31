@@ -1457,8 +1457,10 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await aggregator.aclose()
-        # 别名预算 1:三个别名只允许发出一次搜索(anich ≥1.2s 串行约束)
-        self.assertEqual(scraper.search_calls, ["葬送的芙莉莲 第二季"])
+        # 别名预算 2:该源对短标题命中好、对带季号长关键词几乎全是噪声,
+        # 所以要给第二个别名留余量;但仍受 ≥1.2s 串行节流约束,不能放开
+        self.assertEqual(len(scraper.search_calls), 2)
+        self.assertEqual(scraper.search_calls[0], "葬送的芙莉莲 第二季")
         matched = [match for match in matches if match.source_name == "anich"]
         self.assertEqual(len(matched), 1)
         self.assertEqual(matched[0].source_id, "crawler:anich:37654")
@@ -1471,7 +1473,7 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(_PROVIDER_SEARCH_TIMEOUTS["anich"], 8.0)
-        self.assertEqual(_PROVIDER_SEARCH_ALIAS_BUDGET["anich"], 1)
+        self.assertEqual(_PROVIDER_SEARCH_ALIAS_BUDGET["anich"], 2)
         # 缺省档位保持不变,DIRECT 源排名加成不被 anich 侵占
         self.assertNotIn("anich", DIRECT_SOURCE_PRIORITIES)
 

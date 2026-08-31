@@ -7,9 +7,13 @@ import 'package:media_kit/media_kit.dart';
 
 import 'src/app/anime_app.dart';
 import 'src/app/deferred_fonts.dart';
+import 'src/app/desktop_window.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Must run before the first frame so window_manager owns the window; see
+  // initializeDesktopWindow for why fullscreen depends on it.
+  await initializeDesktopWindow();
   runApp(const ZelunaBootstrap());
 }
 

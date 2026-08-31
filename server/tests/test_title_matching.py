@@ -141,16 +141,18 @@ class SeasonYearBaselineTests(unittest.TestCase):
         self.assertTrue(analysis.evidence.year_compatible)
         self.assertTrue(analysis.playback_eligible)
 
-    def test_exact_title_survives_a_year_gap(self):
+    def test_same_title_different_year_is_still_a_conflict(self):
+        """同名重制片是另一部作品 —— 年份必须继续有否决权。"""
         analysis = analyze_source_match(
-            "钢之炼金术师",
-            ["钢之炼金术师"],
-            candidate_type="anime",
-            expected_type="anime",
-            candidate_year=2009,
-            expected_year=2003,
+            "功夫",
+            ["功夫"],
+            candidate_type="movie",
+            expected_type="movie",
+            candidate_year=2025,
+            expected_year=2004,
         )
-        self.assertTrue(analysis.evidence.year_compatible)
+        self.assertFalse(analysis.evidence.year_compatible)
+        self.assertFalse(analysis.playback_eligible)
 
     def test_season_conflict_still_wins_over_the_year_allowance(self):
         # 年份放宽不能让错误的季蒙混过关
