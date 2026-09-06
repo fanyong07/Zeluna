@@ -85,7 +85,7 @@ jobs:
             adb shell monkey -p app.anime.anime -c android.intent.category.LAUNCHER 1 > app-launch.txt
             sleep 10
             adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt
-            grep -q 'app.anime.anime/.MainActivity' resumed-activity.txt
+            grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity.txt
             adb shell dumpsys package app.anime.anime | grep -E 'versionName|versionCode' > app-version.txt
             adb shell pidof app.anime.anime | tr -d '\r' > app-pid.txt
             grep -Eq '[0-9]+' app-pid.txt
@@ -97,7 +97,7 @@ jobs:
             adb shell settings put system user_rotation 1
             sleep 3
             adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity-landscape.txt
-            grep -q 'app.anime.anime/.MainActivity' resumed-activity-landscape.txt
+            grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity-landscape.txt
             adb exec-out screencap -p > zeluna-android-emulator-landscape.png
             test -s zeluna-android-emulator-landscape.png
             bash -lc 'app_pid="$(tr -d "\r\n" < app-pid.txt)"; adb logcat -d --pid="$app_pid" > android-app-logcat-landscape.txt || true'
@@ -140,6 +140,9 @@ jobs:
       - name: Verify exact-HEAD release gate
         shell: pwsh
         run: ./tool/ci/test_release_gate.ps1
+      - name: Verify Android package architectures and provenance
+        shell: pwsh
+        run: ./tool/ci/test_android_package_contents.ps1
       - name: Verify Windows release package contents
         shell: pwsh
         run: ./tool/ci/test_windows_package_contents.ps1
@@ -203,6 +206,8 @@ jobs:
           cache-dependency-glob: server/uv.lock
       - run: flutter pub get --enforce-lockfile
       - run: uv sync --project server --frozen --all-groups
+      - name: Test repository policy and size-accounting tools
+        run: uv run --project server python -m unittest discover -s tool/ci -p 'test_*.py'
       - name: Verify repository artifact policy
         run: uv run --project server python tool/ci/repository_gate.py --root .
       - name: Generate Python CycloneDX SBOM
