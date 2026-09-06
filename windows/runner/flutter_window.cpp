@@ -10,6 +10,18 @@
 namespace {
 
 constexpr char kStorageChannelName[] = "app.anime.anime/storage";
+constexpr char kWindowChannelName[] = "app.anime.anime/window";
+
+bool RectEquals(const RECT& left, const RECT& right) {
+  return left.left == right.left && left.top == right.top &&
+         left.right == right.right && left.bottom == right.bottom;
+}
+
+bool SetWindowLongPtrChecked(HWND window, int index, LONG_PTR value) {
+  ::SetLastError(ERROR_SUCCESS);
+  const LONG_PTR previous = ::SetWindowLongPtr(window, index, value);
+  return previous != 0 || ::GetLastError() == ERROR_SUCCESS;
+}
 
 std::wstring Utf16FromUtf8(const std::string& value) {
   if (value.empty()) {
@@ -66,7 +78,8 @@ bool FlutterWindow::OnCreate() {
           result->NotImplemented();
           return;
         }
-        const auto* arguments = std::get_if<flutter::EncodableMap>(call.arguments());
+        const auto* arguments =
+            std::get_if<flutter::EncodableMap>(call.arguments());
         if (arguments == nullptr) {
           result->Error("storage_invalid_path", "A storage path is required.");
           return;
@@ -93,6 +106,36 @@ bool FlutterWindow::OnCreate() {
         result->Success(flutter::EncodableValue(
             static_cast<int64_t>(available_bytes.QuadPart)));
       });
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), kWindowChannelName,
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        if (call.method_name() == "isFullscreen") {
+          result->Success(flutter::EncodableValue(IsFullscreen()));
+          return;
+        }
+        if (call.method_name() == "setFullscreen") {
+          const auto* enabled = std::get_if<bool>(call.arguments());
+          if (enabled == nullptr) {
+            result->Error("window_invalid_fullscreen",
+                          "A fullscreen state is required.");
+            return;
+          }
+          if (*enabled) {
+            EnterFullscreen();
+          } else {
+            ExitFullscreen();
+          }
+          // Return the real native state, not an internal requested-state flag.
+          result->Success(flutter::EncodableValue(IsFullscreen()));
+          return;
+        }
+        result->NotImplemented();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -108,6 +151,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (window_channel_) {
+    window_channel_->SetMethodCallHandler(nullptr);
+    window_channel_.reset();
+  }
   if (storage_channel_) {
     storage_channel_->SetMethodCallHandler(nullptr);
     storage_channel_.reset();
@@ -117,6 +164,140 @@ void FlutterWindow::OnDestroy() {
   }
 
   Win32Window::OnDestroy();
+}
+
+bool FlutterWindow::EnterFullscreen() {
+  HWND window = GetHandle();
+  if (window == nullptr) {
+    return false;
+  }
+  if (IsFullscreen()) {
+    return true;
+  }
+
+  fullscreen_original_style_ = ::GetWindowLongPtr(window, GWL_STYLE);
+  fullscreen_original_ex_style_ = ::GetWindowLongPtr(window, GWL_EXSTYLE);
+  if (!::GetWindowRect(window, &fullscreen_original_rect_)) {
+    return false;
+  }
+  fullscreen_original_placement_ = {};
+  fullscreen_original_placement_.length = sizeof(WINDOWPLACEMENT);
+  if (!::GetWindowPlacement(window, &fullscreen_original_placement_)) {
+    return false;
+  }
+
+  HMONITOR monitor =
+      ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(MONITORINFO);
+  if (monitor == nullptr || !::GetMonitorInfo(monitor, &monitor_info)) {
+    return false;
+  }
+
+  fullscreen_state_saved_ = true;
+  if (::IsIconic(window) || ::IsZoomed(window)) {
+    ::ShowWindow(window, SW_RESTORE);
+  }
+
+  const LONG_PTR fullscreen_style =
+      fullscreen_original_style_ &
+      ~static_cast<LONG_PTR>(WS_OVERLAPPEDWINDOW);
+  const LONG_PTR fullscreen_ex_style =
+      fullscreen_original_ex_style_ &
+      ~static_cast<LONG_PTR>(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE |
+                             WS_EX_CLIENTEDGE | WS_EX_STATICEDGE);
+  const bool style_changed =
+      SetWindowLongPtrChecked(window, GWL_STYLE, fullscreen_style);
+  const bool ex_style_changed =
+      SetWindowLongPtrChecked(window, GWL_EXSTYLE, fullscreen_ex_style);
+  const RECT& monitor_rect = monitor_info.rcMonitor;
+  const bool positioned =
+      ::SetWindowPos(window, HWND_TOP, monitor_rect.left, monitor_rect.top,
+                     monitor_rect.right - monitor_rect.left,
+                     monitor_rect.bottom - monitor_rect.top,
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW) !=
+      FALSE;
+
+  if (!style_changed || !ex_style_changed || !positioned || !IsFullscreen()) {
+    RestoreWindowState();
+    return false;
+  }
+  return true;
+}
+
+bool FlutterWindow::ExitFullscreen() {
+  if (!fullscreen_state_saved_) {
+    return !IsFullscreen();
+  }
+  return RestoreWindowState();
+}
+
+bool FlutterWindow::IsFullscreen() {
+  HWND window = GetHandle();
+  if (window == nullptr) {
+    return false;
+  }
+
+  const LONG_PTR style = ::GetWindowLongPtr(window, GWL_STYLE);
+  if ((style & static_cast<LONG_PTR>(WS_CAPTION | WS_THICKFRAME)) != 0) {
+    return false;
+  }
+
+  RECT window_rect{};
+  if (!::GetWindowRect(window, &window_rect)) {
+    return false;
+  }
+  HMONITOR monitor =
+      ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(MONITORINFO);
+  if (monitor == nullptr || !::GetMonitorInfo(monitor, &monitor_info)) {
+    return false;
+  }
+  return RectEquals(window_rect, monitor_info.rcMonitor);
+}
+
+bool FlutterWindow::RestoreWindowState() {
+  HWND window = GetHandle();
+  if (window == nullptr || !fullscreen_state_saved_) {
+    return false;
+  }
+
+  const bool style_restored = SetWindowLongPtrChecked(
+      window, GWL_STYLE, fullscreen_original_style_);
+  const bool ex_style_restored = SetWindowLongPtrChecked(
+      window, GWL_EXSTYLE, fullscreen_original_ex_style_);
+  const bool frame_refreshed =
+      ::SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED) != FALSE;
+
+  WINDOWPLACEMENT placement = fullscreen_original_placement_;
+  placement.length = sizeof(WINDOWPLACEMENT);
+  const bool placement_restored =
+      ::SetWindowPlacement(window, &placement) != FALSE;
+
+  bool bounds_restored = true;
+  if (placement.showCmd != SW_SHOWMAXIMIZED &&
+      placement.showCmd != SW_SHOWMINIMIZED &&
+      placement.showCmd != SW_MINIMIZE) {
+    const RECT& rect = fullscreen_original_rect_;
+    bounds_restored =
+        ::SetWindowPos(window, nullptr, rect.left, rect.top,
+                       rect.right - rect.left, rect.bottom - rect.top,
+                       SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED) !=
+        FALSE;
+  } else if (placement.showCmd == SW_SHOWMAXIMIZED) {
+    ::ShowWindow(window, SW_MAXIMIZE);
+  }
+
+  const bool restored = style_restored && ex_style_restored &&
+                        frame_refreshed && placement_restored &&
+                        bounds_restored && !IsFullscreen();
+  if (restored) {
+    fullscreen_state_saved_ = false;
+  }
+  return restored;
 }
 
 LRESULT

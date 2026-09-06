@@ -2678,15 +2678,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Future<void> _setFullscreen(bool enabled) async {
     _revealPlayerControls();
     if (_fullscreen == enabled) return;
-    bool changed;
+    bool actualState;
     try {
-      changed = await _appFullscreen.setEnabled(enabled);
+      actualState = await _appFullscreen.setEnabled(enabled);
     } catch (_) {
-      changed = false;
+      if (mounted) {
+        _showPlayerToast('系统未能切换全屏，请再次点击全屏按钮。');
+      }
+      return;
     }
     if (!mounted) return;
-    if (enabled && !changed) {
-      _showPlayerToast('系统未允许进入全屏，请再次点击全屏按钮。');
+    if (actualState != enabled) {
+      _showPlayerToast('系统未能切换全屏，请再次点击全屏按钮。');
       return;
     }
     if (enabled) {

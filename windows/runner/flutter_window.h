@@ -25,6 +25,11 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  bool EnterFullscreen();
+  bool ExitFullscreen();
+  bool IsFullscreen();
+  bool RestoreWindowState();
+
   // The project to run.
   flutter::DartProject project_;
 
@@ -33,6 +38,14 @@ class FlutterWindow : public Win32Window {
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       storage_channel_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      window_channel_;
+
+  bool fullscreen_state_saved_ = false;
+  LONG_PTR fullscreen_original_style_ = 0;
+  LONG_PTR fullscreen_original_ex_style_ = 0;
+  RECT fullscreen_original_rect_{};
+  WINDOWPLACEMENT fullscreen_original_placement_{};
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
