@@ -92,9 +92,17 @@ void main() {
     await tester.tap(find.text('弹幕来源'));
     await tester.pumpAndSettle();
 
-    expect(find.text('弹幕源：Zeluna / 弹弹play / Bilibili / 自建弹幕库'), findsOneWidget);
+    expect(
+      find.text('弹幕源：Zeluna / 弹弹play开放弹幕网络 / Bilibili / 自建弹幕库'),
+      findsOneWidget,
+    );
     expect(find.textContaining('游客可读取，登录后可发送'), findsOneWidget);
-    expect(find.text('启用弹弹play弹幕'), findsOneWidget);
+    expect(find.text('启用弹弹play开放弹幕网络'), findsOneWidget);
+    expect(find.text('由 Zeluna 服务端安全接入，无需填写密钥'), findsOneWidget);
+    expect(find.text('弹弹play开放弹幕网络'), findsOneWidget);
+    expect(find.text('官方网站：www.dandanplay.com'), findsOneWidget);
+    expect(find.textContaining('AppId'), findsNothing);
+    expect(find.textContaining('AppSecret'), findsNothing);
     expect(find.text('启用 Bilibili 弹幕'), findsOneWidget);
     expect(find.text('启用自建弹幕库'), findsOneWidget);
     expect(tester.takeException(), isNull);

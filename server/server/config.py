@@ -31,11 +31,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 # CORS 允许所有来源（客户端可以是任意设备）
 _cors_value = os.getenv("CORS_ORIGINS", "").strip()
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in _cors_value.split(",")
-    if origin.strip()
-]
+CORS_ORIGINS = [origin.strip() for origin in _cors_value.split(",") if origin.strip()]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -47,11 +43,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _env_csv(name: str) -> frozenset[str]:
     value = os.getenv(name, "")
-    return frozenset(
-        item.strip().lower()
-        for item in value.split(",")
-        if item.strip()
-    )
+    return frozenset(item.strip().lower() for item in value.split(",") if item.strip())
 
 
 def _env_networks(
@@ -98,6 +90,39 @@ PRECACHE_MAX_SUBJECTS = max(1, int(os.getenv("PRECACHE_MAX_SUBJECTS", "24")))
 BANGUMI_ACCESS_TOKEN = os.getenv("BANGUMI_ACCESS_TOKEN", "").strip()
 TMDB_READ_ACCESS_TOKEN = os.getenv("TMDB_READ_ACCESS_TOKEN", "").strip()
 
+# 弹弹play开放平台凭据只能存在于服务端环境。Flutter 客户端只控制是否
+# 请求聚合弹幕，不能读取、保存或转发 AppSecret。
+DANDANPLAY_ENABLED = _env_bool("DANDANPLAY_ENABLED", False)
+DANDANPLAY_APP_ID = os.getenv("DANDANPLAY_APP_ID", "").strip()
+DANDANPLAY_APP_SECRET = os.getenv("DANDANPLAY_APP_SECRET", "").strip()
+DANDANPLAY_REQUEST_TIMEOUT_SECONDS = max(
+    1.0,
+    min(30.0, float(os.getenv("DANDANPLAY_REQUEST_TIMEOUT_SECONDS", "8"))),
+)
+DANDANPLAY_CACHE_SECONDS = _bounded_seconds(
+    "DANDANPLAY_CACHE_SECONDS", 7200, 60, 24 * 3600
+)
+DANDANPLAY_EMPTY_CACHE_SECONDS = _bounded_seconds(
+    "DANDANPLAY_EMPTY_CACHE_SECONDS", 120, 10, 3600
+)
+DANDANPLAY_CACHE_MAX_ENTRIES = max(
+    1, min(100_000, int(os.getenv("DANDANPLAY_CACHE_MAX_ENTRIES", "2048")))
+)
+DANDANPLAY_MAX_RESPONSE_BYTES = max(
+    64 * 1024,
+    min(
+        32 * 1024 * 1024,
+        int(os.getenv("DANDANPLAY_MAX_RESPONSE_BYTES", str(8 * 1024 * 1024))),
+    ),
+)
+DANDANPLAY_CLIENT_RATE_LIMIT_PER_MINUTE = max(
+    1,
+    min(
+        600,
+        int(os.getenv("DANDANPLAY_CLIENT_RATE_LIMIT_PER_MINUTE", "30")),
+    ),
+)
+
 CATALOG_CACHE_HOURS = max(1, int(os.getenv("CATALOG_CACHE_HOURS", "24")))
 PLAYBACK_CACHE_HOURS = max(1, int(os.getenv("PLAYBACK_CACHE_HOURS", "6")))
 PLAYBACK_PARTIAL_CACHE_MINUTES = max(
@@ -129,9 +154,7 @@ MACCMS_QUICK_ALIAS_LIMIT = max(
 MACCMS_QUICK_QUERY_BUDGET = max(
     1, min(500, int(os.getenv("MACCMS_QUICK_QUERY_BUDGET", "32")))
 )
-MACCMS_FULL_ALIAS_LIMIT = max(
-    1, min(8, int(os.getenv("MACCMS_FULL_ALIAS_LIMIT", "5")))
-)
+MACCMS_FULL_ALIAS_LIMIT = max(1, min(8, int(os.getenv("MACCMS_FULL_ALIAS_LIMIT", "5"))))
 MACCMS_FULL_QUERY_BUDGET = max(
     1, min(1000, int(os.getenv("MACCMS_FULL_QUERY_BUDGET", "120")))
 )
@@ -164,9 +187,7 @@ ANICH_MAX_LINES_PER_EPISODE = max(
 )
 # crawler.anich 直链无签名参数(逐线 expires_at 恒为 0),但实测天级易腐:
 # 在混合来源缓存行上为该源单独盖短 TTL,0/负值关闭盖章行为。
-PLAYBACK_ANICH_LINE_TTL_HOURS = float(
-    os.getenv("PLAYBACK_ANICH_LINE_TTL_HOURS", "2")
-)
+PLAYBACK_ANICH_LINE_TTL_HOURS = float(os.getenv("PLAYBACK_ANICH_LINE_TTL_HOURS", "2"))
 
 # 部分动漫站的站内搜索被边缘缓存冻结或首访即弹验证码,只能抓列表页建
 # 本地 title→sid 索引。没有索引这些源等于没接上,所以由调度器定期重建。
@@ -174,9 +195,7 @@ SITE_INDEX_REBUILD_HOURS = max(
     1, min(168, int(os.getenv("SITE_INDEX_REBUILD_HOURS", "12")))
 )
 SITE_INDEX_PAGES = max(1, min(20, int(os.getenv("SITE_INDEX_PAGES", "4"))))
-MANAGED_PLAYBACK_LINES_ENABLED = _env_bool(
-    "MANAGED_PLAYBACK_LINES_ENABLED", False
-)
+MANAGED_PLAYBACK_LINES_ENABLED = _env_bool("MANAGED_PLAYBACK_LINES_ENABLED", False)
 MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL = _env_bool(
     "MANAGED_PLAYBACK_LINES_REQUIRE_APPROVAL", True
 )
@@ -236,9 +255,7 @@ EMAIL_OUTBOX_WORKER_INTERVAL_SECONDS = max(
 )
 LEGACY_ACCOUNT_API_ENABLED = _env_bool("LEGACY_ACCOUNT_API_ENABLED", False)
 LEGACY_CONFIG_API_ENABLED = _env_bool("LEGACY_CONFIG_API_ENABLED", False)
-LEGACY_JWT_COMPATIBILITY_ENABLED = _env_bool(
-    "LEGACY_JWT_COMPATIBILITY_ENABLED", False
-)
+LEGACY_JWT_COMPATIBILITY_ENABLED = _env_bool("LEGACY_JWT_COMPATIBILITY_ENABLED", False)
 ACCOUNT_TRUSTED_PROXY_NETWORKS = _env_networks("ACCOUNT_TRUSTED_PROXY_CIDRS")
 ACCOUNT_RATE_LIMIT_MAX_KEYS = max(
     100, min(100_000, int(os.getenv("ACCOUNT_RATE_LIMIT_MAX_KEYS", "10000")))

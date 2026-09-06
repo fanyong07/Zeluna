@@ -6,10 +6,10 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 
-import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
 import 'danmaku_response_decoder.dart';
 
 class DanmakuRepository {
@@ -97,10 +97,8 @@ class DanmakuRepository {
     ExternalServiceSettings settings,
   ) async {
     final loaders = <Future<_DanmakuSourceResult?>>[
-      _loadOfficial(subject, episode),
+      _loadOfficial(subject, episode, settings),
       if (settings.bilibiliDanmakuEnabled) _loadBilibili(subject, episode),
-      if (settings.dandanplayDanmakuEnabled)
-        _loadDandanplay(subject, episode, settings),
     ];
 
     final customEndpoint = settings.customDanmakuEndpoint.trim();
@@ -112,7 +110,7 @@ class DanmakuRepository {
       loaders,
     )).whereType<_DanmakuSourceResult>();
     final sources = results
-        .map((result) => result.match)
+        .expand((result) => result.matches)
         .toList(growable: false);
     final comments = _mergeDanmakuComments(
       results.expand((result) => result.comments),
@@ -126,6 +124,7 @@ class DanmakuRepository {
   Future<_DanmakuSourceResult?> _loadOfficial(
     AnimeSubject subject,
     AnimeEpisode episode,
+    ExternalServiceSettings settings,
   ) async {
     try {
       final token = (await _officialTokenProvider?.call())?.trim() ?? '';
@@ -143,6 +142,11 @@ class DanmakuRepository {
           'subject_key': subject.identityKey,
           'episode_key': episode.identityKey(subjectKey: subject.identityKey),
           'limit': '1000',
+          'title': subject.title,
+          'original_title': subject.originalTitle,
+          'episode_number': '${episode.number}',
+          'media_type': subjectContentTypeOf(subject).name,
+          'include_dandanplay': '${settings.dandanplayDanmakuEnabled}',
         },
       );
       var response = await _officialClient
@@ -163,19 +167,27 @@ class DanmakuRepository {
             .timeout(_requestTimeout);
       }
       if (response.statusCode != 200) return null;
-      final comments = parseZelunaDanmaku(
-        jsonDecode(utf8.decode(response.bodyBytes)),
-      );
-      return _DanmakuSourceResult(
-        match: DanmakuMatch(
-          provider: 'Zeluna',
-          title: subject.title,
-          episodeTitle: episode.displayTitle,
-          episodeId: episode.identityKey(subjectKey: subject.identityKey),
-          commentCount: comments.length,
-          available: true,
-          message: comments.isEmpty ? '当前集还没有用户弹幕' : null,
-        ),
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      final comments = parseZelunaDanmaku(decoded);
+      final matches = parseZelunaDanmakuSources(decoded);
+      return _DanmakuSourceResult.multiple(
+        matches: matches.isEmpty
+            ? [
+                DanmakuMatch(
+                  provider: 'Zeluna',
+                  title: subject.title,
+                  episodeTitle: episode.displayTitle,
+                  episodeId: episode.identityKey(
+                    subjectKey: subject.identityKey,
+                  ),
+                  commentCount: comments
+                      .where((comment) => comment.provider == 'Zeluna')
+                      .length,
+                  available: true,
+                  message: comments.isEmpty ? '当前集还没有用户弹幕' : null,
+                ),
+              ]
+            : matches,
         comments: comments,
       );
     } catch (_) {
@@ -523,113 +535,6 @@ class DanmakuRepository {
     return null;
   }
 
-  Future<_DanmakuSourceResult> _loadDandanplay(
-    AnimeSubject subject,
-    AnimeEpisode episode,
-    ExternalServiceSettings settings,
-  ) async {
-    final appId = settings.dandanplayAppId.trim();
-    final appSecret = settings.dandanplayAppSecret.trim();
-    if (appId.isEmpty || appSecret.isEmpty) {
-      return _DanmakuSourceResult(
-        match: _unavailableMatch(
-          provider: '弹弹play',
-          title: subject.title,
-          episodeTitle: episode.displayTitle,
-          message: '尚未配置开放平台凭证',
-        ),
-      );
-    }
-    try {
-      const searchPath = '/api/v2/search/episodes';
-      final searchResponse = await _get(
-        Uri.parse('https://api.dandanplay.net$searchPath').replace(
-          queryParameters: {
-            'anime': _preferredKeyword(subject),
-            'episode': subject.platform.toLowerCase() == 'movie'
-                ? 'movie'
-                : '${episode.number}',
-          },
-        ),
-        headers: _dandanplayHeaders(appId, appSecret, searchPath),
-      ).timeout(_requestTimeout);
-      if (searchResponse.statusCode != 200) {
-        return _DanmakuSourceResult(
-          match: _unavailableMatch(
-            provider: '弹弹play',
-            title: subject.title,
-            episodeTitle: episode.displayTitle,
-            message:
-                searchResponse.statusCode == 401 ||
-                    searchResponse.statusCode == 403
-                ? '开放平台凭证无效或权限不足'
-                : '匹配失败：HTTP ${searchResponse.statusCode}',
-          ),
-        );
-      }
-      final decoded = jsonDecode(utf8.decode(searchResponse.bodyBytes));
-      final matched = _pickDandanplayEpisode(decoded, subject, episode);
-      if (matched == null) {
-        return _DanmakuSourceResult(
-          match: _unavailableMatch(
-            provider: '弹弹play',
-            title: subject.title,
-            episodeTitle: episode.displayTitle,
-            message: '没有匹配到当前番剧与集数',
-          ),
-        );
-      }
-
-      final commentPath = '/api/v2/comment/${matched.episodeId}';
-      final commentResponse = await _get(
-        Uri.parse('https://api.dandanplay.net$commentPath').replace(
-          queryParameters: const {
-            'from': '0',
-            'withRelated': 'true',
-            'chConvert': '1',
-          },
-        ),
-        headers: _dandanplayHeaders(appId, appSecret, commentPath),
-      ).timeout(_requestTimeout);
-      if (commentResponse.statusCode != 200 &&
-          commentResponse.statusCode != 302) {
-        return _DanmakuSourceResult(
-          match: _unavailableMatch(
-            provider: '弹弹play',
-            title: matched.title,
-            episodeTitle: matched.episodeTitle,
-            episodeId: '${matched.episodeId}',
-            message: '弹幕读取失败：HTTP ${commentResponse.statusCode}',
-          ),
-        );
-      }
-      final comments = parseDandanplayDanmaku(
-        jsonDecode(utf8.decode(commentResponse.bodyBytes)),
-      );
-      return _DanmakuSourceResult(
-        match: DanmakuMatch(
-          provider: '弹弹play',
-          title: matched.title,
-          episodeTitle: matched.episodeTitle,
-          episodeId: '${matched.episodeId}',
-          commentCount: comments.length,
-          available: comments.isNotEmpty,
-          message: comments.isEmpty ? '已匹配弹幕库，但没有返回弹幕内容' : null,
-        ),
-        comments: comments,
-      );
-    } catch (_) {
-      return _DanmakuSourceResult(
-        match: _unavailableMatch(
-          provider: '弹弹play',
-          title: subject.title,
-          episodeTitle: episode.displayTitle,
-          message: '弹幕源暂时无法访问',
-        ),
-      );
-    }
-  }
-
   Future<_DanmakuSourceResult> _loadCustom(
     String endpoint,
     AnimeSubject subject,
@@ -703,77 +608,11 @@ class DanmakuRepository {
     final proxyHeaders = <String, String>{
       if (headers['Accept'] != null) 'Accept': headers['Accept']!,
       'X-Upstream-Referer': ?referer,
-      if (headers['X-AppId'] != null) 'X-Upstream-X-AppId': headers['X-AppId']!,
-      if (headers['X-Timestamp'] != null)
-        'X-Upstream-X-Timestamp': headers['X-Timestamp']!,
-      if (headers['X-Signature'] != null)
-        'X-Upstream-X-Signature': headers['X-Signature']!,
     };
     final proxy = Uri.base.resolve(
       '/media-proxy?url=${Uri.encodeQueryComponent(target.toString())}',
     );
     return _client.get(proxy, headers: proxyHeaders);
-  }
-
-  Map<String, String> _dandanplayHeaders(
-    String appId,
-    String appSecret,
-    String path,
-  ) {
-    final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final digest = sha256.convert(
-      utf8.encode('$appId$timestamp$path$appSecret'),
-    );
-    return {
-      'Accept': 'application/json',
-      'X-AppId': appId,
-      'X-Timestamp': '$timestamp',
-      'X-Signature': base64Encode(digest.bytes),
-    };
-  }
-
-  _DandanplayEpisode? _pickDandanplayEpisode(
-    Object? decoded,
-    AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
-    final root = decoded is Map ? decoded : const {};
-    final rawAnimes = root['animes'] ?? root['items'] ?? root['data'];
-    if (rawAnimes is! List) return null;
-    _DandanplayEpisode? selected;
-    var bestScore = -1;
-    for (final anime in rawAnimes.whereType<Map>()) {
-      final animeTitle = _firstText([
-        anime['animeTitle'],
-        anime['title'],
-        anime['name'],
-      ]);
-      final titleScore = _titleScore(animeTitle, subject);
-      final rawEpisodes = anime['episodes'];
-      if (rawEpisodes is! List) continue;
-      for (final item in rawEpisodes.whereType<Map>()) {
-        final episodeId = _intValue(item['episodeId'] ?? item['id']) ?? 0;
-        if (episodeId <= 0) continue;
-        final episodeTitle = _firstText([
-          item['episodeTitle'],
-          item['title'],
-          item['name'],
-        ]);
-        final episodeMatched = _episodeMatches(episodeTitle, episode);
-        final score = titleScore + (episodeMatched ? 60 : 0);
-        if (score > bestScore) {
-          bestScore = score;
-          selected = _DandanplayEpisode(
-            title: animeTitle.isEmpty ? subject.title : animeTitle,
-            episodeTitle: episodeTitle.isEmpty
-                ? episode.displayTitle
-                : episodeTitle,
-            episodeId: episodeId,
-          );
-        }
-      }
-    }
-    return bestScore >= 60 ? selected : null;
   }
 
   int _bilibiliTitleScore(Map<dynamic, dynamic> item, AnimeSubject subject) {
@@ -808,8 +647,7 @@ class DanmakuRepository {
   ) {
     return '${subject.source}|${subject.id}|${subject.title}|${episode.number}|'
         '${settings.bilibiliDanmakuEnabled}|'
-        '${settings.dandanplayDanmakuEnabled}|${settings.dandanplayAppId}|'
-        '${stableDigest(settings.dandanplayAppSecret)}|'
+        '${settings.dandanplayDanmakuEnabled}|'
         '${settings.customDanmakuEnabled}|${settings.customDanmakuEndpoint}';
   }
 }
@@ -926,11 +764,14 @@ List<DanmakuComment> parseZelunaDanmaku(Object? source) {
   if (rawComments is! List) return const [];
   final comments = <DanmakuComment>[];
   for (final item in rawComments.whereType<Map>()) {
-    final id = item['id']?.toString().trim() ?? '';
+    final rawId = item['id']?.toString().trim() ?? '';
+    final provider = item['provider']?.toString().trim().isNotEmpty == true
+        ? item['provider'].toString().trim()
+        : 'Zeluna';
     final text = item['text']?.toString().trim() ?? '';
     final seconds = _doubleValue(item['time_seconds']);
     final color = _colorValue(item['color']);
-    if (id.isEmpty ||
+    if (rawId.isEmpty ||
         text.isEmpty ||
         seconds == null ||
         !seconds.isFinite ||
@@ -940,14 +781,19 @@ List<DanmakuComment> parseZelunaDanmaku(Object? source) {
     }
     final author = item['author'];
     final authorMap = author is Map ? author : const <Object?, Object?>{};
+    final id = provider == 'Zeluna' && !rawId.startsWith('zeluna-')
+        ? 'zeluna-$rawId'
+        : rawId;
     comments.add(
       DanmakuComment(
-        id: 'zeluna-$id',
-        provider: 'Zeluna',
+        id: id,
+        provider: provider,
         time: Duration(milliseconds: (seconds * 1000).round()),
         mode: switch (item['mode']?.toString()) {
           'top' => DanmakuMode.top,
           'bottom' => DanmakuMode.bottom,
+          'reverse' => DanmakuMode.reverse,
+          'advanced' => DanmakuMode.advanced,
           _ => DanmakuMode.scroll,
         },
         color: color,
@@ -959,6 +805,36 @@ List<DanmakuComment> parseZelunaDanmaku(Object? source) {
   }
   comments.sort(_compareComments);
   return List.unmodifiable(comments);
+}
+
+List<DanmakuMatch> parseZelunaDanmakuSources(Object? source) {
+  final rawSources = source is Map ? source['sources'] : null;
+  if (rawSources is! List) return const [];
+  final matches = <DanmakuMatch>[];
+  for (final item in rawSources.whereType<Map>()) {
+    final provider = item['provider']?.toString().trim() ?? '';
+    if (provider.isEmpty) continue;
+    final message = item['message']?.toString().trim();
+    matches.add(
+      DanmakuMatch(
+        provider: provider,
+        title: item['title']?.toString().trim() ?? provider,
+        episodeTitle:
+            item['episode_title']?.toString().trim() ??
+            item['episodeTitle']?.toString().trim() ??
+            '',
+        episodeId:
+            item['episode_id']?.toString().trim() ??
+            item['episodeId']?.toString().trim() ??
+            '',
+        commentCount:
+            _intValue(item['comment_count'] ?? item['commentCount']) ?? 0,
+        available: item['available'] == true,
+        message: message == null || message.isEmpty ? null : message,
+      ),
+    );
+  }
+  return List.unmodifiable(matches);
 }
 
 List<DanmakuComment> _mergeDanmakuComments(
@@ -1033,21 +909,6 @@ DanmakuMatch _unavailableMatch({
   );
 }
 
-String _preferredKeyword(AnimeSubject subject) {
-  final title = subject.title.trim();
-  if (title.length >= 2) return title;
-  return subject.originalTitle.trim();
-}
-
-bool _episodeMatches(String title, AnimeEpisode episode) {
-  final normalized = title.toLowerCase().replaceAll(' ', '');
-  final number = episode.number;
-  return _episodeNumber(normalized) == number ||
-      normalized.contains('第$number') ||
-      normalized.contains('ep$number') ||
-      normalized.contains('episode$number');
-}
-
 int? _episodeNumber(Object? value) {
   final text = _plainText(value).trim();
   final direct = double.tryParse(text);
@@ -1103,9 +964,19 @@ int? _colorValue(Object? value) {
 }
 
 class _DanmakuSourceResult {
-  const _DanmakuSourceResult({required this.match, this.comments = const []});
+  _DanmakuSourceResult({
+    required DanmakuMatch match,
+    List<DanmakuComment> comments = const [],
+  }) : matches = List.unmodifiable([match]),
+       comments = List.unmodifiable(comments);
 
-  final DanmakuMatch match;
+  _DanmakuSourceResult.multiple({
+    required List<DanmakuMatch> matches,
+    List<DanmakuComment> comments = const [],
+  }) : matches = List.unmodifiable(matches),
+       comments = List.unmodifiable(comments);
+
+  final List<DanmakuMatch> matches;
   final List<DanmakuComment> comments;
 }
 
@@ -1132,18 +1003,6 @@ class _BilibiliLookupException implements Exception {
   const _BilibiliLookupException(this.message);
 
   final String message;
-}
-
-class _DandanplayEpisode {
-  const _DandanplayEpisode({
-    required this.title,
-    required this.episodeTitle,
-    required this.episodeId,
-  });
-
-  final String title;
-  final String episodeTitle;
-  final int episodeId;
 }
 
 class _TimedTimeline {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../accounts/account_controller.dart';
@@ -145,6 +147,13 @@ final class SettingsController {
     _contextVersion = contextVersion;
     _miscMutation++;
     _servicesMutation++;
+    final rawServices = _storage.get(
+      AccountController.settingsKeyFor(accountId, 'services'),
+    );
+    final hasLegacyDandanplayCredentials =
+        rawServices is Map &&
+        (rawServices.containsKey('dandanplayAppId') ||
+            rawServices.containsKey('dandanplayAppSecret'));
     _snapshot = SettingsSnapshot(
       playback: _read(
         accountId,
@@ -186,6 +195,15 @@ final class SettingsController {
       ),
     );
     _loaded = true;
+    if (hasLegacyDandanplayCredentials) {
+      unawaited(
+        _write(
+          accountId,
+          'services',
+          _snapshot.services.toJson(),
+        ).catchError((_) {}),
+      );
+    }
     return _snapshot;
   }
 

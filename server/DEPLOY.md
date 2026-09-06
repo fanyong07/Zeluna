@@ -30,6 +30,15 @@
 ```dotenv
 TMDB_READ_ACCESS_TOKEN=
 BANGUMI_ACCESS_TOKEN=
+DANDANPLAY_ENABLED=false
+DANDANPLAY_APP_ID=
+DANDANPLAY_APP_SECRET=
+DANDANPLAY_REQUEST_TIMEOUT_SECONDS=8
+DANDANPLAY_CACHE_SECONDS=7200
+DANDANPLAY_EMPTY_CACHE_SECONDS=120
+DANDANPLAY_CACHE_MAX_ENTRIES=2048
+DANDANPLAY_MAX_RESPONSE_BYTES=8388608
+DANDANPLAY_CLIENT_RATE_LIMIT_PER_MINUTE=30
 ADMIN_TOKEN=
 SECRET_KEY=
 SMTP_HOST=smtp.example.com
@@ -70,6 +79,11 @@ PLAYBACK_ANICH_LINE_TTL_HOURS=2
 
 - `TMDB_READ_ACCESS_TOKEN`：TMDB v4 Read Access Token，电视剧和电影目录必需。
 - `BANGUMI_ACCESS_TOKEN`：可选；未配置时使用 Bangumi 公共接口。
+- `DANDANPLAY_APP_ID` / `DANDANPLAY_APP_SECRET`：审核通过应用的开放平台凭据，只能写入 VPS 环境文件，不能进入 Flutter、仓库、日志或发布包。
+- `DANDANPLAY_ENABLED`：凭据配置完成后改为 `true`。客户端只在用户实际播放且启用了该弹幕源时请求，服务端负责搜索、分集匹配、签名、缓存和异常降级。
+- `DANDANPLAY_CACHE_*`：正结果默认缓存 2 小时，空结果默认缓存 2 分钟，最多保留 2048 个条目，避免重复消耗开放平台请求和无界占用内存。
+- `DANDANPLAY_MAX_RESPONSE_BYTES`：单次上游响应上限，默认 8 MiB。
+- `DANDANPLAY_CLIENT_RATE_LIMIT_PER_MINUTE`：每个客户端 IP 每分钟最多触发 30 次弹弹play缓存未命中请求；命中缓存和相同请求合并不计入，超限时只降级外部弹幕，不影响 Zeluna 社区弹幕。
 - `ADMIN_TOKEN`：保护手动刷新和管理接口，必须是随机长字符串。
 - `SECRET_KEY`：账户令牌和验证码摘要密钥，必须是独立随机值且至少 32 字节；空值、短值、低多样性值和历史占位值会让账号操作 fail-closed 返回 `503`。
 - `SMTP_*`：邮箱注册、验证码和找回密码所需的发信服务，只能保存在 VPS 环境文件中。

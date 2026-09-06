@@ -124,69 +124,107 @@ void main() {
     expect(requests, afterFirstLoad);
   });
 
-  test('Bilibili 412 clearly falls back to dandanplay comments', () async {
+  test('Bilibili 412 keeps server-provided dandanplay comments', () async {
     final paths = <String>[];
-    final repository = DanmakuRepository(
-      client: MockClient((request) async {
-        paths.add(request.url.path);
-        if (request.url.path == '/x/web-interface/nav') {
-          return _jsonResponse({
-            'code': -101,
-            'data': {
-              'wbi_img': {
-                'img_url':
-                    'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
-                'sub_url':
-                    'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
-              },
+    late final MockClient client;
+    client = MockClient((request) async {
+      paths.add(request.url.path);
+      if (request.url.host == 'api.zeluna.test') {
+        expect(request.url.path, '/api/v3/danmaku');
+        expect(request.url.queryParameters['subject_key'], 'bangumi:1');
+        expect(request.url.queryParameters['episode_key'], isNotEmpty);
+        expect(request.url.queryParameters['title'], '葬送的芙莉莲');
+        expect(request.url.queryParameters['original_title'], 'Frieren');
+        expect(request.url.queryParameters['episode_number'], '1');
+        expect(request.url.queryParameters['media_type'], 'anime');
+        expect(request.url.queryParameters['include_dandanplay'], 'true');
+        return _jsonResponse({
+          'comments': [
+            {
+              'id': '41',
+              'provider': 'Zeluna',
+              'time_seconds': 20,
+              'mode': 'scroll',
+              'color': 0xFFFFFF,
+              'text': 'Zeluna 用户弹幕',
+              'author': {'display_name': '用户', 'is_mine': false},
             },
-          });
-        }
-        if (request.url.path == '/x/web-interface/wbi/search/type') {
-          return http.Response('<div class="error-container">412</div>', 412);
-        }
-        if (request.url.path == '/api/v2/search/episodes') {
-          expect(_header(request, 'X-AppId'), 'app');
-          expect(_header(request, 'X-Signature'), isNotEmpty);
-          return _jsonResponse({
-            'animes': [
-              {
-                'animeTitle': '葬送的芙莉莲',
-                'episodes': [
-                  {'episodeId': 12345, 'episodeTitle': '第1话 冒险的结束'},
-                ],
-              },
-            ],
-          });
-        }
-        if (request.url.path == '/api/v2/comment/12345') {
-          return _jsonResponse({
-            'comments': [
-              {'cid': 88, 'p': '12.5,5,16776960,user', 'm': '备用真实弹幕'},
-            ],
-          });
-        }
-        return http.Response('not found', 404);
-      }),
+            {
+              'id': 'dandanplay:12345:88',
+              'provider': '弹弹play',
+              'time_seconds': 12.5,
+              'mode': 'top',
+              'color': 0xFFFF00,
+              'text': '备用真实弹幕',
+              'author': {'display_name': '弹幕用户', 'is_mine': false},
+            },
+          ],
+          'sources': [
+            {
+              'provider': 'Zeluna',
+              'title': '葬送的芙莉莲',
+              'episode_title': '第 1 集',
+              'episode_id': 'episode:v2:first',
+              'comment_count': 1,
+              'available': true,
+            },
+            {
+              'provider': '弹弹play',
+              'title': '葬送的芙莉莲',
+              'episode_title': '第1话 冒险的结束',
+              'episode_id': '12345',
+              'comment_count': 1,
+              'available': true,
+            },
+          ],
+          'next_cursor': null,
+        });
+      }
+      if (request.url.path == '/x/web-interface/nav') {
+        return _jsonResponse({
+          'code': -101,
+          'data': {
+            'wbi_img': {
+              'img_url':
+                  'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+              'sub_url':
+                  'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+            },
+          },
+        });
+      }
+      if (request.url.path == '/x/web-interface/wbi/search/type') {
+        return http.Response('<div class="error-container">412</div>', 412);
+      }
+      return http.Response('not found', 404);
+    });
+    final repository = DanmakuRepository(
+      client: client,
+      officialClient: client,
+      officialBaseUrl: 'https://api.zeluna.test',
     );
 
     final timeline = await repository.timelineForEpisode(
       _subject,
       _episode,
-      const ExternalServiceSettings(
-        dandanplayAppId: 'app',
-        dandanplayAppSecret: 'secret',
-      ),
+      const ExternalServiceSettings(),
     );
 
+    expect(paths, contains('/api/v3/danmaku'));
     expect(paths, contains('/x/web-interface/wbi/search/type'));
-    expect(timeline.sources, hasLength(2));
-    expect(timeline.sources.first.message, contains('风控'));
-    expect(timeline.sources.last.available, isTrue);
-    expect(timeline.comments.single.provider, '弹弹play');
-    expect(timeline.comments.single.mode, DanmakuMode.top);
-    expect(timeline.comments.single.color, 0xFFFF00);
-    expect(timeline.comments.single.text, '备用真实弹幕');
+    expect(timeline.sources.map((item) => item.provider), [
+      'Zeluna',
+      '弹弹play',
+      'Bilibili',
+    ]);
+    expect(timeline.sources.last.message, contains('风控'));
+    expect(timeline.comments.map((item) => item.provider), [
+      '弹弹play',
+      'Zeluna',
+    ]);
+    expect(timeline.comments.first.mode, DanmakuMode.top);
+    expect(timeline.comments.first.color, 0xFFFF00);
+    expect(timeline.comments.first.text, '备用真实弹幕');
   });
 
   test('official and public danmaku sources are merged', () async {
@@ -400,14 +438,6 @@ http.Response _jsonResponse(Object value) {
     200,
     headers: const {'content-type': 'application/json; charset=utf-8'},
   );
-}
-
-String? _header(http.Request request, String name) {
-  final target = name.toLowerCase();
-  for (final entry in request.headers.entries) {
-    if (entry.key.toLowerCase() == target) return entry.value;
-  }
-  return null;
 }
 
 const _subject = AnimeSubject(

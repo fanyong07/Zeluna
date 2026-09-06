@@ -272,8 +272,8 @@ void main() {
     expect(settings.dandanplayDanmakuEnabled, isTrue);
     expect(settings.bilibiliDanmakuEnabled, isTrue);
     expect(json, contains('dandanplayDanmakuEnabled'));
-    expect(json, contains('dandanplayAppId'));
-    expect(json, contains('dandanplayAppSecret'));
+    expect(json, isNot(contains('dandanplayAppId')));
+    expect(json, isNot(contains('dandanplayAppSecret')));
     expect(json, contains('cinemetaEnabled'));
     expect(json, contains('watchHubEnabled'));
     expect(json['watchHubEnabled'], isFalse);
@@ -323,75 +323,6 @@ void main() {
     expect(restored.shortcutFullscreen, isFalse);
     expect(restored.shortcutMute, isFalse);
     expect(restored.shortcutReload, isFalse);
-  });
-
-  test('dandanplay danmaku source parses matched episode results', () async {
-    const subject = AnimeSubject(
-      id: 1,
-      title: '葬送的芙莉莲',
-      originalTitle: 'Frieren',
-      summary: 'summary',
-      coverUrl: null,
-      bannerUrl: null,
-      date: '2023-09-29',
-      platform: 'TV',
-      language: '日语',
-      region: '日本',
-      status: '全28集',
-      categories: [AnimeCategory(name: '动画')],
-      tags: [AnimeTag(name: 'TV')],
-      totalEpisodes: 28,
-    );
-    const episode = AnimeEpisode(
-      id: 101,
-      subjectId: 1,
-      number: 1,
-      title: '',
-      airdate: '2023-09-29',
-      duration: '24:00',
-      description: '第一集',
-    );
-    final repo = ExternalServiceRepository(
-      client: MockClient((request) async {
-        if (request.url.path == '/api/v2/search/episodes') {
-          expect(_headerValue(request, 'X-AppId'), 'app');
-          expect(_headerValue(request, 'X-Timestamp'), isNotEmpty);
-          expect(_headerValue(request, 'X-Signature'), isNotEmpty);
-          expect(request.headers.keys, isNot(contains('X-AppSecret')));
-          return http.Response(
-            jsonEncode({
-              'animes': [
-                {
-                  'animeTitle': '葬送的芙莉莲',
-                  'episodes': [
-                    {'episodeId': 12345, 'episodeTitle': '第1话 冒险结束'},
-                  ],
-                },
-              ],
-            }),
-            200,
-          );
-        }
-        if (request.url.path == '/api/v2/comment/12345') {
-          return http.Response(jsonEncode({'count': 321, 'comments': []}), 200);
-        }
-        return http.Response(jsonEncode({'count': 321, 'comments': []}), 200);
-      }),
-    );
-
-    final danmaku = await repo.matchDanmaku(
-      subject,
-      episode,
-      const ExternalServiceSettings(
-        dandanplayAppId: 'app',
-        dandanplayAppSecret: 'secret',
-        bilibiliDanmakuEnabled: false,
-      ),
-    );
-
-    expect(danmaku.single.provider, '弹弹play');
-    expect(danmaku.single.message, isNot(contains('凭证')));
-    expect(danmaku.single.message, isNot(contains('需要')));
   });
 
   test(
@@ -1904,14 +1835,6 @@ RulePlugin _animekoLookupRule({
       matchVideoUrl: r'(?<v>https?:\/\/.+\.(m3u8|mp4))',
     ),
   );
-}
-
-String? _headerValue(http.BaseRequest request, String name) {
-  final normalized = name.toLowerCase();
-  for (final entry in request.headers.entries) {
-    if (entry.key.toLowerCase() == normalized) return entry.value;
-  }
-  return null;
 }
 
 class _DelayedRulePlaybackResolver extends RulePlaybackResolver {

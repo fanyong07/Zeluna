@@ -1030,8 +1030,6 @@ class ExternalServiceSettings {
     this.subtitleLanguage = 'zh-CN',
     this.autoMatchSubtitle = true,
     this.dandanplayDanmakuEnabled = true,
-    this.dandanplayAppId = '',
-    this.dandanplayAppSecret = '',
     this.bilibiliDanmakuEnabled = true,
     this.customDanmakuEnabled = false,
     this.customDanmakuEndpoint = '',
@@ -1059,8 +1057,6 @@ class ExternalServiceSettings {
   final String subtitleLanguage;
   final bool autoMatchSubtitle;
   final bool dandanplayDanmakuEnabled;
-  final String dandanplayAppId;
-  final String dandanplayAppSecret;
   final bool bilibiliDanmakuEnabled;
   final bool customDanmakuEnabled;
   final String customDanmakuEndpoint;
@@ -1088,8 +1084,6 @@ class ExternalServiceSettings {
     String? subtitleLanguage,
     bool? autoMatchSubtitle,
     bool? dandanplayDanmakuEnabled,
-    String? dandanplayAppId,
-    String? dandanplayAppSecret,
     bool? bilibiliDanmakuEnabled,
     bool? customDanmakuEnabled,
     String? customDanmakuEndpoint,
@@ -1122,8 +1116,6 @@ class ExternalServiceSettings {
       autoMatchSubtitle: autoMatchSubtitle ?? this.autoMatchSubtitle,
       dandanplayDanmakuEnabled:
           dandanplayDanmakuEnabled ?? this.dandanplayDanmakuEnabled,
-      dandanplayAppId: dandanplayAppId ?? this.dandanplayAppId,
-      dandanplayAppSecret: dandanplayAppSecret ?? this.dandanplayAppSecret,
       bilibiliDanmakuEnabled:
           bilibiliDanmakuEnabled ?? this.bilibiliDanmakuEnabled,
       customDanmakuEnabled: customDanmakuEnabled ?? this.customDanmakuEnabled,
@@ -1159,8 +1151,6 @@ class ExternalServiceSettings {
     'subtitleLanguage': subtitleLanguage,
     'autoMatchSubtitle': autoMatchSubtitle,
     'dandanplayDanmakuEnabled': dandanplayDanmakuEnabled,
-    'dandanplayAppId': dandanplayAppId,
-    'dandanplayAppSecret': dandanplayAppSecret,
     'bilibiliDanmakuEnabled': bilibiliDanmakuEnabled,
     'customDanmakuEnabled': customDanmakuEnabled,
     'customDanmakuEndpoint': customDanmakuEndpoint,
@@ -1203,8 +1193,6 @@ class ExternalServiceSettings {
       autoMatchSubtitle: json['autoMatchSubtitle'] as bool? ?? true,
       dandanplayDanmakuEnabled:
           json['dandanplayDanmakuEnabled'] as bool? ?? true,
-      dandanplayAppId: json['dandanplayAppId']?.toString() ?? '',
-      dandanplayAppSecret: json['dandanplayAppSecret']?.toString() ?? '',
       bilibiliDanmakuEnabled: json['bilibiliDanmakuEnabled'] as bool? ?? true,
       customDanmakuEnabled: json['customDanmakuEnabled'] as bool? ?? false,
       customDanmakuEndpoint: json['customDanmakuEndpoint']?.toString() ?? '',

@@ -102,6 +102,51 @@ void main() {
     expect(serviceChanges, isEmpty);
   });
 
+  test('legacy dandanplay credentials are scrubbed per account', () async {
+    final accountAKey = AccountController.settingsKeyFor(
+      'account-a',
+      'services',
+    );
+    final accountBKey = AccountController.settingsKeyFor(
+      'account-b',
+      'services',
+    );
+    final storage = _MemorySettingsStorage({
+      accountAKey: {
+        ...const ExternalServiceSettings().toJson(),
+        'dandanplayAppId': 'legacy-app-a',
+        'dandanplayAppSecret': 'legacy-secret-a',
+      },
+      accountBKey: {
+        ...const ExternalServiceSettings().toJson(),
+        'dandanplayAppId': 'legacy-app-b',
+        'dandanplayAppSecret': 'legacy-secret-b',
+      },
+    });
+    final controller = SettingsController(
+      storage: storage,
+      publishSnapshot: (_) {},
+      applyKeepScreenOn: (_) async {},
+      onExternalServicesChanged: (_) async {},
+    );
+
+    controller.loadForAccount(accountId: 'account-a', contextVersion: 1);
+    await controller.settleWrites();
+
+    final persistedA = storage.values[accountAKey] as Map;
+    final untouchedB = storage.values[accountBKey] as Map;
+    expect(persistedA, isNot(contains('dandanplayAppId')));
+    expect(persistedA, isNot(contains('dandanplayAppSecret')));
+    expect(untouchedB, contains('dandanplayAppId'));
+    expect(untouchedB, contains('dandanplayAppSecret'));
+
+    controller.loadForAccount(accountId: 'account-b', contextVersion: 2);
+    await controller.settleWrites();
+    final persistedB = storage.values[accountBKey] as Map;
+    expect(persistedB, isNot(contains('dandanplayAppId')));
+    expect(persistedB, isNot(contains('dandanplayAppSecret')));
+  });
+
   test(
     'stale settings writes cannot apply cross-account side effects',
     () async {

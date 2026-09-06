@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
@@ -10,6 +11,8 @@ import '../player/playback_line_display.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/settings_ui.dart';
 import '../shared_ui/app_navigation.dart';
+
+final _dandanplayWebsiteUri = Uri.https('www.dandanplay.com', '/');
 
 class SettingsHubPage extends ConsumerWidget {
   const SettingsHubPage({super.key});
@@ -1452,10 +1455,10 @@ class ServiceSettingsPage extends ConsumerWidget {
   ) {
     return [
       const _InfoCard(
-        title: '弹幕源：Zeluna / 弹弹play / Bilibili / 自建弹幕库',
+        title: '弹幕源：Zeluna / 弹弹play开放弹幕网络 / Bilibili / 自建弹幕库',
         lines: [
           'Zeluna 用户弹幕默认接入：游客可读取，登录后可发送，也可删除自己发送的弹幕。',
-          '弹弹play 使用官方开放平台按番名和集数匹配弹幕库，需要填写 AppId 和 AppSecret。',
+          '弹弹play开放弹幕网络由 Zeluna 服务端安全接入，客户端无需填写或保存开放平台密钥。',
           '通过 B 站公开番剧搜索匹配到对应分集，再读取该集的公开弹幕。',
           '你也可以填自己的弹幕接口，作为补充来源。',
         ],
@@ -1464,21 +1467,18 @@ class ServiceSettingsPage extends ConsumerWidget {
       SettingsCard(
         children: [
           SettingsSwitchRow(
-            title: '启用弹弹play弹幕',
-            subtitle: settings.dandanplayAppId.trim().isEmpty
-                ? '需要填写开放平台 AppId / AppSecret'
-                : '已配置开放平台凭证',
+            title: '启用弹弹play开放弹幕网络',
+            subtitle: '由 Zeluna 服务端安全接入，无需填写密钥',
             value: settings.dandanplayDanmakuEnabled,
             onChanged: (value) => controller.updateServices(
               settings.copyWith(dandanplayDanmakuEnabled: value),
             ),
           ),
           SettingsActionRow(
-            title: '弹弹play开放平台',
-            subtitle: settings.dandanplayAppId.trim().isEmpty
-                ? '未填写'
-                : settings.dandanplayAppId,
-            onTap: () => _showDandanplayEditor(context, settings, controller),
+            title: '弹弹play开放弹幕网络',
+            subtitle: '官方网站：www.dandanplay.com',
+            icon: Icons.open_in_new,
+            onTap: () => _openDandanplayWebsite(context),
           ),
           SettingsSwitchRow(
             title: '启用 Bilibili 弹幕',
@@ -1513,57 +1513,18 @@ class ServiceSettingsPage extends ConsumerWidget {
     ];
   }
 
-  void _showDandanplayEditor(
-    BuildContext context,
-    ExternalServiceSettings settings,
-    AnimeController controller,
-  ) {
-    final appId = TextEditingController(text: settings.dandanplayAppId);
-    final appSecret = TextEditingController(text: settings.dandanplayAppSecret);
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) {
-        return SafeArea(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              20,
-              18,
-              20,
-              MediaQuery.viewInsetsOf(context).bottom + 20,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: appId,
-                  decoration: const InputDecoration(labelText: 'AppId'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: appSecret,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'AppSecret'),
-                ),
-                const SizedBox(height: 14),
-                FilledButton(
-                  onPressed: () {
-                    controller.updateServices(
-                      settings.copyWith(
-                        dandanplayAppId: appId.text.trim(),
-                        dandanplayAppSecret: appSecret.text.trim(),
-                      ),
-                    );
-                    Navigator.of(context).pop();
-                  },
-                  child: const Text('保存'),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
+  Future<void> _openDandanplayWebsite(BuildContext context) async {
+    var launched = false;
+    try {
+      launched = await launchUrl(
+        _dandanplayWebsiteUri,
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {}
+    if (launched || !context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('没有找到可以打开官网的应用')));
   }
 
   void _showEndpointEditor(
