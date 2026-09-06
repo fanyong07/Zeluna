@@ -180,6 +180,19 @@ gradle.taskGraph.whenReady(
     },
 )
 
+// Keep a single APK/versionCode when targeting one ABI. Flutter's
+// --target-platform only narrows Dart/engine output, not all transitive JNI
+// libraries; --split-per-abi would add ABI-specific versionCode offsets.
+val zelunaTargetAbi = providers.gradleProperty("zelunaTargetAbi").orNull
+if (zelunaTargetAbi != null) {
+    require(zelunaTargetAbi in setOf("arm64-v8a", "armeabi-v7a", "x86_64")) {
+        "Unsupported zelunaTargetAbi."
+    }
+    require(providers.gradleProperty("split-per-abi").orNull != "true") {
+        "Use zelunaTargetAbi without split-per-abi to preserve versionCode."
+    }
+}
+
 android {
     namespace = "app.anime.anime"
     compileSdk = flutter.compileSdkVersion
@@ -220,6 +233,12 @@ android {
     }
 
     buildTypes {
+        configureEach {
+            if (zelunaTargetAbi != null) {
+                ndk.abiFilters.clear()
+                ndk.abiFilters.add(zelunaTargetAbi)
+            }
+        }
         release {
             if (allowLegacyDebugReleaseSigning) {
                 signingConfig = signingConfigs.getByName("debug")

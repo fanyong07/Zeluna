@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string[]]$ArtifactPath,
@@ -14,6 +14,7 @@ $projectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $releaseRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "release"))
 $pathComparison = [System.StringComparison]::OrdinalIgnoreCase
 . (Join-Path $PSScriptRoot 'release_gate.ps1')
+. (Join-Path $PSScriptRoot 'android_release_archive.ps1')
 
 function Resolve-ProjectFile([string]$Path, [string]$Label) {
     $candidate = if ([System.IO.Path]::IsPathRooted($Path)) {
@@ -102,12 +103,25 @@ foreach ($existingPath in Get-ChildItem -LiteralPath $releaseRoot -File -Filter 
 
 $artifacts = foreach ($artifact in $resolvedArtifacts | Sort-Object FullName) {
     $relative = $artifact.FullName.Substring($projectRoot.Length).TrimStart('\', '/')
-    [ordered]@{
+    $entry = [ordered]@{
         name = $artifact.Name
         path = $relative.Replace('\', '/')
         bytes = $artifact.Length
         sha256 = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
+    if ($artifact.Extension -eq '.apk') {
+        $buildReceiptPath = "$($artifact.FullName).build.json"
+        if (-not (Test-Path -LiteralPath $buildReceiptPath -PathType Leaf)) {
+            throw 'APK build receipt is required for release manifest provenance.'
+        }
+        $metadata = Get-Content -LiteralPath $buildReceiptPath -Raw | ConvertFrom-Json
+        $verified = Read-ZelunaAndroidBuildReceipt `
+            $artifact.FullName $buildReceiptPath $commit $resolvedVersion ([string]$metadata.target_platform)
+        $entry['native_abis'] = @($verified.native_abis)
+        $entry['legacy_debug_signing'] = [bool]$verified.legacy_debug_signing
+        $entry['build_receipt_sha256'] = (Get-FileHash -LiteralPath $buildReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $entry
 }
 
 $manifest = [ordered]@{
