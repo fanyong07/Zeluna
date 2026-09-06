@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 from server.playback_discovery.strategy import (
     DiscoverySource,
@@ -70,6 +71,107 @@ class ProgressiveAliasSearchTests(unittest.IsolatedAsyncioTestCase):
                 )
                 if source_count > 32:
                     self.assertLess(len(queried_sources), source_count)
+
+    async def test_staggered_fallback_timers_do_not_starve_peer_sources(self):
+        sources = [
+            DiscoverySource(key=f"source-{index}", weight=10 - index)
+            for index in range(5)
+        ]
+        attempts: list[Attempt] = []
+        release_late_timers = asyncio.Event()
+        real_sleep = asyncio.sleep
+        timers_started = 0
+
+        async def staggered_sleep(delay: float) -> None:
+            nonlocal timers_started
+            if delay <= 0:
+                await real_sleep(0)
+                return
+            timers_started += 1
+            if timers_started == 1:
+                await real_sleep(0)
+            else:
+                # Model separate timer wakeups without relying on wall-clock
+                # precision: one worker can run before its peers are released.
+                await release_late_timers.wait()
+
+        async def query(source: DiscoverySource, alias: str) -> Attempt:
+            attempt = Attempt(source.key, alias)
+            attempts.append(attempt)
+            if len(attempts) == 2:
+                release_late_timers.set()
+            return attempt
+
+        with patch(
+            "server.playback_discovery.strategy.asyncio.sleep",
+            side_effect=staggered_sleep,
+        ):
+            async with asyncio.timeout(1):
+                results = [
+                    result
+                    async for result in progressive_alias_search(
+                        sources,
+                        ["first", "second"],
+                        query=query,
+                        is_terminal=lambda _result: False,
+                        query_budget=2,
+                        max_concurrency=5,
+                        fallback_delay_seconds=0.35,
+                    )
+                ]
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            [(attempt.source, attempt.alias) for attempt in attempts],
+            [("source-0", "first"), ("source-1", "first")],
+        )
+
+    async def test_closing_before_fallback_wave_cancels_the_timer(self):
+        timer_started = asyncio.Event()
+        never = asyncio.Event()
+        real_sleep = asyncio.sleep
+        waiting_timers = 0
+        attempts: list[str] = []
+
+        async def delayed_sleep(delay: float) -> None:
+            nonlocal waiting_timers
+            if delay <= 0:
+                await real_sleep(0)
+                return
+            waiting_timers += 1
+            timer_started.set()
+            try:
+                await never.wait()
+            finally:
+                waiting_timers -= 1
+
+        async def query(source: DiscoverySource, alias: str) -> Attempt:
+            attempts.append(source.key)
+            await timer_started.wait()
+            return Attempt(source.key, alias, terminal=True)
+
+        with patch(
+            "server.playback_discovery.strategy.asyncio.sleep",
+            side_effect=delayed_sleep,
+        ):
+            iterator = progressive_alias_search(
+                [
+                    DiscoverySource(key="preferred", preferred=True),
+                    DiscoverySource(key="fallback"),
+                ],
+                ["first"],
+                query=query,
+                is_terminal=lambda result: result.terminal,
+                query_budget=2,
+                max_concurrency=2,
+                fallback_delay_seconds=0.35,
+            )
+            first = await asyncio.wait_for(anext(iterator), timeout=1)
+            await iterator.aclose()
+
+        self.assertEqual(first.source, "preferred")
+        self.assertEqual(attempts, ["preferred"])
+        self.assertEqual(waiting_timers, 0)
 
     async def test_terminal_source_does_not_spend_more_aliases(self):
         sources = [

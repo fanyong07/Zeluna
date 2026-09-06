@@ -57,6 +57,15 @@ async def progressive_alias_search(
     remaining_budget = query_budget
     queue: asyncio.Queue[T | object] = asyncio.Queue()
     completed = object()
+    # Wake one fallback wave together. Per-worker timers can expire on
+    # different event-loop turns and let the first worker spend a second
+    # alias unit before its peers have even entered the semaphore queue.
+    fallback_wave = (
+        asyncio.create_task(asyncio.sleep(fallback_delay_seconds))
+        if fallback_delay_seconds > 0
+        and any(not source.preferred for source in ordered_sources)
+        else None
+    )
 
     async def claim_query_unit() -> bool:
         nonlocal remaining_budget
@@ -67,8 +76,8 @@ async def progressive_alias_search(
             return True
 
     async def run_source(source: DiscoverySource) -> None:
-        if not source.preferred and fallback_delay_seconds > 0:
-            await asyncio.sleep(fallback_delay_seconds)
+        if not source.preferred and fallback_wave is not None:
+            await asyncio.shield(fallback_wave)
         for alias in ordered_aliases:
             async with semaphore:
                 if not await claim_query_unit():
@@ -102,9 +111,10 @@ async def progressive_alias_search(
                 return
             yield result
     finally:
-        for worker in workers:
-            if not worker.done():
-                worker.cancel()
-        if not finisher.done():
-            finisher.cancel()
-        await asyncio.gather(*workers, finisher, return_exceptions=True)
+        tasks = [*workers, finisher]
+        if fallback_wave is not None:
+            tasks.append(fallback_wave)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
