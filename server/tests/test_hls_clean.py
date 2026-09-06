@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -159,6 +161,7 @@ class CleanUrlTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handler)
         ) as client:
+            kwargs.setdefault("validate_url", AsyncMock(return_value=True))
             return await clean_url(url, client=client, **kwargs)
 
     async def test_media_playlist_is_fetched_and_cleaned(self):
@@ -222,6 +225,126 @@ class CleanUrlTests(unittest.IsolatedAsyncioTestCase):
             headers={"Referer": "https://site.example/play"},
         )
         self.assertEqual(seen["referer"], "https://site.example/play")
+
+
+    async def test_redirected_master_and_child_use_their_final_relative_bases(self):
+        seen = []
+        routes = {
+            "/start.m3u8": httpx.Response(302, headers={"Location": "/m/master.m3u8"}),
+            "/m/master.m3u8": httpx.Response(200, text=(
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nchild/list.m3u8\n"
+            )),
+            "/m/child/list.m3u8": httpx.Response(307, headers={"Location": "../../final/list.m3u8"}),
+            "/final/list.m3u8": httpx.Response(200, text=_feature_playlist()),
+        }
+
+        def handler(request):
+            seen.append(str(request.url))
+            return routes[request.url.path]
+
+        validator = AsyncMock(return_value=True)
+        result = await self._run(handler, "https://cdn.example/start.m3u8", validate_url=validator)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.variant_url, "https://cdn.example/final/list.m3u8")
+        self.assertIn("https://cdn.example/final/main0.ts", result.playlist)
+        self.assertEqual([call.args[0] for call in validator.await_args_list], seen)
+
+    async def test_redirect_loop_is_bounded_even_with_auto_redirect_client(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(302, headers={"Location": "/loop.m3u8"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as client:
+            result = await clean_url("https://cdn.example/loop.m3u8", client=client,
+                                     max_redirects=2, validate_url=AsyncMock(return_value=True))
+        self.assertIsNone(result)
+        self.assertEqual(len(seen), 3)
+
+    async def test_stream_limits_abort_master_and_variant_and_close_response(self):
+        for variant in (False, True):
+            with self.subTest(variant=variant):
+                stream = _CountingStream([b"#EXTM3U\n", b"x" * 300, b"must not read"])
+
+                def handler(request):
+                    if variant and request.url.path == "/master.m3u8":
+                        return httpx.Response(200, text=(
+                            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nchild.m3u8\n"
+                        ))
+                    return httpx.Response(200, stream=stream)
+
+                result = await self._run(handler, "https://cdn.example/master.m3u8", max_bytes=256)
+                self.assertIsNone(result)
+                self.assertEqual(stream.reads, 2)
+                self.assertTrue(stream.closed)
+
+    async def test_large_content_length_is_refused_without_reading_body(self):
+        stream = _CountingStream([b"must not read"])
+        result = await self._run(
+            lambda r: httpx.Response(200, headers={"Content-Length": "99999"}, stream=stream),
+            "https://cdn.example/list.m3u8", max_bytes=256,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(stream.reads, 0)
+        self.assertTrue(stream.closed)
+
+    async def test_unexpected_compression_is_refused_without_decompressing(self):
+        stream = _CountingStream([b"must not decode compressed bytes"])
+
+        def handler(request):
+            self.assertEqual(request.headers["Accept-Encoding"], "identity")
+            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=stream)
+
+        self.assertIsNone(await self._run(handler, "https://cdn.example/list.m3u8"))
+        self.assertEqual(stream.reads, 0)
+        self.assertTrue(stream.closed)
+
+    async def test_one_timeout_budget_includes_dns_validation(self):
+        async def slow_validation(url):
+            await asyncio.sleep(1)
+            return True
+
+        seen = []
+        result = await self._run(lambda r: seen.append(r) or httpx.Response(200),
+                                 "https://cdn.example/list.m3u8", timeout_seconds=0.01,
+                                 validate_url=slow_validation)
+        self.assertIsNone(result)
+        self.assertEqual(seen, [])
+
+    async def test_timeout_closes_slow_response_stream(self):
+        class SlowStream(_CountingStream):
+            async def __aiter__(self):
+                yield b"#EXTM3U\n"
+                await asyncio.sleep(1)
+                yield b"late"
+
+        stream = SlowStream([])
+        result = await self._run(lambda r: httpx.Response(200, stream=stream),
+                                 "https://cdn.example/list.m3u8", timeout_seconds=0.01)
+        self.assertIsNone(result)
+        self.assertTrue(stream.closed)
+
+    async def test_non_playlist_and_nested_master_fall_back(self):
+        for body in ["not an HLS playlist", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nchild.m3u8\n"]:
+            with self.subTest(body=body):
+                self.assertIsNone(await self._run(lambda r: httpx.Response(200, text=body),
+                                                 "https://cdn.example/list.m3u8"))
+
+
+class _CountingStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.reads = 0
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.reads += 1
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Stable-identity playback discovery routes."""
 
+import asyncio
 import logging
 
 import httpx
@@ -7,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..aggregator import _is_public_http_url
+from ..public_http import PublicHttpTransport, is_public_http_url as _is_public_http_url
 from ..catalog import parse_stable_id
 from ..dependencies import get_session
 from ..playback import playback_service
@@ -28,8 +29,9 @@ playlist_transport: httpx.AsyncBaseTransport | None = None
 def _playlist_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         timeout=_PLAYLIST_TIMEOUT_SECONDS,
-        follow_redirects=True,
-        transport=playlist_transport,
+        follow_redirects=False,
+        trust_env=False,
+        transport=playlist_transport if playlist_transport is not None else PublicHttpTransport(),
     )
 
 
@@ -90,8 +92,8 @@ async def cleaned_playlist(token: str) -> PlainTextResponse:
     安全边界:
       * 只接受服务端签发的 token,**不接受任何裸 URL 参数**(否则该端点
         会变成开放代理 / SSRF 跳板);
-      * 目标须为公网 HTTP(S),经 ``_is_public_http_url`` 复核;
-      * 只读取清单文本、只在内存中重写,不落盘、不代理媒体分片;
+      * 每个跳转和子清单均须为公网 HTTP(S),实际连接固定到已验证 IP;
+      * 各层流式限额和整条链超时,只在内存重写清单,不代理媒体分片;
       * 剪裁失败一律 502 交由客户端回退原直链,不静默返回坏清单。
     """
     try:
@@ -99,17 +101,24 @@ async def cleaned_playlist(token: str) -> PlainTextResponse:
     except PlaylistTokenError as error:
         raise HTTPException(400, str(error)) from error
 
-    if not await _is_public_http_url(target.url):
-        raise HTTPException(400, "清单地址不在允许范围内")
-
-    headers = {"Referer": target.referer} if target.referer else None
-    async with _playlist_client() as client:
-        result = await clean_url(
-            target.url,
-            client=client,
-            headers=headers,
-            max_bytes=_PLAYLIST_MAX_BYTES,
-        )
+    result = None
+    try:
+        # Include initial DNS validation, redirects, and child reads in one budget.
+        async with asyncio.timeout(_PLAYLIST_TIMEOUT_SECONDS):
+            if not await _is_public_http_url(target.url):
+                raise HTTPException(400, "清单地址不在允许范围内")
+            headers = {"Referer": target.referer} if target.referer else None
+            async with _playlist_client() as client:
+                result = await clean_url(
+                    target.url,
+                    client=client,
+                    headers=headers,
+                    max_bytes=_PLAYLIST_MAX_BYTES,
+                    validate_url=_is_public_http_url,
+                    timeout_seconds=_PLAYLIST_TIMEOUT_SECONDS,
+                )
+    except TimeoutError:
+        pass
     if result is None:
         raise HTTPException(502, "清单不可用,请回退原始线路")
 

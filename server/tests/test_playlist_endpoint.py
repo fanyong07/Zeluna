@@ -145,5 +145,62 @@ class PlaylistEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+    def test_redirect_to_private_host_is_blocked_before_request(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            if len(seen) == 1:
+                return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+            return httpx.Response(200, text=_playlist_with_ads())
+
+        with (
+            patch("server.routers.playback.playlist_transport", httpx.MockTransport(handler)),
+            patch("server.routers.playback._is_public_http_url", new=AsyncMock(
+                side_effect=lambda url: httpx.URL(url).host == "cdn.example"
+            )),
+        ):
+            response = self.client.get(f"/api/v3/playlist/{self._token()}")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(len(seen), 1)
+
+    def test_private_variant_is_blocked_before_request(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            if len(seen) == 1:
+                return httpx.Response(200, text=(
+                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n"
+                    "http://127.0.0.1/private.m3u8\n"
+                ))
+            return httpx.Response(200, text=_playlist_with_ads())
+
+        with (
+            patch("server.routers.playback.playlist_transport", httpx.MockTransport(handler)),
+            patch("server.routers.playback._is_public_http_url", new=AsyncMock(
+                side_effect=lambda url: httpx.URL(url).host == "cdn.example"
+            )),
+        ):
+            response = self.client.get(f"/api/v3/playlist/{self._token()}")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(len(seen), 1)
+
+    def test_oversized_variant_is_refused(self):
+        def handler(request):
+            if request.url.path.endswith("index.m3u8"):
+                return httpx.Response(200, text=(
+                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nchild.m3u8\n"
+                ))
+            return httpx.Response(200, text=_playlist_with_ads())
+
+        with (
+            patch("server.routers.playback.playlist_transport", httpx.MockTransport(handler)),
+            patch("server.routers.playback._PLAYLIST_MAX_BYTES", 256),
+        ):
+            response = self.client.get(f"/api/v3/playlist/{self._token()}")
+        self.assertEqual(response.status_code, 502)
+
+
 if __name__ == "__main__":
     unittest.main()

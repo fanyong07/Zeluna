@@ -19,12 +19,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable
 import statistics
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+from ..public_http import is_public_http_url
 
 #: 组级判据:短分片簇的时长上限 = max(此值, 全局中位数/3)
 _MIN_SHORT_THRESHOLD_SECONDS = 2.0
@@ -299,41 +303,98 @@ def needs_clean(url: str, declared_format: str = "") -> bool:
     return (declared_format or "").strip().lower() in {"hls", "m3u8"}
 
 
+async def _fetch_playlist(
+    url: str,
+    *,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    max_bytes: int,
+    validate_url: Callable[[str], Awaitable[bool]],
+    max_redirects: int,
+) -> tuple[str, str] | None:
+    # Explicit redirects keep every hop inside the same validation/size budget.
+    for hop in range(max_redirects + 1):
+        if not await validate_url(url):
+            return None
+        async with client.stream(
+            "GET", url, headers=headers, follow_redirects=False,
+        ) as response:
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                if not location or hop == max_redirects:
+                    return None
+                url = str(response.url.join(location))
+                continue
+            if response.status_code != 200:
+                return None
+            # Avoid decompression bombs: request identity and reject servers
+            # ignoring it. The caller can fall back to the original stream.
+            if response.headers.get("content-encoding", "identity").lower() not in (
+                "", "identity",
+            ):
+                return None
+            length = response.headers.get("content-length")
+            if length is not None:
+                try:
+                    if int(length) < 0 or int(length) > max_bytes:
+                        return None
+                except ValueError:
+                    return None
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > max_bytes:
+                    return None
+                body.extend(chunk)
+            text = body.decode("utf-8-sig")
+            if not text.lstrip().startswith("#EXTM3U"):
+                return None
+            return text, str(response.url)
+    return None
+
+
 async def clean_url(
     url: str,
     *,
     client: httpx.AsyncClient,
-    headers: dict | None = None,
+    headers: dict[str, str] | None = None,
     max_bytes: int = 4 * 1024 * 1024,
+    validate_url: Callable[[str], Awaitable[bool]] = is_public_http_url,
+    max_redirects: int = 5,
+    timeout_seconds: float = 12.0,
 ) -> CleanResult | None:
-    """拉取清单并剪裁。失败返回 None,由调用方回退原直链。
+    """Fetch bounded public playlists, or return None for original-line fallback.
 
-    主清单会先选一路 variant 再剪。不写磁盘、不下载媒体分片。
+    The production client uses PublicHttpTransport to pin validated DNS answers.
+    No media segments or encryption keys are fetched by this function.
     """
     request_headers = dict(headers or {})
+    request_headers["Accept-Encoding"] = "identity"
     try:
-        response = await client.get(url, headers=request_headers)
-        if response.status_code != 200:
-            return None
-        text = response.text
-        if len(response.content) > max_bytes:
-            return None
-    except httpx.HTTPError:
-        return None
-
-    variant_url: str | None = None
-    if is_master_playlist(text):
-        variant_url = pick_variant(text, url)
-        if not variant_url:
-            return None
-        try:
-            child = await client.get(variant_url, headers=request_headers)
-            if child.status_code != 200:
+        async with asyncio.timeout(timeout_seconds):
+            fetched = await _fetch_playlist(
+                url, client=client, headers=request_headers, max_bytes=max_bytes,
+                validate_url=validate_url, max_redirects=max_redirects,
+            )
+            if fetched is None:
                 return None
-            text = child.text
-        except httpx.HTTPError:
-            return None
-
-    base = variant_url or url
-    playlist, report = clean_playlist(text, base)
-    return CleanResult(playlist=playlist, report=report, variant_url=variant_url)
+            text, base = fetched
+            variant_url = None
+            if is_master_playlist(text):
+                variant_url = pick_variant(text, base)
+                if not variant_url:
+                    return None
+                fetched = await _fetch_playlist(
+                    variant_url, client=client, headers=request_headers,
+                    max_bytes=max_bytes, validate_url=validate_url,
+                    max_redirects=max_redirects,
+                )
+                if fetched is None:
+                    return None
+                text, base = fetched
+                variant_url = base
+                if is_master_playlist(text):
+                    return None
+            playlist, report = clean_playlist(text, base)
+            return CleanResult(playlist=playlist, report=report, variant_url=variant_url)
+    except (httpx.HTTPError, httpx.InvalidURL, TimeoutError, ValueError):
+        return None

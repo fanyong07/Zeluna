@@ -22,6 +22,8 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .m3u8_resolver import resolver as m3u8_resolver
+from .public_http import is_public_http_url as _is_public_http_url
+from .public_http import is_public_ip as _is_public_ip
 from .playback_discovery import SourceDiscoveryDiagnostic, SourceDiscoveryStatus
 from .playback_discovery.strategy import (
     DiscoverySource,
@@ -166,50 +168,6 @@ def _prepare_discovery_aliases(values: list[str]) -> list[str]:
         value
         for _index, value in sorted(enumerate(unique), key=priority)
     ]
-
-
-def _is_public_ip(value: str) -> bool:
-    try:
-        return ipaddress.ip_address(value).is_global
-    except ValueError:
-        return False
-
-
-async def _is_public_http_url(url: str) -> bool:
-    """Reject local/private destinations before the backend probes a line."""
-    try:
-        parsed = urlparse(url)
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    except ValueError:
-        return False
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        return False
-    host = parsed.hostname.strip().lower()
-    if host == "localhost" or host.endswith((".localhost", ".local")):
-        return False
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        loop = asyncio.get_running_loop()
-        try:
-            addresses = await loop.run_in_executor(
-                None,
-                lambda: socket.getaddrinfo(
-                    host,
-                    port,
-                    type=socket.SOCK_STREAM,
-                ),
-            )
-        except OSError:
-            return False
-        resolved = {item[4][0] for item in addresses if item[4]}
-        return bool(resolved) and all(_is_public_ip(item) for item in resolved)
-    return _is_public_ip(host)
 
 
 def _is_client_probe_candidate_url(url: str, declared_format: str = "") -> bool:
