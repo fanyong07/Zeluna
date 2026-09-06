@@ -16,7 +16,16 @@ import 'animeko_webview_sniffer.dart';
 import 'csp_rule_support.dart';
 import 'drpy_runtime.dart';
 import 'rule_models.dart';
+import 'rule_http_policy.dart';
+import 'rule_page_client.dart';
+import 'rule_playback_cancellation.dart';
 import 'rule_security.dart';
+
+// Preserve the existing public import surface for callers.
+export 'rule_playback_cancellation.dart';
+export 'rule_page_client.dart' show HttpException;
+export 'rule_http_policy.dart'
+    show ruleRequestUriForWebTest, ruleRequestHeadersForWebTest;
 
 const _playableProbeTimeout = Duration(seconds: 6);
 const _playlistMetadataTimeout = Duration(seconds: 3);
@@ -30,60 +39,15 @@ const _maxDrpyMediaRedirects = 3;
 const _maxRuleRedirects = 5;
 const _maxConcurrentPlayableProbes = 4;
 const _maxConcurrentMetadataProbes = 4;
-const _responseCacheTtl = Duration(minutes: 5);
 const _availableProbeCacheTtl = Duration(minutes: 2);
 const _failedProbeCacheTtl = Duration(seconds: 20);
-const _maxResponseCacheEntries = 128;
 const _maxProbeCacheEntries = 256;
-
-class RulePlaybackCancellationToken {
-  final Set<void Function()> _callbacks = <void Function()>{};
-  bool _cancelled = false;
-
-  bool get isCancelled => _cancelled;
-
-  void cancel() {
-    if (_cancelled) return;
-    _cancelled = true;
-    final callbacks = _callbacks.toList(growable: false);
-    _callbacks.clear();
-    for (final callback in callbacks) {
-      try {
-        callback();
-      } catch (_) {
-        // Cancellation is best-effort; one client must not prevent the rest
-        // of the lookup session from being stopped.
-      }
-    }
-  }
-
-  void Function() register(void Function() callback) {
-    if (_cancelled) {
-      try {
-        callback();
-      } catch (_) {
-        // Already cancelled: registering work must not revive or fail it.
-      }
-      return () {};
-    }
-    _callbacks.add(callback);
-    return () => _callbacks.remove(callback);
-  }
-}
 
 final Object _rulePlaybackResolveContextKey = Object();
 final Object _drpyPublicMediaProbeKey = Object();
 
-class _RulePlaybackResolveContext {
-  const _RulePlaybackResolveContext(this.cancellationToken, {this.rule});
-
-  final RulePlaybackCancellationToken? cancellationToken;
-  final RulePlugin? rule;
-}
-
-_RulePlaybackResolveContext? get _activeRulePlaybackResolveContext =>
-    Zone.current[_rulePlaybackResolveContextKey]
-        as _RulePlaybackResolveContext?;
+RulePageRequestScope? get _activeRulePlaybackResolveContext =>
+    Zone.current[_rulePlaybackResolveContextKey] as RulePageRequestScope?;
 
 bool get _requiresDrpyPublicMediaProbe =>
     Zone.current[_drpyPublicMediaProbeKey] == true;
@@ -116,8 +80,7 @@ class RulePlaybackResolver {
   final DrpyRuntime _drpyRuntime;
   final AnimekoWebViewSniffer _animekoWebViewSniffer;
   final Duration timeout;
-  final Map<String, _TimedCacheEntry<String>> _responseCache = {};
-  final Map<String, Future<String>> _responseRequests = {};
+  late final _pages = RulePageClient(timeout: timeout);
   final Map<String, _TimedCacheEntry<_PlayableProbeResult>> _probeCache = {};
   final Map<String, Future<_PlayableProbeResult>> _probeRequests = {};
   final _playableProbeLimiter = _AsyncLimiter(_maxConcurrentPlayableProbes);
@@ -128,8 +91,7 @@ class RulePlaybackResolver {
 
   void clearCaches() {
     _cacheGeneration++;
-    _responseCache.clear();
-    _responseRequests.clear();
+    _pages.clearCaches();
     _probeCache.clear();
     _probeRequests.clear();
   }
@@ -161,7 +123,7 @@ class RulePlaybackResolver {
       );
     }
 
-    final resolveContext = _RulePlaybackResolveContext(cancellationToken);
+    final resolveContext = RulePageRequestScope(cancellationToken);
     return runZoned(() async {
       final injectedClient = line.publicHttpOnly
           ? _drpyPublicClient ?? _client
@@ -213,10 +175,7 @@ class RulePlaybackResolver {
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     if (cancellationToken?.isCancelled ?? false) return const [];
-    final resolveContext = _RulePlaybackResolveContext(
-      cancellationToken,
-      rule: rule,
-    );
+    final resolveContext = RulePageRequestScope(cancellationToken, rule: rule);
     return runZoned(() async {
       if (rule.requiresCaptcha || rule.unsupportedReason != null) {
         if (rule.engine.toLowerCase() == 'android-csp') return const [];
@@ -385,8 +344,8 @@ class RulePlaybackResolver {
       final baseHeaders = _headers(rule: rule, referer: referer);
       final credentialOrigin = Uri.tryParse(rule.baseUrl.trim());
       final headers = credentialOrigin == null
-          ? _withoutOriginBoundMediaHeaders(baseHeaders)
-          : _mediaChildHeaders(credentialOrigin, target, baseHeaders);
+          ? withoutRuleCredentials(baseHeaders)
+          : ruleChildHeaders(credentialOrigin, target, baseHeaders);
       for (final entry in candidate.headers.entries) {
         final name = entry.key.trim();
         final value = entry.value.trim();
@@ -1753,184 +1712,31 @@ class RulePlaybackResolver {
     http.Client client,
     Uri url,
     Map<String, String> headers,
-  ) async {
-    _throwIfLookupCancelled(url);
-    _ensureSandboxedRuleUri(url, RuleUrlPurpose.page);
-    final requestUri = _ruleRequestUri(url);
-    final requestHeaders = _ruleRequestHeaders(url, headers);
-    final key = _requestCacheKey('GET', requestUri, requestHeaders);
-    final cached = _freshCacheValue(_responseCache, key);
-    if (cached != null) return cached;
-
-    final inFlightKey = _resolveScopedInFlightKey(key);
-    final existing = _responseRequests[inFlightKey];
-    if (existing != null) return existing;
-
-    final cacheGeneration = _cacheGeneration;
-    final request = _sendBufferedRequest(
-      client,
-      'GET',
-      requestUri,
-      requestHeaders,
-    ).then(_responseText);
-    _responseRequests[inFlightKey] = request;
-    try {
-      final result = await request;
-      _throwIfLookupCancelled(requestUri);
-      if (cacheGeneration == _cacheGeneration) {
-        _storeCacheValue(
-          _responseCache,
-          key,
-          result,
-          _responseCacheTtl,
-          _maxResponseCacheEntries,
-        );
-      }
-      return result;
-    } finally {
-      if (identical(_responseRequests[inFlightKey], request)) {
-        _responseRequests.remove(inFlightKey);
-      }
-    }
-  }
-
-  void _ensureSandboxedRuleUri(Uri uri, RuleUrlPurpose purpose) {
-    final rule = _activeRulePlaybackResolveContext?.rule;
-    if (rule == null) return;
-    if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
-      throw StateError('这个来源想访问未授权的网站，已拦下。');
-    }
-  }
+  ) => _pages.get(
+    client,
+    url,
+    headers,
+    scope: _activeRulePlaybackResolveContext,
+  );
 
   Future<String> _post(
     http.Client client,
     Uri url,
     String body,
     Map<String, String> headers,
-  ) async {
-    _throwIfLookupCancelled(url);
-    _ensureSandboxedRuleUri(url, RuleUrlPurpose.page);
-    final requestUri = _ruleRequestUri(url);
-    final requestHeaders = _ruleRequestHeaders(url, headers);
-    final key = _requestCacheKey(
-      'POST',
-      requestUri,
-      requestHeaders,
-      body: body,
-    );
-    final cached = _freshCacheValue(_responseCache, key);
-    if (cached != null) return cached;
+  ) => _pages.post(
+    client,
+    url,
+    body,
+    headers,
+    scope: _activeRulePlaybackResolveContext,
+  );
 
-    final inFlightKey = _resolveScopedInFlightKey(key);
-    final existing = _responseRequests[inFlightKey];
-    if (existing != null) return existing;
-
-    final cacheGeneration = _cacheGeneration;
-    final request = _sendBufferedRequest(
-      client,
-      'POST',
-      requestUri,
-      requestHeaders,
-      body: body,
-    ).then(_responseText);
-    _responseRequests[inFlightKey] = request;
-    try {
-      final result = await request;
-      _throwIfLookupCancelled(requestUri);
-      if (cacheGeneration == _cacheGeneration) {
-        _storeCacheValue(
-          _responseCache,
-          key,
-          result,
-          _responseCacheTtl,
-          _maxResponseCacheEntries,
-        );
-      }
-      return result;
-    } finally {
-      if (identical(_responseRequests[inFlightKey], request)) {
-        _responseRequests.remove(inFlightKey);
-      }
-    }
-  }
-
-  Future<http.Response> _sendBufferedRequest(
-    http.Client client,
-    String method,
-    Uri uri,
-    Map<String, String> headers, {
-    String? body,
-  }) async {
-    final abortTrigger = Completer<void>();
-    void abort() {
-      if (!abortTrigger.isCompleted) abortTrigger.complete();
-    }
-
-    final cancellationToken =
-        _activeRulePlaybackResolveContext?.cancellationToken;
-    final unregisterCancellation = cancellationToken?.register(abort);
-    final sandboxed = _activeRulePlaybackResolveContext?.rule != null;
-    final operation = () async {
-      var currentMethod = method;
-      var currentUri = uri;
-      var currentHeaders = headers;
-      var currentBody = body;
-      for (var redirect = 0; ; redirect++) {
-        _ensureSandboxedRuleUri(currentUri, RuleUrlPurpose.page);
-        final request =
-            http.AbortableRequest(
-                currentMethod,
-                currentUri,
-                abortTrigger: abortTrigger.future,
-              )
-              ..followRedirects = !sandboxed
-              ..headers.addAll(currentHeaders);
-        if (currentBody != null) request.body = currentBody;
-        final response = await client.send(request);
-        final location = response.headers['location'];
-        if (!sandboxed ||
-            !_isHttpRedirect(response.statusCode) ||
-            location == null ||
-            location.trim().isEmpty) {
-          return http.Response.fromStream(response);
-        }
-        if (redirect >= _maxRuleRedirects) {
-          final subscription = response.stream.listen(null);
-          await subscription.cancel();
-          throw StateError('这个来源的网页一直在跳转，已停下。');
-        }
-        final nextUri = currentUri.resolve(location.trim());
-        _ensureSandboxedRuleUri(nextUri, RuleUrlPurpose.page);
-        currentHeaders = _mediaChildHeaders(
-          currentUri,
-          nextUri,
-          currentHeaders,
-        );
-        if (response.statusCode == 303 ||
-            ((response.statusCode == 301 || response.statusCode == 302) &&
-                currentMethod.toUpperCase() == 'POST')) {
-          currentMethod = 'GET';
-          currentBody = null;
-          currentHeaders = _withoutHeaderIgnoreCase(
-            currentHeaders,
-            'content-type',
-          );
-        }
-        final subscription = response.stream.listen(null);
-        await subscription.cancel();
-        currentUri = nextUri;
-      }
-    }();
-    try {
-      return await operation.timeout(
-        timeout,
-        onTimeout: () {
-          abort();
-          throw TimeoutException('Rule request timed out after $timeout.');
-        },
-      );
-    } finally {
-      unregisterCancellation?.call();
+  void _ensureSandboxedRuleUri(Uri uri, RuleUrlPurpose purpose) {
+    final rule = _activeRulePlaybackResolveContext?.rule;
+    if (rule == null) return;
+    if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
+      throw StateError('这个来源想访问未授权的网站，已拦下。');
     }
   }
 
@@ -1944,13 +1750,6 @@ class RulePlaybackResolver {
         false) {
       throw http.RequestAbortedException(uri);
     }
-  }
-
-  String _responseText(http.Response response) {
-    if (response.statusCode < 200 || response.statusCode >= 400) {
-      throw HttpException('HTTP ${response.statusCode}');
-    }
-    return utf8.decode(response.bodyBytes, allowMalformed: true);
   }
 
   PlaybackLine _availableLine(
@@ -2130,10 +1929,10 @@ class RulePlaybackResolver {
     }
     _throwIfLookupCancelled(target);
     _ensureSandboxedRuleUri(target, RuleUrlPurpose.media);
-    final requestUri = _ruleRequestUri(target);
+    final requestUri = ruleRequestUri(target);
     final sourceHeaders = _videoProbeHeaders(headers);
-    final requestHeaders = _ruleRequestHeaders(target, sourceHeaders);
-    final key = _requestCacheKey(
+    final requestHeaders = ruleRequestHeaders(target, sourceHeaders);
+    final key = ruleRequestCacheKey(
       '${enrichMetadata ? 'PROBE' : 'PROBE_QUICK'}'
       '${_requiresDrpyPublicMediaProbe ? '_DRPY_PUBLIC' : ''}',
       requestUri,
@@ -2227,8 +2026,8 @@ class RulePlaybackResolver {
           try {
             final expandedSample = await _sendPlayableProbe(
               client,
-              _ruleRequestUri(sourceUri),
-              _ruleRequestHeaders(
+              ruleRequestUri(sourceUri),
+              ruleRequestHeaders(
                 sourceUri,
                 _manifestProbeHeaders(sourceHeaders),
               ),
@@ -2393,11 +2192,8 @@ class RulePlaybackResolver {
         if (needsExpandedManifest) {
           final expandedSample = await _sendPlayableProbe(
             client,
-            _ruleRequestUri(sourceUri),
-            _ruleRequestHeaders(
-              sourceUri,
-              _manifestProbeHeaders(sourceHeaders),
-            ),
+            ruleRequestUri(sourceUri),
+            ruleRequestHeaders(sourceUri, _manifestProbeHeaders(sourceHeaders)),
             timeout: requestTimeout(),
           );
           if (expandedSample.response.statusCode >= 200 &&
@@ -2409,18 +2205,15 @@ class RulePlaybackResolver {
 
         final variantUri = enriched.variantUri;
         if (variantUri != null) {
-          final childHeaders = _mediaChildHeaders(
+          final childHeaders = ruleChildHeaders(
             sourceUri,
             variantUri,
             sourceHeaders,
           );
           final variantSample = await _sendPlayableProbe(
             client,
-            _ruleRequestUri(variantUri),
-            _ruleRequestHeaders(
-              variantUri,
-              _manifestProbeHeaders(childHeaders),
-            ),
+            ruleRequestUri(variantUri),
+            ruleRequestHeaders(variantUri, _manifestProbeHeaders(childHeaders)),
             timeout: requestTimeout(),
           );
           if (variantSample.response.statusCode >= 200 &&
@@ -2490,15 +2283,15 @@ class RulePlaybackResolver {
     String? lastFailure;
     for (final variant in variants) {
       try {
-        final variantHeaders = _mediaChildHeaders(
+        final variantHeaders = ruleChildHeaders(
           sourceUri,
           variant.uri,
           sourceHeaders,
         );
         final variantSample = await _sendPlayableProbe(
           client,
-          _ruleRequestUri(variant.uri),
-          _ruleRequestHeaders(
+          ruleRequestUri(variant.uri),
+          ruleRequestHeaders(
             variant.uri,
             _manifestProbeHeaders(variantHeaders),
           ),
@@ -2571,15 +2364,15 @@ class RulePlaybackResolver {
           if (!aes128KeyVerified) continue;
         }
         final segmentUri = candidate.uri;
-        final segmentHeaders = _mediaChildHeaders(
+        final segmentHeaders = ruleChildHeaders(
           credentialSourceUri,
           segmentUri,
           sourceHeaders,
         );
         final segmentSample = await _sendPlayableProbe(
           client,
-          _ruleRequestUri(segmentUri),
-          _ruleRequestHeaders(segmentUri, _videoProbeHeaders(segmentHeaders)),
+          ruleRequestUri(segmentUri),
+          ruleRequestHeaders(segmentUri, _videoProbeHeaders(segmentHeaders)),
           timeout: _playlistMetadataTimeout,
         );
         if (segmentSample.response.statusCode >= 200 &&
@@ -2604,15 +2397,15 @@ class RulePlaybackResolver {
     required Uri keyUri,
     required Map<String, String> sourceHeaders,
   }) async {
-    final keyHeaders = _mediaChildHeaders(
+    final keyHeaders = ruleChildHeaders(
       credentialSourceUri,
       keyUri,
       sourceHeaders,
     );
     final sample = await _sendPlayableProbe(
       client,
-      _ruleRequestUri(keyUri),
-      _ruleRequestHeaders(keyUri, _videoProbeHeaders(keyHeaders)),
+      ruleRequestUri(keyUri),
+      ruleRequestHeaders(keyUri, _videoProbeHeaders(keyHeaders)),
       timeout: _playlistMetadataTimeout,
     );
     return sample.response.statusCode >= 200 &&
@@ -2631,15 +2424,15 @@ class RulePlaybackResolver {
     }
     for (final resource in metadata.dashResources.take(3)) {
       try {
-        final childHeaders = _mediaChildHeaders(
+        final childHeaders = ruleChildHeaders(
           sourceUri,
           resource.uri,
           sourceHeaders,
         );
         final sample = await _sendPlayableProbe(
           client,
-          _ruleRequestUri(resource.uri),
-          _ruleRequestHeaders(resource.uri, _videoProbeHeaders(childHeaders)),
+          ruleRequestUri(resource.uri),
+          ruleRequestHeaders(resource.uri, _videoProbeHeaders(childHeaders)),
           timeout: _playlistMetadataTimeout,
         );
         if (sample.response.statusCode < 200 ||
@@ -2675,10 +2468,10 @@ class RulePlaybackResolver {
     }
     final segmentSample = await _sendPlayableProbe(
       client,
-      _ruleRequestUri(segmentUri),
-      _ruleRequestHeaders(
+      ruleRequestUri(segmentUri),
+      ruleRequestHeaders(
         segmentUri,
-        _mediaChildHeaders(credentialSourceUri, segmentUri, sourceHeaders),
+        ruleChildHeaders(credentialSourceUri, segmentUri, sourceHeaders),
       ),
       timeout: timeout,
     );
@@ -2717,7 +2510,7 @@ class RulePlaybackResolver {
     return _sendPlayableProbeOnce(
       client,
       requestUri,
-      _withoutHeaderIgnoreCase(headers, 'range'),
+      withoutRuleHeader(headers, 'range'),
       timeout: remaining,
     );
   }
@@ -2749,7 +2542,7 @@ class RulePlaybackResolver {
         }
         if (drpyPublicOnly) {
           await _drpyRuntime.ensurePublicUri(
-            _proxyUpstreamUri(currentUri) ?? currentUri,
+            ruleProxyUpstreamUri(currentUri) ?? currentUri,
           );
         }
         final request =
@@ -2763,7 +2556,7 @@ class RulePlaybackResolver {
               ..headers.addAll(currentHeaders);
         response = await client.send(request);
         final location = response.headers['location'];
-        if (!_isHttpRedirect(response.statusCode) ||
+        if (!isRuleHttpRedirect(response.statusCode) ||
             location == null ||
             location.trim().isEmpty) {
           break;
@@ -2782,14 +2575,10 @@ class RulePlaybackResolver {
         }
         if (drpyPublicOnly) {
           await _drpyRuntime.ensurePublicUri(
-            _proxyUpstreamUri(nextUri) ?? nextUri,
+            ruleProxyUpstreamUri(nextUri) ?? nextUri,
           );
         }
-        currentHeaders = _mediaChildHeaders(
-          currentUri,
-          nextUri,
-          currentHeaders,
-        );
+        currentHeaders = ruleChildHeaders(currentUri, nextUri, currentHeaders);
         final subscription = response.stream.listen(null);
         await subscription.cancel();
         currentUri = nextUri;
@@ -2879,13 +2668,6 @@ class RulePlaybackResolver {
     }
   }
 }
-
-bool _isHttpRedirect(int statusCode) =>
-    statusCode == 301 ||
-    statusCode == 302 ||
-    statusCode == 303 ||
-    statusCode == 307 ||
-    statusCode == 308;
 
 class _PlayableProbeResponse {
   const _PlayableProbeResponse(
@@ -3060,7 +2842,7 @@ bool _isManifestResponse(Uri requestUri, http.StreamedResponse response) {
   if (contentType.contains('mpegurl') || contentType.contains('dash+xml')) {
     return true;
   }
-  final target = _proxyUpstreamUri(requestUri) ?? requestUri;
+  final target = ruleProxyUpstreamUri(requestUri) ?? requestUri;
   final lower = target.toString().toLowerCase();
   return _manifestExtensionPattern.hasMatch(lower);
 }
@@ -3068,7 +2850,7 @@ bool _isManifestResponse(Uri requestUri, http.StreamedResponse response) {
 Uri _resolvePlaylistReference(Uri playlistUri, String rawReference) {
   final reference = Uri.tryParse(rawReference.trim());
   if (reference == null) return playlistUri.resolve(rawReference);
-  final upstream = _proxyUpstreamUri(reference);
+  final upstream = ruleProxyUpstreamUri(reference);
   if (upstream != null) {
     if (kIsWeb) {
       return reference.hasScheme ? reference : Uri.base.resolveUri(reference);
@@ -3081,7 +2863,7 @@ Uri _resolvePlaylistReference(Uri playlistUri, String rawReference) {
 Uri? _safeHttpPlaylistReference(Uri playlistUri, String rawReference) {
   try {
     final resolved = _resolvePlaylistReference(playlistUri, rawReference);
-    final upstream = _proxyUpstreamUri(resolved) ?? resolved;
+    final upstream = ruleProxyUpstreamUri(resolved) ?? resolved;
     if (!const {'http', 'https'}.contains(upstream.scheme.toLowerCase()) ||
         upstream.host.isEmpty) {
       return null;
@@ -3090,18 +2872,6 @@ Uri? _safeHttpPlaylistReference(Uri playlistUri, String rawReference) {
   } catch (_) {
     return null;
   }
-}
-
-Uri? _proxyUpstreamUri(Uri uri) {
-  if (uri.path != '/media-proxy') return null;
-  final rawTarget = uri.queryParameters['url'];
-  final target = rawTarget == null ? null : Uri.tryParse(rawTarget);
-  if (target == null ||
-      !const {'http', 'https'}.contains(target.scheme.toLowerCase()) ||
-      target.host.isEmpty) {
-    return null;
-  }
-  return target;
 }
 
 int? _responseTotalBytes(http.StreamedResponse response) {
@@ -3811,109 +3581,6 @@ void _storeCacheValue<T>(
   }
 }
 
-String _requestCacheKey(
-  String method,
-  Uri uri,
-  Map<String, String> headers, {
-  String body = '',
-}) {
-  final normalizedHeaders = headers.entries.toList(growable: false)
-    ..sort(
-      (left, right) =>
-          left.key.toLowerCase().compareTo(right.key.toLowerCase()),
-    );
-  final headerKey = normalizedHeaders
-      .map((entry) => '${entry.key.toLowerCase()}:${entry.value}')
-      .join('\n');
-  return '$method\n$uri\n$headerKey\n$body';
-}
-
-Uri _ruleRequestUri(Uri target) {
-  return _ruleRequestUriForPlatform(target, isWeb: kIsWeb, baseUri: Uri.base);
-}
-
-Uri _ruleRequestUriForPlatform(
-  Uri target, {
-  required bool isWeb,
-  required Uri baseUri,
-}) {
-  if (!isWeb) return target;
-  if (!const {'http', 'https'}.contains(baseUri.scheme.toLowerCase())) {
-    return target;
-  }
-  final host = target.host.toLowerCase();
-  if (host == 'localhost' || host == '127.0.0.1' || host == '::1') {
-    return target;
-  }
-  return baseUri.resolve(
-    '/media-proxy?url=${Uri.encodeQueryComponent(target.toString())}',
-  );
-}
-
-Map<String, String> _ruleRequestHeaders(
-  Uri target,
-  Map<String, String> headers,
-) {
-  return _ruleRequestHeadersForPlatform(
-    target,
-    headers,
-    isWeb: kIsWeb,
-    baseUri: Uri.base,
-  );
-}
-
-Map<String, String> _ruleRequestHeadersForPlatform(
-  Uri target,
-  Map<String, String> headers, {
-  required bool isWeb,
-  required Uri baseUri,
-}) {
-  if (!isWeb) return headers;
-  final requestUri = _ruleRequestUriForPlatform(
-    target,
-    isWeb: true,
-    baseUri: baseUri,
-  );
-  final usesMediaProxy =
-      requestUri.path == '/media-proxy' && requestUri.origin == baseUri.origin;
-  if (!usesMediaProxy) return headers;
-  const upstreamNames = <String, String>{
-    'user-agent': 'X-Upstream-User-Agent',
-    'referer': 'X-Upstream-Referer',
-    'authorization': 'X-Upstream-Authorization',
-    'cookie': 'X-Upstream-Cookie',
-    'x-appid': 'X-Upstream-X-AppId',
-    'x-timestamp': 'X-Upstream-X-Timestamp',
-    'x-signature': 'X-Upstream-X-Signature',
-  };
-  final result = <String, String>{};
-  for (final entry in headers.entries) {
-    final upstreamName = upstreamNames[entry.key.toLowerCase()];
-    if (upstreamName != null && entry.value.trim().isNotEmpty) {
-      result[upstreamName] = entry.value;
-    } else {
-      result[entry.key] = entry.value;
-    }
-  }
-  return result;
-}
-
-@visibleForTesting
-Uri ruleRequestUriForWebTest(Uri target, Uri baseUri) =>
-    _ruleRequestUriForPlatform(target, isWeb: true, baseUri: baseUri);
-
-@visibleForTesting
-Map<String, String> ruleRequestHeadersForWebTest(
-  Uri target,
-  Map<String, String> headers,
-  Uri baseUri,
-) => _ruleRequestHeadersForPlatform(
-  target,
-  headers,
-  isWeb: true,
-  baseUri: baseUri,
-);
-
 class _PlayableProbeResult {
   const _PlayableProbeResult(
     this.available,
@@ -4220,15 +3887,6 @@ bool _hasMpegTransportStreamSignature(List<int> bytes) {
     }
   }
   return false;
-}
-
-class HttpException implements Exception {
-  const HttpException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => message;
 }
 
 List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword) {
@@ -5496,8 +5154,8 @@ String _friendlyError(Object error) {
 }
 
 Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
-  final result = _withoutHeaderIgnoreCase(
-    _withoutHeaderIgnoreCase(headers, 'accept'),
+  final result = withoutRuleHeader(
+    withoutRuleHeader(headers, 'accept'),
     'range',
   );
   result['Accept'] = '*/*';
@@ -5506,69 +5164,8 @@ Map<String, String> _videoProbeHeaders(Map<String, String> headers) {
 }
 
 Map<String, String> _manifestProbeHeaders(Map<String, String> headers) {
-  return _withoutHeaderIgnoreCase(headers, 'range')
+  return withoutRuleHeader(headers, 'range')
     ..['Range'] = 'bytes=0-${_maxManifestProbeSampleBytes - 1}';
-}
-
-Map<String, String> _withoutHeaderIgnoreCase(
-  Map<String, String> headers,
-  String name,
-) {
-  final normalized = name.toLowerCase();
-  return {
-    for (final entry in headers.entries)
-      if (entry.key.toLowerCase() != normalized) entry.key: entry.value,
-  };
-}
-
-const _originBoundMediaHeaders = <String>{
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'cookie2',
-  'api-key',
-  'x-api-key',
-  'access-token',
-  'x-auth-token',
-  'x-access-token',
-  'x-appid',
-  'x-timestamp',
-  'x-signature',
-  'x-upstream-authorization',
-  'x-upstream-cookie',
-  'x-upstream-x-appid',
-  'x-upstream-x-timestamp',
-  'x-upstream-x-signature',
-};
-
-Map<String, String> _withoutOriginBoundMediaHeaders(
-  Map<String, String> headers,
-) => {
-  for (final entry in headers.entries)
-    if (!_originBoundMediaHeaders.contains(entry.key.toLowerCase()))
-      entry.key: entry.value,
-};
-
-Map<String, String> _mediaChildHeaders(
-  Uri credentialSourceUri,
-  Uri childUri,
-  Map<String, String> headers,
-) {
-  if (_sameMediaOrigin(credentialSourceUri, childUri)) return headers;
-  return _withoutOriginBoundMediaHeaders(headers);
-}
-
-bool _sameMediaOrigin(Uri left, Uri right) {
-  final leftOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(left) ?? left);
-  final rightOrigin = _normalizedMediaOrigin(_proxyUpstreamUri(right) ?? right);
-  return leftOrigin != null && leftOrigin == rightOrigin;
-}
-
-String? _normalizedMediaOrigin(Uri uri) {
-  final scheme = uri.scheme.toLowerCase();
-  if (scheme != 'http' && scheme != 'https' || uri.host.isEmpty) return null;
-  final port = uri.hasPort ? uri.port : (scheme == 'https' ? 443 : 80);
-  return '$scheme://${uri.host.toLowerCase()}:$port';
 }
 
 /// Short user-facing text for a probe failure.

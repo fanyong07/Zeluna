@@ -14,6 +14,281 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  group('page request contract', () {
+    for (final redirect in <int, String>{
+      301: 'GET',
+      302: 'GET',
+      303: 'GET',
+      307: 'POST',
+      308: 'POST',
+    }.entries) {
+      test(
+        'POST ${redirect.key} follows the expected method and body',
+        () async {
+          final seen = <http.Request>[];
+          final client = MockClient((request) async {
+            seen.add(request);
+            expect(request.followRedirects, isFalse);
+            if (request.url.path == '/search.html') {
+              return http.Response(
+                '',
+                redirect.key,
+                headers: {'location': '/after'},
+              );
+            }
+            return _html('');
+          });
+          final config = _xbpqRule.xbpq!;
+          final rule = _xbpqRule.copyWith(
+            permissionManifest: _kazumiRule.permissionManifest,
+            requestHeaders: const {
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            xbpq: XbpqParserConfig.fromJson({
+              ...config.toJson(),
+              'searchPostBody': 'wd={wd}',
+            }),
+          );
+          await RulePlaybackResolver(client: client).resolveRule(
+            rule: rule,
+            subject: _equivalentTitleSubject,
+            episode: _episode,
+            verifyPlayable: false,
+          );
+          expect(seen, hasLength(2));
+          expect(seen.first.method, 'POST');
+          expect(seen.first.body, 'wd=Test+Anime');
+          expect(seen.last.url.path, '/after');
+          expect(seen.last.method, redirect.value);
+          if (redirect.value == 'GET') {
+            expect(seen.last.body, isEmpty);
+            expect(
+              seen.last.headers.keys.map((key) => key.toLowerCase()),
+              isNot(contains('content-type')),
+            );
+          } else {
+            expect(seen.last.body, 'wd=Test+Anime');
+            expect(
+              seen.last.headers['content-type'],
+              startsWith('application/x-www-form-urlencoded'),
+            );
+          }
+        },
+      );
+    }
+
+    test('an allowed redirect to a different origin strips cookies', () async {
+      final seen = <http.Request>[];
+      final client = MockClient((request) async {
+        seen.add(request);
+        if (seen.length == 1) {
+          return http.Response(
+            '',
+            302,
+            headers: {'location': 'https://example.com:8443/after'},
+          );
+        }
+        return _html('');
+      });
+      await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+      expect(seen, hasLength(2));
+      expect(seen.first.headers['cookie'], 'session=user-value');
+      expect(seen.last.url.port, 8443);
+      expect(
+        seen.last.headers.keys.map((key) => key.toLowerCase()),
+        isNot(contains('cookie')),
+      );
+    });
+
+    test('a failed page response is not cached', () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        return http.Response('', 500);
+      });
+      final resolver = RulePlaybackResolver(client: client);
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final result = await resolver.resolveRule(
+          rule: _kazumiRule,
+          subject: _equivalentTitleSubject,
+          episode: _episode,
+          verifyPlayable: false,
+        );
+        expect(result.single.available, isFalse);
+      }
+      expect(requests, 2);
+    });
+
+    test('rejected page redirects release their response stream', () async {
+      var streamCancelled = false;
+      var requests = 0;
+      final body = StreamController<List<int>>(
+        onCancel: () => streamCancelled = true,
+      );
+      addTearDown(() async {
+        if (!streamCancelled) await body.stream.listen(null).cancel();
+        await body.close();
+      });
+      final client = MockClient.streaming((request, _) async {
+        requests++;
+        return http.StreamedResponse(
+          body.stream,
+          302,
+          headers: {'location': 'https://attacker.test/blocked'},
+        );
+      });
+      final result = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+      expect(result.single.available, isFalse);
+      expect(requests, 1);
+      expect(streamCancelled, isTrue);
+    });
+
+    test('reuses cached pages until clearCaches', () async {
+      var requests = 0;
+      final client = MockClient((request) async {
+        requests++;
+        return _html('');
+      });
+      final resolver = RulePlaybackResolver(client: client);
+      Future<List<PlaybackLine>> lookup() => resolver.resolveRule(
+        rule: _kazumiRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+
+      await lookup();
+      expect(requests, 1);
+      await lookup();
+      expect(requests, 1);
+      resolver.clearCaches();
+      await lookup();
+      expect(requests, 2);
+    });
+
+    test('late pages cannot repopulate a cleared cache', () async {
+      var requests = 0;
+      final started = Completer<void>();
+      final release = Completer<void>();
+      addTearDown(() {
+        if (!release.isCompleted) release.complete();
+      });
+      final client = MockClient((request) async {
+        requests++;
+        if (requests == 1) {
+          started.complete();
+          await release.future;
+        }
+        return _html('');
+      });
+      final resolver = RulePlaybackResolver(client: client);
+      Future<List<PlaybackLine>> lookup() => resolver.resolveRule(
+        rule: _kazumiRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+
+      final oldLookup = lookup();
+      await started.future.timeout(const Duration(seconds: 1));
+      resolver.clearCaches();
+      release.complete();
+      await oldLookup;
+      await lookup();
+      expect(requests, 2);
+      await lookup();
+      expect(requests, 2);
+    });
+
+    test(
+      'cancelling one lookup preserves an identical concurrent lookup',
+      () async {
+        var requests = 0;
+        final started = Completer<void>();
+        final cancelled = Completer<void>();
+        final token = RulePlaybackCancellationToken();
+        addTearDown(token.cancel);
+        final client = MockClient.streaming((request, _) async {
+          requests++;
+          if (requests == 1) {
+            expect(request, isA<http.AbortableRequest>());
+            started.complete();
+            await (request as http.AbortableRequest).abortTrigger;
+            cancelled.complete();
+            throw http.RequestAbortedException(request.url);
+          }
+          return http.StreamedResponse(Stream.value(<int>[]), 200);
+        });
+        final resolver = RulePlaybackResolver(client: client);
+        Future<List<PlaybackLine>> lookup([
+          RulePlaybackCancellationToken? token,
+        ]) => resolver.resolveRule(
+          rule: _kazumiRule,
+          subject: _equivalentTitleSubject,
+          episode: _episode,
+          verifyPlayable: false,
+          cancellationToken: token,
+        );
+
+        final first = lookup(token);
+        await started.future.timeout(const Duration(seconds: 1));
+        final second = lookup();
+        token.cancel();
+        expect(await first.timeout(const Duration(seconds: 1)), isEmpty);
+        final remaining = await second.timeout(const Duration(seconds: 1));
+        expect(remaining, hasLength(1));
+        expect(remaining.single.available, isFalse);
+        await cancelled.future.timeout(const Duration(seconds: 1));
+        expect(requests, 2);
+        await lookup();
+        expect(requests, 2);
+      },
+    );
+
+    test(
+      'timeout aborts the page request without closing the shared client',
+      () async {
+        final aborted = Completer<void>();
+        final client = _PageContractClient(
+          MockClient.streaming((request, _) async {
+            expect(request, isA<http.AbortableRequest>());
+            await (request as http.AbortableRequest).abortTrigger;
+            aborted.complete();
+            throw http.RequestAbortedException(request.url);
+          }),
+        );
+        addTearDown(client.close);
+        final resolver = RulePlaybackResolver(
+          client: client,
+          timeout: const Duration(milliseconds: 50),
+        );
+        final result = await resolver
+            .resolveRule(
+              rule: _kazumiRule,
+              subject: _equivalentTitleSubject,
+              episode: _episode,
+              verifyPlayable: false,
+            )
+            .timeout(const Duration(seconds: 2));
+
+        expect(result, hasLength(1));
+        expect(result.single.available, isFalse);
+        await aborted.future.timeout(const Duration(seconds: 1));
+        expect(client.closeCalls, 0);
+      },
+    );
+  });
+
   test(
     'cancellation aborts requests on a shared client without closing it',
     () async {
@@ -559,6 +834,12 @@ void main() {
       'Referer': 'https://source.example/watch',
       'authorization': 'Bearer secret',
       'Cookie': 'sid=secret',
+      'X-AppId': 'must-not-leave-client',
+      'X-Timestamp': '1700000000',
+      'X-Signature': 'must-not-leave-client',
+      'X-Upstream-X-AppId': 'must-not-pass-through',
+      'X-Upstream-X-Timestamp': 'must-not-pass-through',
+      'X-Upstream-X-Signature': 'must-not-pass-through',
       'Range': 'bytes=0-524287',
     }, base);
     expect(headers['X-Upstream-User-Agent'], 'Fixture Agent');
@@ -568,6 +849,12 @@ void main() {
     expect(headers['Range'], 'bytes=0-524287');
     expect(headers, isNot(contains('Cookie')));
     expect(headers, isNot(contains('authorization')));
+    expect(headers, isNot(contains('X-AppId')));
+    expect(headers, isNot(contains('X-Timestamp')));
+    expect(headers, isNot(contains('X-Signature')));
+    expect(headers, isNot(contains('X-Upstream-X-AppId')));
+    expect(headers, isNot(contains('X-Upstream-X-Timestamp')));
+    expect(headers, isNot(contains('X-Upstream-X-Signature')));
   });
 
   test('Kazumi probes independent playback lines concurrently', () async {
@@ -2902,3 +3189,20 @@ const _movieEpisode = AnimeEpisode(
 );
 
 final _date = DateTime(2026, 5, 5);
+
+class _PageContractClient extends http.BaseClient {
+  _PageContractClient(this.delegate);
+
+  final http.Client delegate;
+  int closeCalls = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      delegate.send(request);
+
+  @override
+  void close() {
+    closeCalls++;
+    delegate.close();
+  }
+}
