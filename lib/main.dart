@@ -11,21 +11,15 @@ import 'src/app/desktop_window.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Must run before the first frame so window_manager owns the window; see
-  // initializeDesktopWindow for why fullscreen depends on it.
+  // Desktop plugins must be initialized before the first frame.
   await initializeDesktopWindow();
   runApp(const ZelunaBootstrap());
 }
 
 class ZelunaBootstrap extends StatefulWidget {
-  const ZelunaBootstrap({
-    super.key,
-    this.initializeRuntime,
-    this.minimumDisplayDuration = const Duration(milliseconds: 500),
-  });
+  const ZelunaBootstrap({super.key, this.initializeRuntime});
 
   final Future<void> Function()? initializeRuntime;
-  final Duration minimumDisplayDuration;
 
   @override
   State<ZelunaBootstrap> createState() => _ZelunaBootstrapState();
@@ -47,19 +41,16 @@ class _ZelunaBootstrapState extends State<ZelunaBootstrap> {
   Future<void> _initialize() async {
     if (_initializing) return;
     _initializing = true;
-    final displayTimer = Stopwatch()..start();
     if (_initializationError != null && mounted) {
       setState(() => _initializationError = null);
     }
 
     try {
       await (widget.initializeRuntime?.call() ?? _initializeRuntime());
-      final remaining = widget.minimumDisplayDuration - displayTimer.elapsed;
-      if (remaining > Duration.zero) await Future<void>.delayed(remaining);
       if (!mounted) return;
       setState(() => _ready = true);
       // The large emphasis fonts are intentionally loaded after the real app
-      // takes over, so neither Android nor the branded splash waits on them.
+      // takes over, so startup does not wait on them.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(loadDeferredFonts());
       });

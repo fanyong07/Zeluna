@@ -7,7 +7,7 @@ import app.anime.anime.storage.StorageMethodChannel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
-class MainActivity : FlutterActivity() {
+open class MainActivity : FlutterActivity() {
     private var cspMethodChannel: CspMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
 

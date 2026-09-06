@@ -86,11 +86,6 @@ flutter:
 
   assets:
     - assets/brand/anime_logo_app_icon.png
-    - assets/brand/anime_logo_app_icon_192.png
-    - assets/brand/anime_logo_app_icon_512.png
-    - assets/brand/anime_logo_mark.png
-    - assets/brand/anime_logo_mark_512.png
-    - assets/brand/splash/zeluna_android_splash.png
     - assets/shaders/anime4k/
     - assets/data/sources_catalog.json
     - assets/fonts/OFL-NotoSerifSC.txt

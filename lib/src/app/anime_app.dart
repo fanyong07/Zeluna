@@ -249,8 +249,6 @@ class _RestoreStartupSystemUiState extends State<_RestoreStartupSystemUi> {
 class ZelunaStartupView extends StatelessWidget {
   const ZelunaStartupView({super.key});
 
-  static const assetPath = 'assets/brand/splash/zeluna_android_splash.png';
-
   @override
   Widget build(BuildContext context) {
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -266,16 +264,9 @@ class ZelunaStartupView extends StatelessWidget {
         backgroundColor: const Color(0xFF14181D),
         body: Semantics(
           label: 'Zeluna 正在启动',
-          image: true,
+          container: true,
           child: const SizedBox.expand(
-            child: Image(
-              key: ValueKey<String>('zeluna-startup-image'),
-              image: AssetImage(assetPath),
-              fit: BoxFit.cover,
-              alignment: Alignment.center,
-              filterQuality: FilterQuality.high,
-              gaplessPlayback: true,
-            ),
+            key: ValueKey<String>('zeluna-startup-background'),
           ),
         ),
       ),

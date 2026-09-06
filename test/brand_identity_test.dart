@@ -5,10 +5,37 @@ import 'package:anime/src/app/anime_app.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/data/bangumi_metadata_repository.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'runtime bundle keeps active branding and omits unused originals',
+    (tester) async {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      final assets = manifest.listAssets();
+      expect(assets, contains('assets/brand/anime_logo_app_icon.png'));
+      for (final original in [
+        'assets/brand/anime_logo_app_icon_192.png',
+        'assets/brand/anime_logo_app_icon_512.png',
+        'assets/brand/anime_logo_mark.png',
+        'assets/brand/anime_logo_mark_512.png',
+        'assets/brand/splash/zeluna_android_splash.png',
+      ]) {
+        expect(assets, isNot(contains(original)));
+        expect(
+          File(original).existsSync(),
+          isTrue,
+          reason: 'preserve design originals',
+        );
+      }
+      expect(assets, contains('assets/fonts/NotoSansSC-400.ttf'));
+      expect(assets, contains('assets/fonts/NotoSansSC-600.ttf'));
+      expect(assets, contains('assets/fonts/NotoSerifSC-SemiBold.ttf'));
+    },
+  );
+
   testWidgets('Zeluna is the visible Flutter application brand', (
     tester,
   ) async {
@@ -84,9 +111,7 @@ void main() {
     );
   });
 
-  testWidgets('startup loading state uses the selected Zeluna artwork', (
-    tester,
-  ) async {
+  testWidgets('startup loading state is plain without artwork', (tester) async {
     tester.view.physicalSize = const Size(1080, 1920);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -103,17 +128,17 @@ void main() {
     await tester.pump();
 
     expect(
-      find.byKey(const ValueKey<String>('zeluna-startup-image')),
+      find.byKey(const ValueKey<String>('zeluna-startup-background')),
       findsOneWidget,
     );
-    expect(File(ZelunaStartupView.assetPath).existsSync(), isTrue);
-    expect(
-      File(
-        'android/app/src/main/res/drawable-nodpi/'
-        'zeluna_launch_background.png',
-      ).existsSync(),
-      isTrue,
+    expect(find.byType(Image), findsNothing);
+    final startup = tester.widget<Scaffold>(
+      find.descendant(
+        of: find.byType(ZelunaStartupView),
+        matching: find.byType(Scaffold),
+      ),
     );
+    expect(startup.backgroundColor, const Color(0xFF14181D));
   });
 }
 
