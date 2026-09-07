@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -262,6 +263,91 @@ def test_list_aggregates_community_and_dandanplay_comments(tmp_path):
             tmp_path / "aggregate-danmaku.db",
             exercise,
             dandanplay_client=fake,
+        )
+    )
+
+
+def test_dandanplay_total_budget_is_shorter_than_client_timeout():
+    assert 0 < danmaku_router._DANDANPLAY_TOTAL_TIMEOUT_SECONDS < 8
+
+
+@pytest.mark.parametrize("endpoint", ["/api/v3/danmaku", "/api/v3/danmaku/mine"])
+@pytest.mark.parametrize("upstream_state", ["hung", "slow_search_and_comments"])
+def test_slow_dandanplay_returns_existing_community_within_budget(
+    tmp_path, monkeypatch, caplog, endpoint, upstream_state
+):
+    monkeypatch.setattr(
+        danmaku_router, "_DANDANPLAY_TOTAL_TIMEOUT_SECONDS", 0.05, raising=False
+    )
+
+    class SlowDandanplayClient:
+        async def comments_for_episode(self, *, before_upstream=None, **_kwargs):
+            if before_upstream is not None:
+                await before_upstream()
+            if upstream_state == "hung":
+                await asyncio.Event().wait()
+            else:
+                # Each stage fits the budget; their combined duration does not.
+                await asyncio.sleep(0.04)  # Search.
+                await asyncio.sleep(0.04)  # Comments.
+            return DandanplayResult(source={"provider": "弹弹play", "available": True})
+
+    async def exercise(client, _switch_user, _owner_id, _other_id):
+        created = await client.post(
+            "/api/v3/danmaku",
+            json={
+                "subject_key": "bangumi:400602",
+                "episode_key": "episode:v2:first",
+                "time_seconds": 10,
+                "mode": "scroll",
+                "color": 0xFFFFFF,
+                "text": "社区弹幕",
+            },
+        )
+        assert created.status_code == 201
+
+        response = await asyncio.wait_for(
+            client.get(
+                endpoint,
+                params={
+                    "subject_key": "bangumi:400602",
+                    "episode_key": "episode:v2:first",
+                    "title": "葬送的芙莉莲",
+                    "episode_number": 1,
+                    "include_dandanplay": True,
+                },
+            ),
+            timeout=0.5,
+        )
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        payload = response.json()
+        assert set(payload) == {"comments", "sources", "next_cursor"}
+        assert payload["next_cursor"] is None
+        assert payload["comments"] == [
+            {
+                **created.json(),
+                "author": {
+                    "display_name": "弹幕用户",
+                    "is_mine": endpoint.endswith("/mine"),
+                },
+            }
+        ]
+        assert [item["provider"] for item in payload["sources"]] == [
+            "Zeluna",
+            "弹弹play",
+        ]
+        assert payload["sources"][0]["available"] is True
+        assert payload["sources"][0]["comment_count"] == 1
+        assert payload["sources"][1]["available"] is False
+        assert "社区弹幕仍可正常使用" in payload["sources"][1]["message"]
+        assert not [record for record in caplog.records if record.levelno >= 40]
+
+    asyncio.run(
+        _exercise_api(
+            tmp_path / "slow-dandanplay.db",
+            exercise,
+            dandanplay_client=SlowDandanplayClient(),
         )
     )
 

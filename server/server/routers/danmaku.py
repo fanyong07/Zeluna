@@ -1,5 +1,6 @@
 """Modern stable-identity JSON danmaku endpoints."""
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -27,6 +28,8 @@ from ..dependencies import get_session
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v3/danmaku", tags=["danmaku"])
 _STABLE_KEY_PATTERN = r"^[A-Za-z0-9._:-]+$"
+# Leave headroom for the client's 8-second request timeout.
+_DANDANPLAY_TOTAL_TIMEOUT_SECONDS = 6.0
 
 
 class DanmakuCreateRequest(BaseModel):
@@ -138,14 +141,15 @@ async def _load_dandanplay(
     if not enabled or after_id != 0:
         return None
     try:
-        return await client.comments_for_episode(
-            title=title,
-            original_title=original_title,
-            episode_number=episode_number,
-            media_type=media_type,
-            before_upstream=before_upstream,
-        )
-    except DandanplayError:
+        async with asyncio.timeout(_DANDANPLAY_TOTAL_TIMEOUT_SECONDS):
+            return await client.comments_for_episode(
+                title=title,
+                original_title=original_title,
+                episode_number=episode_number,
+                media_type=media_type,
+                before_upstream=before_upstream,
+            )
+    except (DandanplayError, TimeoutError):
         pass
     except Exception:
         logger.exception("unexpected dandanplay integration failure")
