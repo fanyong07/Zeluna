@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from tool.ci.android_ui_ready import is_home_visible, wait_for_home
 
-HOME = '<hierarchy><node package="app.anime.anime" content-desc="首页"/><node package="app.anime.anime" text="我的"/></hierarchy>'
+HOME = '<hierarchy><node package="app.anime.anime" content-desc="首页"/><node package="app.anime.anime" text="我的"/><node package="app.anime.anime" content-desc="新番时间表"/></hierarchy>'
 STARTUP = '<hierarchy><node package="app.anime.anime" content-desc="Zeluna 正在启动"/></hierarchy>'
 
 
@@ -34,6 +34,17 @@ class AndroidHomeReadinessTests(unittest.TestCase):
         ):
             with self.subTest(xml=xml):
                 self.assertFalse(is_home_visible(xml))
+
+    def test_navigation_alone_or_search_error_is_not_the_home_page(self):
+        navigation = HOME.replace(
+            '<node package="app.anime.anime" content-desc="新番时间表"/>', ""
+        )
+        self.assertFalse(is_home_visible(navigation))
+        error = navigation.replace(
+            "</hierarchy>",
+            '<node package="app.anime.anime" text="搜索暂时失败，请检查网络后重试。"/></hierarchy>',
+        )
+        self.assertFalse(is_home_visible(error))
 
     def test_accepts_portrait_and_landscape_navigation_with_semantics_suffix(self):
         self.assertTrue(is_home_visible(HOME))

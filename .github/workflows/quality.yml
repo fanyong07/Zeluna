@@ -83,7 +83,7 @@ jobs:
             adb shell wm density 420
             adb install -r build/app/outputs/flutter-apk/app-debug.apk
             adb shell monkey -p app.anime.anime -c android.intent.category.LAUNCHER 1 > app-launch.txt
-            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui.xml --timeout 90 || { result=$?; adb logcat -d --pid="$(adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat.txt || true; adb exec-out screencap -p > android-startup-failure.png || true; exit "$result"; }'
+            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui.xml --timeout 90 || { result=$?; timeout --kill-after=1s 3s adb logcat -d --pid="$(timeout --kill-after=1s 3s adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat.txt || true; timeout --kill-after=1s 3s adb exec-out screencap -p > android-startup-failure.png || true; exit "$result"; }'
             adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt
             grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity.txt
             adb shell dumpsys package app.anime.anime | grep -E 'versionName|versionCode' > app-version.txt
@@ -96,7 +96,7 @@ jobs:
             adb shell settings put system accelerometer_rotation 0
             adb shell settings put system user_rotation 1
             sleep 3
-            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui-landscape.xml --timeout 90 || { result=$?; adb logcat -d --pid="$(adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat-landscape.txt || true; adb exec-out screencap -p > android-startup-failure-landscape.png || true; exit "$result"; }'
+            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui-landscape.xml --timeout 90 || { result=$?; timeout --kill-after=1s 3s adb logcat -d --pid="$(timeout --kill-after=1s 3s adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat-landscape.txt || true; timeout --kill-after=1s 3s adb exec-out screencap -p > android-startup-failure-landscape.png || true; exit "$result"; }'
             adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity-landscape.txt
             grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity-landscape.txt
             adb exec-out screencap -p > zeluna-android-emulator-landscape.png

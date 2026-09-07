@@ -53,6 +53,19 @@ class AndroidLauncherContractTests(unittest.TestCase):
                 self.workflow.index(f"adb exec-out screencap -p > {screenshot}"),
             )
 
+    def test_failure_diagnostics_are_bounded_and_preserve_failure_status(self):
+        commands = [
+            line
+            for line in self.workflow.splitlines()
+            if "python3 tool/ci/android_ui_ready.py" in line
+        ]
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn("timeout --kill-after=1s 3s adb shell pidof", command)
+            self.assertIn("timeout --kill-after=1s 3s adb logcat", command)
+            self.assertIn("timeout --kill-after=1s 3s adb exec-out screencap", command)
+            self.assertIn('exit "$result"', command)
+
     def test_installed_launcher_component_is_preserved(self):
         self.assertEqual(self.launchers, [".SplashActivity"])
 

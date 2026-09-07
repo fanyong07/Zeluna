@@ -28,7 +28,9 @@ def is_home_visible(xml: str) -> bool:
             labels.update(part.strip() for part in node.get(attribute, "").splitlines())
     if "Zeluna 正在启动" in labels:
         return False
-    return "首页" in labels and bool(labels & {"我的", "我的内容"})
+    # Shared navigation also appears on search/error pages. The home toolbar's
+    # calendar action is rendered only after the startup data gate has opened.
+    return {"首页", "新番时间表"} <= labels and bool(labels & {"我的", "我的内容"})
 
 
 def wait_for_home(output: Path, timeout: float, adb: str = "adb") -> None:
