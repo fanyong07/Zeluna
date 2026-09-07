@@ -1,4 +1,5 @@
 """Keep Android CI's portrait/landscape assertions aligned with the launcher."""
+
 from __future__ import annotations
 
 import shlex
@@ -19,13 +20,38 @@ class AndroidLauncherContractTests(unittest.TestCase):
         for activity in manifest.findall("application/activity"):
             for intent in activity.findall("intent-filter"):
                 actions = {item.get(ANDROID_NAME) for item in intent.findall("action")}
-                categories = {item.get(ANDROID_NAME) for item in intent.findall("category")}
+                categories = {
+                    item.get(ANDROID_NAME) for item in intent.findall("category")
+                }
                 if (
                     "android.intent.action.MAIN" in actions
                     and "android.intent.category.LAUNCHER" in categories
                 ):
                     cls.launchers.append(activity.get(ANDROID_NAME))
-        cls.workflow = (ROOT / ".github/workflows/quality.yml").read_text(encoding="utf-8")
+        cls.workflow = (ROOT / ".github/workflows/quality.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_runtime_smoke_waits_for_real_home_before_each_screenshot(self):
+        for orientation in ("portrait", "landscape"):
+            output = (
+                "android-ui.xml"
+                if orientation == "portrait"
+                else "android-ui-landscape.xml"
+            )
+            screenshot = (
+                "zeluna-android-emulator.png"
+                if orientation == "portrait"
+                else "zeluna-android-emulator-landscape.png"
+            )
+            command = (
+                f"python3 tool/ci/android_ui_ready.py --output {output} --timeout 90"
+            )
+            self.assertIn(command, self.workflow)
+            self.assertLess(
+                self.workflow.index(command),
+                self.workflow.index(f"adb exec-out screencap -p > {screenshot}"),
+            )
 
     def test_installed_launcher_component_is_preserved(self):
         self.assertEqual(self.launchers, [".SplashActivity"])
