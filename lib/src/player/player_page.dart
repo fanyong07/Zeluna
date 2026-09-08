@@ -1993,9 +1993,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           );
         },
       );
+      final resource = nativeMediaPlaybackResource(
+        url,
+        windows: !kIsWeb && defaultTargetPlatform == TargetPlatform.windows,
+      );
       final media = line.headers.isEmpty
-          ? Media(url)
-          : Media(url, httpHeaders: line.headers);
+          ? Media(resource)
+          : Media(resource, httpHeaders: line.headers);
       _nativeMediaEvents.beginOpen(openSerial: serial, mediaUri: media.uri);
       _ignoreNativeErrorsUntil = DateTime.now().add(
         const Duration(milliseconds: 750),
