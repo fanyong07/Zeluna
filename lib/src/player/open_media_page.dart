@@ -6,6 +6,7 @@ import '../core/identity/stable_identity.dart';
 import '../domain/anime_models.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
+import 'local_media.dart';
 
 class OpenMediaPage extends StatefulWidget {
   const OpenMediaPage({super.key});
@@ -149,7 +150,7 @@ class _OpenMediaPageState extends State<OpenMediaPage> {
       final path = file?.xFile.path.trim() ?? '';
       if (path.isEmpty) return;
       if (_title.text.trim().isEmpty) _title.text = file?.name ?? '本地媒体';
-      await _open(path, provider: '本地文件');
+      await _open(localMediaPlaybackUrl(path), provider: '本地文件');
     } finally {
       if (mounted) setState(() => _opening = false);
     }

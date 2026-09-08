@@ -29,6 +29,7 @@ import 'gestures/player_gesture_controller.dart';
 import 'lines/playback_line_controller.dart';
 import 'lines/playback_line_repository.dart';
 import 'lines/playback_recovery_controller.dart';
+import 'local_media.dart';
 import 'playback_continuity.dart';
 import 'playback_line_display.dart';
 import 'playback_performance_trace.dart';
@@ -2593,7 +2594,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       title: file?.name ?? '本地视频',
       quality: '原始',
       format: _directPlaybackFormat(path),
-      url: path,
+      url: localMediaPlaybackUrl(path),
       available: true,
     );
     setState(() {
