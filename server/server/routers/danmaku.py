@@ -28,13 +28,16 @@ from ..dependencies import get_session
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v3/danmaku", tags=["danmaku"])
 _STABLE_KEY_PATTERN = r"^[A-Za-z0-9._:-]+$"
+# Flutter stableEpisodeKey uses v1|<subject key>|episode:<number>. Keep the
+# legacy flat keys valid without changing identities or splitting stored comments.
+_EPISODE_KEY_PATTERN = r"^(?:[A-Za-z0-9._:-]+|v1\|[A-Za-z0-9._:-]+\|episode:[A-Za-z0-9._:-]+)$"
 # Leave headroom for the client's 8-second request timeout.
 _DANDANPLAY_TOTAL_TIMEOUT_SECONDS = 6.0
 
 
 class DanmakuCreateRequest(BaseModel):
     subject_key: str = Field(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN)
-    episode_key: str = Field(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN)
+    episode_key: str = Field(min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN)
     time_seconds: float = Field(ge=0, le=86400)
     mode: Literal["scroll", "top", "bottom"] = "scroll"
     color: int = Field(default=0xFFFFFF, ge=0, le=0xFFFFFF)
@@ -242,7 +245,7 @@ async def _list_response(
 async def list_danmaku(
     request: Request,
     subject_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
-    episode_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
+    episode_key: str = Query(min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN),
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
     title: str = Query(default="", max_length=300),
@@ -280,7 +283,7 @@ async def list_danmaku(
 async def list_danmaku_with_ownership(
     request: Request,
     subject_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
-    episode_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
+    episode_key: str = Query(min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN),
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
     title: str = Query(default="", max_length=300),

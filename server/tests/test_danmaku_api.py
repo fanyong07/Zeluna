@@ -499,3 +499,53 @@ def test_dandanplay_rate_limit_degrades_without_failing_community(
             dandanplay_client=fake,
         )
     )
+
+
+@pytest.mark.parametrize("subject_key", ["bangumi:876", "tmdb:tv:95842", "subject:v1:" + "a" * 64])
+def test_real_flutter_episode_identity_reads_writes_and_aggregates(tmp_path, subject_key):
+    episode_key = f"v1|{subject_key}|episode:1"
+    fake = _FakeDandanplayClient(result=DandanplayResult(
+        source={"provider": "弹弹play", "available": True, "comment_count": 1},
+        comments=({"id": "dandanplay:42:1", "provider": "弹弹play",
+                   "time_seconds": 1, "text": "真实分集协议回归"},),
+    ))
+
+    async def exercise(client, _switch_user, _owner_id, _other_id):
+        params = {"subject_key": subject_key, "episode_key": episode_key,
+                  "title": "CLANNAD AFTER STORY", "episode_number": 1,
+                  "include_dandanplay": True}
+        # Anonymous playback must reach the upstream, using the *client* key.
+        read = await client.get("/api/v3/danmaku", params=params)
+        assert read.status_code == 200, read.text
+        assert read.json()["sources"][1]["available"] is True
+        assert read.json()["comments"][0]["provider"] == "弹弹play"
+        created = await client.post("/api/v3/danmaku", json={
+            "subject_key": subject_key, "episode_key": episode_key,
+            "time_seconds": 2, "text": "兼容客户端稳定分集键",
+        })
+        assert created.status_code == 201, created.text
+        mine = await client.get("/api/v3/danmaku/mine", params=params)
+        assert mine.status_code == 200, mine.text
+        own = [c for c in mine.json()["comments"] if c["provider"] == "Zeluna"]
+        assert len(own) == 1
+        assert own[0]["episode_key"] == episode_key
+        assert own[0]["author"]["is_mine"] is True
+        assert len(fake.calls) == 2
+
+    asyncio.run(_exercise_api(tmp_path / "client-identity.db", exercise,
+                              dandanplay_client=fake))
+
+
+@pytest.mark.parametrize("invalid", ["v1|bangumi:876|episode:1\n", "../episode:1", "a/b", "a?b", "a b", "a' OR 1=1", "a\x00b", "a" * 301])
+def test_episode_identity_rejects_unsafe_characters(tmp_path, invalid):
+    async def exercise(client, _switch_user, _owner_id, _other_id):
+        params = {"subject_key": "bangumi:876", "episode_key": invalid}
+        for path in ("/api/v3/danmaku", "/api/v3/danmaku/mine"):
+            response = await client.get(path, params=params)
+            assert response.status_code == 422
+        response = await client.post("/api/v3/danmaku", json={
+            **params, "time_seconds": 2, "text": "无效分集",
+        })
+        assert response.status_code == 422
+
+    asyncio.run(_exercise_api(tmp_path / "invalid-identity.db", exercise))
