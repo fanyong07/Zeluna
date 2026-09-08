@@ -31,6 +31,45 @@ void main() {
     expect(controller.requestedEpisodeId, 2);
   });
 
+  test(
+    'explicit refresh replaces a cached empty timeline for the same episode',
+    () async {
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      await controller.loadEpisode(
+        episodeId: 7,
+        load: () async => const DanmakuTimeline(),
+      );
+      await controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: true,
+        load: () async => DanmakuTimeline(comments: [_comment('recovered')]),
+      );
+      expect(controller.remoteComments.single.text, 'recovered');
+    },
+  );
+
+  test(
+    'explicit refresh rejects older in-flight results for the same episode',
+    () async {
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      final stale = Completer<DanmakuTimeline>();
+      final first = controller.loadEpisode(
+        episodeId: 7,
+        load: () => stale.future,
+      );
+      await controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: true,
+        load: () async => DanmakuTimeline(comments: [_comment('fresh')]),
+      );
+      stale.complete(DanmakuTimeline(comments: [_comment('stale')]));
+      await first;
+      expect(controller.remoteComments.single.text, 'fresh');
+    },
+  );
+
   test('failed loads can retry the same episode', () async {
     final controller = DanmakuController();
     addTearDown(controller.dispose);

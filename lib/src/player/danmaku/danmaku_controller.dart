@@ -52,9 +52,12 @@ final class DanmakuController extends ChangeNotifier {
 
   Future<void> loadEpisode({
     required int episodeId,
+    bool forceRefresh = false,
     required Future<DanmakuTimeline> Function() load,
   }) async {
-    if (_disposed || _requestedEpisodeId == episodeId) return;
+    if (_disposed || (!forceRefresh && _requestedEpisodeId == episodeId)) {
+      return;
+    }
     _requestedEpisodeId = episodeId;
     final serial = ++_loadSerial;
 

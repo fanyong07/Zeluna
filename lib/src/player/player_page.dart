@@ -2881,6 +2881,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final episode = _episode;
     await _danmakuController.loadEpisode(
       episodeId: episode.id,
+      forceRefresh: forceRefresh,
       load: () => ref
           .read(animeControllerProvider.notifier)
           .danmakuTimelineForEpisode(
