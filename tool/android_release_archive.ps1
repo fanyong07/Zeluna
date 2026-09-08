@@ -24,21 +24,26 @@ function Get-ZelunaAndroidArchiveInfo([string]$Path, [string]$TargetPlatform) {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
     try {
         $names = @($archive.Entries | ForEach-Object FullName)
-        if ($names -notcontains 'AndroidManifest.xml') {
+        # Android ZIP paths are case-sensitive; AAPT2 can emit res/GR.xml and
+        # res/gR.xml together. Reject exact duplicates without conflating them.
+        $uniqueNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($name in $names) {
+            if (-not $uniqueNames.Add($name)) {
+                throw 'APK contains ambiguous duplicate entries.'
+            }
+        }
+        if (-not $uniqueNames.Contains('AndroidManifest.xml')) {
             throw 'APK is missing AndroidManifest.xml.'
         }
-        if (@($names | Sort-Object -Unique).Count -ne $names.Count) {
-            throw 'APK contains ambiguous duplicate entries.'
-        }
         $abis = @($names | ForEach-Object {
-            if ($_ -match '^lib/([^/]+)/[^/]+\.so$') { $Matches[1] }
+            if ($_ -cmatch '^lib/([^/]+)/[^/]+\.so$') { $Matches[1] }
         } | Sort-Object -Unique)
-        if (($abis -join ',') -ne (($expected | Sort-Object) -join ',')) {
+        if (($abis -join ',') -cne (($expected | Sort-Object) -join ',')) {
             throw "APK ABI mismatch: expected $($expected -join ','); found $($abis -join ',')."
         }
         foreach ($abi in $abis) {
             foreach ($library in @('libapp.so', 'libflutter.so')) {
-                if ($names -notcontains "lib/$abi/$library") {
+                if (-not $uniqueNames.Contains("lib/$abi/$library")) {
                     throw "APK is missing required Flutter library for $abi."
                 }
             }
