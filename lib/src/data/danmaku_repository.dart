@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -157,22 +158,18 @@ class DanmakuRepository {
           'include_dandanplay': '${settings.dandanplayDanmakuEnabled}',
         },
       );
-      var response = await _officialClient
-          .get(
-            targetFor(authenticated: token.isNotEmpty),
-            headers: {
-              'Accept': 'application/json',
-              if (token.isNotEmpty) 'Authorization': 'Bearer $token',
-            },
-          )
-          .timeout(_requestTimeout);
+      var response = await _getOfficialWithRetry(
+        targetFor(authenticated: token.isNotEmpty),
+        headers: {
+          'Accept': 'application/json',
+          if (token.isNotEmpty) 'Authorization': 'Bearer $token',
+        },
+      );
       if (response.statusCode == 401 && token.isNotEmpty) {
-        response = await _officialClient
-            .get(
-              targetFor(authenticated: false),
-              headers: const {'Accept': 'application/json'},
-            )
-            .timeout(_requestTimeout);
+        response = await _getOfficialWithRetry(
+          targetFor(authenticated: false),
+          headers: const {'Accept': 'application/json'},
+        );
       }
       if (response.statusCode != 200) {
         return _officialFailure(
@@ -207,6 +204,33 @@ class DanmakuRepository {
       );
     } catch (_) {
       return _officialFailure(subject, episode, settings, '弹幕服务暂时无法访问，请重试');
+    }
+  }
+
+  // A brief transport failure must not leave playback permanently without
+  // comments. The surrounding per-episode single-flight also shares retries
+  // between the player and its source panel. Never retry authorization, rate
+  // limits, validation failures, or network-policy rejections.
+  Future<http.Response> _getOfficialWithRetry(
+    Uri uri, {
+    required Map<String, String> headers,
+  }) async {
+    const delays = [Duration(milliseconds: 500), Duration(seconds: 1)];
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final response = await _officialClient
+            .get(uri, headers: headers)
+            .timeout(_requestTimeout);
+        if (!const {408, 502, 503, 504}.contains(response.statusCode) ||
+            attempt == delays.length) {
+          return response;
+        }
+      } on TimeoutException {
+        if (attempt == delays.length) rethrow;
+      } on http.ClientException {
+        if (attempt == delays.length) rethrow;
+      }
+      await Future<void>.delayed(delays[attempt]);
     }
   }
 

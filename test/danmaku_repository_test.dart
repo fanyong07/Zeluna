@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -9,6 +10,73 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'transient official failure retries before returning an empty timeline',
+    () async {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          if (attempts == 1) throw http.ClientException('network unavailable');
+          if (attempts == 2) throw TimeoutException('request timed out');
+          return _jsonResponse({
+            'comments': [
+              {
+                'id': 'live-retry',
+                'provider': '弹弹play',
+                'text': '自动恢复',
+                'time_seconds': 1,
+                'color': 16777215,
+                'mode': 'scroll',
+              },
+            ],
+            'sources': [
+              {'provider': '弹弹play', 'available': true, 'comment_count': 1},
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final first = repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      final shared = repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(identical(first, shared), isTrue);
+      final timeline = await first;
+      expect(timeline.comments.single.text, '自动恢复');
+      expect(attempts, 3);
+    },
+  );
+
+  test(
+    'official transient retry is bounded and never retries denied requests',
+    () async {
+      for (final status in [503, 403, 429]) {
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          officialClient: MockClient((_) async {
+            attempts++;
+            return http.Response('', status);
+          }),
+        );
+        addTearDown(repository.close);
+        final timeline = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+        );
+        expect(timeline.comments, isEmpty);
+        expect(attempts, status == 503 ? 3 : 1);
+      }
+    },
+  );
+
   test(
     'official failure remains visible and cannot poison a mixed timeline cache',
     () async {

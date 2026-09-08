@@ -5,6 +5,42 @@ import 'package:anime/src/player/danmaku/danmaku_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'failed refresh preserves comments and permits a later same-episode retry',
+    () async {
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      await controller.loadEpisode(
+        episodeId: 7,
+        load: () async => DanmakuTimeline(comments: [_comment('last-good')]),
+      );
+      await controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: true,
+        load: () async => const DanmakuTimeline(
+          sources: [
+            DanmakuMatch(
+              provider: '弹弹play',
+              title: '',
+              episodeTitle: '',
+              episodeId: '7',
+              available: false,
+            ),
+          ],
+        ),
+      );
+      expect(controller.remoteComments.single.text, 'last-good');
+      expect(controller.requestedEpisodeId, isNull);
+      await controller.loadEpisode(
+        episodeId: 7,
+        load: () async => throw StateError('offline'),
+      );
+      expect(controller.remoteComments.single.text, 'last-good');
+      controller.changeEpisode();
+      expect(controller.remoteComments, isEmpty);
+    },
+  );
+
   test('new settings show danmaku but preserve an explicit saved opt-out', () {
     expect(const DanmakuSettings().enabled, isTrue);
     expect(DanmakuSettings.fromJson({}).enabled, isTrue);

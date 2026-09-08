@@ -32,6 +32,7 @@ final class DanmakuController extends ChangeNotifier {
   List<DanmakuComment> _remoteComments = const [];
   int _loadSerial = 0;
   int? _requestedEpisodeId;
+  int? _commentsEpisodeId;
   int _lastLocalCommentId = 0;
   bool _disposed = false;
 
@@ -45,6 +46,7 @@ final class DanmakuController extends ChangeNotifier {
     if (_disposed) return;
     _loadSerial++;
     _requestedEpisodeId = null;
+    _commentsEpisodeId = null;
     if (_remoteComments.isEmpty) return;
     _remoteComments = const [];
     notifyListeners();
@@ -64,14 +66,26 @@ final class DanmakuController extends ChangeNotifier {
     try {
       final timeline = await load();
       if (!_acceptsLoadResult(serial, episodeId)) return;
+      if (timeline.comments.isEmpty &&
+          timeline.sources.any((source) => !source.available)) {
+        _acceptFailedLoad(episodeId);
+        return;
+      }
+      _commentsEpisodeId = episodeId;
       _remoteComments = List<DanmakuComment>.unmodifiable(timeline.comments);
       notifyListeners();
     } catch (_) {
       if (!_acceptsLoadResult(serial, episodeId)) return;
-      _requestedEpisodeId = null;
-      _remoteComments = const [];
-      notifyListeners();
+      _acceptFailedLoad(episodeId);
     }
+  }
+
+  void _acceptFailedLoad(int episodeId) {
+    // Keep a usable same-episode timeline when refresh fails, but allow the
+    // next request to retry. Never carry comments over to a different episode.
+    _requestedEpisodeId = null;
+    if (_commentsEpisodeId != episodeId) _remoteComments = const [];
+    notifyListeners();
   }
 
   LocalDanmakuSendResult sendLocal(

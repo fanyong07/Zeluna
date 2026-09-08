@@ -817,7 +817,10 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
             '显示弹幕',
             style: TextStyle(color: AppColors.theaterInk),
           ),
-          subtitle: Text(settings.enabled ? '播放和切集后自动加载' : '已关闭，开启后显示滚动弹幕'),
+          subtitle: Text(
+            settings.enabled ? '播放和切集后自动加载' : '已关闭，开启后显示滚动弹幕',
+            style: const TextStyle(color: AppColors.theaterMuted),
+          ),
           value: settings.enabled,
           onChanged: (enabled) async {
             try {
