@@ -1459,7 +1459,7 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
             await aggregator.aclose()
         # Exact identity needs no redundant second search; two remains the cap.
         self.assertEqual(len(scraper.search_calls), 1)
-        self.assertEqual(scraper.search_calls[0], "葬送的芙莉莲 第二季")
+        self.assertEqual(scraper.search_calls[0], "Frieren Season 2")
         matched = [match for match in matches if match.source_name == "anich"]
         self.assertEqual(len(matched), 1)
         self.assertEqual(matched[0].source_id, "crawler:anich:37654")
@@ -1485,6 +1485,36 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
             await aggregator.aclose()
         self.assertEqual(len(scraper.search_calls), 2)
         self.assertEqual(matches, [])
+
+    async def test_anich_original_alias_is_not_starved_by_localized_variants(self):
+        class OriginalOnlyScraper(_FakeAniChScraper):
+            async def search(self, keyword):
+                self.search_calls.append(keyword)
+                if keyword != "CLANNAD 〜AFTER STORY〜":
+                    return []
+                return [SubjectResult(
+                    source_id="21480", title="团子大家族 第二季",
+                    type="anime", year=2008,
+                    extra={"aliases": [keyword]},
+                )]
+
+        scraper = OriginalOnlyScraper()
+        aggregator = ContentAggregator(
+            crawler_scrapers={"anich": scraper},
+            enabled_provider_ids=frozenset({"crawler.anich"}),
+            resolver_search_enabled=False,
+        )
+        try:
+            matches = await aggregator.discover_source_matches(
+                ["团子大家族 第二季", "团子大家族 第2季", "团子大家族",
+                 "小镇家族", "光守望的坡道", "家族", "小鎮家族",
+                 "CLANNAD 〜AFTER STORY〜", "CLANNAD"],
+                content_type="anime", year=2008,
+            )
+        finally:
+            await aggregator.aclose()
+        self.assertEqual([m.source_id for m in matches], ["crawler:anich:21480"])
+        self.assertEqual(scraper.search_calls, ["CLANNAD 〜AFTER STORY〜"])
 
     def test_provider_timeout_table_reserves_slow_lane_for_anich(self):
         from server.aggregator import (

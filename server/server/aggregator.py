@@ -567,7 +567,18 @@ class ContentAggregator:
             )
 
         started_at = time.monotonic()
-        attempted_aliases = aliases[
+        search_aliases = aliases
+        if provider == "anich":
+            # Catalog aliases prioritize Chinese for MacCMS. AniCh indexes
+            # original titles too: do not spend its two-query serial budget
+            # on two localized spellings before reaching the original title.
+            # Keep identity scoring against ALL aliases unchanged.
+            original = next((alias for alias in aliases
+                             if re.search(r"[A-Za-z\u3040-\u30ff]", alias)
+                             and not re.search(r"[\u3400-\u9fff]", alias)), None)
+            if original is not None:
+                search_aliases = [original, *(a for a in aliases if a != original)]
+        attempted_aliases = search_aliases[
             : _PROVIDER_SEARCH_ALIAS_BUDGET.get(provider, 3)
         ]
         failures: list[BaseException] = []
