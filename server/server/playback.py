@@ -37,6 +37,7 @@ from .aggregator import (
     SourceMatch,
     SourceResolutionOutcome,
     aggregator,
+    _is_inventory_candidate_url,
 )
 from .catalog import catalog_service, parse_stable_id
 from .config import (
@@ -591,7 +592,7 @@ class PlaybackService:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            if not cls._is_safe_cached_item(item):
+            if not cls._is_safe_inventory_item(item):
                 continue
             try:
                 expires_at = float(item.get("expires_at") or 0)
@@ -1446,6 +1447,7 @@ class PlaybackService:
             "startup_profile": line.startup_profile,
             "startup_latency_ms": line.startup_latency_ms,
             "available": server_verified,
+            "inventory_only": not (server_verified or client_probe_required),
             "status": (
                 SERVER_VERIFIED
                 if server_verified
@@ -1814,6 +1816,20 @@ class PlaybackService:
     def _site_name(source: object) -> str:
         parts = str(source or "").split(":", 2)
         return parts[1].strip() if len(parts) >= 2 else ""
+
+    @staticmethod
+    def _is_safe_inventory_item(item: dict) -> bool:
+        # Keep unavailable extensionless routes across cache hits. Do not relax
+        # _is_safe_cached_item: it also gates quick/startable route selection.
+        if item.get("inventory_only") is True:
+            return (
+                item.get("available") is False
+                and item.get("status") == UNAVAILABLE
+                and _is_inventory_candidate_url(
+                    str(item.get("url") or ""), str(item.get("format") or ""),
+                )
+            )
+        return PlaybackService._is_safe_cached_item(item)
 
     @staticmethod
     def _is_safe_cached_item(item: dict) -> bool:

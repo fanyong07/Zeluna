@@ -1501,6 +1501,58 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service._full_negative_cache_is_confirmed([transient])
         )
 
+    async def test_full_inventory_keeps_58_routes_on_cache_hit_without_promoting_failures(self):
+        # Same data boundary as production: serialized resolver output -> DB ->
+        # full cache lookup. Extensionless unavailable routes used to disappear.
+        cold = [self.service._line_dict(AggregatedVideoLine(
+            url=f"https://cdn.example/{index}.m3u8" if index < 20
+                else f"https://cdn.example/media/opaque-{index}",
+            title=f"AniCh route {index}",
+            source=f"crawler:anich:route-{index}",
+            format="hls" if index < 20 else "auto",
+            verification_status=SERVER_VERIFIED if index < 10 else UNAVAILABLE,
+        )) for index in range(58)]
+        async with self.sessions() as session:
+            session.add(PlaybackCache(
+                subject_id="bangumi:inventory-58", episode=1,
+                title="Inventory", lines_json=json.dumps(cold),
+                line_count=10, verified_at=time.time(),
+            ))
+            await session.commit()
+        async with self.sessions() as session:
+            state, cached = await self.service._cache_lookup(
+                session, "bangumi:inventory-58", 1,
+            )
+        routes = [item for item in cached if item.get("url")]
+        self.assertEqual(state, "fresh")
+        self.assertEqual({item["url"] for item in routes},
+                         {item["url"] for item in cold})
+        self.assertEqual(sum(item["available"] for item in routes), 10)
+        failed = [item for item in routes if not item["available"]]
+        self.assertFalse(self.service._has_playable_line(failed))
+        self.assertFalse(self.service._has_usable_cached_route(failed))
+        self.assertEqual(self.service._select_quick_lines(failed), [])
+
+    def test_inventory_marker_cannot_promote_unsafe_or_playable_entries(self):
+        for url in (
+            "http://127.0.0.1/stream", "http://10.0.0.1/a.m3u8",
+            "http://[::1]/stream", "http://localhost/a.mp4",
+            "http://host.local/stream", "file:///video.mp4",
+            "https://site.example/player.html", "https://user:pass@cdn.example/x",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(self.service._is_safe_inventory_item({
+                    "url": url, "available": False, "status": UNAVAILABLE,
+                    "inventory_only": True, "format": "auto",
+                }))
+        for status, available in ((CLIENT_PROBE_REQUIRED, False),
+                                   (SERVER_VERIFIED, True), (UNAVAILABLE, True)):
+            with self.subTest(status=status, available=available):
+                self.assertFalse(self.service._is_safe_inventory_item({
+                    "url": "https://cdn.example/opaque", "available": available,
+                    "status": status, "inventory_only": True,
+                }))
+
     async def test_cache_drops_player_pages_and_unverified_opaque_urls(self):
         async with self.sessions() as session:
             session.add(

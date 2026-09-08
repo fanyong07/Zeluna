@@ -976,7 +976,29 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(queried), 2)
         self.assertEqual(len(not_queried), 3)
 
-    async def test_definitive_404_is_not_sent_to_the_client_as_a_candidate(self):
+    async def test_failed_route_inventory_still_excludes_non_public_targets(self):
+        crawler = AsyncMock()
+        crawler.content_types = ["anime"]
+        crawler.get_video_urls = AsyncMock(return_value=[
+            VideoLine(url="https://private-dns.example/video.m3u8", format="hls"),
+            VideoLine(url="http://127.0.0.1/video.m3u8", format="hls"),
+        ])
+        self.aggregator = ContentAggregator(crawler_scrapers={"unsafe": crawler})
+        with patch.object(
+            self.aggregator, "_line_verification_status",
+            new=AsyncMock(side_effect=[
+                LineVerificationResult(status=UNAVAILABLE, error_category=NON_PUBLIC_TARGET),
+                LineVerificationResult(status=UNAVAILABLE, error_category=READ_TIMEOUT),
+            ]),
+        ):
+            lines, _health = await self.aggregator.resolve_source_matches(
+                [SourceMatch(source_id="crawler:unsafe:1", source_name="unsafe",
+                             title="Unsafe", content_type="anime", year=2025)],
+                episode=1,
+            )
+        self.assertEqual(lines, [])
+
+    async def test_definitive_404_stays_visible_but_is_not_a_playable_candidate(self):
         crawler = AsyncMock()
         crawler.content_types = ["anime"]
         crawler.get_video_urls = AsyncMock(return_value=[
@@ -1011,7 +1033,8 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 include_diagnostics=True,
             )
 
-        self.assertEqual(lines, [])
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].verification_status, UNAVAILABLE)
         self.assertEqual(health, {"dead": UNAVAILABLE})
         self.assertEqual(diagnostics["dead"].error_category, STALE_ROUTE)
         self.assertEqual(diagnostics["dead"].failure_scope, "route")

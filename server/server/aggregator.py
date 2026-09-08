@@ -88,17 +88,6 @@ SERVER_BLOCKED_CLIENT_CANDIDATE = "server_blocked_client_candidate"
 RATE_LIMITED = "rate_limited"
 UNKNOWN_EXCEPTION = "unknown_exception"
 
-#: 内容确定不存在/不是媒体 —— 换个网络结论也不会变,不必列给用户白点一次。
-#  其余(连接超时、读超时、DNS、被限流等)属网络可达性问题:客户端网络与服务端
-#  出口的结论可能相反,那类线路仍然列出并如实标注状态。
-_CONTENT_ABSENT_CATEGORIES = frozenset({
-    STALE_ROUTE,
-    MALFORMED_MANIFEST,
-    EMPTY_MEDIA,
-    PARSER_MISMATCH,
-    NON_PUBLIC_TARGET,
-})
-
 _ERROR_CATEGORY_PRIORITY = {
     SERVER_BLOCKED_CLIENT_CANDIDATE: 0,
     RATE_LIMITED: 20,
@@ -178,6 +167,19 @@ def _is_client_probe_candidate_url(url: str, declared_format: str = "") -> bool:
     adapter to hand the player a literal loopback or private address.
     """
     if classify_media_url(url, declared_format) != DIRECT_MEDIA_URL:
+        return False
+    return _is_inventory_candidate_url(url, declared_format)
+
+
+def _is_inventory_candidate_url(url: str, declared_format: str = "") -> bool:
+    """Allow display of failed HTTP media routes, never authorize playback.
+
+    Opaque paths may be listed, but browser pages and literal private targets
+    remain excluded. Resolver DNS safety failures are also excluded separately.
+    """
+    if classify_media_url(url, declared_format) in {
+        INVALID_MEDIA_URL, PLAYER_PAGE_URL,
+    }:
         return False
     try:
         parsed = urlparse(url)
@@ -1174,14 +1176,12 @@ class ContentAggregator:
                                 ),
                                 startup_latency_ms=check.latency_ms,
                             ))
-                        elif check.error_category not in _CONTENT_ABSENT_CATEGORIES:
-                            # 网络类失败仍然列出:客户端网络与服务端出口的结论
-                            # 可能相反(实测同一条线在两端结果不同),用户也需要
-                            # 看到这一集到底有哪些线路。状态如实标注,排序排在
-                            # 已验证之后。
-                            #
-                            # 内容确定不存在的(404、解析不是媒体等)不列:那类
-                            # 换个网络也不会变,给出来只是让人白点一次。
+                        elif (
+                            check.error_category != NON_PUBLIC_TARGET
+                            and _is_inventory_candidate_url(line.url, line.format)
+                        ):
+                            # Visibility is not playability: keep failed routes
+                            # (including 404/invalid media) disabled in inventory.
                             lines.append(replace(
                                 line,
                                 verification_status=UNAVAILABLE,

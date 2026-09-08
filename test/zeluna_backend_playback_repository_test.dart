@@ -72,6 +72,43 @@ void main() {
     },
   );
 
+  test(
+    'unavailable inventory keeps all 58 routes without authorizing playback',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient(
+          (request) async => _jsonResponse(
+            List.generate(
+              58,
+              (i) => {
+                'url': 'https://cdn.example.com/opaque-$i',
+                'title': 'Route $i',
+                'source': 'route-$i',
+                'provider_id': 'route-$i',
+                'provider_name': 'route-$i',
+                'format': 'auto',
+                'available': i < 10,
+                'status': i < 10 ? 'server_verified' : 'unavailable',
+                'inventory_only': i >= 10,
+              },
+            ),
+          ),
+        ),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(58));
+      expect(lines.map((line) => line.id).toSet(), hasLength(58));
+      expect(lines.where((line) => line.available), hasLength(10));
+      expect(lines.where((line) => line.requiresClientProbe), isEmpty);
+      expect(lines.where((line) => line.serverVerified), hasLength(10));
+    },
+  );
+
   test('聚合后端会保留同一作品的不同站点线路', () async {
     String? requestedStableId;
     final client = MockClient((request) async {
