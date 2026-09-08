@@ -1533,6 +1533,25 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.service._has_usable_cached_route(failed))
         self.assertEqual(self.service._select_quick_lines(failed), [])
 
+    def test_inventory_completion_is_idempotent_and_has_no_phantom_anich_source(self):
+        routes = [self.service._line_dict(AggregatedVideoLine(
+            url=f"https://cdn.example/route-{i}.m3u8",
+            source=f"crawler:anich:route-{i}",
+            verification_status=SERVER_VERIFIED,
+        )) for i in range(58)]
+        with patch.object(aggregator, "_enabled_provider_ids", {"crawler.anich"}):
+            self.assertIn(("crawler", "anich"), aggregator.source_inventory)
+            first = self.service._complete_site_inventory(routes)
+            second = self.service._complete_site_inventory(first)
+            third = self.service._complete_site_inventory(second)
+        self.assertEqual(len(first), len(second))
+        self.assertEqual(len(second), len(third))
+        self.assertFalse(any(
+            item.get("source") == "crawler:聚合线路" and not item.get("url")
+            for item in first
+        ))
+        self.assertEqual(sum(bool(item.get("url")) for item in third), 58)
+
     def test_inventory_marker_cannot_promote_unsafe_or_playable_entries(self):
         for url in (
             "http://127.0.0.1/stream", "http://10.0.0.1/a.m3u8",

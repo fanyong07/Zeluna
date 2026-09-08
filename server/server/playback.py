@@ -1442,6 +1442,7 @@ class PlaybackService:
             "quality": line.quality,
             "format": line.format,
             "source": public_source_label(line.source),
+            "catalog_source": public_source_label(self._site_name(line.source)),
             **self._line_identity_fields(line),
             "headers": line.headers,
             "startup_profile": line.startup_profile,
@@ -1653,13 +1654,17 @@ class PlaybackService:
                 item["source_latency_ms"] = diagnostic.latency_ms
             if discovery is not None:
                 self._apply_discovery_fields(item, discovery)
+        # Route labels can differ from their catalog provider (AniCh). Keep
+        # that provenance separately and compare public labels consistently,
+        # otherwise every cache hit adds another false source placeholder.
         represented_sites = {
-            self._site_name(item.get("source"))
+            str(item.get("catalog_source") or public_source_label(
+                self._site_name(item.get("source")),
+            ))
             for item in result
-            if self._site_name(item.get("source"))
         }
         for provider, name in source_inventory:
-            if name in represented_sites:
+            if public_source_label(name) in represented_sites:
                 continue
             discovery = discovery_diagnostics.get(name)
             if discovery is None:
