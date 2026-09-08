@@ -281,7 +281,7 @@ void main() {
       expect(state.settings.speed, const PlaybackSettings().speed);
       expect(state.homePreferences.defaultTab, AnimeHomeTab.recommended);
       expect(state.appearance.compactMode, isFalse);
-      expect(state.danmaku.enabled, isFalse);
+      expect(state.danmaku.enabled, const DanmakuSettings().enabled);
       expect(state.misc.keepScreenOn, isTrue);
       expect(state.services.bangumiEnabled, isFalse);
       expect(state.rulePlugins.customRules, isEmpty);

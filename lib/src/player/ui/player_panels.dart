@@ -805,75 +805,106 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<List<DanmakuMatch>>(
-      future: _future,
-      builder: (context, snapshot) {
-        final items = snapshot.data ?? const <DanmakuMatch>[];
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return _PanelEmpty(
-            title: '弹幕源读取失败',
-            message: _friendlyPlaybackError(snapshot.error!),
-          );
-        }
-        final mine = widget.comments
-            .where((comment) => comment.provider == 'Zeluna' && comment.isMine)
-            .toList(growable: false);
-        if (items.isEmpty && mine.isEmpty) {
-          return const _PanelEmpty(
-            title: '没有匹配弹幕',
-            message: '当前集还没有可显示的公开弹幕或 Zeluna 用户弹幕。',
-          );
-        }
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
+    final settings =
+        ref.watch(animeControllerProvider).value?.danmaku ??
+        const DanmakuSettings();
+    return Column(
+      children: [
+        SwitchListTile.adaptive(
+          key: const ValueKey('playerDanmakuEnabled'),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+          title: const Text(
+            '显示弹幕',
+            style: TextStyle(color: AppColors.theaterInk),
+          ),
+          subtitle: Text(settings.enabled ? '播放和切集后自动加载' : '已关闭，开启后显示滚动弹幕'),
+          value: settings.enabled,
+          onChanged: (enabled) async {
+            try {
+              await ref
+                  .read(animeControllerProvider.notifier)
+                  .updateDanmaku(settings.copyWith(enabled: enabled));
+            } catch (_) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(const SnackBar(content: Text('弹幕设置未保存，请重试')));
+              }
+            }
+          },
+        ),
+        Row(
           children: [
-            if (mine.isNotEmpty) ...[
-              const _PanelSectionTitle('我的弹幕'),
-              for (final comment in mine) ...[
-                _OwnedDanmakuRow(
-                  key: ValueKey('owned-danmaku-${comment.id}'),
-                  comment: comment,
-                  deleting: _deletingId == comment.id,
-                  onDelete: () => _delete(comment),
-                ),
-                const SizedBox(height: 10),
-              ],
-            ],
-            Row(
-              children: [
-                const Expanded(child: _PanelSectionTitle('弹幕来源')),
-                TextButton.icon(
-                  key: const ValueKey('reloadDanmaku'),
-                  onPressed: () {
-                    setState(
-                      () => _future = widget.onReload().then((_) => _load()),
-                    );
-                  },
-                  icon: const Icon(Icons.refresh_rounded),
-                  label: const Text('重新加载'),
-                ),
-              ],
+            const Expanded(child: _PanelSectionTitle('弹幕来源')),
+            TextButton.icon(
+              key: const ValueKey('reloadDanmaku'),
+              onPressed: () => setState(
+                () => _future = widget.onReload().then((_) => _load()),
+              ),
+              icon: const Icon(Icons.refresh_rounded),
+              label: const Text('重新加载'),
             ),
-            if (items.isEmpty)
-              const _PanelInlineStatus(text: '公开来源暂时没有返回弹幕', loading: false)
-            else
-              for (final item in items) ...[
-                _PanelRow(
-                  title: item.title.isEmpty ? widget.subject.title : item.title,
-                  subtitle:
-                      '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
-                  trailing: item.available
-                      ? '${item.commentCount} 条'
-                      : item.message ?? '未启用',
-                ),
-                const SizedBox(height: 10),
-              ],
           ],
-        );
-      },
+        ),
+        Expanded(
+          child: FutureBuilder<List<DanmakuMatch>>(
+            future: _future,
+            builder: (context, snapshot) {
+              final items = snapshot.data ?? const <DanmakuMatch>[];
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return _PanelEmpty(
+                  title: '弹幕源读取失败',
+                  message: _friendlyPlaybackError(snapshot.error!),
+                );
+              }
+              final mine = widget.comments
+                  .where(
+                    (comment) => comment.provider == 'Zeluna' && comment.isMine,
+                  )
+                  .toList(growable: false);
+              if (items.isEmpty && mine.isEmpty) {
+                return const _PanelEmpty(
+                  title: '没有匹配弹幕',
+                  message: '当前集还没有可显示的公开弹幕或 Zeluna 用户弹幕。',
+                );
+              }
+              return ListView(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
+                children: [
+                  if (mine.isNotEmpty) ...[
+                    const _PanelSectionTitle('我的弹幕'),
+                    for (final comment in mine) ...[
+                      _OwnedDanmakuRow(
+                        key: ValueKey('owned-danmaku-${comment.id}'),
+                        comment: comment,
+                        deleting: _deletingId == comment.id,
+                        onDelete: () => _delete(comment),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                  ],
+                  for (final item in items) ...[
+                    _PanelRow(
+                      title: item.title.isEmpty
+                          ? widget.subject.title
+                          : item.title,
+                      subtitle:
+                          '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
+                      trailing: item.available
+                          ? '${item.commentCount} 条'
+                          : item.message ?? '未启用',
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ],
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }

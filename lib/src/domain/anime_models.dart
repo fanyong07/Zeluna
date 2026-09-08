@@ -904,7 +904,7 @@ class AppearanceSettings {
 
 class DanmakuSettings {
   const DanmakuSettings({
-    this.enabled = false,
+    this.enabled = true,
     this.opacity = 0.86,
     this.fontSize = 18,
     this.blockTop = false,
@@ -948,7 +948,7 @@ class DanmakuSettings {
 
   factory DanmakuSettings.fromJson(Map<String, dynamic> json) {
     return DanmakuSettings(
-      enabled: json['enabled'] as bool? ?? false,
+      enabled: json['enabled'] as bool? ?? true,
       opacity: (json['opacity'] as num?)?.toDouble() ?? 0.86,
       fontSize: (json['fontSize'] as num?)?.toDouble() ?? 18,
       blockTop: json['blockTop'] as bool? ?? false,

@@ -294,9 +294,10 @@ void main() {
     expect(migrated.watchHubEnabled, isFalse);
   });
 
-  test('danmaku stays off until the user opts in', () {
-    expect(const DanmakuSettings().enabled, isFalse);
-    expect(DanmakuSettings.fromJson(const {}).enabled, isFalse);
+  test('danmaku defaults on without overriding saved display preferences', () {
+    expect(const DanmakuSettings().enabled, isTrue);
+    expect(DanmakuSettings.fromJson(const {}).enabled, isTrue);
+    expect(DanmakuSettings.fromJson(const {'enabled': false}).enabled, isFalse);
     expect(DanmakuSettings.fromJson(const {'enabled': true}).enabled, isTrue);
   });
 

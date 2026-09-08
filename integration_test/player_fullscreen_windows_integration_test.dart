@@ -5,10 +5,12 @@ import 'dart:typed_data';
 import 'package:anime/src/app/desktop_window.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/data/playback_source_repository.dart';
+import 'package:anime/src/data/playback_prefetch_cache.dart';
 import 'package:anime/src/rules/rule_playback_cancellation.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/app_fullscreen.dart';
 import 'package:anime/src/player/player_page.dart';
+import 'package:anime/src/player/danmaku_overlay.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -133,6 +135,7 @@ void main() {
               'recommendationFirstFrames': account.firstFrames,
               'playbackEvents': playbackEvents,
               'mediaErrors': mediaErrors,
+              'danmakuEpisodeRequests': account.danmakuRequests,
               'keyboardEvents': keyboardEvents,
               'latestPositionMs': account.latestPosition.inMilliseconds,
               'input': 'WidgetTester button tap; targeted Win32 F/Esc messages',
@@ -153,7 +156,9 @@ void main() {
             child: MaterialApp(
               home: PlayerPage(
                 request: PlaySessionRequest(
-                  subject: _subject,
+                  subject: online
+                      ? _subject.copyWith(source: 'integration')
+                      : _subject,
                   episodes: online
                       ? const [_episode, _secondEpisode]
                       : const [_episode],
@@ -200,6 +205,25 @@ void main() {
           const Duration(seconds: 10),
         );
         expect(find.byType(PlayerPage), findsOneWidget);
+        expect(
+          account.danmakuRequests,
+          isEmpty,
+          reason: 'disabled danmaku must not compete with video startup',
+        );
+        if (online) {
+          account.enableDanmaku();
+          await _waitFor(
+            tester,
+            () => account.danmakuRequests.isNotEmpty,
+            'enabling danmaku during playback loads without opening a panel',
+          );
+          await _waitFor(
+            tester,
+            () => find.text('自动弹幕第1集').evaluate().isNotEmpty,
+            'real PlayerPage paints timeline comments without opening a panel',
+          );
+          expect(account.danmakuRequests, [_episode.id]);
+        }
 
         Future<Map<String, dynamic>> observe(
           String action,
@@ -367,6 +391,16 @@ void main() {
               playbackEvents.where((e) => e['event'] == 'line_open_requested'),
               hasLength(expectedFrames),
             );
+            await _waitFor(tester, () {
+              final overlays = tester.widgetList<RemoteDanmakuOverlay>(
+                find.byType(RemoteDanmakuOverlay),
+              );
+              return overlays.any(
+                (overlay) =>
+                    overlay.comments.isNotEmpty &&
+                    overlay.comments.first.id.startsWith('${line.episodeId}:'),
+              );
+            }, '$label: new episode loads danmaku without opening a panel');
             await expectFullscreen(label);
           }
 
@@ -649,6 +683,22 @@ class _IsolatedPlayerAccount extends AnimeController {
   _IsolatedPlayerAccount({this.mediaBase});
   final Uri? mediaBase;
 
+  @override
+  NextEpisodeWarmupBundle? prefetchedWarmupBundleForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    Duration minValidity = const Duration(seconds: 60),
+  }) => null;
+
+  @override
+  Future<void> prefetchPlaybackForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    String? preferredProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {}
+
   PlaybackLine lineFor(AnimeEpisode episode, {bool backup = false}) {
     final provider = backup ? 'backup' : 'primary';
     return PlaybackLine(
@@ -708,6 +758,15 @@ class _IsolatedPlayerAccount extends AnimeController {
     RulePlaybackCancellationToken? cancellationToken,
   }) async => [lineFor(episode, backup: true)];
 
+  final danmakuRequests = <int>[];
+  void enableDanmaku() {
+    state = AsyncData(
+      state.requireValue.copyWith(
+        danmaku: const DanmakuSettings(enabled: true),
+      ),
+    );
+  }
+
   var firstFrames = 0;
   Duration latestPosition = Duration.zero;
 
@@ -737,7 +796,22 @@ class _IsolatedPlayerAccount extends AnimeController {
     AnimeSubject subject,
     AnimeEpisode episode, {
     bool forceRefresh = false,
-  }) async => const DanmakuTimeline();
+  }) async {
+    danmakuRequests.add(episode.id);
+    return DanmakuTimeline(
+      comments: [
+        for (var second = 0; second < 90; second++)
+          DanmakuComment(
+            id: '${episode.id}:$second',
+            provider: 'test-fixture',
+            time: Duration(seconds: second),
+            mode: DanmakuMode.scroll,
+            color: 0xFFFFFFFF,
+            text: '自动弹幕第${episode.number}集',
+          ),
+      ],
+    );
+  }
 
   @override
   Future<void> recordRecommendationFirstFrame(

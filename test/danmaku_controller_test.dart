@@ -5,6 +5,12 @@ import 'package:anime/src/player/danmaku/danmaku_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('new settings show danmaku but preserve an explicit saved opt-out', () {
+    expect(const DanmakuSettings().enabled, isTrue);
+    expect(DanmakuSettings.fromJson({}).enabled, isTrue);
+    expect(DanmakuSettings.fromJson({'enabled': false}).enabled, isFalse);
+  });
+
   test('episode changes reject stale parallel danmaku results', () async {
     final controller = DanmakuController();
     addTearDown(controller.dispose);
@@ -105,7 +111,10 @@ void main() {
     controller.addListener(() => notifications++);
 
     expect(
-      controller.sendLocal('hello', settings: const DanmakuSettings()),
+      controller.sendLocal(
+        'hello',
+        settings: const DanmakuSettings(enabled: false),
+      ),
       LocalDanmakuSendResult.disabled,
     );
     expect(

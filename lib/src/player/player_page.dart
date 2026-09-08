@@ -320,6 +320,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController.dispatch(PlaybackSessionEvent.firstFrame(line.id));
     _recordRecommendationFirstFrame();
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
+    _loadEnabledDanmakuAfterFirstFrame();
     _playbackTrace.recordBufferingChanged(
       buffering: false,
       fields: <String, Object?>{
@@ -736,6 +737,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<bool>(
+      animeControllerProvider.select(
+        (state) => state.value?.danmaku.enabled ?? false,
+      ),
+      (_, enabled) {
+        if (enabled) _loadEnabledDanmakuAfterFirstFrame();
+      },
+    );
     return AsyncAnimeGate(
       builder: (context, state) {
         final effectiveSettings = _temporaryPlaybackRate == null
@@ -2805,9 +2814,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _linePanel = false;
       _settingsPanel = false;
     });
-    // Danmaku is intentionally opt-in during playback. Fetching and parsing a
-    // full XML timeline competes with rule lookup and video startup, so only a
-    // deliberate visit to the danmaku panel starts this work.
+    // Opening the source panel may also inspect a timeline while display is off.
     if (opening) unawaited(_loadDanmakuForCurrentEpisode());
   }
 
@@ -2873,6 +2880,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         ],
       ),
     );
+  }
+
+  void _loadEnabledDanmakuAfterFirstFrame() {
+    if (!mounted ||
+        _leaving ||
+        widget.request.offlineOnly ||
+        widget.request.subject.source == 'direct' ||
+        _firstFrameTraceOpenSerial != _openLineSerial ||
+        !(ref.read(animeControllerProvider).value?.danmaku.enabled ?? false)) {
+      return;
+    }
+    // Do not delay the video open: start only once its first frame is rendered.
+    // The controller deduplicates same-episode loads and rejects stale results.
+    unawaited(_loadDanmakuForCurrentEpisode());
   }
 
   Future<void> _loadDanmakuForCurrentEpisode({
