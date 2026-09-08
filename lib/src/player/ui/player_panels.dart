@@ -685,7 +685,11 @@ class _LinePanelBody extends StatelessWidget {
       displayLines,
       selectedLineId: selected?.id,
     );
-    final summary = summarizePlaybackSourceDiagnostics(displayLines);
+    final cards = [...groups.primary, ...groups.other];
+    final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
+    final routeCount = routes.length;
+    final playableCount = routes.where((line) => line.available).length;
+    final unresolvedCount = cards.length - routeCount;
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 110),
@@ -694,10 +698,9 @@ class _LinePanelBody extends StatelessWidget {
           _PanelInlineStatus(
             loading: scanning,
             text: scanning
-                ? '正在查找可播放线路$progress · '
-                      '已找到 ${summary.playableSources} 条'
-                : '共 ${summary.totalSources} 个来源，'
-                      '${summary.playableSources} 个可以播放',
+                ? '正在查找全部线路$progress · 已找到 $routeCount 条'
+                : '共 $routeCount 条线路，$playableCount 条可以播放'
+                      '${unresolvedCount > 0 ? ' · $unresolvedCount 个来源暂无线路' : ''}',
           ),
           const SizedBox(height: 12),
         ],
@@ -717,18 +720,18 @@ class _LinePanelBody extends StatelessWidget {
             clipBehavior: Clip.antiAlias,
             child: Column(
               children: [
-                for (var i = 0; i < groups.primary.length; i++) ...[
+                for (var i = 0; i < cards.length; i++) ...[
                   _LineTile(
-                    key: ValueKey(groups.primary[i].id),
+                    key: ValueKey(cards[i].id),
                     index: i,
-                    line: groups.primary[i],
-                    selected: selected?.id == groups.primary[i].id,
-                    runtimeFailed: failedLineIds.contains(groups.primary[i].id),
-                    onTap: groups.primary[i].available
-                        ? () => onSelected(groups.primary[i])
+                    line: cards[i],
+                    selected: selected?.id == cards[i].id,
+                    runtimeFailed: failedLineIds.contains(cards[i].id),
+                    onTap: cards[i].available
+                        ? () => onSelected(cards[i])
                         : null,
                   ),
-                  if (i != groups.primary.length - 1 || groups.other.isNotEmpty)
+                  if (i != cards.length - 1)
                     const Divider(
                       height: 1,
                       indent: 12,
@@ -736,41 +739,6 @@ class _LinePanelBody extends StatelessWidget {
                       color: AppColors.theaterBorder,
                     ),
                 ],
-                if (groups.other.isNotEmpty)
-                  ExpansionTile(
-                    key: const ValueKey('playbackOtherSources'),
-                    tilePadding: const EdgeInsets.symmetric(horizontal: 16),
-                    childrenPadding: EdgeInsets.zero,
-                    title: Text(
-                      '其它来源（${groups.other.length}）',
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        color: AppColors.theaterMuted,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    children: [
-                      for (var i = 0; i < groups.other.length; i++) ...[
-                        const Divider(
-                          height: 1,
-                          indent: 12,
-                          endIndent: 12,
-                          color: AppColors.theaterBorder,
-                        ),
-                        _LineTile(
-                          key: ValueKey(groups.other[i].id),
-                          index: groups.primary.length + i,
-                          line: groups.other[i],
-                          selected: selected?.id == groups.other[i].id,
-                          runtimeFailed: failedLineIds.contains(
-                            groups.other[i].id,
-                          ),
-                          onTap: groups.other[i].available
-                              ? () => onSelected(groups.other[i])
-                              : null,
-                        ),
-                      ],
-                    ],
-                  ),
               ],
             ),
           ),
@@ -785,12 +753,14 @@ class _DanmakuPanel extends ConsumerStatefulWidget {
     required this.episode,
     required this.comments,
     required this.onDelete,
+    required this.onReload,
   });
 
   final AnimeSubject subject;
   final AnimeEpisode episode;
   final List<DanmakuComment> comments;
   final Future<void> Function(DanmakuComment comment) onDelete;
+  final Future<void> Function() onReload;
 
   @override
   ConsumerState<_DanmakuPanel> createState() => _DanmakuPanelState();
@@ -872,7 +842,21 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
                 const SizedBox(height: 10),
               ],
             ],
-            const _PanelSectionTitle('弹幕来源'),
+            Row(
+              children: [
+                const Expanded(child: _PanelSectionTitle('弹幕来源')),
+                TextButton.icon(
+                  key: const ValueKey('reloadDanmaku'),
+                  onPressed: () {
+                    setState(
+                      () => _future = widget.onReload().then((_) => _load()),
+                    );
+                  },
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('重新加载'),
+                ),
+              ],
+            ),
             if (items.isEmpty)
               const _PanelInlineStatus(text: '公开来源暂时没有返回弹幕', loading: false)
             else
@@ -986,57 +970,45 @@ class _PanelRow extends StatelessWidget {
     required this.subtitle,
     required this.trailing,
   });
-
   final String title;
   final String subtitle;
   final String trailing;
-
   @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Theme.of(context).colorScheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurface,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
+  Widget build(BuildContext context) => Material(
+    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+    borderRadius: BorderRadius.circular(8),
+    child: Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: Theme.of(context).colorScheme.onSurface,
+              fontWeight: FontWeight.w800,
             ),
-            const SizedBox(width: 8),
-            Text(
-              trailing,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: AppStatusColors.probing),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            trailing,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: AppStatusColors.probing),
+          ),
+        ],
       ),
-    );
-  }
+    ),
+  );
 }
 
 class _PanelEmpty extends StatelessWidget {
@@ -1269,34 +1241,32 @@ class _LineTile extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      children: [
-                        Text(
-                          provider,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall
-                              ?.copyWith(
-                                color: selected ? accent : AppColors.theaterInk,
-                                fontWeight: FontWeight.w800,
-                              ),
+                    Text(
+                      provider,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        color: selected ? accent : AppColors.theaterInk,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    if (detail.isNotEmpty && detail != provider)
+                      Text(
+                        detail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.theaterMuted,
                         ),
-                        if (detail.isNotEmpty && detail != provider)
-                          Expanded(
-                            child: Text(
-                              ' · $detail',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleSmall
-                                  ?.copyWith(
-                                    color: selected
-                                        ? accent
-                                        : AppColors.theaterInk,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                            ),
-                          ),
-                      ],
+                      ),
+                    Text(
+                      latency,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: latencyColor,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                     const SizedBox(height: 3),
                     Text(
@@ -1329,14 +1299,6 @@ class _LineTile extends StatelessWidget {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text(
-                    latency,
-                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: latencyColor,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 5),
                   if (selected)
                     Text(
                       '当前',

@@ -908,6 +908,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           episode: _episode,
                           comments: _danmakuController.remoteComments,
                           onDelete: _deleteDanmaku,
+                          onReload: () =>
+                              _loadDanmakuForCurrentEpisode(forceRefresh: true),
                         ),
                       ),
                     if (_settingsPanel)
@@ -2873,13 +2875,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
   }
 
-  Future<void> _loadDanmakuForCurrentEpisode() async {
+  Future<void> _loadDanmakuForCurrentEpisode({
+    bool forceRefresh = false,
+  }) async {
     final episode = _episode;
     await _danmakuController.loadEpisode(
       episodeId: episode.id,
       load: () => ref
           .read(animeControllerProvider.notifier)
-          .danmakuTimelineForEpisode(widget.request.subject, episode),
+          .danmakuTimelineForEpisode(
+            widget.request.subject,
+            episode,
+            forceRefresh: forceRefresh,
+          ),
     );
   }
 

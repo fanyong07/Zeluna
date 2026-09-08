@@ -304,20 +304,34 @@ List<PlaybackLine> _playbackSourceCardsForDisplay(
   Iterable<PlaybackLine> lines, {
   String? selectedLineId,
 }) {
-  final cards = <String, PlaybackLine>{};
+  final grouped = <String, List<PlaybackLine>>{};
   for (final line in lines) {
-    final key = _playbackSourceCardIdentityKey(line);
-    final previous = cards[key];
-    if (previous == null ||
-        _playbackSourceCardPriority(line, selectedLineId: selectedLineId) >
-            _playbackSourceCardPriority(
-              previous,
-              selectedLineId: selectedLineId,
-            )) {
-      cards[key] = line;
-    }
+    grouped
+        .putIfAbsent(_playbackSourceCardIdentityKey(line), () => [])
+        .add(line);
   }
-  return List<PlaybackLine>.unmodifiable(cards.values);
+  final cards = <PlaybackLine>[];
+  for (final candidates in grouped.values) {
+    // Diagnostics without a URL describe the source, not another route. Only
+    // collapse those placeholders; distinct media routes must all stay visible.
+    final routes = <String, PlaybackLine>{
+      for (final line in candidates)
+        if (line.url?.trim().isNotEmpty == true) line.id: line,
+    };
+    if (routes.isNotEmpty) {
+      cards.addAll(routes.values);
+      continue;
+    }
+    var best = candidates.first;
+    for (final line in candidates.skip(1)) {
+      if (_playbackSourceCardPriority(line, selectedLineId: selectedLineId) >
+          _playbackSourceCardPriority(best, selectedLineId: selectedLineId)) {
+        best = line;
+      }
+    }
+    cards.add(best);
+  }
+  return List<PlaybackLine>.unmodifiable(cards);
 }
 
 String _playbackSourceCardIdentityKey(PlaybackLine line) {
@@ -715,7 +729,12 @@ String playbackProviderLabel({
   required String providerName,
 }) {
   final name = providerName.trim();
-  if (name.isNotEmpty && !_looksLikeInternalProviderId(name)) return name;
+  // Numbered upstream tags identify real routes; keep them out of the alias pool.
+  if (name.isNotEmpty &&
+      (RegExp(r'^[a-z]{1,12}-[0-9]+(?:-[0-9]+)?$').hasMatch(name) ||
+          !_looksLikeInternalProviderId(name))) {
+    return name;
+  }
   final key = providerId.trim().isNotEmpty ? providerId.trim() : name;
   if (key.isEmpty) return '线路';
   final alias =

@@ -18,6 +18,7 @@ class DanmakuRepository {
     http.Client? officialClient,
     String officialBaseUrl = 'https://api.zeluna.top',
     Future<String?> Function()? officialTokenProvider,
+    DateTime Function()? now,
   }) : _client =
            client ??
            createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
@@ -31,12 +32,15 @@ class DanmakuRepository {
            ),
        _ownsOfficialClient = officialClient == null,
        _officialBaseUri = Uri.parse(officialBaseUrl),
-       _officialTokenProvider = officialTokenProvider;
+       _officialTokenProvider = officialTokenProvider,
+       _now = now ?? DateTime.now;
 
   static const _requestTimeout = Duration(seconds: 8);
   static const _successCacheDuration = Duration(minutes: 30);
+  static const _failureCacheDuration = Duration(seconds: 30);
   static const _emptyCacheDuration = Duration(minutes: 2);
 
+  final DateTime Function() _now;
   final http.Client _client;
   final bool _ownsClient;
   final http.Client _officialClient;
@@ -52,11 +56,13 @@ class DanmakuRepository {
   Future<DanmakuTimeline> timelineForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode,
-    ExternalServiceSettings settings,
-  ) {
+    ExternalServiceSettings settings, {
+    bool forceRefresh = false,
+  }) {
     final key = _cacheKey(subject, episode, settings);
+    if (forceRefresh) _cache.remove(key);
     final cached = _cache[key];
-    if (cached != null && cached.expiresAt.isAfter(DateTime.now())) {
+    if (cached != null && cached.expiresAt.isAfter(_now())) {
       return Future.value(cached.timeline);
     }
     final active = _inFlight[key];
@@ -67,8 +73,10 @@ class DanmakuRepository {
         .then((timeline) {
           _cache[key] = _TimedTimeline(
             timeline: timeline,
-            expiresAt: DateTime.now().add(
-              timeline.comments.isEmpty
+            expiresAt: _now().add(
+              timeline.sources.any((source) => !source.available)
+                  ? _failureCacheDuration
+                  : timeline.comments.isEmpty
                   ? _emptyCacheDuration
                   : _successCacheDuration,
             ),
@@ -166,7 +174,14 @@ class DanmakuRepository {
             )
             .timeout(_requestTimeout);
       }
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        return _officialFailure(
+          subject,
+          episode,
+          settings,
+          '弹幕服务暂时不可用（HTTP ${response.statusCode}），请重试',
+        );
+      }
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
       final comments = parseZelunaDanmaku(decoded);
       final matches = parseZelunaDanmakuSources(decoded);
@@ -191,9 +206,29 @@ class DanmakuRepository {
         comments: comments,
       );
     } catch (_) {
-      return null;
+      return _officialFailure(subject, episode, settings, '弹幕服务暂时无法访问，请重试');
     }
   }
+
+  _DanmakuSourceResult _officialFailure(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    ExternalServiceSettings settings,
+    String message,
+  ) => _DanmakuSourceResult.multiple(
+    matches: [
+      for (final provider in [
+        'Zeluna',
+        if (settings.dandanplayDanmakuEnabled) '弹弹play',
+      ])
+        _unavailableMatch(
+          provider: provider,
+          title: subject.title,
+          episodeTitle: episode.displayTitle,
+          message: message,
+        ),
+    ],
+  );
 
   Future<_DanmakuSourceResult> _loadBilibili(
     AnimeSubject subject,

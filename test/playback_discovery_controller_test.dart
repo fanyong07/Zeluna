@@ -9,6 +9,49 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final preferred in <String?>[null, 'zeluna:preferred']) {
+    test(
+      'expanded lookup retains all routes with preference $preferred',
+      () async {
+        final requestedModes = <bool>[];
+        final backend = _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async {
+            requestedModes.add(expandAll);
+            if (preferred != null) {
+              await Future<void>.delayed(const Duration(seconds: 7));
+            }
+            return List.generate(
+              58,
+              (i) => _line(
+                'route-$i',
+                provider: i == 0 ? 'zeluna:preferred' : 'zeluna:anich',
+                available: i < 2,
+                serverVerified: i < 2,
+              ),
+            );
+          },
+        );
+        final controller = _controller(
+          backend: backend,
+          activeVersion: () => 1,
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        final lines = await controller.linesForEpisodeMode(
+          _subject,
+          _episode,
+          expandAll: true,
+          preferredProviderId: preferred,
+        );
+        expect(requestedModes, [true]);
+        expect(
+          lines.map((line) => line.id).toSet(),
+          List.generate(58, (i) => 'route-$i').toSet(),
+        );
+      },
+    );
+  }
+
   test(
     'old-account backend result cannot publish or populate the cache',
     () async {

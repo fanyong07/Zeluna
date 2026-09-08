@@ -9,6 +9,102 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'official failure remains visible and cannot poison a mixed timeline cache',
+    () async {
+      var now = DateTime(2026, 9, 8);
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        now: () => now,
+        officialClient: MockClient((request) async {
+          attempts++;
+          expect(
+            request.url.queryParameters['episode_key'],
+            'v1|bangumi:1|episode:1',
+          );
+          if (attempts == 1) return http.Response('private error body', 422);
+          return _jsonResponse({
+            'comments': [],
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {'provider': '弹弹play', 'available': true, 'comment_count': 0},
+            ],
+          });
+        }),
+        client: MockClient(
+          (_) async => _jsonResponse([
+            {'time': 1, 'text': '其它来源的弹幕'},
+          ]),
+        ),
+      );
+      addTearDown(repository.close);
+      const settings = ExternalServiceSettings(
+        bilibiliDanmakuEnabled: false,
+        customDanmakuEnabled: true,
+        customDanmakuEndpoint: 'https://danmaku.example/comments',
+      );
+      final failed = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+      );
+      expect(failed.comments, isNotEmpty);
+      expect(
+        failed.sources.where((s) => s.provider == '弹弹play').single.available,
+        isFalse,
+      );
+      expect(failed.sources.first.message, contains('422'));
+      expect(failed.sources.first.message, isNot(contains('private')));
+      await repository.timelineForEpisode(_subject, _episode, settings);
+      expect(
+        attempts,
+        1,
+        reason: 'brief failure cache prevents request storms',
+      );
+      now = now.add(const Duration(seconds: 31));
+      final recovered = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+      );
+      expect(
+        attempts,
+        2,
+        reason: 'partial failure must not be cached for 30 minutes',
+      );
+      expect(
+        recovered.sources.where((s) => s.provider == '弹弹play').single.available,
+        isTrue,
+      );
+      await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+        forceRefresh: true,
+      );
+      expect(attempts, 3, reason: 'user retry bypasses a cached result');
+    },
+  );
+
+  test(
+    'official network errors show enabled sources without leaking errors',
+    () async {
+      final repository = DanmakuRepository(
+        officialClient: MockClient(
+          (_) async => throw Exception('private-token'),
+        ),
+      );
+      addTearDown(repository.close);
+      final timeline = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(timeline.sources.map((s) => s.provider), ['Zeluna', '弹弹play']);
+      expect(timeline.sources.every((s) => !s.available), isTrue);
+      expect(timeline.sources.first.message, isNot(contains('private-token')));
+    },
+  );
   test('Bilibili XML parses real time, mode, color and decoded text', () {
     final comments = parseBilibiliDanmakuXml('''
 <i>
@@ -33,6 +129,7 @@ void main() {
     var requests = 0;
     final paths = <String>[];
     final repository = DanmakuRepository(
+      officialClient: MockClient((_) async => _jsonResponse({'comments': []})),
       client: MockClient((request) async {
         requests++;
         paths.add(request.url.path);
@@ -113,11 +210,15 @@ void main() {
 
     expect(paths, contains('/x/web-interface/wbi/search/type'));
     expect(
-      first.sources.single.available,
+      first.sources.where((s) => s.provider == 'Bilibili').single.available,
       isTrue,
-      reason: '${first.sources.single.message}; paths=$paths',
+      reason:
+          '${first.sources.where((s) => s.provider == 'Bilibili').single.message}; paths=$paths',
     );
-    expect(first.sources.single.episodeId, '777');
+    expect(
+      first.sources.where((s) => s.provider == 'Bilibili').single.episodeId,
+      '777',
+    );
     expect(first.comments.single.provider, 'Bilibili');
     expect(first.comments.single.text, '真实弹幕');
     expect(second.comments.single.text, '真实弹幕');
@@ -375,7 +476,13 @@ void main() {
 
       expect(seasonRequested, isFalse);
       expect(timeline.comments, isEmpty);
-      expect(timeline.sources.single.available, isFalse);
+      expect(
+        timeline.sources
+            .where((s) => s.provider == 'Bilibili')
+            .single
+            .available,
+        isFalse,
+      );
     },
   );
 

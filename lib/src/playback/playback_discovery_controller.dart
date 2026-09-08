@@ -282,8 +282,10 @@ final class PlaybackDiscoveryController {
     final scope = _scope();
     if (cancellationToken?.isCancelled ?? false) return const [];
     final preferred = preferredProviderId?.trim();
-    if ((preferred == null || preferred.isEmpty) &&
-        lookupIntent == PlaybackLookupIntent.interactive) {
+    // Full discovery is an inventory, not the two-route startup shortlist.
+    if (expandAll ||
+        ((preferred == null || preferred.isEmpty) &&
+            lookupIntent == PlaybackLookupIntent.interactive)) {
       return _linesForEpisodeWithoutPreference(
         scope,
         subject,
@@ -370,10 +372,11 @@ final class PlaybackDiscoveryController {
         scope,
         subject,
         episode,
+        expandAll: expandAll,
         forceRefresh: forceRefresh,
         cancellationToken: lookupWorkToken,
       ).timeout(
-        const Duration(seconds: 6),
+        Duration(seconds: expandAll ? 20 : 6),
         onTimeout: () => const <PlaybackLine>[],
       ),
     );

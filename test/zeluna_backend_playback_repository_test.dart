@@ -35,6 +35,43 @@ void main() {
     description: '',
   );
 
+  test(
+    'full AniCh inventory preserves all 58 distinct routes before probing',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient((request) async {
+          expect(request.url.path, '/api/v3/playback/bangumi:1');
+          return _jsonResponse(
+            List.generate(
+              58,
+              (i) => {
+                'url': 'https://cdn.example.com/route-$i/index.m3u8',
+                'title': '第1集',
+                'source': 'route-$i',
+                'provider_id': 'route-$i',
+                'provider_name': 'route-$i',
+                'tag': 'route-$i',
+                'quality': '1080P',
+                'format': 'hls',
+                'available': false,
+                'status': 'client_probe_required',
+              },
+            ),
+          );
+        }),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(58));
+      expect(lines.map((l) => l.id).toSet(), hasLength(58));
+      expect(lines.every((l) => l.requiresClientProbe), isTrue);
+    },
+  );
+
   test('聚合后端会保留同一作品的不同站点线路', () async {
     String? requestedStableId;
     final client = MockClient((request) async {

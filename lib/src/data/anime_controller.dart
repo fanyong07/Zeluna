@@ -1079,13 +1079,19 @@ class AnimeController extends AsyncNotifier<AnimeState> {
 
   Future<DanmakuTimeline> danmakuTimelineForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async {
+    AnimeEpisode episode, {
+    bool forceRefresh = false,
+  }) async {
     final accountContextVersion = _accountContextVersion;
     final services = state.value?.services ?? const ExternalServiceSettings();
     final timeline = await ref
         .read(danmakuRepositoryProvider)
-        .timelineForEpisode(subject, episode, services);
+        .timelineForEpisode(
+          subject,
+          episode,
+          services,
+          forceRefresh: forceRefresh,
+        );
     return accountContextVersion == _accountContextVersion
         ? timeline
         : const DanmakuTimeline();

@@ -735,8 +735,9 @@ class _IsolatedPlayerAccount extends AnimeController {
   @override
   Future<DanmakuTimeline> danmakuTimelineForEpisode(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async => const DanmakuTimeline();
+    AnimeEpisode episode, {
+    bool forceRefresh = false,
+  }) async => const DanmakuTimeline();
 
   @override
   Future<void> recordRecommendationFirstFrame(

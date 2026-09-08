@@ -4,6 +4,71 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'all 58 AniCh routes are listed on a narrow screen without expansion',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final lines = List.generate(
+        58,
+        (i) => PlaybackLine(
+          id: 'anich-$i',
+          episodeId: 1,
+          providerId: 'route-$i',
+          providerName: 'route-$i',
+          sourceName: 'route-$i',
+          title: '第1集 官方字幕完整线路',
+          quality: '1080P',
+          format: 'HLS',
+          url: 'https://cdn.example/$i.m3u8',
+          available: false,
+          diagnosticStatus: PlaybackDiscoveryStatus.clientProbeRequired,
+          message: '服务器出口受限，等待客户端完成清单和首段验证',
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: Scaffold(
+            body: PlaybackSourcePanel(
+              selected: null,
+              lines: lines,
+              failedLineIds: const {},
+              scanning: false,
+              completedRules: 0,
+              totalRules: 58,
+              onSelected: (_) {},
+              onPickLocal: () async {},
+              onOpenNetwork: (_, _) async {},
+              onSearch: () async {},
+            ),
+          ),
+        ),
+      );
+      expect(find.text('共 58 条线路，0 条可以播放'), findsOneWidget);
+      expect(find.byType(ExpansionTile), findsNothing);
+      for (var i = 0; i < 58; i++) {
+        expect(find.byKey(ValueKey('anich-$i')), findsOneWidget);
+      }
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('anich-57')),
+        600,
+        scrollable: find.byType(Scrollable).last,
+        maxScrolls: 40,
+      );
+      await tester.pumpAndSettle();
+      final lastRouteRect = tester.getRect(
+        find.byKey(const ValueKey('anich-57')),
+      );
+      expect(
+        lastRouteRect.overlaps(const Rect.fromLTWH(0, 0, 360, 760)),
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
   testWidgets('playback source panel modes perform real actions', (
     tester,
   ) async {
@@ -90,7 +155,7 @@ void main() {
   });
 
   testWidgets(
-    'source panel shows truthful summary and folds background states',
+    'source panel shows every source including background states by default',
     (tester) async {
       tester.view.physicalSize = const Size(430, 760);
       tester.view.devicePixelRatio = 1;
@@ -181,15 +246,10 @@ void main() {
         ),
       );
 
-      expect(find.text('共 4 个来源，1 个可以播放'), findsOneWidget);
+      expect(find.text('共 1 条线路，1 条可以播放 · 3 个来源暂无线路'), findsOneWidget);
       expect(find.text('在线服务 · iKun'), findsOneWidget);
       expect(find.text('在线服务 · 线路失败源'), findsOneWidget);
-      expect(find.text('其它来源（2）'), findsOneWidget);
-      expect(find.text('在线服务 · 无结果源'), findsNothing);
-      expect(find.text('在线服务 · 未查询源'), findsNothing);
-
-      await tester.tap(find.text('其它来源（2）'));
-      await tester.pumpAndSettle();
+      expect(find.byType(ExpansionTile), findsNothing);
 
       expect(find.text('在线服务 · 无结果源'), findsOneWidget);
       expect(find.text('在线服务 · 未查询源'), findsOneWidget);
@@ -257,7 +317,7 @@ void main() {
       ),
     );
 
-    expect(find.text('共 1 个来源，1 个可以播放'), findsOneWidget);
+    expect(find.text('共 1 条线路，1 条可以播放'), findsOneWidget);
     expect(find.text('在线服务 · 魔都2'), findsOneWidget);
     expect(find.text('其它来源（1）'), findsNothing);
     expect(find.text('当前站点没有匹配到这部作品'), findsNothing);

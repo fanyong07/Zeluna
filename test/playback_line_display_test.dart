@@ -6,6 +6,29 @@ import 'package:anime/src/player/playback_line_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'diagnostic cards preserve distinct routes from the same named source',
+    () {
+      final lines = List.generate(
+        58,
+        (i) => PlaybackLine(
+          id: 'route-$i',
+          episodeId: 1,
+          providerId: 'crawler.anich',
+          providerName: '同名来源',
+          sourceName: '同名来源',
+          title: '线路 $i',
+          quality: '1080P',
+          format: 'HLS',
+          url: 'https://cdn.example/$i.m3u8',
+          available: false,
+          diagnosticStatus: PlaybackDiscoveryStatus.clientProbeRequired,
+        ),
+      );
+      final groups = groupPlaybackLinesForDiagnostics(lines);
+      expect([...groups.primary, ...groups.other], hasLength(58));
+    },
+  );
   test('playback lines sort by latency and keep unknown or failed last', () {
     final lines = [
       _line('slow', latencyMs: 1002),
@@ -209,37 +232,43 @@ void main() {
     expect(groups.other.map((line) => line.id), ['miss', 'pending', 'circuit']);
   });
 
-  test('source cards prefer a real route over its placeholder', () {
-    final groups = groupPlaybackLinesForDiagnostics([
-      _line(
-        'placeholder',
-        providerId: 'aggregate.maccms',
-        sourceName: '魔都2',
-        diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
-        available: false,
-        url: '',
-      ),
-      _line(
-        'verified',
-        providerId: 'aggregate.maccms',
-        sourceName: '魔都2',
-        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
-        serverVerified: true,
-        latencyMs: 320,
-      ),
-      _line(
-        'verified-slower',
-        providerId: 'aggregate.maccms',
-        sourceName: '魔都2',
-        diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
-        serverVerified: true,
-        latencyMs: 640,
-      ),
-    ]);
+  test(
+    'real routes replace their placeholder without hiding slower alternatives',
+    () {
+      final groups = groupPlaybackLinesForDiagnostics([
+        _line(
+          'placeholder',
+          providerId: 'aggregate.maccms',
+          sourceName: '魔都2',
+          diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+          available: false,
+          url: '',
+        ),
+        _line(
+          'verified',
+          providerId: 'aggregate.maccms',
+          sourceName: '魔都2',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+          serverVerified: true,
+          latencyMs: 320,
+        ),
+        _line(
+          'verified-slower',
+          providerId: 'aggregate.maccms',
+          sourceName: '魔都2',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+          serverVerified: true,
+          latencyMs: 640,
+        ),
+      ]);
 
-    expect(groups.primary.map((line) => line.id), ['verified']);
-    expect(groups.other, isEmpty);
-  });
+      expect(groups.primary.map((line) => line.id), [
+        'verified',
+        'verified-slower',
+      ]);
+      expect(groups.other, isEmpty);
+    },
+  );
 
   test(
     'managed lines keep independent cards even with the same source name',
@@ -265,7 +294,7 @@ void main() {
     },
   );
 
-  test('selected route represents a deduplicated source card', () {
+  test('selecting a route keeps every alternative visible', () {
     final groups = groupPlaybackLinesForDiagnostics([
       _line(
         'fast-route',
@@ -285,7 +314,10 @@ void main() {
       ),
     ], selectedLineId: 'selected-route');
 
-    expect(groups.primary.map((line) => line.id), ['selected-route']);
+    expect(groups.primary.map((line) => line.id), [
+      'fast-route',
+      'selected-route',
+    ]);
   });
 
   test('diagnostic status labels do not collapse into generic unavailable', () {
@@ -1034,6 +1066,18 @@ void main() {
     );
   });
   group('playbackProviderLabel', () {
+    test(
+      'upstream numbered route tags stay identifiable instead of aliasing',
+      () {
+        for (final tag in ['hb-10', 'jk-18', 'route-57', 'hb-10-2']) {
+          expect(
+            playbackProviderLabel(providerId: tag, providerName: tag),
+            tag,
+          );
+        }
+      },
+    );
+
     test('内部规则 ID 不会出现在界面，映射为稳定别名', () {
       final label = playbackProviderLabel(
         providerId: 'xfdmneo',
