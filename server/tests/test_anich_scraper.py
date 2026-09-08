@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import sys
 import unittest
 
 import httpx
@@ -376,3 +378,151 @@ class EpochYearTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_localized_search_uses_detail_alias_without_matching_another_season():
+    from server.aggregator import ContentAggregator
+
+    class LocalizedHandler(_Handler):
+        def __call__(self, request):
+            if request.url.path == "/bangumi/search":
+                self.calls.append(request.url.path)
+                body = b"".join(_field_bytes(1, _field_varint(1, ident) + _string_field(2, title))
+                                for ident, title in [(21480, "团子大家族 第二季"), (21479, "团子大家族")])
+                return httpx.Response(200, content=body)
+            if request.url.path.startswith("/bangumi/detail/"):
+                self.calls.append(request.url.path)
+                second = request.url.path.endswith("21480")
+                return httpx.Response(200, json={
+                    "title": "团子大家族 第二季" if second else "团子大家族",
+                    "titles": ["CLANNAD 〜AFTER STORY〜"] if second else ["CLANNAD"],
+                    "airdate": 1222966800000 if second else 1191459600000,
+                })
+            return super().__call__(request)
+
+    async def run():
+        handler = LocalizedHandler()
+        scraper = _scraper(handler)
+        try:
+            query = "CLANNAD 〜AFTER STORY〜"
+            rows = await scraper.search(query)
+            matches = ContentAggregator._score_scraper_results(
+                "anich", rows, [query], content_type="anime", year=2008)
+            assert [m.source_id for m in matches] == ["crawler:anich:21480"]
+            await scraper.search(query)
+            assert handler.calls.count("/bangumi/detail/21480") == 1
+            assert "/bangumi/detail/21479" not in handler.calls
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_all_58_distinct_lines_survive_scraper_and_api_serialization(monkeypatch):
+    from server.aggregator import AggregatedVideoLine, _crawler_line_source
+    from server.playback import PlaybackService
+
+    monkeypatch.setattr(sys.modules[__name__], "_VOD_LINES", [
+        (f"https://cdn.example/route-{index}/episode-1.m3u8", f"第01集 线路{index}")
+        for index in range(58)
+    ])
+    monkeypatch.setattr(sys.modules[__name__], "_VOD_TAGS", tuple(f"route-{i}" for i in range(58)))
+
+    async def run():
+        scraper = _scraper(_Handler(), max_lines=6)
+        try:
+            lines = await scraper.get_video_urls(str(BANGUMI_ID), 1)
+            assert len(lines) == 58
+            assert len({x.source_name for x in lines}) == 58
+            payloads = [PlaybackService()._line_dict(AggregatedVideoLine(
+                url=x.url, source=_crawler_line_source("anich", x.source_name),
+                title=x.title, quality=x.quality, format=x.format,
+                verification_status="client_probe_required",
+            )) for x in lines]
+            assert len(payloads) == 58
+            assert len({x["provider_id"] for x in payloads}) == 58
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_detail_alias_cannot_override_season_year_or_derivative_conflicts():
+    from server.aggregator import ContentAggregator
+    from server.scrapers.base import SubjectResult
+
+    for title, year in [("团子大家族 第1季", 2008), ("团子大家族 第2季 预告", 2008),
+                        ("团子大家族", 2024)]:
+        result = SubjectResult(source_id="wrong", title=title, type="anime", year=year,
+                               extra={"aliases": ["CLANNAD 第2季"]})
+        assert ContentAggregator._score_scraper_results(
+            "anich", [result], ["CLANNAD 第2季"], content_type="anime", year=2008) == []
+
+
+def test_detail_lookup_is_bounded_and_failure_keeps_search_results():
+    class NoMatchHandler(_Handler):
+        def __call__(self, request):
+            self.calls.append(request.url.path)
+            if request.url.path == "/bangumi/search":
+                return httpx.Response(200, content=b"".join(
+                    _field_bytes(1, _field_varint(1, 100 + i) + _string_field(2, f"中文标题{i}"))
+                    for i in range(10)))
+            return httpx.Response(404)
+
+    async def run():
+        handler = NoMatchHandler()
+        scraper = _scraper(handler)
+        try:
+            rows = await scraper.search("Distinct English Title")
+            assert len(rows) == 10
+            assert 1 <= sum("/bangumi/detail/" in call for call in handler.calls) <= 3
+            assert not any("episodes" in call for call in handler.calls)
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_detail_lookup_checks_at_most_three_candidates():
+    class EmptyDetailHandler(_Handler):
+        def __call__(self, request):
+            self.calls.append(request.url.path)
+            if request.url.path == "/bangumi/search":
+                return httpx.Response(200, content=b"".join(
+                    _field_bytes(1, _field_varint(1, 100 + i) + _string_field(2, f"中文标题{i}"))
+                    for i in range(10)))
+            return httpx.Response(200, content=b"{}")
+
+    async def run():
+        handler = EmptyDetailHandler()
+        scraper = _scraper(handler)
+        try:
+            rows = await scraper.search("Distinct English Title")
+            assert len(rows) == 10
+            assert sum("/bangumi/detail/" in call for call in handler.calls) == 3
+            assert not any("episodes" in call for call in handler.calls)
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_precise_anich_match_does_not_spend_budget_on_another_alias():
+    from server.aggregator import ContentAggregator
+    from server.scrapers.base import SubjectResult
+
+    class ExactScraper:
+        content_types = ["anime"]
+        def __init__(self):
+            self.calls = []
+        async def search(self, keyword):
+            self.calls.append(keyword)
+            return [SubjectResult(source_id="21480", title="团子大家族 第二季",
+                                  type="anime", year=2008,
+                                  extra={"aliases": ["CLANNAD 〜AFTER STORY〜"]})]
+
+    async def run():
+        scraper = ExactScraper()
+        aggregator = ContentAggregator.__new__(ContentAggregator)
+        matches = await aggregator._discover_scraper_matches(
+            "anich", scraper, ["CLANNAD 〜AFTER STORY〜", "CLANNAD AFTER STORY"],
+            content_type="anime", year=2008)
+        assert [m.source_id for m in matches] == ["crawler:anich:21480"]
+        assert len(scraper.calls) == 1
+    asyncio.run(run())

@@ -10,7 +10,7 @@
   映射的行都必须通过 ``_plausible_episode`` 校验。
 
 线路纯净度参考(排序依据):自建 CDN 官方二压 > 代取流 > 对象存储
-转存 > 采集站原始 m3u8。单集可达 58 条线,统一截断到配置上限。
+转存 > 采集站原始 m3u8。单集可达 58 条线,全量返回;验证预算不应变成展示上限。
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
+from ...title_matching import analyze_source_match
 from ..base import (
     INVALID_MEDIA_URL,
     PLAYER_PAGE_URL,
@@ -208,6 +209,7 @@ class AniChScraper(BaseScraper):
         #  而每次取流都要先拿它:实测该请求本身约 1s,加上串行节流的最小间隔,
         #  不缓存等于给每次播放白加两秒多。
         self._episodes_cache: dict[int, tuple[float, list[dict]]] = {}
+        self._details_cache: dict[int, tuple[float, dict]] = {}
 
     @property
     def content_types(self) -> list[str]:
@@ -223,7 +225,31 @@ class AniChScraper(BaseScraper):
         if not keyword:
             return []
         payload = await self._transport.request(anich_search_path(keyword))
-        return self._list_results(anich_proto.decode_bangumi_list(payload))
+        results = self._list_results(anich_proto.decode_bangumi_list(payload))
+        # Search cards may contain only a localized title. Consult a bounded
+        # number of detail records for upstream aliases, never loosen identity
+        # matching or fetch episode/media payloads just to resolve a title.
+        def precise_match(title: str) -> bool:
+            analysis = analyze_source_match(
+                title, [keyword], candidate_type="anime", expected_type="anime",
+                candidate_year=0, expected_year=0,
+            )
+            return analysis.playback_eligible and (
+                analysis.evidence.exact_title or analysis.evidence.safe_title_variant
+            )
+
+        if any(precise_match(row.title) for row in results):
+            return results
+        for row in results[:3]:
+            try:
+                meta = await self._detail_metadata(int(row.source_id))
+            except Exception:
+                continue
+            row.extra["aliases"] = meta["aliases"]
+            row.year = meta["year"] or row.year
+            if any(precise_match(title) for title in meta["aliases"]):
+                break
+        return results
 
     async def get_latest(self, page: int = 1) -> list[SubjectResult]:
         # 只取首页:precache 场景足够,深翻页对该源没有增量价值。
@@ -240,8 +266,7 @@ class AniChScraper(BaseScraper):
         bangumi_id = _parse_bangumi_id(source_id)
         if bangumi_id is None:
             return None
-        detail_payload = await self._transport.request(anich_detail_path(bangumi_id))
-        meta = _detail_meta(detail_payload, bangumi_id)
+        meta = await self._detail_metadata(bangumi_id)
         episodes = [
             EpisodeInfo(
                 number=index + 1,
@@ -260,6 +285,7 @@ class AniChScraper(BaseScraper):
             rating=meta["rating"],
             genres=meta["genres"],
             episodes=episodes,
+            extra={"aliases": meta["aliases"]},
         )
 
     async def get_video_urls(
@@ -347,6 +373,17 @@ class AniChScraper(BaseScraper):
             self._episodes_cache[bangumi_id] = (self._clock(), episodes)
         return episodes
 
+    async def _detail_metadata(self, bangumi_id: int) -> dict:
+        cached = self._details_cache.get(bangumi_id)
+        if cached is not None and self._clock() - cached[0] < self._episodes_ttl:
+            return cached[1]
+        payload = await self._transport.request(anich_detail_path(bangumi_id))
+        meta = _detail_meta(payload, bangumi_id)
+        if len(self._details_cache) >= 256:
+            self._details_cache.pop(next(iter(self._details_cache)))
+        self._details_cache[bangumi_id] = (self._clock(), meta)
+        return meta
+
     async def aclose(self) -> None:
         close = getattr(self._transport, "aclose", None)
         if callable(close):
@@ -392,6 +429,16 @@ class AniChScraper(BaseScraper):
 
 
 # ── 模块级工具 ────────────────────────────────────────────────
+def _title_aliases(titles: object) -> list[str]:
+    values = titles.values() if isinstance(titles, dict) else titles
+    if not isinstance(values, (list, tuple)) and not isinstance(titles, dict):
+        return []
+    return list(dict.fromkeys(
+        value.strip() for value in values
+        if isinstance(value, str) and 0 < len(value.strip()) <= 300
+    ))[:20]
+
+
 def _first_alias(titles: object) -> str:
     """``titles`` 线上是数组(历史资料里出现过 dict 形态,两者都兼容)。"""
     if isinstance(titles, list):
@@ -461,6 +508,7 @@ def _detail_meta(payload: bytes, fallback_title_hint: int) -> dict:
     genres = [str(genre) for genre in (data.get("genres") or []) if genre]
     return {
         "title": title or f"bangumi-{fallback_title_hint}",
+        "aliases": _title_aliases(data.get("titles")),
         "cover": str(data.get("image") or ""),
         "summary": str(data.get("overview") or "")[:400],
         "year": year,

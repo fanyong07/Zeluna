@@ -574,9 +574,21 @@ class ContentAggregator:
         successful_searches = 0
         search_hit_count = 0
         result_groups = []
+        aliases_queried = 0
         for alias in attempted_aliases:
+            aliases_queried += 1
             try:
-                result_groups.append(await scraper.search(alias))
+                results = await scraper.search(alias)
+                result_groups.append(results)
+                # AniCh serializes upstream requests. Once exact identity is
+                # established, another alias only consumes its lookup budget.
+                if provider == "anich" and any(
+                    match.evidence.exact_title or match.evidence.safe_title_variant
+                    for match in self._score_scraper_results(
+                        provider, results, aliases, content_type=content_type, year=year
+                    )
+                ):
+                    break
             except Exception as error:
                 result_groups.append(error)
         matches: dict[str, SourceMatch] = {}
@@ -607,7 +619,7 @@ class ContentAggregator:
             diagnostic = diagnostics.get(provider)
             if diagnostic is not None:
                 diagnostic.queried = bool(attempted_aliases)
-                diagnostic.aliases_attempted = len(attempted_aliases)
+                diagnostic.aliases_attempted = aliases_queried
                 diagnostic.search_hit_count = search_hit_count
                 diagnostic.best_match_score = max(
                     (match.score for match in matches.values()),
@@ -670,6 +682,22 @@ class ContentAggregator:
                 candidate_year=result.year,
                 expected_year=year,
             )
+            if provider == "anich" and not analysis.evidence.has_explicit_identity_conflict:
+                # Detail aliases are identity evidence, not fuzzy ranking hints.
+                # The card title still vetoes explicit season/derivative conflicts.
+                for title in result.extra.get("aliases", []):
+                    alias_analysis = analyze_source_match(
+                        title, aliases, candidate_type=result.type,
+                        expected_type=content_type, candidate_year=result.year,
+                        expected_year=year,
+                    )
+                    if (
+                        alias_analysis.playback_eligible
+                        and (alias_analysis.evidence.exact_title
+                             or alias_analysis.evidence.safe_title_variant)
+                        and alias_analysis.ranking_score > analysis.ranking_score
+                    ):
+                        analysis = alias_analysis
             if not analysis.playback_eligible:
                 continue
             parts = result.source_id.split(":", 2)

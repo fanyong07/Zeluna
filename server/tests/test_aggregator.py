@@ -1457,13 +1457,34 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
             )
         finally:
             await aggregator.aclose()
-        # 别名预算 2:该源对短标题命中好、对带季号长关键词几乎全是噪声,
-        # 所以要给第二个别名留余量;但仍受 ≥1.2s 串行节流约束,不能放开
-        self.assertEqual(len(scraper.search_calls), 2)
+        # Exact identity needs no redundant second search; two remains the cap.
+        self.assertEqual(len(scraper.search_calls), 1)
         self.assertEqual(scraper.search_calls[0], "葬送的芙莉莲 第二季")
         matched = [match for match in matches if match.source_name == "anich"]
         self.assertEqual(len(matched), 1)
         self.assertEqual(matched[0].source_id, "crawler:anich:37654")
+
+    async def test_no_match_uses_two_aliases_but_not_a_third(self):
+        class NoMatchScraper(_FakeAniChScraper):
+            async def search(self, keyword):
+                self.search_calls.append(keyword)
+                return []
+
+        scraper = NoMatchScraper()
+        aggregator = ContentAggregator(
+            crawler_scrapers={"anich": scraper},
+            enabled_provider_ids=frozenset({"crawler.anich"}),
+            resolver_search_enabled=False,
+        )
+        try:
+            matches = await aggregator.discover_source_matches(
+                ["葬送的芙莉莲 第二季", "葬送的芙莉莲", "Frieren Season 2"],
+                content_type="anime", year=2024,
+            )
+        finally:
+            await aggregator.aclose()
+        self.assertEqual(len(scraper.search_calls), 2)
+        self.assertEqual(matches, [])
 
     def test_provider_timeout_table_reserves_slow_lane_for_anich(self):
         from server.aggregator import (
