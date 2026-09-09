@@ -13,6 +13,18 @@ import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import 'danmaku_response_decoder.dart';
 
+/// A positively identified transport failure, not an empty or unmatched source.
+/// Kept separate from user-facing messages so wording never controls recovery.
+class TransientDanmakuFailure extends DanmakuMatch {
+  const TransientDanmakuFailure({
+    required super.provider,
+    required super.title,
+    required super.episodeTitle,
+    super.episodeId = '',
+    super.message,
+  }) : super(available: false);
+}
+
 class DanmakuRepository {
   DanmakuRepository({
     http.Client? client,
@@ -20,6 +32,7 @@ class DanmakuRepository {
     String officialBaseUrl = 'https://api.zeluna.top',
     Future<String?> Function()? officialTokenProvider,
     DateTime Function()? now,
+    @visibleForTesting Stopwatch Function()? stopwatchFactory,
   }) : _client =
            client ??
            createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
@@ -34,14 +47,17 @@ class DanmakuRepository {
        _ownsOfficialClient = officialClient == null,
        _officialBaseUri = Uri.parse(officialBaseUrl),
        _officialTokenProvider = officialTokenProvider,
-       _now = now ?? DateTime.now;
+       _now = now ?? DateTime.now,
+       _stopwatchFactory = stopwatchFactory ?? Stopwatch.new;
 
   static const _requestTimeout = Duration(seconds: 8);
+  static const _transientHttpStatuses = {408, 502, 503, 504};
   static const _successCacheDuration = Duration(minutes: 30);
   static const _failureCacheDuration = Duration(seconds: 30);
   static const _emptyCacheDuration = Duration(minutes: 2);
 
   final DateTime Function() _now;
+  final Stopwatch Function() _stopwatchFactory;
   final http.Client _client;
   final bool _ownsClient;
   final http.Client _officialClient;
@@ -135,8 +151,13 @@ class DanmakuRepository {
     AnimeEpisode episode,
     ExternalServiceSettings settings,
   ) async {
+    final budget = _stopwatchFactory()..start();
     try {
-      final token = (await _officialTokenProvider?.call())?.trim() ?? '';
+      final token =
+          (await _officialTokenProvider?.call().timeout(
+            _requestTimeout,
+          ))?.trim() ??
+          '';
       Uri targetFor({required bool authenticated}) => _officialBaseUri.replace(
         pathSegments: [
           ..._officialBaseUri.pathSegments.where(
@@ -160,6 +181,7 @@ class DanmakuRepository {
       );
       var response = await _getOfficialWithRetry(
         targetFor(authenticated: token.isNotEmpty),
+        budget: budget,
         headers: {
           'Accept': 'application/json',
           if (token.isNotEmpty) 'Authorization': 'Bearer $token',
@@ -168,6 +190,7 @@ class DanmakuRepository {
       if (response.statusCode == 401 && token.isNotEmpty) {
         response = await _getOfficialWithRetry(
           targetFor(authenticated: false),
+          budget: budget,
           headers: const {'Accept': 'application/json'},
         );
       }
@@ -176,7 +199,12 @@ class DanmakuRepository {
           subject,
           episode,
           settings,
-          '弹幕服务暂时不可用（HTTP ${response.statusCode}），请重试',
+          switch (response.statusCode) {
+            401 || 403 => '弹幕服务授权失败，请检查登录状态',
+            429 => '弹幕请求受限，请稍后再试',
+            _ => '弹幕服务暂时不可用（HTTP ${response.statusCode}），请重试',
+          },
+          transient: _transientHttpStatuses.contains(response.statusCode),
         );
       }
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
@@ -202,33 +230,69 @@ class DanmakuRepository {
             : matches,
         comments: comments,
       );
-    } catch (_) {
-      return _officialFailure(subject, episode, settings, '弹幕服务暂时无法访问，请重试');
+    } catch (error) {
+      final transient =
+          error is TimeoutException || error is http.ClientException;
+      return _officialFailure(
+        subject,
+        episode,
+        settings,
+        transient ? '弹幕服务暂时无法访问，请重试' : '弹幕服务返回异常，请重试',
+        transient: transient,
+      );
     }
   }
 
   // A brief transport failure must not leave playback permanently without
   // comments. The surrounding per-episode single-flight also shares retries
   // between the player and its source panel. Never retry authorization, rate
-  // limits, validation failures, or network-policy rejections.
+  // limits, validation failures, or network-policy rejections. One monotonic
+  // eight-second budget includes token lookup, backoff and anonymous fallback.
   Future<http.Response> _getOfficialWithRetry(
     Uri uri, {
     required Map<String, String> headers,
+    required Stopwatch budget,
   }) async {
     const delays = [Duration(milliseconds: 500), Duration(seconds: 1)];
+    http.Response? lastPartial;
     for (var attempt = 0; ; attempt++) {
+      final remaining = _requestTimeout - budget.elapsed;
+      if (remaining <= Duration.zero) {
+        if (lastPartial != null) return lastPartial;
+        throw TimeoutException('Danmaku request budget exhausted');
+      }
       try {
         final response = await _officialClient
             .get(uri, headers: headers)
-            .timeout(_requestTimeout);
-        if (!const {408, 502, 503, 504}.contains(response.statusCode) ||
+            .timeout(remaining);
+        final partial =
+            response.statusCode == 200 &&
+            parseZelunaDanmakuSources(
+              jsonDecode(utf8.decode(response.bodyBytes)),
+            ).any((source) => source is TransientDanmakuFailure);
+        if (partial) lastPartial = response;
+        if ((!partial &&
+                !_transientHttpStatuses.contains(response.statusCode)) ||
             attempt == delays.length) {
-          return response;
+          return lastPartial != null &&
+                  _transientHttpStatuses.contains(response.statusCode)
+              ? lastPartial
+              : response;
         }
       } on TimeoutException {
-        if (attempt == delays.length) rethrow;
+        if (attempt == delays.length) {
+          if (lastPartial != null) return lastPartial;
+          rethrow;
+        }
       } on http.ClientException {
-        if (attempt == delays.length) rethrow;
+        if (attempt == delays.length) {
+          if (lastPartial != null) return lastPartial;
+          rethrow;
+        }
+      }
+      if (_requestTimeout - budget.elapsed <= delays[attempt]) {
+        if (lastPartial != null) return lastPartial;
+        throw TimeoutException('Danmaku retry exceeds remaining budget');
       }
       await Future<void>.delayed(delays[attempt]);
     }
@@ -238,8 +302,9 @@ class DanmakuRepository {
     AnimeSubject subject,
     AnimeEpisode episode,
     ExternalServiceSettings settings,
-    String message,
-  ) => _DanmakuSourceResult.multiple(
+    String message, {
+    bool transient = false,
+  }) => _DanmakuSourceResult.multiple(
     matches: [
       for (final provider in [
         'Zeluna',
@@ -250,6 +315,7 @@ class DanmakuRepository {
           title: subject.title,
           episodeTitle: episode.displayTitle,
           message: message,
+          transient: transient,
         ),
     ],
   );
@@ -285,6 +351,7 @@ class DanmakuRepository {
             episodeTitle: match.episodeTitle,
             episodeId: '${match.cid}',
             message: '弹幕读取失败：HTTP ${response.statusCode}',
+            transient: _transientHttpStatuses.contains(response.statusCode),
           ),
         );
       }
@@ -317,13 +384,14 @@ class DanmakuRepository {
           message: error.message,
         ),
       );
-    } catch (_) {
+    } catch (error) {
       return _DanmakuSourceResult(
         match: _unavailableMatch(
           provider: 'Bilibili',
           title: subject.title,
           episodeTitle: episode.displayTitle,
           message: '弹幕源暂时无法访问',
+          transient: error is TimeoutException || error is http.ClientException,
         ),
       );
     }
@@ -617,6 +685,7 @@ class DanmakuRepository {
             title: subject.title,
             episodeTitle: episode.displayTitle,
             message: '读取失败：HTTP ${response.statusCode}',
+            transient: _transientHttpStatuses.contains(response.statusCode),
           ),
         );
       }
@@ -635,13 +704,14 @@ class DanmakuRepository {
         ),
         comments: comments,
       );
-    } catch (_) {
+    } catch (error) {
       return _DanmakuSourceResult(
         match: _unavailableMatch(
           provider: '自建弹幕库',
           title: subject.title,
           episodeTitle: episode.displayTitle,
           message: '弹幕源暂时无法访问',
+          transient: error is TimeoutException || error is http.ClientException,
         ),
       );
     }
@@ -874,23 +944,42 @@ List<DanmakuMatch> parseZelunaDanmakuSources(Object? source) {
     final provider = item['provider']?.toString().trim() ?? '';
     if (provider.isEmpty) continue;
     final message = item['message']?.toString().trim();
+    final match = DanmakuMatch(
+      provider: provider,
+      title: item['title']?.toString().trim() ?? provider,
+      episodeTitle:
+          item['episode_title']?.toString().trim() ??
+          item['episodeTitle']?.toString().trim() ??
+          '',
+      episodeId:
+          item['episode_id']?.toString().trim() ??
+          item['episodeId']?.toString().trim() ??
+          '',
+      commentCount:
+          _intValue(item['comment_count'] ?? item['commentCount']) ?? 0,
+      available: item['available'] == true,
+      message: message == null || message.isEmpty ? null : message,
+    );
+    // Only an explicit server classification grants retention/retry. Old
+    // deployments and arbitrary error messages remain non-retryable.
+    final transient =
+        !match.available &&
+        item['retryable'] == true &&
+        const {
+          'timeout',
+          'transport',
+          'upstream_unavailable',
+        }.contains(item['error_code']);
     matches.add(
-      DanmakuMatch(
-        provider: provider,
-        title: item['title']?.toString().trim() ?? provider,
-        episodeTitle:
-            item['episode_title']?.toString().trim() ??
-            item['episodeTitle']?.toString().trim() ??
-            '',
-        episodeId:
-            item['episode_id']?.toString().trim() ??
-            item['episodeId']?.toString().trim() ??
-            '',
-        commentCount:
-            _intValue(item['comment_count'] ?? item['commentCount']) ?? 0,
-        available: item['available'] == true,
-        message: message == null || message.isEmpty ? null : message,
-      ),
+      transient
+          ? TransientDanmakuFailure(
+              provider: match.provider,
+              title: match.title,
+              episodeTitle: match.episodeTitle,
+              episodeId: match.episodeId,
+              message: match.message,
+            )
+          : match,
     );
   }
   return List.unmodifiable(matches);
@@ -957,7 +1046,17 @@ DanmakuMatch _unavailableMatch({
   required String episodeTitle,
   required String message,
   String episodeId = '',
+  bool transient = false,
 }) {
+  if (transient) {
+    return TransientDanmakuFailure(
+      provider: provider,
+      title: title,
+      episodeTitle: episodeTitle,
+      episodeId: episodeId,
+      message: message,
+    );
+  }
   return DanmakuMatch(
     provider: provider,
     title: title,

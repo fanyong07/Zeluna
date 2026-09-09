@@ -146,6 +146,96 @@ void main() {
   );
 
   testWidgets(
+    'sampled first frame confirms startup after early progress was rejected',
+    (tester) async {
+      final media = Media('https://media.test/episode.m3u8');
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 2, mediaUri: media.uri);
+      expect(
+        guard.acceptsValue(
+          currentOpenSerial: 2,
+          playerMediaUri: null,
+          eventValue: const Duration(seconds: 3),
+          playerStateValue: const Duration(seconds: 3),
+        ),
+        isFalse,
+      );
+      guard.finishOpen(openSerial: 2);
+      final backend = PlayerState().copyWith(
+        playlist: Playlist([media]),
+        playing: true,
+        position: const Duration(seconds: 3),
+      );
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      final frames = <NativePlaybackStartupSnapshot>[];
+      final errors = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => guard.readStartupSnapshot(
+          currentOpenSerial: 2,
+          playerState: backend,
+          hasAlternative: true,
+        ),
+        onFirstFrame: frames.add,
+        onTimeout: errors.add,
+      );
+      await tester.pump(const Duration(seconds: 7));
+      expect(frames, hasLength(1));
+      expect(frames.single.position, const Duration(seconds: 3));
+      expect(watchdog.isActive, isFalse);
+      expect(
+        watchdog.handleProgress(
+          previousPosition: Duration.zero,
+          currentPosition: const Duration(seconds: 4),
+        ),
+        isFalse,
+        reason: 'A later stream event must not confirm the same frame twice.',
+      );
+      await tester.pump(const Duration(seconds: 30));
+      expect(frames, hasLength(1));
+      expect(errors, isEmpty);
+    },
+  );
+
+  for (final end in ['cancel', 'dispose', 'stale', 'replace']) {
+    testWidgets('sampled first frame respects $end lifecycle', (tester) async {
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      var current = true;
+      var oldFrames = 0;
+      var newFrames = 0;
+      var errors = 0;
+      watchdog.start(
+        isCurrent: () => current,
+        readSnapshot: () => _snapshot(position: const Duration(seconds: 1)),
+        onFirstFrame: (_) => oldFrames++,
+        onTimeout: (_) => errors++,
+      );
+      switch (end) {
+        case 'cancel':
+          watchdog.cancel();
+        case 'dispose':
+          watchdog.dispose();
+        case 'stale':
+          current = false;
+        case 'replace':
+          watchdog.start(
+            isCurrent: () => true,
+            readSnapshot: () => _snapshot(position: const Duration(seconds: 2)),
+            onFirstFrame: (_) => newFrames++,
+            onTimeout: (_) => errors++,
+          );
+      }
+      await tester.pump(const Duration(seconds: 30));
+      expect(oldFrames, 0);
+      expect(newFrames, end == 'replace' ? 1 : 0);
+      expect(errors, 0);
+      expect(watchdog.isActive, isFalse);
+    });
+  }
+
+  testWidgets(
     'native position progress confirms first frame and cancels timeout',
     (tester) async {
       final watchdog = NativeFirstFrameWatchdog();

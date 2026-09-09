@@ -35,6 +35,25 @@ _EPISODE_PATTERN = re.compile(
 class DandanplayError(RuntimeError):
     """A safe upstream failure that must not fail Zeluna community danmaku."""
 
+    def __init__(self, message: str, *, code: str = "upstream_error") -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = code in {"timeout", "transport", "upstream_unavailable"}
+
+
+def _http_failure(status: int) -> DandanplayError:
+    if status in {401, 403}:
+        code = "authorization"
+    elif status == 429:
+        code = "rate_limited"
+    elif status in {408, 504}:
+        code = "timeout"
+    elif status in {502, 503}:
+        code = "upstream_unavailable"
+    else:
+        code = "upstream_error"
+    return DandanplayError(f"dandanplay returned HTTP {status}", code=code)
+
 
 @dataclass(frozen=True)
 class DandanplayResult:
@@ -253,18 +272,21 @@ class DandanplayClient:
                 title=title,
                 episode_number=episode_number,
                 message="Zeluna 服务端尚未启用弹弹play弹幕",
+                code="disabled",
             )
         if not self._app_id or not self._app_secret:
             return self._unavailable(
                 title=title,
                 episode_number=episode_number,
                 message="Zeluna 服务端尚未配置弹弹play开放平台凭据",
+                code="not_configured",
             )
         if episode_number < 1:
             return self._unavailable(
                 title=title,
                 episode_number=episode_number,
                 message="当前集数无法用于匹配弹弹play弹幕库",
+                code="invalid_input",
             )
 
         aliases = _unique_texts((title, original_title))
@@ -274,6 +296,7 @@ class DandanplayClient:
                 title=title,
                 episode_number=episode_number,
                 message="作品标题过短，无法匹配弹弹play弹幕库",
+                code="invalid_input",
             )
 
         async with httpx.AsyncClient(
@@ -303,6 +326,7 @@ class DandanplayClient:
                     title=title,
                     episode_number=episode_number,
                     message="弹弹play 没有可靠匹配到当前作品与集数",
+                    code="no_match",
                 )
 
             comments = await self._comments(client, selected.episode_id)
@@ -315,6 +339,8 @@ class DandanplayClient:
             "comment_count": len(comments),
             "available": bool(comments),
             "message": None if comments else "已匹配弹幕库，但没有返回弹幕内容",
+            "error_code": None,
+            "retryable": False,
         }
         return DandanplayResult(source=source, comments=tuple(comments))
 
@@ -335,11 +361,9 @@ class DandanplayClient:
             params=params,
         )
         if response.status_code in {401, 403}:
-            raise DandanplayError("dandanplay credentials were rejected")
+            raise _http_failure(response.status_code)
         if response.status_code != 200:
-            raise DandanplayError(
-                f"dandanplay search returned HTTP {response.status_code}"
-            )
+            raise _http_failure(response.status_code)
         payload = _decode_json_object(response.body)
         error_code = _as_int(payload.get("errorCode"))
         if payload.get("success") is False or error_code not in {None, 0}:
@@ -359,7 +383,7 @@ class DandanplayClient:
             read_redirect_body=False,
         )
         if response.status_code in {401, 403}:
-            raise DandanplayError("dandanplay credentials were rejected")
+            raise _http_failure(response.status_code)
         if response.status_code == 302:
             location = response.headers.get("location", "").strip()
             await self._ensure_safe_redirect(location)
@@ -369,9 +393,7 @@ class DandanplayClient:
                 headers={"Accept": "application/json", "User-Agent": _USER_AGENT},
             )
         if response.status_code != 200:
-            raise DandanplayError(
-                f"dandanplay comments returned HTTP {response.status_code}"
-            )
+            raise _http_failure(response.status_code)
         payload = _decode_json_object(response.body)
         error_code = _as_int(payload.get("errorCode"))
         if payload.get("success") is False or error_code not in {None, 0}:
@@ -442,7 +464,15 @@ class DandanplayClient:
                 return _HttpResult(response.status_code, response.headers, bytes(body))
         except DandanplayError:
             raise
-        except (httpx.HTTPError, TimeoutError) as error:
+        except (httpx.TimeoutException, TimeoutError) as error:
+            raise DandanplayError(
+                "dandanplay request timed out", code="timeout"
+            ) from error
+        except httpx.NetworkError as error:
+            raise DandanplayError(
+                "dandanplay transport failed", code="transport"
+            ) from error
+        except httpx.HTTPError as error:
             raise DandanplayError("dandanplay request failed") from error
 
     async def _ensure_safe_redirect(self, url: str) -> None:
@@ -538,6 +568,7 @@ class DandanplayClient:
         title: str,
         episode_number: int,
         message: str,
+        code: str,
     ) -> DandanplayResult:
         return DandanplayResult(
             source={
@@ -548,6 +579,8 @@ class DandanplayClient:
                 "comment_count": 0,
                 "available": False,
                 "message": message,
+                "error_code": code,
+                "retryable": False,
             }
         )
 

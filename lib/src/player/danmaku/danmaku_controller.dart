@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:http/http.dart' as http;
 
+import '../../data/danmaku_repository.dart' show TransientDanmakuFailure;
 import '../../domain/anime_models.dart';
 
 enum LocalDanmakuSendResult { accepted, empty, disabled, blocked }
@@ -66,25 +68,43 @@ final class DanmakuController extends ChangeNotifier {
     try {
       final timeline = await load();
       if (!_acceptsLoadResult(serial, episodeId)) return;
-      if (timeline.comments.isEmpty &&
-          timeline.sources.any((source) => !source.available)) {
-        _acceptFailedLoad(episodeId);
-        return;
-      }
+      final failedProviders = timeline.sources
+          .whereType<TransientDanmakuFailure>()
+          .map((source) => source.provider)
+          .toSet();
+      final comments =
+          {
+            if (_commentsEpisodeId == episodeId)
+              for (final comment in _remoteComments)
+                if (failedProviders.contains(comment.provider))
+                  (comment.provider, comment.id): comment,
+            for (final comment in timeline.comments)
+              (comment.provider, comment.id): comment,
+          }.values.toList()..sort((left, right) {
+            final time = left.time.compareTo(right.time);
+            return time != 0 ? time : left.id.compareTo(right.id);
+          });
       _commentsEpisodeId = episodeId;
-      _remoteComments = List<DanmakuComment>.unmodifiable(timeline.comments);
+      _remoteComments = List<DanmakuComment>.unmodifiable(comments);
+      if (failedProviders.isNotEmpty) _requestedEpisodeId = null;
       notifyListeners();
-    } catch (_) {
+    } catch (error) {
       if (!_acceptsLoadResult(serial, episodeId)) return;
-      _acceptFailedLoad(episodeId);
+      _acceptFailedLoad(
+        episodeId,
+        transient: error is TimeoutException || error is http.ClientException,
+      );
     }
   }
 
-  void _acceptFailedLoad(int episodeId) {
+  void _acceptFailedLoad(int episodeId, {required bool transient}) {
     // Keep a usable same-episode timeline when refresh fails, but allow the
     // next request to retry. Never carry comments over to a different episode.
     _requestedEpisodeId = null;
-    if (_commentsEpisodeId != episodeId) _remoteComments = const [];
+    if (!transient || _commentsEpisodeId != episodeId) {
+      _commentsEpisodeId = null;
+      _remoteComments = const [];
+    }
     notifyListeners();
   }
 

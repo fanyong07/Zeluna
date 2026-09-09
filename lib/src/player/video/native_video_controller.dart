@@ -89,20 +89,25 @@ final class NativeResumeSeekController {
     required Future<void> Function(Duration) seek,
     Duration initialDelay = const Duration(milliseconds: 250),
     Duration retryDelay = const Duration(seconds: 2),
+    Duration seekTimeout = const Duration(seconds: 10),
     int maxAttempts = 15,
   }) : _readOpenSerial = readOpenSerial,
        _seek = seek,
        _initialDelay = initialDelay,
        _retryDelay = retryDelay,
+       _seekTimeout = seekTimeout,
        _maxAttempts = maxAttempts;
 
   final int Function() _readOpenSerial;
   final Future<void> Function(Duration) _seek;
   final Duration _initialDelay;
   final Duration _retryDelay;
+  final Duration _seekTimeout;
   final int _maxAttempts;
 
   Timer? _timer;
+  Timer? _seekDeadlineTimer;
+  bool _seekTimedOut = false;
   Duration? _target;
   int? _openSerial;
   int _attempts = 0;
@@ -117,7 +122,7 @@ final class NativeResumeSeekController {
   // An exhausted target is kept for the next line, but must not prevent the
   // stalled player from recovering forever after all retries have stopped.
   bool get blocksStallRecovery =>
-      isPending && (_attempts < _maxAttempts || _seeking);
+      isPending && !_seekTimedOut && (_attempts < _maxAttempts || _seeking);
   bool get isSeeking => _seeking;
   bool get isDisposed => _disposed;
 
@@ -136,7 +141,7 @@ final class NativeResumeSeekController {
   }
 
   void nudge({bool mediaReady = false}) {
-    if (_disposed || _openSerial != _readOpenSerial()) return;
+    if (_disposed || _seekTimedOut || _openSerial != _readOpenSerial()) return;
     if (mediaReady) {
       _timer?.cancel();
       _timer = null;
@@ -161,6 +166,9 @@ final class NativeResumeSeekController {
     _generation++;
     _timer?.cancel();
     _timer = null;
+    _seekDeadlineTimer?.cancel();
+    _seekDeadlineTimer = null;
+    _seekTimedOut = false;
     _target = null;
     _openSerial = null;
     _attempts = 0;
@@ -170,6 +178,7 @@ final class NativeResumeSeekController {
   void _schedule(Duration delay) {
     if (_disposed ||
         _target == null ||
+        _seekTimedOut ||
         _seeking ||
         _attempts >= _maxAttempts ||
         _timer != null) {
@@ -195,12 +204,26 @@ final class NativeResumeSeekController {
     }
     _seeking = true;
     _attempts++;
+    _seekDeadlineTimer = Timer(_seekTimeout, () {
+      _seekDeadlineTimer = null;
+      if (_disposed || generation != _generation) return;
+      // Native commands can hang without completing or throwing. Stop waiting
+      // and release recovery, but do not enqueue more seeks on the same open.
+      // The native future is not cancellable; invalidate its late completion.
+      _generation++;
+      _seekTimedOut = true;
+      _seeking = false;
+    });
     try {
       await _seek(position);
     } catch (_) {
       // Some demuxers reject seeking until duration or the first frame exists.
     } finally {
-      if (generation == _generation) _seeking = false;
+      if (generation == _generation) {
+        _seekDeadlineTimer?.cancel();
+        _seekDeadlineTimer = null;
+        _seeking = false;
+      }
     }
     if (!_disposed &&
         generation == _generation &&
@@ -258,6 +281,7 @@ final class NativeFirstFrameWatchdog {
     required bool Function() isCurrent,
     required NativePlaybackStartupSnapshot Function() readSnapshot,
     required void Function(NativeStartupTimeoutEvent event) onTimeout,
+    void Function(NativePlaybackStartupSnapshot snapshot)? onFirstFrame,
     Duration softTimeout = const Duration(seconds: 7),
     Duration hardTimeout = const Duration(seconds: 25),
     Duration pollInterval = const Duration(seconds: 1),
@@ -280,6 +304,9 @@ final class NativeFirstFrameWatchdog {
           playing: snapshot.playing,
           position: snapshot.position,
         )) {
+          // Early stream events can be rejected before media ownership is
+          // known. A sampled first frame must complete the same UI lifecycle.
+          onFirstFrame?.call(snapshot);
           return;
         }
         final hardTimedOut = elapsed >= hardTimeout;
@@ -375,12 +402,14 @@ final class NativeVideoController {
     required bool Function() isCurrent,
     required NativePlaybackStartupSnapshot Function() readSnapshot,
     required void Function(NativeStartupTimeoutEvent event) onTimeout,
+    required void Function(NativePlaybackStartupSnapshot snapshot) onFirstFrame,
   }) {
     if (_disposed) return;
     _firstFrameWatchdog.start(
       isCurrent: isCurrent,
       readSnapshot: readSnapshot,
       onTimeout: onTimeout,
+      onFirstFrame: onFirstFrame,
     );
   }
 

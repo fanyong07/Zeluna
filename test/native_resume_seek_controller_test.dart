@@ -59,6 +59,79 @@ void main() {
     controller.dispose();
   });
 
+  testWidgets(
+    'hung native seek releases recovery without overlapping retries',
+    (tester) async {
+      final pendingSeek = Completer<void>();
+      var calls = 0;
+      final controller = NativeResumeSeekController(
+        readOpenSerial: () => 1,
+        seek: (_) {
+          calls++;
+          return pendingSeek.future;
+        },
+        initialDelay: Duration.zero,
+      );
+      addTearDown(controller.dispose);
+      controller.arm(openSerial: 1, position: const Duration(minutes: 5));
+      await tester.pump();
+      expect(controller.blocksStallRecovery, isTrue);
+      await tester.pump(const Duration(seconds: 10));
+      expect(controller.blocksStallRecovery, isFalse);
+      expect(controller.isSeeking, isFalse);
+      expect(
+        controller.recoveryPosition(Duration.zero),
+        const Duration(minutes: 5),
+      );
+      controller.nudge(mediaReady: true);
+      await tester.pump(const Duration(seconds: 30));
+      expect(
+        calls,
+        1,
+        reason: 'Do not queue commands behind the hung backend seek.',
+      );
+      expect(controller.blocksStallRecovery, isFalse);
+      pendingSeek.complete();
+      await tester.pump(const Duration(seconds: 10));
+      expect(calls, 1);
+      expect(controller.blocksStallRecovery, isFalse);
+    },
+  );
+
+  testWidgets('old seek deadlines and completion cannot change a newer open', (
+    tester,
+  ) async {
+    final oldSeek = Completer<void>();
+    final newSeek = Completer<void>();
+    var serial = 1;
+    var calls = 0;
+    final controller = NativeResumeSeekController(
+      readOpenSerial: () => serial,
+      seek: (_) => ++calls == 1 ? oldSeek.future : newSeek.future,
+      initialDelay: Duration.zero,
+      retryDelay: const Duration(hours: 1),
+    );
+    addTearDown(controller.dispose);
+    controller.arm(openSerial: serial, position: const Duration(minutes: 1));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 6));
+    controller.arm(openSerial: ++serial, position: const Duration(minutes: 2));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    expect(controller.isSeeking, isTrue);
+    expect(controller.blocksStallRecovery, isTrue);
+    oldSeek.completeError(StateError('old native seek failed'));
+    await tester.pump();
+    expect(controller.isSeeking, isTrue);
+    expect(controller.target, const Duration(minutes: 2));
+    newSeek.complete();
+    await tester.pump();
+    controller.handleProgress(const Duration(minutes: 2));
+    expect(controller.isPending, isFalse);
+    await tester.pump(const Duration(seconds: 10));
+    expect(calls, 2);
+  });
+
   test('stale opens and disposal reject delayed seek callbacks', () async {
     var openSerial = 1;
     var seeks = 0;

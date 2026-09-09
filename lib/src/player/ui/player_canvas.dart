@@ -167,6 +167,7 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onLinePanel,
     required this.onDanmakuPanel,
     required this.danmakuInput,
+    required this.danmakuInputFocus,
     required this.onSendDanmaku,
     required this.onWebReady,
     required this.onWebError,
@@ -182,6 +183,7 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onTemporaryDoubleSpeedEnd,
     required this.onVideoViewportSize,
     required this.onChromeHotZoneChanged,
+    required this.onControlMenuChanged,
   });
 
   final VideoController controller;
@@ -233,6 +235,7 @@ class _PlayerCanvas extends StatelessWidget {
   final VoidCallback onLinePanel;
   final VoidCallback onDanmakuPanel;
   final TextEditingController danmakuInput;
+  final FocusNode danmakuInputFocus;
   final ValueChanged<String> onSendDanmaku;
   final VoidCallback onWebReady;
   final VoidCallback onWebError;
@@ -246,6 +249,7 @@ class _PlayerCanvas extends StatelessWidget {
   final VoidCallback onTemporaryDoubleSpeedEnd;
   final ValueChanged<Size> onVideoViewportSize;
   final ValueChanged<bool> onChromeHotZoneChanged;
+  final ValueChanged<bool> onControlMenuChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -393,7 +397,16 @@ class _PlayerCanvas extends StatelessWidget {
                                           left: 0,
                                           right: 0,
                                           bottom: 0,
-                                          height: compact ? 124 : 190,
+                                          height:
+                                              compact &&
+                                                  MediaQuery.sizeOf(
+                                                        context,
+                                                      ).height >
+                                                      MediaQuery.sizeOf(
+                                                        context,
+                                                      ).width
+                                              ? 124
+                                              : 190,
                                           child: DecoratedBox(
                                             decoration: BoxDecoration(
                                               gradient:
@@ -441,9 +454,12 @@ class _PlayerCanvas extends StatelessWidget {
                                           onMute: onMute,
                                           onVolumeChanged: onVolumeChanged,
                                           onSpeedSelected: onSpeedSelected,
+                                          onControlMenuChanged:
+                                              onControlMenuChanged,
                                           onFullscreen: onFullscreen,
                                           onDanmakuPanel: onDanmakuPanel,
                                           danmakuInput: danmakuInput,
+                                          danmakuInputFocus: danmakuInputFocus,
                                           onSendDanmaku: onSendDanmaku,
                                           onEpisodePanel: onEpisodePanel,
                                           onLinePanel: onLinePanel,

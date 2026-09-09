@@ -1,10 +1,222 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:anime/src/data/danmaku_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/danmaku/danmaku_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'HTTP 200 partial failure retains dandanplay and updates community',
+    () async {
+      var phase = 0;
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          return http.Response(
+            jsonEncode({
+              'sources': [
+                {'provider': 'Zeluna', 'available': true},
+                {
+                  'provider': '弹弹play',
+                  'available': phase != 1,
+                  'error_code': phase == 1 ? 'timeout' : null,
+                  'retryable': phase == 1,
+                  'message': 'wording must not control recovery',
+                },
+              ],
+              'comments': [
+                {
+                  'id': 'community',
+                  'provider': 'Zeluna',
+                  'text': 'community-$phase',
+                  'time_seconds': 2,
+                  'color': 16777215,
+                },
+                if (phase != 1)
+                  {
+                    'id': 'external',
+                    'provider': '弹弹play',
+                    'text': 'external-$phase',
+                    'time_seconds': 1,
+                    'color': 16777215,
+                  },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          );
+        }),
+      );
+      addTearDown(repository.close);
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      Future<void> load({bool refresh = false}) => controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: refresh,
+        load: () => repository.timelineForEpisode(
+          _subject,
+          _episode,
+          const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+          forceRefresh: refresh,
+        ),
+      );
+      await load();
+      expect(controller.remoteComments.map((c) => c.text), [
+        'external-0',
+        'community-0',
+      ]);
+      phase = 1;
+      await load(refresh: true);
+      expect(controller.remoteComments.map((c) => c.text), [
+        'external-0',
+        'community-1',
+      ]);
+      expect(controller.requestedEpisodeId, isNull);
+      phase = 2;
+      repository.invalidate();
+      await load();
+      expect(controller.remoteComments.map((c) => c.text), [
+        'external-2',
+        'community-2',
+      ]);
+      expect(controller.requestedEpisodeId, 7);
+      expect(attempts, greaterThanOrEqualTo(3));
+    },
+  );
+
+  test(
+    'non-transient errors and empty source outcomes remove old comments',
+    () async {
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      for (final message in [
+        'no_match',
+        'disabled',
+        'empty',
+        'HTTP 403',
+        'HTTP 429',
+        '弹幕源暂时无法访问',
+        '弹弹play 暂时无法访问，Zeluna 社区弹幕仍可正常使用',
+        null,
+      ]) {
+        await controller.loadEpisode(
+          episodeId: 7,
+          forceRefresh: true,
+          load: () async => DanmakuTimeline(comments: [_comment('old')]),
+        );
+        await controller.loadEpisode(
+          episodeId: 7,
+          forceRefresh: true,
+          load: () async => DanmakuTimeline(
+            sources: [
+              DanmakuMatch(
+                provider: 'test',
+                title: '',
+                episodeTitle: '',
+                episodeId: '7',
+                message: message,
+              ),
+            ],
+          ),
+        );
+        expect(
+          controller.remoteComments,
+          isEmpty,
+          reason: 'empty outcome: $message',
+        );
+        expect(controller.requestedEpisodeId, 7);
+      }
+      await controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: true,
+        load: () async => DanmakuTimeline(comments: [_comment('old')]),
+      );
+      await controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: true,
+        load: () async => throw const FormatException('malformed data'),
+      );
+      expect(controller.remoteComments, isEmpty);
+    },
+  );
+
+  test(
+    'partial transient refresh preserves only failed sources and can retry',
+    () async {
+      var failing = false;
+      final repository = DanmakuRepository(
+        officialClient: MockClient(
+          (_) async => failing
+              ? http.Response('', 503)
+              : http.Response(
+                  jsonEncode({
+                    'comments': [
+                      {
+                        'id': 'official',
+                        'provider': 'Zeluna',
+                        'text': 'kept',
+                        'time_seconds': 1,
+                        'color': 16777215,
+                      },
+                    ],
+                    'sources': [
+                      {'provider': 'Zeluna', 'available': true},
+                    ],
+                  }),
+                  200,
+                ),
+        ),
+        client: MockClient(
+          (_) async => http.Response(
+            jsonEncode([
+              {'time': 2, 'text': failing ? 'fresh-custom' : 'old-custom'},
+            ]),
+            200,
+          ),
+        ),
+      );
+      addTearDown(repository.close);
+      final controller = DanmakuController();
+      addTearDown(controller.dispose);
+      Future<void> load({bool refresh = false}) => controller.loadEpisode(
+        episodeId: 7,
+        forceRefresh: refresh,
+        load: () => repository.timelineForEpisode(
+          _subject,
+          _episode,
+          const ExternalServiceSettings(
+            bilibiliDanmakuEnabled: false,
+            dandanplayDanmakuEnabled: false,
+            customDanmakuEnabled: true,
+            customDanmakuEndpoint: 'https://danmaku.example/comments',
+          ),
+          forceRefresh: refresh,
+        ),
+      );
+      await load();
+      failing = true;
+      await load(refresh: true);
+      expect(controller.remoteComments.map((c) => c.text), [
+        'kept',
+        'fresh-custom',
+      ]);
+      expect(controller.requestedEpisodeId, isNull);
+      failing = false;
+      repository.invalidate();
+      await load();
+      expect(controller.remoteComments.map((c) => c.text), [
+        'kept',
+        'old-custom',
+      ]);
+      expect(controller.requestedEpisodeId, 7);
+    },
+  );
+
   test(
     'failed refresh preserves comments and permits a later same-episode retry',
     () async {
@@ -19,12 +231,11 @@ void main() {
         forceRefresh: true,
         load: () async => const DanmakuTimeline(
           sources: [
-            DanmakuMatch(
-              provider: '弹弹play',
+            TransientDanmakuFailure(
+              provider: 'test',
               title: '',
               episodeTitle: '',
               episodeId: '7',
-              available: false,
             ),
           ],
         ),
@@ -33,7 +244,7 @@ void main() {
       expect(controller.requestedEpisodeId, isNull);
       await controller.loadEpisode(
         episodeId: 7,
-        load: () async => throw StateError('offline'),
+        load: () async => throw TimeoutException('offline'),
       );
       expect(controller.remoteComments.single.text, 'last-good');
       controller.changeEpisode();
@@ -255,3 +466,30 @@ extension on DanmakuComment {
         isMine: isMine ?? this.isMine,
       );
 }
+
+const _subject = AnimeSubject(
+  id: 1,
+  title: '葬送的芙莉莲',
+  originalTitle: 'Frieren',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-09-29',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '全28集',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [AnimeTag(name: 'TV')],
+  totalEpisodes: 28,
+);
+
+const _episode = AnimeEpisode(
+  id: 101,
+  subjectId: 1,
+  number: 1,
+  title: '',
+  airdate: '2023-09-29',
+  duration: '24:00',
+  description: '第一集',
+);

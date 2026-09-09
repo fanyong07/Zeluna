@@ -1,12 +1,10 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+import 'support/generated_player_video.dart';
+import 'support/isolated_player_environment.dart';
 
 import 'package:anime/src/app/desktop_window.dart';
 import 'package:anime/src/data/anime_controller.dart';
-import 'package:anime/src/data/playback_source_repository.dart';
-import 'package:anime/src/data/playback_prefetch_cache.dart';
-import 'package:anime/src/rules/rule_playback_cancellation.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/app_fullscreen.dart';
 import 'package:anime/src/player/player_page.dart';
@@ -78,8 +76,8 @@ void main() {
         ]);
         expect(compiled.exitCode, 0, reason: '${compiled.stderr}');
         expect(probe.existsSync(), isTrue);
-        final clip = await _writeTestVideo(temporary);
-        final fixture = online ? await _LoopbackVideoFixture.start(clip) : null;
+        final clip = await writeGeneratedPlayerTestVideo(temporary);
+        final fixture = online ? await LoopbackPlayerVideo.start(clip) : null;
         final snapshots = <Map<String, Object?>>[];
         final mediaErrors = <String>[];
         final keyboardEvents = <Map<String, Object?>>[];
@@ -105,7 +103,7 @@ void main() {
         addTearDown(
           () => HardwareKeyboard.instance.removeHandler(recordKeyboard),
         );
-        final account = _IsolatedPlayerAccount(mediaBase: fixture?.baseUri);
+        final account = IsolatedPlayerTestAccount(mediaBase: fixture?.baseUri);
         var passed = false;
         addTearDown(() async {
           final fullscreen = AppFullscreenController();
@@ -157,18 +155,18 @@ void main() {
               home: PlayerPage(
                 request: PlaySessionRequest(
                   subject: online
-                      ? _subject.copyWith(source: 'integration')
-                      : _subject,
+                      ? playerTestSubject.copyWith(source: 'integration')
+                      : playerTestSubject,
                   episodes: online
-                      ? const [_episode, _secondEpisode]
-                      : const [_episode],
-                  episode: _episode,
+                      ? const [playerTestEpisode, playerTestSecondEpisode]
+                      : const [playerTestEpisode],
+                  episode: playerTestEpisode,
                   offlineOnly: !online,
                   initialLine: online
-                      ? account.lineFor(_episode)
+                      ? account.lineFor(playerTestEpisode)
                       : PlaybackLine(
                           id: 'integration:local',
-                          episodeId: _episode.id,
+                          episodeId: playerTestEpisode.id,
                           providerId: 'local',
                           providerName: 'Local integration fixture',
                           title: 'Generated test video',
@@ -222,7 +220,7 @@ void main() {
             () => find.text('自动弹幕第1集').evaluate().isNotEmpty,
             'real PlayerPage paints timeline comments without opening a panel',
           );
-          expect(account.danmakuRequests, [_episode.id]);
+          expect(account.danmakuRequests, [playerTestEpisode.id]);
         }
 
         Future<Map<String, dynamic>> observe(
@@ -411,7 +409,7 @@ void main() {
             await expectFullscreen('http:$mode:entered');
             await clickControl('下一集');
             await expectNewMedia(
-              account.lineFor(_secondEpisode),
+              account.lineFor(playerTestSecondEpisode),
               'http:$mode:next-episode',
             );
             await clickControl('暂停');
@@ -460,12 +458,12 @@ void main() {
             );
             await tester.tap(backupLine);
             await expectNewMedia(
-              account.lineFor(_secondEpisode, backup: true),
+              account.lineFor(playerTestSecondEpisode, backup: true),
               'http:$mode:backup-line',
             );
             await clickControl('上一集');
             await expectNewMedia(
-              account.lineFor(_episode),
+              account.lineFor(playerTestEpisode),
               'http:$mode:previous-episode',
             );
             await observe('key-escape', 'http:$mode:Esc-exit-dispatch');
@@ -535,387 +533,4 @@ Future<void> _waitFor(
     await tester.pump(const Duration(milliseconds: 100));
   }
   expect(ready(), isTrue, reason: 'Timed out: $label');
-}
-
-// A generated uncompressed AVI using only Dart byte operations. AVI is a
-// supported local-file format; no download, binary fixture or encoder is needed.
-Future<File> _writeTestVideo(Directory directory) async {
-  const width = 64;
-  const height = 36;
-  const frameCount = 1800;
-  const frameSize = width * height * 3;
-  Uint8List words(List<int> values) {
-    final data = ByteData(values.length * 4);
-    for (var i = 0; i < values.length; i++) {
-      data.setUint32(i * 4, values[i], Endian.little);
-    }
-    return data.buffer.asUint8List();
-  }
-
-  Uint8List chunk(String type, List<int> body) =>
-      (BytesBuilder(copy: false)
-            ..add(ascii.encode(type))
-            ..add(words([body.length]))
-            ..add(body)
-            ..add(body.length.isOdd ? [0] : const []))
-          .takeBytes();
-  Uint8List list(String type, List<int> body) => chunk(
-    'LIST',
-    (BytesBuilder(copy: false)
-          ..add(ascii.encode(type))
-          ..add(body))
-        .takeBytes(),
-  );
-  final streamHeader = ByteData(56);
-  streamHeader.buffer.asUint8List().setRange(0, 8, ascii.encode('vidsDIB '));
-  streamHeader.setUint32(20, 1, Endian.little);
-  streamHeader.setUint32(24, 10, Endian.little);
-  streamHeader.setUint32(32, frameCount, Endian.little);
-  streamHeader.setUint32(36, frameSize, Endian.little);
-  streamHeader.setUint32(40, 0xffffffff, Endian.little);
-  streamHeader.setInt16(52, width, Endian.little);
-  streamHeader.setInt16(54, height, Endian.little);
-  final bitmap = ByteData(40)
-    ..setUint32(0, 40, Endian.little)
-    ..setInt32(4, width, Endian.little)
-    ..setInt32(8, height, Endian.little)
-    ..setUint16(12, 1, Endian.little)
-    ..setUint16(14, 24, Endian.little)
-    ..setUint32(20, frameSize, Endian.little);
-  final headers = list(
-    'hdrl',
-    (BytesBuilder(copy: false)
-          ..add(
-            chunk(
-              'avih',
-              words([
-                100000,
-                frameSize * 10,
-                0,
-                0x10,
-                frameCount,
-                0,
-                1,
-                frameSize,
-                width,
-                height,
-                0,
-                0,
-                0,
-                0,
-              ]),
-            ),
-          )
-          ..add(
-            list(
-              'strl',
-              (BytesBuilder(copy: false)
-                    ..add(chunk('strh', streamHeader.buffer.asUint8List()))
-                    ..add(chunk('strf', bitmap.buffer.asUint8List())))
-                  .takeBytes(),
-            ),
-          ))
-        .takeBytes(),
-  );
-  final frames = BytesBuilder(copy: false);
-  final index = BytesBuilder(copy: false);
-  var offset = 4;
-  for (var frame = 0; frame < frameCount; frame++) {
-    final pixels = Uint8List(frameSize)
-      ..fillRange(0, frameSize, 40 + frame % 180);
-    final encoded = chunk('00db', pixels);
-    frames.add(encoded);
-    index
-      ..add(ascii.encode('00db'))
-      ..add(words([0x10, offset, frameSize]));
-    offset += encoded.length;
-  }
-  final body =
-      (BytesBuilder(copy: false)
-            ..add(ascii.encode('AVI '))
-            ..add(headers)
-            ..add(list('movi', frames.takeBytes()))
-            ..add(chunk('idx1', index.takeBytes())))
-          .takeBytes();
-  return File(
-    '${directory.path}/generated.avi',
-  ).writeAsBytes(chunk('RIFF', body));
-}
-
-const _subject = AnimeSubject(
-  id: -9001,
-  title: 'Fullscreen integration fixture',
-  originalTitle: '',
-  summary: '',
-  coverUrl: null,
-  bannerUrl: null,
-  date: null,
-  platform: 'local',
-  language: '',
-  region: '',
-  status: '',
-  categories: [],
-  tags: [],
-  totalEpisodes: 2,
-  source: 'direct',
-);
-const _episode = AnimeEpisode(
-  id: -9002,
-  subjectId: -9001,
-  number: 1,
-  title: 'Local video',
-  airdate: null,
-  duration: '180',
-  description: '',
-);
-
-const _secondEpisode = AnimeEpisode(
-  id: -9003,
-  subjectId: -9001,
-  number: 2,
-  title: 'Second generated video',
-  airdate: null,
-  duration: '180',
-  description: '',
-);
-
-class _IsolatedPlayerAccount extends AnimeController {
-  _IsolatedPlayerAccount({this.mediaBase});
-  final Uri? mediaBase;
-
-  @override
-  NextEpisodeWarmupBundle? prefetchedWarmupBundleForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    Duration minValidity = const Duration(seconds: 60),
-  }) => null;
-
-  @override
-  Future<void> prefetchPlaybackForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    String? preferredProviderId,
-    bool forceRefresh = false,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async {}
-
-  PlaybackLine lineFor(AnimeEpisode episode, {bool backup = false}) {
-    final provider = backup ? 'backup' : 'primary';
-    return PlaybackLine(
-      id: 'integration:${episode.id}:$provider',
-      episodeId: episode.id,
-      providerId: 'integration:$provider',
-      providerName: 'Loopback $provider',
-      title: 'Generated episode ${episode.number}',
-      quality: 'Original',
-      format: 'avi',
-      url: mediaBase!
-          .resolve('/episode-${episode.number}-$provider.avi')
-          .toString(),
-      available: true,
-      clientVerified: true,
-    );
-  }
-
-  @override
-  Future<List<PlaybackLine>> linesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async => [lineFor(episode), lineFor(episode, backup: true)];
-
-  @override
-  Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async* {
-    yield PlaybackLineLookupUpdate(
-      lines: await linesForEpisode(
-        subject,
-        episode,
-        cancellationToken: cancellationToken,
-      ),
-      completedRules: 1,
-      totalRules: 1,
-      phase: PlaybackLineLookupPhase.complete,
-    );
-  }
-
-  @override
-  Future<PlaybackLine> verifyPlaybackLine(
-    PlaybackLine line, {
-    bool enrichMetadata = true,
-    bool forceRefresh = false,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async => line;
-
-  @override
-  Future<List<PlaybackLine>> prepareSingleBackupForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    required PlaybackLine currentLine,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async => [lineFor(episode, backup: true)];
-
-  final danmakuRequests = <int>[];
-  void enableDanmaku() {
-    state = AsyncData(
-      state.requireValue.copyWith(
-        danmaku: const DanmakuSettings(enabled: true),
-      ),
-    );
-  }
-
-  var firstFrames = 0;
-  Duration latestPosition = Duration.zero;
-
-  @override
-  Future<AnimeState> build() async => const AnimeState(
-    homeFeed: AnimeHomeFeed(
-      hero: _subject,
-      recent: [],
-      recommended: [],
-      index: [],
-      categories: [],
-      tags: [],
-    ),
-    settings: PlaybackSettings(
-      rememberLine: false,
-      autoNext: false,
-      autoSwitchLine: false,
-    ),
-    danmaku: DanmakuSettings(enabled: false),
-  );
-
-  @override
-  String? rememberedPlaybackProvider(AnimeSubject subject) => null;
-
-  @override
-  Future<DanmakuTimeline> danmakuTimelineForEpisode(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    bool forceRefresh = false,
-  }) async {
-    danmakuRequests.add(episode.id);
-    return DanmakuTimeline(
-      comments: [
-        for (var second = 0; second < 90; second++)
-          DanmakuComment(
-            id: '${episode.id}:$second',
-            provider: 'test-fixture',
-            time: Duration(seconds: second),
-            mode: DanmakuMode.scroll,
-            color: 0xFFFFFFFF,
-            text: '自动弹幕第${episode.number}集',
-          ),
-      ],
-    );
-  }
-
-  @override
-  Future<void> recordRecommendationFirstFrame(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    int? expectedAccountContextVersion,
-  }) async {
-    firstFrames++;
-  }
-
-  @override
-  Future<void> recordRecommendationEffectiveWatch(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    int? expectedAccountContextVersion,
-  }) async {}
-
-  @override
-  Future<void> recordRecommendationCompleted(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    int? expectedAccountContextVersion,
-  }) async {}
-
-  @override
-  Future<void> updatePlaybackProgress(
-    AnimeSubject subject,
-    AnimeEpisode episode, {
-    required Duration position,
-    required Duration duration,
-    int? expectedAccountContextVersion,
-  }) async {
-    latestPosition = position;
-  }
-}
-
-// Exposes only the generated clip on loopback, never a directory or user data.
-// Range requests and media decoding are real; catalogue discovery is isolated.
-class _LoopbackVideoFixture {
-  _LoopbackVideoFixture(this.server);
-  final HttpServer server;
-  final requests = <Map<String, Object?>>[];
-  Uri get baseUri => Uri.parse('http://127.0.0.1:${server.port}');
-
-  static Future<_LoopbackVideoFixture> start(File clip) async {
-    final fixture = _LoopbackVideoFixture(
-      await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
-    );
-    final size = await clip.length();
-    fixture.server.listen((request) async {
-      final response = request.response;
-      try {
-        if (!RegExp(
-              r'^/episode-[12]-(primary|backup)\.avi$',
-            ).hasMatch(request.uri.path) ||
-            !['GET', 'HEAD'].contains(request.method)) {
-          response.statusCode = HttpStatus.notFound;
-          await response.close();
-          return;
-        }
-        var start = 0;
-        var end = size - 1;
-        final range = request.headers.value(HttpHeaders.rangeHeader);
-        if (range != null) {
-          final match = RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(range);
-          if (match == null) {
-            throw const FormatException('Unsupported fixture range');
-          }
-          start = int.parse(match[1]!);
-          if (match[2]!.isNotEmpty) end = int.parse(match[2]!);
-          if (end >= size) end = size - 1;
-          if (start > end || start >= size) {
-            throw const FormatException('Invalid fixture range');
-          }
-          response.statusCode = HttpStatus.partialContent;
-          response.headers.set(
-            HttpHeaders.contentRangeHeader,
-            'bytes $start-$end/$size',
-          );
-        }
-        response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
-        response.headers.contentType = ContentType('video', 'x-msvideo');
-        response.contentLength = end - start + 1;
-        fixture.requests.add({
-          'path': request.uri.path,
-          'range': range,
-          'status': response.statusCode,
-        });
-        if (request.method == 'GET') {
-          await response.addStream(clip.openRead(start, end + 1));
-        }
-        await response.close();
-      } on FormatException {
-        response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
-        response.headers.set(HttpHeaders.contentRangeHeader, 'bytes */$size');
-        await response.close();
-      } on HttpException {
-        // Switching media cancels an in-flight response, as a normal player does.
-      } on SocketException {
-        // Decoder stop/dispose can close the connection before the clip finishes.
-      }
-    });
-    return fixture;
-  }
-
-  Future<void> close() => server.close(force: true);
 }

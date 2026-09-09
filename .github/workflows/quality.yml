@@ -59,6 +59,9 @@ jobs:
           cache: true
       - run: flutter pub get --enforce-lockfile
       - run: flutter build apk --debug --suppress-analytics
+      - name: Run Android native unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
       - name: Enable KVM
         shell: bash
         run: |

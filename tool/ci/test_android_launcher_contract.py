@@ -66,6 +66,19 @@ class AndroidLauncherContractTests(unittest.TestCase):
             self.assertIn("timeout --kill-after=1s 3s adb exec-out screencap", command)
             self.assertIn('exit "$result"', command)
 
+    def test_native_android_unit_tests_run_before_emulator_smoke(self):
+        command = "run: ./gradlew :app:testDebugUnitTest --no-daemon"
+        self.assertIn(command, self.workflow)
+        step = self.workflow[: self.workflow.index(command)].rsplit("      - name:", 1)[
+            1
+        ]
+        self.assertIn("working-directory: android", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertLess(
+            self.workflow.index(command),
+            self.workflow.index("name: Launch debug APK on Android 35"),
+        )
+
     def test_installed_launcher_component_is_preserved(self):
         self.assertEqual(self.launchers, [".SplashActivity"])
 

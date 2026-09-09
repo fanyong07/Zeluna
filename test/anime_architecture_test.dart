@@ -14,6 +14,34 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test('native sampled and streamed first frames share completion wiring', () {
+    final source = File('lib/src/player/player_page.dart').readAsStringSync();
+    final start = source.indexOf('void _confirmNativeFirstFrame(');
+    final end = source.indexOf('void _bindPlayer()', start);
+    expect(start, isNonNegative);
+    expect(end, greaterThan(start));
+    final completion = source.substring(start, end);
+    expect(completion, contains('_loadingLine = false;'));
+    expect(completion, contains('_playbackFailed = false;'));
+    expect(completion, contains('_recordFirstFrame(current);'));
+    expect(completion, contains('_scheduleNextEpisodePrefetch();'));
+    expect(
+      source,
+      contains('if (reachedFirstFrame) _confirmNativeFirstFrame();'),
+    );
+    expect(
+      source.replaceAll(RegExp(r'\s+'), ' '),
+      contains(
+        'onFirstFrame: (snapshot) => _confirmNativeFirstFrame(snapshot: snapshot)',
+      ),
+    );
+    final trace = source.substring(
+      source.indexOf('void _recordFirstFrame('),
+      source.indexOf('void _clearWarmupTransitionState()'),
+    );
+    expect(trace, contains('_loadEnabledDanmakuAfterFirstFrame();'));
+  });
+
   test('anime controller remains a bounded orchestration surface', () {
     final controller = File('lib/src/data/anime_controller.dart');
     final lines = controller.readAsLinesSync();

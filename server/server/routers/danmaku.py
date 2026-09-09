@@ -30,7 +30,9 @@ router = APIRouter(prefix="/api/v3/danmaku", tags=["danmaku"])
 _STABLE_KEY_PATTERN = r"^[A-Za-z0-9._:-]+$"
 # Flutter stableEpisodeKey uses v1|<subject key>|episode:<number>. Keep the
 # legacy flat keys valid without changing identities or splitting stored comments.
-_EPISODE_KEY_PATTERN = r"^(?:[A-Za-z0-9._:-]+|v1\|[A-Za-z0-9._:-]+\|episode:[A-Za-z0-9._:-]+)$"
+_EPISODE_KEY_PATTERN = (
+    r"^(?:[A-Za-z0-9._:-]+|v1\|[A-Za-z0-9._:-]+\|episode:[A-Za-z0-9._:-]+)$"
+)
 # Leave headroom for the client's 8-second request timeout.
 _DANDANPLAY_TOTAL_TIMEOUT_SECONDS = 6.0
 
@@ -118,6 +120,7 @@ def _failed_dandanplay_source(
     *,
     title: str,
     episode_number: int,
+    error: DandanplayError,
 ) -> dict[str, object]:
     return {
         "provider": "弹弹play",
@@ -126,7 +129,18 @@ def _failed_dandanplay_source(
         "episode_id": "",
         "comment_count": 0,
         "available": False,
-        "message": "弹弹play 暂时无法访问，Zeluna 社区弹幕仍可正常使用",
+        "message": {
+            "authorization": "弹弹play 授权失败，请联系管理员检查服务端凭据；Zeluna 社区弹幕仍可正常使用",
+            "rate_limited": "弹弹play 请求受限，请稍后再试；Zeluna 社区弹幕仍可正常使用",
+            "timeout": "弹弹play 请求超时，Zeluna 社区弹幕仍可正常使用",
+            "transport": "弹弹play 网络暂时不可用，Zeluna 社区弹幕仍可正常使用",
+            "upstream_unavailable": "弹弹play 服务暂时不可用，Zeluna 社区弹幕仍可正常使用",
+        }.get(
+            error.code,
+            "弹弹play 返回异常，请联系管理员检查；Zeluna 社区弹幕仍可正常使用",
+        ),
+        "error_code": error.code,
+        "retryable": error.retryable,
     }
 
 
@@ -152,14 +166,18 @@ async def _load_dandanplay(
                 media_type=media_type,
                 before_upstream=before_upstream,
             )
-    except (DandanplayError, TimeoutError):
-        pass
+    except DandanplayError as error:
+        failure = error
+    except TimeoutError:
+        failure = DandanplayError("dandanplay budget exhausted", code="timeout")
     except Exception:
         logger.exception("unexpected dandanplay integration failure")
+        failure = DandanplayError("unexpected upstream failure")
     return DandanplayResult(
         source=_failed_dandanplay_source(
             title=title,
             episode_number=episode_number,
+            error=failure,
         )
     )
 
@@ -177,7 +195,7 @@ async def _guard_dandanplay_upstream(request: Request) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
         }:
             raise DandanplayError(
-                "dandanplay upstream request was throttled"
+                "dandanplay upstream request was throttled", code="rate_limited"
             ) from error
         raise
 
@@ -245,7 +263,9 @@ async def _list_response(
 async def list_danmaku(
     request: Request,
     subject_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
-    episode_key: str = Query(min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN),
+    episode_key: str = Query(
+        min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN
+    ),
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
     title: str = Query(default="", max_length=300),
@@ -283,7 +303,9 @@ async def list_danmaku(
 async def list_danmaku_with_ownership(
     request: Request,
     subject_key: str = Query(min_length=3, max_length=300, pattern=_STABLE_KEY_PATTERN),
-    episode_key: str = Query(min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN),
+    episode_key: str = Query(
+        min_length=3, max_length=300, pattern=_EPISODE_KEY_PATTERN
+    ),
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
     title: str = Query(default="", max_length=300),

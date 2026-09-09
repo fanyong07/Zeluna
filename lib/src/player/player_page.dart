@@ -95,6 +95,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   double? _appliedVolume;
   var _manualVolumeOverride = false;
   bool _controlsVisible = true;
+  bool _controlMenuOpen = false;
+  final _danmakuInputFocus = FocusNode(debugLabel: 'Player danmaku input');
   double? _temporaryPlaybackRate;
   bool _pointerInChromeHotZone = false;
   var _playing = false;
@@ -214,6 +216,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       lookupInProgress: !_loadingLine && !widget.request.offlineOnly,
     );
     _recoveryController = PlaybackRecoveryController();
+    _danmakuInputFocus.addListener(_handleDanmakuInputFocus);
     _danmakuController = DanmakuController()
       ..addListener(_handleDanmakuChanged);
     _anime4kController = Anime4KController(
@@ -701,6 +704,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController.dispose();
     unawaited(_lineRepository.dispose());
     _lineController.dispose();
+    _danmakuInputFocus.dispose();
     _danmakuController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
@@ -850,12 +854,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         onVolumeChanged: _setVolume,
                         onGestureVolumeChanged: _setGestureVolume,
                         onSpeedSelected: _selectSpeed,
+                        onControlMenuChanged: _handleControlMenuChanged,
                         onFullscreen: () => _setFullscreen(!_fullscreen),
                         onEpisodePanel: _toggleEpisodePanel,
                         onEpisodeSelected: _selectEpisode,
                         onLinePanel: _toggleLinePanel,
                         onDanmakuPanel: _toggleDanmakuPanel,
                         danmakuInput: _danmakuController.input,
+                        danmakuInputFocus: _danmakuInputFocus,
                         onSendDanmaku: (text) => unawaited(
                           _sendDanmaku(
                             text,
@@ -990,7 +996,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   bool get _shouldAutoHidePlayerControls {
-    return _playing &&
+    return !_controlMenuOpen &&
+        !_danmakuInputFocus.hasFocus &&
+        _playing &&
         !_buffering &&
         !_loadingLine &&
         !_lineLookupInProgress &&
@@ -1037,6 +1045,24 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _scheduleControlsHide();
   }
 
+  void _handleDanmakuInputFocus() {
+    if (_danmakuInputFocus.hasFocus) {
+      _revealPlayerControls();
+    } else {
+      _scheduleControlsHide();
+    }
+  }
+
+  void _handleControlMenuChanged(bool open) {
+    _controlMenuOpen = open;
+    if (!mounted) return;
+    if (open) {
+      _controlsHideTimer?.cancel();
+    } else {
+      _scheduleControlsHide();
+    }
+  }
+
   void _scheduleControlsHide() {
     _controlsHideTimer?.cancel();
     if (!_shouldAutoHidePlayerControls) return;
@@ -1056,7 +1082,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   KeyEventResult _handleShortcut(KeyEvent event, PlaybackSettings settings) {
-    if (!settings.keyboardShortcutsEnabled) return KeyEventResult.ignored;
+    if (!settings.keyboardShortcutsEnabled || _danmakuInputFocus.hasFocus) {
+      return KeyEventResult.ignored;
+    }
     if (event is KeyUpEvent) return KeyEventResult.ignored;
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.escape) {
@@ -1108,6 +1136,35 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     return KeyEventResult.ignored;
   }
 
+  void _confirmNativeFirstFrame({NativePlaybackStartupSnapshot? snapshot}) {
+    if (!mounted || _leaving) return;
+    _ignoreNativeErrorsUntil = null;
+    if (snapshot != null) {
+      _notePlaybackProgress(snapshot.position);
+      _nativeVideo.resumeSeek.handleProgress(snapshot.position);
+    }
+    setState(() {
+      if (snapshot != null) {
+        _playing = snapshot.playing;
+        _position = snapshot.position;
+        _buffer = snapshot.buffer;
+        _buffering = snapshot.buffering;
+        _duration = _player.state.duration;
+      }
+      _loadingLine = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+    final current = _line;
+    if (current != null) {
+      _clearLineFailure(current.id);
+      _preferredProviderId = current.providerId;
+      _recordFirstFrame(current);
+    }
+    _scheduleSingleBackupLookup();
+    _scheduleNextEpisodePrefetch();
+  }
+
   void _bindPlayer() {
     _nativeVideo
       ..track(
@@ -1156,27 +1213,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             previousPosition: previousPosition,
             currentPosition: value,
           );
-          if (reachedFirstFrame) {
-            _ignoreNativeErrorsUntil = null;
-            final current = _line;
-            if (current != null) {
-              _clearLineFailure(current.id);
-              _preferredProviderId = current.providerId;
-              _recordFirstFrame(current);
-            }
-          }
-          setState(() {
-            _position = value;
-            if (reachedFirstFrame) {
-              _loadingLine = false;
-              _playbackFailed = false;
-              _playerMessage = null;
-            }
-          });
-          if (reachedFirstFrame) {
-            _scheduleSingleBackupLookup();
-            _scheduleNextEpisodePrefetch();
-          }
+          setState(() => _position = value);
+          if (reachedFirstFrame) _confirmNativeFirstFrame();
           _maybeRefreshNextEpisodePrefetch();
         }),
       )
@@ -1984,6 +2022,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           playerState: _player.state,
           hasAlternative: _nextPlayableLine() != null,
         ),
+        onFirstFrame: (snapshot) =>
+            _confirmNativeFirstFrame(snapshot: snapshot),
         onTimeout: (event) {
           final hardTimedOut = event.phase == NativeStartupTimeoutPhase.hard;
           _sessionController.dispatch(

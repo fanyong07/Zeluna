@@ -1,13 +1,17 @@
 import asyncio
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from server import account_api
 from server.account_api import current_account
+from server.rate_limit import InMemoryRateLimiter
 from server.app import create_app
 from server.dandanplay import (
+    DandanplayClient,
     DandanplayError,
     DandanplayResult,
     get_dandanplay_client,
@@ -340,6 +344,8 @@ def test_slow_dandanplay_returns_existing_community_within_budget(
         assert payload["sources"][0]["available"] is True
         assert payload["sources"][0]["comment_count"] == 1
         assert payload["sources"][1]["available"] is False
+        assert payload["sources"][1]["error_code"] == "timeout"
+        assert payload["sources"][1]["retryable"] is True
         assert "社区弹幕仍可正常使用" in payload["sources"][1]["message"]
         assert not [record for record in caplog.records if record.levelno >= 40]
 
@@ -501,28 +507,49 @@ def test_dandanplay_rate_limit_degrades_without_failing_community(
     )
 
 
-@pytest.mark.parametrize("subject_key", ["bangumi:876", "tmdb:tv:95842", "subject:v1:" + "a" * 64])
-def test_real_flutter_episode_identity_reads_writes_and_aggregates(tmp_path, subject_key):
+@pytest.mark.parametrize(
+    "subject_key", ["bangumi:876", "tmdb:tv:95842", "subject:v1:" + "a" * 64]
+)
+def test_real_flutter_episode_identity_reads_writes_and_aggregates(
+    tmp_path, subject_key
+):
     episode_key = f"v1|{subject_key}|episode:1"
-    fake = _FakeDandanplayClient(result=DandanplayResult(
-        source={"provider": "弹弹play", "available": True, "comment_count": 1},
-        comments=({"id": "dandanplay:42:1", "provider": "弹弹play",
-                   "time_seconds": 1, "text": "真实分集协议回归"},),
-    ))
+    fake = _FakeDandanplayClient(
+        result=DandanplayResult(
+            source={"provider": "弹弹play", "available": True, "comment_count": 1},
+            comments=(
+                {
+                    "id": "dandanplay:42:1",
+                    "provider": "弹弹play",
+                    "time_seconds": 1,
+                    "text": "真实分集协议回归",
+                },
+            ),
+        )
+    )
 
     async def exercise(client, _switch_user, _owner_id, _other_id):
-        params = {"subject_key": subject_key, "episode_key": episode_key,
-                  "title": "CLANNAD AFTER STORY", "episode_number": 1,
-                  "include_dandanplay": True}
+        params = {
+            "subject_key": subject_key,
+            "episode_key": episode_key,
+            "title": "CLANNAD AFTER STORY",
+            "episode_number": 1,
+            "include_dandanplay": True,
+        }
         # Anonymous playback must reach the upstream, using the *client* key.
         read = await client.get("/api/v3/danmaku", params=params)
         assert read.status_code == 200, read.text
         assert read.json()["sources"][1]["available"] is True
         assert read.json()["comments"][0]["provider"] == "弹弹play"
-        created = await client.post("/api/v3/danmaku", json={
-            "subject_key": subject_key, "episode_key": episode_key,
-            "time_seconds": 2, "text": "兼容客户端稳定分集键",
-        })
+        created = await client.post(
+            "/api/v3/danmaku",
+            json={
+                "subject_key": subject_key,
+                "episode_key": episode_key,
+                "time_seconds": 2,
+                "text": "兼容客户端稳定分集键",
+            },
+        )
         assert created.status_code == 201, created.text
         mine = await client.get("/api/v3/danmaku/mine", params=params)
         assert mine.status_code == 200, mine.text
@@ -532,20 +559,123 @@ def test_real_flutter_episode_identity_reads_writes_and_aggregates(tmp_path, sub
         assert own[0]["author"]["is_mine"] is True
         assert len(fake.calls) == 2
 
-    asyncio.run(_exercise_api(tmp_path / "client-identity.db", exercise,
-                              dandanplay_client=fake))
+    asyncio.run(
+        _exercise_api(tmp_path / "client-identity.db", exercise, dandanplay_client=fake)
+    )
 
 
-@pytest.mark.parametrize("invalid", ["v1|bangumi:876|episode:1\n", "../episode:1", "a/b", "a?b", "a b", "a' OR 1=1", "a\x00b", "a" * 301])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "v1|bangumi:876|episode:1\n",
+        "../episode:1",
+        "a/b",
+        "a?b",
+        "a b",
+        "a' OR 1=1",
+        "a\x00b",
+        "a" * 301,
+    ],
+)
 def test_episode_identity_rejects_unsafe_characters(tmp_path, invalid):
     async def exercise(client, _switch_user, _owner_id, _other_id):
         params = {"subject_key": "bangumi:876", "episode_key": invalid}
         for path in ("/api/v3/danmaku", "/api/v3/danmaku/mine"):
             response = await client.get(path, params=params)
             assert response.status_code == 422
-        response = await client.post("/api/v3/danmaku", json={
-            **params, "time_seconds": 2, "text": "无效分集",
-        })
+        response = await client.post(
+            "/api/v3/danmaku",
+            json={
+                **params,
+                "time_seconds": 2,
+                "text": "无效分集",
+            },
+        )
         assert response.status_code == 422
 
     asyncio.run(_exercise_api(tmp_path / "invalid-identity.db", exercise))
+
+
+@pytest.mark.parametrize("endpoint", ["/api/v3/danmaku", "/api/v3/danmaku/mine"])
+@pytest.mark.parametrize(
+    "status,code,retryable,message",
+    [
+        (401, "authorization", False, "授权失败"),
+        (403, "authorization", False, "授权失败"),
+        (429, "rate_limited", False, "请求受限"),
+        (503, "upstream_unavailable", True, "服务暂时不可用"),
+        (504, "timeout", True, "请求超时"),
+        (422, "upstream_error", False, "返回异常"),
+    ],
+)
+def test_real_client_partial_http_200_classifies_errors_safely(
+    tmp_path, monkeypatch, endpoint, status, code, retryable, message
+):
+    monkeypatch.setattr(
+        account_api, "_rate_limiter", InMemoryRateLimiter(max_keys=1000)
+    )
+
+    async def handler(_request):
+        return httpx.Response(status, text="private-upstream-body-secret")
+
+    upstream = DandanplayClient(
+        enabled=True,
+        app_id="fixture",
+        app_secret="fixture-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    async def exercise(client, _switch_user, _owner_id, _other_id):
+        created = await client.post(
+            "/api/v3/danmaku",
+            json={
+                "subject_key": "bangumi:400602",
+                "episode_key": "episode:v2:first",
+                "time_seconds": 1,
+                "mode": "scroll",
+                "color": 0xFFFFFF,
+                "text": "社区仍可用",
+            },
+        )
+        assert created.status_code == 201
+        response = await client.get(
+            endpoint,
+            params={
+                "subject_key": "bangumi:400602",
+                "episode_key": "episode:v2:first",
+                "title": "葬送的芙莉莲",
+                "episode_number": 1,
+                "include_dandanplay": True,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["comments"][0]["text"] == "社区仍可用"
+        source = payload["sources"][1]
+        assert source["provider"] == "弹弹play"
+        assert source["available"] is False
+        assert source["error_code"] == code
+        assert source["retryable"] is retryable
+        assert message in source["message"]
+        assert "fixture-secret" not in response.text
+        assert "private-upstream-body-secret" not in response.text
+
+    asyncio.run(
+        _exercise_api(tmp_path / "classified.db", exercise, dandanplay_client=upstream)
+    )
+
+
+def test_local_upstream_rate_limit_never_becomes_retryable(monkeypatch):
+    async def denied(*_args, **_kwargs):
+        raise HTTPException(status_code=429)
+
+    monkeypatch.setattr(danmaku_router, "_rate_limit", denied)
+    monkeypatch.setattr(danmaku_router, "_client_key", lambda _: "fixture")
+
+    async def exercise():
+        with pytest.raises(DandanplayError) as caught:
+            await danmaku_router._guard_dandanplay_upstream(None)
+        assert caught.value.code == "rate_limited"
+        assert caught.value.retryable is False
+
+    asyncio.run(exercise())

@@ -4,12 +4,271 @@ import 'dart:io';
 
 import 'package:anime/src/data/danmaku_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/core/network/network_security.dart';
 import 'package:anime/src/player/danmaku_overlay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  testWidgets(
+    'six second partial response cannot restart an eight second budget',
+    (tester) async {
+      final start = tester.binding.clock.now();
+      final pending = Completer<http.Response>();
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        stopwatchFactory: () =>
+            _TestStopwatch(() => tester.binding.clock.now().difference(start)),
+        officialClient: MockClient((_) async {
+          attempts++;
+          if (attempts > 1) return pending.future;
+          await Future<void>.delayed(const Duration(seconds: 6));
+          return _jsonResponse({
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {
+                'provider': '弹弹play',
+                'available': false,
+                'error_code': 'timeout',
+                'retryable': true,
+              },
+            ],
+            'comments': [
+              {
+                'id': 'community',
+                'provider': 'Zeluna',
+                'text': 'still usable',
+                'time_seconds': 1,
+                'color': 16777215,
+              },
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      DanmakuTimeline? result;
+      final future = repository
+          .timelineForEpisode(
+            _subject,
+            _episode,
+            const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+          )
+          .then((value) => result = value);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(attempts, 2);
+      await tester.pump(const Duration(milliseconds: 1499));
+      expect(result, isNull);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(result, isNotNull);
+      await future;
+      expect(result!.comments.single.text, 'still usable');
+      expect(result!.sources.last, isA<TransientDanmakuFailure>());
+      pending.complete(http.Response('', 503));
+      await tester.pump(const Duration(seconds: 20));
+      expect(attempts, 2);
+    },
+  );
+
+  test('HTTP 200 permanent unknown and empty outcomes never retry', () async {
+    for (final code in [
+      'authorization',
+      'rate_limited',
+      'disabled',
+      'no_match',
+      'upstream_error',
+      null,
+    ]) {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          return _jsonResponse({
+            'sources': [
+              {
+                'provider': '弹弹play',
+                'available': false,
+                'error_code': code,
+                'retryable': true,
+                'message': '弹弹play 暂时无法访问，Zeluna 社区弹幕仍可正常使用',
+              },
+            ],
+            'comments': [],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final result = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(attempts, 1, reason: '$code');
+      expect(result.sources.single, isNot(isA<TransientDanmakuFailure>()));
+    }
+    for (final retryable in [false, null]) {
+      final parsed = parseZelunaDanmakuSources({
+        'sources': [
+          {
+            'provider': '弹弹play',
+            'available': false,
+            'error_code': 'timeout',
+            'retryable': retryable,
+          },
+        ],
+      });
+      expect(parsed.single, isNot(isA<TransientDanmakuFailure>()));
+    }
+  });
+
+  test(
+    'HTTP 200 explicitly retryable partial failure recovers without a second load',
+    () async {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          return _jsonResponse({
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {
+                'provider': '弹弹play',
+                'available': attempts > 1,
+                'error_code': attempts == 1 ? 'timeout' : null,
+                'retryable': attempts == 1,
+              },
+            ],
+            'comments': [
+              {
+                'id': 'community',
+                'provider': 'Zeluna',
+                'text': 'community',
+                'time_seconds': 2,
+                'color': 16777215,
+              },
+              if (attempts > 1)
+                {
+                  'id': 'external',
+                  'provider': '弹弹play',
+                  'text': 'recovered',
+                  'time_seconds': 1,
+                  'color': 16777215,
+                },
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final result = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(result.comments.map((c) => c.text), ['recovered', 'community']);
+      expect(attempts, 2);
+    },
+  );
+
+  testWidgets(
+    'official retries and anonymous fallback share the eight second budget',
+    (tester) async {
+      final pending = Completer<http.Response>();
+      final start = tester.binding.clock.now();
+      var attempts = 0;
+      final observed = <http.Request>[];
+      final repository = DanmakuRepository(
+        stopwatchFactory: () =>
+            _TestStopwatch(() => tester.binding.clock.now().difference(start)),
+        officialTokenProvider: () async => 'fixture-token',
+        officialClient: MockClient((request) async {
+          attempts++;
+          observed.add(request);
+          if (attempts == 1) {
+            await Future<void>.delayed(const Duration(seconds: 3));
+            return http.Response('', 401);
+          }
+          if (attempts == 2) {
+            await Future<void>.delayed(const Duration(seconds: 3));
+            return http.Response('', 503);
+          }
+          return pending.future;
+        }),
+      );
+      addTearDown(repository.close);
+      DanmakuTimeline? result;
+      final future = repository
+          .timelineForEpisode(
+            _subject,
+            _episode,
+            const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+          )
+          .then((value) => result = value);
+      await tester.pump();
+      expect(attempts, 1);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(attempts, 2, reason: '${observed.map((r) => r.url.path)}');
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(attempts, 3);
+      await tester.pump(const Duration(milliseconds: 1499));
+      expect(result, isNull);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        result,
+        isNotNull,
+        reason: 'all requests must settle at eight seconds',
+      );
+      expect(
+        result!.sources.every((s) => s is TransientDanmakuFailure),
+        isTrue,
+      );
+      await future;
+      pending.complete(http.Response('', 503));
+      await tester.pump(const Duration(seconds: 20));
+      expect(attempts, 3, reason: 'expiry must not schedule another retry');
+      expect(observed.map((r) => r.url.path), [
+        '/api/v3/danmaku/mine',
+        '/api/v3/danmaku',
+        '/api/v3/danmaku',
+      ]);
+      expect(observed.first.headers['authorization'], 'Bearer fixture-token');
+      expect(
+        observed.skip(1).every((r) => !r.headers.containsKey('authorization')),
+        isTrue,
+      );
+    },
+  );
+
+  test('only transport failures carry transient source metadata', () async {
+    for (final error in [
+      TimeoutException('offline'),
+      http.ClientException('connection reset'),
+      const FormatException('malformed'),
+      const NetworkSecurityException('blocked'),
+    ]) {
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async => throw error),
+      );
+      addTearDown(repository.close);
+      final timeline = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(timeline.sources, isNotEmpty);
+      expect(
+        timeline.sources.every((s) => s is TransientDanmakuFailure),
+        error is TimeoutException || error is http.ClientException,
+        reason: '${error.runtimeType}',
+      );
+    }
+  });
+
   test(
     'transient official failure retries before returning an empty timeline',
     () async {
@@ -641,3 +900,10 @@ const _episode = AnimeEpisode(
   duration: '24:00',
   description: '第一集',
 );
+
+class _TestStopwatch extends Stopwatch {
+  _TestStopwatch(this.readElapsed);
+  final Duration Function() readElapsed;
+  @override
+  Duration get elapsed => readElapsed();
+}

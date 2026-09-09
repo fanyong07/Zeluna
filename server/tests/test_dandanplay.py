@@ -522,3 +522,67 @@ def test_cancelled_initiator_keeps_shared_flight_and_populates_cache():
         assert len(client._cache) == 1
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("stage", ["search", "comments", "redirect"])
+@pytest.mark.parametrize(
+    "status,code,retryable",
+    [
+        (401, "authorization", False),
+        (403, "authorization", False),
+        (429, "rate_limited", False),
+        (422, "upstream_error", False),
+        (408, "timeout", True),
+        (502, "upstream_unavailable", True),
+        (503, "upstream_unavailable", True),
+        (504, "timeout", True),
+    ],
+)
+def test_http_failure_retryability_is_explicit(stage, status, code, retryable):
+    async def exercise():
+        async def handler(request):
+            if stage != "search" and request.url.path == "/api/v2/search/episodes":
+                return httpx.Response(200, json=_search_payload())
+            if stage == "redirect" and request.url.path.startswith("/api/v2/comment/"):
+                return httpx.Response(
+                    302, headers={"location": "https://cdn.example/comments"}
+                )
+            return httpx.Response(status)
+
+        with pytest.raises(DandanplayError) as caught:
+            await _client(handler).comments_for_episode(
+                title="葬送的芙莉莲",
+                original_title="Frieren",
+                episode_number=1,
+                media_type="anime",
+            )
+        assert caught.value.code == code
+        assert caught.value.retryable is retryable
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "error,code,retryable",
+    [
+        (httpx.ReadTimeout("slow"), "timeout", True),
+        (httpx.ConnectError("offline"), "transport", True),
+        (httpx.UnsupportedProtocol("bad protocol"), "upstream_error", False),
+    ],
+)
+def test_transport_failure_retryability_is_explicit(error, code, retryable):
+    async def exercise():
+        async def handler(_request):
+            raise error
+
+        with pytest.raises(DandanplayError) as caught:
+            await _client(handler).comments_for_episode(
+                title="葬送的芙莉莲",
+                original_title="Frieren",
+                episode_number=1,
+                media_type="anime",
+            )
+        assert caught.value.code == code
+        assert caught.value.retryable is retryable
+
+    asyncio.run(exercise())

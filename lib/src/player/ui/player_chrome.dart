@@ -27,7 +27,10 @@ class _PlayerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final compact = _isMobilePlayerLayout(context);
+    final compact = usesCompactPlayerBottomControlsForSize(
+      MediaQuery.sizeOf(context),
+      defaultTargetPlatform,
+    );
     if (compact) {
       final densePortrait =
           MediaQuery.sizeOf(context).height > MediaQuery.sizeOf(context).width;
@@ -145,12 +148,15 @@ class _PlayerHeader extends StatelessWidget {
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
                 const SizedBox(width: 12),
-                Text(
-                  episode.displayTitle,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: AppColors.theaterMuted,
+                Flexible(
+                  child: Text(
+                    episode.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.theaterMuted,
+                    ),
                   ),
                 ),
               ],
@@ -202,9 +208,11 @@ class PlayerBottomBar extends StatelessWidget {
     required this.onMute,
     required this.onVolumeChanged,
     required this.onSpeedSelected,
+    this.onControlMenuChanged,
     required this.onFullscreen,
     required this.onDanmakuPanel,
     required this.danmakuInput,
+    this.danmakuInputFocus,
     required this.onSendDanmaku,
     required this.onEpisodePanel,
     required this.onLinePanel,
@@ -230,9 +238,11 @@ class PlayerBottomBar extends StatelessWidget {
   final Future<void> Function() onMute;
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSpeedSelected;
+  final ValueChanged<bool>? onControlMenuChanged;
   final Future<void> Function() onFullscreen;
   final VoidCallback onDanmakuPanel;
   final TextEditingController danmakuInput;
+  final FocusNode? danmakuInputFocus;
   final ValueChanged<String> onSendDanmaku;
   final VoidCallback onEpisodePanel;
   final VoidCallback onLinePanel;
@@ -286,229 +296,62 @@ class PlayerBottomBar extends StatelessWidget {
               ),
             ),
           ),
-          SizedBox(
-            height: portraitMobile ? 36 : 52,
-            child: portraitMobile
-                ? _MobilePlayerControls(
-                    playing: playing,
-                    buffering: buffering,
-                    loadingLine: loadingLine,
-                    fullscreen: fullscreen,
-                    onPlayPause: onPlayPause,
-                    onPreviousEpisode: onPreviousEpisode,
-                    onNextEpisode: onNextEpisode,
-                    onFullscreen: onFullscreen,
-                    landscape: false,
-                  )
-                : mobileLandscape
-                ? _LandscapeMobilePlayerControls(
-                    line: line,
-                    settings: settings,
-                    services: services,
-                    position: position,
-                    duration: duration,
-                    volume: volume,
-                    playing: playing,
-                    buffering: buffering,
-                    loadingLine: loadingLine,
-                    fullscreen: fullscreen,
-                    muted: muted,
-                    onPlayPause: onPlayPause,
-                    onPreviousEpisode: onPreviousEpisode,
-                    onNextEpisode: onNextEpisode,
-                    onMute: onMute,
-                    onVolumeChanged: onVolumeChanged,
-                    onSpeedSelected: onSpeedSelected,
-                    onFullscreen: onFullscreen,
-                    onDanmakuPanel: onDanmakuPanel,
-                    onEpisodePanel: onEpisodePanel,
-                    onLinePanel: onLinePanel,
-                  )
-                : Row(
-                    children: [
-                      _ControlIconButton(
-                        icon: Icons.skip_previous_rounded,
-                        tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
-                        onPressed: onPreviousEpisode,
-                        size: 26,
-                      ),
-                      const SizedBox(width: 2),
-                      _ControlIconButton(
-                        icon: playing
-                            ? Icons.pause_rounded
-                            : Icons.play_arrow_rounded,
-                        tooltip: playing ? '暂停' : '播放',
-                        size: 32,
-                        busy: loadingLine || buffering,
-                        onPressed: onPlayPause,
-                      ),
-                      const SizedBox(width: 2),
-                      _ControlIconButton(
-                        icon: Icons.skip_next_rounded,
-                        tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
-                        onPressed: onNextEpisode,
-                        size: 26,
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        '${_durationLabel(position)} / ${_durationLabel(duration)}',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppColors.theaterMuted,
-                          fontWeight: FontWeight.w600,
-                          fontFeatures: const [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                      const SizedBox(width: 18),
-                      Tooltip(
-                        message:
-                            services.dandanplayDanmakuEnabled ||
-                                services.bilibiliDanmakuEnabled
-                            ? '弹幕源与显示设置'
-                            : '弹幕源已关闭',
-                        child: IconButton(
-                          onPressed: onDanmakuPanel,
-                          padding: EdgeInsets.zero,
-                          icon: Icon(
-                            Icons.comment_outlined,
-                            color:
-                                services.dandanplayDanmakuEnabled ||
-                                    services.bilibiliDanmakuEnabled
-                                ? AppColors.theaterInk
-                                : AppColors.theaterFaint,
-                          ),
-                          iconSize: 23,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Align(
-                          alignment: fullscreen
-                              ? Alignment.center
-                              : Alignment.centerLeft,
-                          child: ConstrainedBox(
-                            constraints: BoxConstraints(
-                              maxWidth: fullscreen ? 760 : 520,
-                            ),
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: AppColors.theaterBg.withValues(
-                                  alpha: 0.72,
-                                ),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: AppColors.theaterBorder,
-                                ),
-                              ),
-                              child: SizedBox(
-                                height: 36,
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: TextField(
-                                        controller: danmakuInput,
-                                        enabled: danmaku.enabled,
-                                        textInputAction: TextInputAction.send,
-                                        onSubmitted: onSendDanmaku,
-                                        style: const TextStyle(
-                                          color: AppColors.theaterInk,
-                                          fontSize: 13,
-                                        ),
-                                        decoration: InputDecoration(
-                                          isDense: true,
-                                          filled: false,
-                                          border: InputBorder.none,
-                                          enabledBorder: InputBorder.none,
-                                          focusedBorder: InputBorder.none,
-                                          hintText: danmaku.enabled
-                                              ? '发条弹幕吧…'
-                                              : '弹幕已关闭',
-                                          contentPadding:
-                                              const EdgeInsets.symmetric(
-                                                horizontal: 14,
-                                                vertical: 9,
-                                              ),
-                                        ),
-                                      ),
-                                    ),
-                                    Padding(
-                                      padding: const EdgeInsets.only(right: 4),
-                                      child: TextButton(
-                                        onPressed: danmaku.enabled
-                                            ? () => onSendDanmaku(
-                                                danmakuInput.text,
-                                              )
-                                            : null,
-                                        style: TextButton.styleFrom(
-                                          minimumSize: const Size(0, 30),
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 12,
-                                          ),
-                                          foregroundColor: AppColors.primary2,
-                                        ),
-                                        child: const Text('发送'),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 14),
-                      TextButton.icon(
-                        onPressed: onEpisodePanel,
-                        icon: const Icon(
-                          Icons.video_library_outlined,
-                          size: 18,
-                          color: AppColors.theaterInk,
-                        ),
-                        label: const Text(
-                          '选集',
-                          style: TextStyle(color: AppColors.theaterInk),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _SpeedMenuButton(
-                        current: settings.speed,
-                        onSelected: onSpeedSelected,
-                      ),
-                      const SizedBox(width: 10),
-                      TextButton(
-                        onPressed: onLinePanel,
-                        child: Text(
-                          line == null
-                              ? '线路'
-                              : playbackLineProviderLabel(line!),
-                          style: const TextStyle(color: AppColors.theaterInk),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _VolumeButton(
-                        volume: volume,
-                        muted: muted,
-                        onMute: onMute,
-                        onVolumeChanged: onVolumeChanged,
-                      ),
-                      const SizedBox(width: 6),
-                      _ControlIconButton(
-                        icon: fullscreen
-                            ? Icons.fullscreen_exit_rounded
-                            : Icons.fullscreen_rounded,
-                        tooltip: fullscreen ? '退出全屏' : '全屏',
-                        onPressed: onFullscreen,
-                      ),
-                    ],
-                  ),
-          ),
+          if (portraitMobile)
+            SizedBox(
+              height: 36,
+              child: _MobilePlayerControls(
+                playing: playing,
+                buffering: buffering,
+                loadingLine: loadingLine,
+                fullscreen: fullscreen,
+                onPlayPause: onPlayPause,
+                onPreviousEpisode: onPreviousEpisode,
+                onNextEpisode: onNextEpisode,
+                onFullscreen: onFullscreen,
+                landscape: false,
+              ),
+            )
+          else
+            _UnifiedPlayerControls(
+              line: line,
+              settings: settings,
+              services: services,
+              danmaku: danmaku,
+              danmakuInput: danmakuInput,
+              danmakuInputFocus: danmakuInputFocus,
+              onSendDanmaku: onSendDanmaku,
+              position: position,
+              duration: duration,
+              volume: volume,
+              playing: playing,
+              buffering: buffering,
+              loadingLine: loadingLine,
+              fullscreen: fullscreen,
+              muted: muted,
+              onPlayPause: onPlayPause,
+              onPreviousEpisode: onPreviousEpisode,
+              onNextEpisode: onNextEpisode,
+              onMute: onMute,
+              onVolumeChanged: onVolumeChanged,
+              onSpeedSelected: onSpeedSelected,
+              onControlMenuChanged: onControlMenuChanged,
+              onFullscreen: onFullscreen,
+              onDanmakuPanel: onDanmakuPanel,
+              onEpisodePanel: onEpisodePanel,
+              onLinePanel: onLinePanel,
+            ),
         ],
       ),
     );
   }
 }
 
-class _LandscapeMobilePlayerControls extends StatelessWidget {
-  const _LandscapeMobilePlayerControls({
+class _UnifiedPlayerControls extends StatelessWidget {
+  const _UnifiedPlayerControls({
+    required this.danmaku,
+    required this.danmakuInput,
+    this.danmakuInputFocus,
+    required this.onSendDanmaku,
     required this.line,
     required this.settings,
     required this.services,
@@ -526,12 +369,17 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
     required this.onMute,
     required this.onVolumeChanged,
     required this.onSpeedSelected,
+    this.onControlMenuChanged,
     required this.onFullscreen,
     required this.onDanmakuPanel,
     required this.onEpisodePanel,
     required this.onLinePanel,
   });
 
+  final DanmakuSettings danmaku;
+  final TextEditingController danmakuInput;
+  final FocusNode? danmakuInputFocus;
+  final ValueChanged<String> onSendDanmaku;
   final PlaybackLine? line;
   final PlaybackSettings settings;
   final ExternalServiceSettings services;
@@ -549,6 +397,7 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
   final Future<void> Function() onMute;
   final ValueChanged<double> onVolumeChanged;
   final ValueChanged<double> onSpeedSelected;
+  final ValueChanged<bool>? onControlMenuChanged;
   final Future<void> Function() onFullscreen;
   final VoidCallback onDanmakuPanel;
   final VoidCallback onEpisodePanel;
@@ -556,95 +405,243 @@ class _LandscapeMobilePlayerControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const controlSize = 40.0;
-    _ControlIconButton action({
-      required IconData icon,
-      required String tooltip,
-      required Future<void> Function()? onPressed,
-      double size = 22,
-      bool busy = false,
-    }) => _ControlIconButton(
-      icon: icon,
-      tooltip: tooltip,
-      onPressed: onPressed,
-      size: size,
-      busy: busy,
-      compact: true,
-      compactSize: controlSize,
-    );
+    final touch =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Keep the annotated Windows order on one row at every landscape
+        // width. Reduce secondary label width, never move input below playback.
+        final dense = constraints.maxWidth < 1000;
+        final narrow = constraints.maxWidth < 600;
+        _ControlIconButton action(
+          IconData icon,
+          String tooltip,
+          Future<void> Function()? callback, {
+          double size = 24,
+          bool busy = false,
+        }) => _ControlIconButton(
+          icon: icon,
+          tooltip: tooltip,
+          onPressed: callback,
+          size: dense ? size * 0.8 : size,
+          busy: busy,
+          compact: dense || touch,
+          compactSize: 40,
+        );
 
-    return Row(
-      children: [
-        action(
-          icon: Icons.skip_previous_rounded,
-          tooltip: onPreviousEpisode == null ? '已经是第一集' : '上一集',
-          onPressed: onPreviousEpisode,
-        ),
-        action(
-          icon: playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-          tooltip: playing ? '暂停' : '播放',
-          onPressed: onPlayPause,
-          size: 28,
-          busy: loadingLine || buffering,
-        ),
-        action(
-          icon: Icons.skip_next_rounded,
-          tooltip: onNextEpisode == null ? '已经是最后一集' : '下一集',
-          onPressed: onNextEpisode,
-        ),
-        const SizedBox(width: 4),
-        Expanded(
-          child: Text(
-            '${_durationLabel(position)} / ${_durationLabel(duration)}',
-            maxLines: 1,
-            overflow: TextOverflow.fade,
-            softWrap: false,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: AppColors.theaterMuted,
-              fontWeight: FontWeight.w600,
-              fontFeatures: const [FontFeature.tabularFigures()],
+        Widget composer() => Row(
+          children: [
+            Tooltip(
+              message:
+                  services.dandanplayDanmakuEnabled ||
+                      services.bilibiliDanmakuEnabled
+                  ? '弹幕源与显示设置'
+                  : '弹幕源已关闭',
+              child: IconButton(
+                onPressed: onDanmakuPanel,
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(40, 40),
+                  maximumSize: const Size(40, 40),
+                  padding: EdgeInsets.zero,
+                ),
+                icon: Icon(
+                  Icons.comment_outlined,
+                  size: dense ? 18 : 23,
+                  color: AppColors.theaterInk,
+                ),
+              ),
             ),
+            SizedBox(width: dense ? 4 : 8),
+            Expanded(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: AppColors.theaterBg.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.theaterBorder),
+                ),
+                child: SizedBox(
+                  height: dense ? 34 : 40,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: danmakuInput,
+                          focusNode: danmakuInputFocus,
+                          enabled: danmaku.enabled,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: onSendDanmaku,
+                          style: TextStyle(
+                            color: AppColors.theaterInk,
+                            fontSize: dense ? 10.5 : 13,
+                          ),
+                          decoration: InputDecoration(
+                            isDense: true,
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            hintText: danmaku.enabled ? '发条弹幕吧…' : '弹幕已关闭',
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: dense ? 6 : 14,
+                              vertical: dense ? 7 : 9,
+                            ),
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: danmaku.enabled
+                            ? () => onSendDanmaku(danmakuInput.text)
+                            : null,
+                        style: TextButton.styleFrom(
+                          minimumSize: Size(dense ? 36 : 48, 40),
+                          padding: EdgeInsets.symmetric(
+                            horizontal: dense ? 4 : 10,
+                          ),
+                          foregroundColor: AppColors.primary2,
+                        ),
+                        child: Text(
+                          '发送',
+                          style: TextStyle(fontSize: dense ? 10 : 14),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+
+        final transport = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            action(
+              Icons.skip_previous_rounded,
+              onPreviousEpisode == null ? '已经是第一集' : '上一集',
+              onPreviousEpisode,
+            ),
+            action(
+              playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+              playing ? '暂停' : '播放',
+              onPlayPause,
+              size: 32,
+              busy: loadingLine || buffering,
+            ),
+            action(
+              Icons.skip_next_rounded,
+              onNextEpisode == null ? '已经是最后一集' : '下一集',
+              onNextEpisode,
+            ),
+            SizedBox(width: dense ? 4 : 8),
+            Tooltip(
+              message:
+                  '${_durationLabel(position)} / ${_durationLabel(duration)}',
+              child: SizedBox(
+                width: narrow ? 46 : null,
+                child: Text(
+                  narrow
+                      ? '${_durationLabel(position)}\n${_durationLabel(duration)}'
+                      : '${_durationLabel(position)} / ${_durationLabel(duration)}',
+                  maxLines: narrow ? 2 : 1,
+                  textAlign: narrow ? TextAlign.center : TextAlign.start,
+                  style: TextStyle(
+                    color: AppColors.theaterMuted,
+                    fontSize: dense ? 10 : 14,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+        final actions = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Tooltip(
+              message: '选集',
+              child: dense
+                  ? TextButton(
+                      onPressed: onEpisodePanel,
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(40, 40),
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        foregroundColor: AppColors.theaterInk,
+                      ),
+                      child: const Text('选集', style: TextStyle(fontSize: 10)),
+                    )
+                  : TextButton.icon(
+                      onPressed: onEpisodePanel,
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(56, 40),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        foregroundColor: AppColors.theaterInk,
+                      ),
+                      icon: const Icon(Icons.video_library_outlined, size: 18),
+                      label: const Text('选集'),
+                    ),
+            ),
+            _SpeedMenuButton(
+              current: settings.speed,
+              onSelected: onSpeedSelected,
+              compact: dense || touch,
+              onOpenChanged: onControlMenuChanged,
+            ),
+            Tooltip(
+              message: line == null ? '线路' : playbackLineProviderLabel(line!),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: dense ? 44 : 160),
+                child: TextButton(
+                  onPressed: onLinePanel,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size(dense ? 40 : 48, 40),
+                    padding: EdgeInsets.symmetric(horizontal: dense ? 2 : 8),
+                    foregroundColor: AppColors.theaterInk,
+                  ),
+                  child: Text(
+                    dense || line == null
+                        ? '线路'
+                        : playbackLineProviderLabel(line!),
+                    style: TextStyle(fontSize: dense ? 10 : 14),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+            _VolumeButton(
+              volume: volume,
+              muted: muted,
+              onMute: onMute,
+              onVolumeChanged: onVolumeChanged,
+              compact: touch,
+              iconSize: dense ? 19 : 24,
+              onOpenChanged: onControlMenuChanged,
+            ),
+            action(
+              fullscreen
+                  ? Icons.fullscreen_exit_rounded
+                  : Icons.fullscreen_rounded,
+              fullscreen ? '退出全屏' : '全屏',
+              onFullscreen,
+            ),
+          ],
+        );
+        return SizedBox(
+          height: dense ? 44 : 52,
+          child: Row(
+            children: [
+              transport,
+              SizedBox(width: dense ? 4 : 18),
+              Expanded(child: composer()),
+              SizedBox(width: dense ? 4 : 14),
+              actions,
+            ],
           ),
-        ),
-        action(
-          icon: Icons.comment_outlined,
-          tooltip:
-              services.dandanplayDanmakuEnabled ||
-                  services.bilibiliDanmakuEnabled
-              ? '弹幕源与显示设置'
-              : '弹幕源已关闭',
-          onPressed: () async => onDanmakuPanel(),
-        ),
-        action(
-          icon: Icons.video_library_outlined,
-          tooltip: '选集',
-          onPressed: () async => onEpisodePanel(),
-        ),
-        _SpeedMenuButton(
-          current: settings.speed,
-          onSelected: onSpeedSelected,
-          compact: true,
-        ),
-        action(
-          icon: Icons.alt_route_rounded,
-          tooltip: line == null ? '线路' : playbackLineProviderLabel(line!),
-          onPressed: () async => onLinePanel(),
-        ),
-        _VolumeButton(
-          volume: volume,
-          muted: muted,
-          onMute: onMute,
-          onVolumeChanged: onVolumeChanged,
-          compact: true,
-        ),
-        action(
-          icon: fullscreen
-              ? Icons.fullscreen_exit_rounded
-              : Icons.fullscreen_rounded,
-          tooltip: fullscreen ? '退出全屏' : '全屏',
-          onPressed: onFullscreen,
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -654,6 +651,7 @@ class _SpeedMenuButton extends StatelessWidget {
     required this.current,
     required this.onSelected,
     this.compact = false,
+    this.onOpenChanged,
   });
 
   static const _speeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
@@ -661,10 +659,13 @@ class _SpeedMenuButton extends StatelessWidget {
   final double current;
   final ValueChanged<double> onSelected;
   final bool compact;
+  final ValueChanged<bool>? onOpenChanged;
 
   @override
   Widget build(BuildContext context) {
     return MenuAnchor(
+      onOpen: () => onOpenChanged?.call(true),
+      onClose: () => onOpenChanged?.call(false),
       alignmentOffset: const Offset(0, -8),
       style: const MenuStyle(alignment: Alignment.topLeft),
       menuChildren: [
@@ -690,7 +691,13 @@ class _SpeedMenuButton extends StatelessWidget {
             onTap: () =>
                 controller.isOpen ? controller.close() : controller.open(),
             child: compact
-                ? SizedBox(width: 44, height: 40, child: Center(child: badge))
+                ? SizedBox(
+                    width: 44,
+                    height: 40,
+                    child: Center(
+                      child: Transform.scale(scale: 0.88, child: badge),
+                    ),
+                  )
                 : badge,
           ),
         );
@@ -706,6 +713,8 @@ class _VolumeButton extends StatefulWidget {
     required this.onMute,
     required this.onVolumeChanged,
     this.compact = false,
+    this.iconSize = 24,
+    this.onOpenChanged,
   });
 
   final double volume;
@@ -713,6 +722,8 @@ class _VolumeButton extends StatefulWidget {
   final Future<void> Function() onMute;
   final ValueChanged<double> onVolumeChanged;
   final bool compact;
+  final double iconSize;
+  final ValueChanged<bool>? onOpenChanged;
 
   @override
   State<_VolumeButton> createState() => _VolumeButtonState();
@@ -741,6 +752,8 @@ class _VolumeButtonState extends State<_VolumeButton> {
   Widget build(BuildContext context) {
     final effective = widget.muted ? 0.0 : widget.volume;
     return MenuAnchor(
+      onOpen: () => widget.onOpenChanged?.call(true),
+      onClose: () => widget.onOpenChanged?.call(false),
       controller: _menu,
       alignmentOffset: const Offset(-6, -8),
       menuChildren: [
@@ -809,6 +822,7 @@ class _VolumeButtonState extends State<_VolumeButton> {
                   ? Icons.volume_off_rounded
                   : Icons.volume_up_rounded,
               color: AppColors.theaterInk,
+              size: widget.iconSize,
             ),
           ),
         );
