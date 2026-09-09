@@ -1630,8 +1630,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _leaving ||
           _sessionController.state.userIntent == PlaybackIntent.paused ||
           !_isPlayableLine(_line) ||
-          _nativeVideo.resumeSeek.isPending ||
-          _nativeVideo.resumeSeek.isSeeking,
+          _nativeVideo.resumeSeek.blocksStallRecovery,
       appInForeground: _appInForeground,
       playing: _playing,
       buffering: _buffering,
@@ -1980,11 +1979,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _nativeVideo.startFirstFrameWatchdog(
         isCurrent: () =>
             mounted && serial == _openLineSerial && _loadedUrl == url,
-        readSnapshot: () => NativePlaybackStartupSnapshot(
-          playing: _playing,
-          position: _position,
-          buffer: _buffer,
-          buffering: _buffering,
+        readSnapshot: () => _nativeMediaEvents.readStartupSnapshot(
+          currentOpenSerial: serial,
+          playerState: _player.state,
           hasAlternative: _nextPlayableLine() != null,
         ),
         onTimeout: (event) {

@@ -1,3 +1,4 @@
+import 'package:media_kit/media_kit.dart';
 import 'package:anime/src/player/video/native_video_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -72,6 +73,77 @@ void main() {
       isFalse,
     );
   });
+
+  testWidgets(
+    'startup samples current backend buffering after early events were rejected',
+    (tester) async {
+      final media = Media('https://media.test/episode.m3u8');
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 2, mediaUri: media.uri);
+      // Buffering can arrive before the playlist confirms the media identity.
+      expect(
+        guard.acceptsValue(
+          currentOpenSerial: 2,
+          playerMediaUri: null,
+          eventValue: true,
+          playerStateValue: true,
+        ),
+        isFalse,
+      );
+      guard.finishOpen(openSerial: 2);
+      final backend = PlayerState().copyWith(
+        playlist: Playlist([media]),
+        playing: true,
+        buffering: true,
+      );
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      final events = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => guard.readStartupSnapshot(
+          currentOpenSerial: 2,
+          playerState: backend,
+          hasAlternative: true,
+        ),
+        onTimeout: events.add,
+        softTimeout: const Duration(seconds: 7),
+        hardTimeout: const Duration(seconds: 25),
+      );
+      await tester.pump(const Duration(seconds: 7));
+      expect(
+        events,
+        isEmpty,
+        reason:
+            'Do not switch a still-buffering live stream using stale UI state.',
+      );
+      await tester.pump(const Duration(seconds: 18));
+      expect(events.single.phase, NativeStartupTimeoutPhase.hard);
+    },
+  );
+
+  test(
+    'startup snapshot never attributes old media progress to a new open',
+    () {
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 3, mediaUri: 'https://media.test/new.mp4');
+      final old = PlayerState().copyWith(
+        playlist: Playlist([Media('https://media.test/old.mp4')]),
+        position: const Duration(seconds: 42),
+        playing: true,
+      );
+      for (final ready in [false, true]) {
+        if (ready) guard.finishOpen(openSerial: 3);
+        final snapshot = guard.readStartupSnapshot(
+          currentOpenSerial: 3,
+          playerState: old,
+          hasAlternative: true,
+        );
+        expect(snapshot.position, Duration.zero);
+        expect(snapshot.buffering, isTrue);
+      }
+    },
+  );
 
   testWidgets(
     'native position progress confirms first frame and cancels timeout',

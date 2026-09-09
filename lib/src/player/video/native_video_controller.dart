@@ -40,6 +40,33 @@ final class NativeMediaEventGuard {
         _mediaUri == playerMediaUri;
   }
 
+  NativePlaybackStartupSnapshot readStartupSnapshot({
+    required int currentOpenSerial,
+    required PlayerState playerState,
+    required bool hasAlternative,
+  }) {
+    final playlist = playerState.playlist;
+    final index = playlist.index;
+    final uri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    final current = isCurrent(
+      currentOpenSerial: currentOpenSerial,
+      playerMediaUri: uri,
+    );
+    // Startup stream events may precede the playlist identity and be rejected.
+    // Sample the authoritative backend, not the UI values those events missed.
+    // Unknown ownership is still initializing, not evidence of a dead stream;
+    // the hard deadline remains active, and old media progress never leaks in.
+    return NativePlaybackStartupSnapshot(
+      playing: current && playerState.playing,
+      position: current ? playerState.position : Duration.zero,
+      buffer: current ? playerState.buffer : Duration.zero,
+      buffering: !current || playerState.buffering,
+      hasAlternative: hasAlternative,
+    );
+  }
+
   bool acceptsValue<T>({
     required int currentOpenSerial,
     required String? playerMediaUri,
@@ -86,6 +113,10 @@ final class NativeResumeSeekController {
   Duration? get target => _target;
   int get attempts => _attempts;
   bool get isPending => _target != null;
+  // An exhausted target is kept for the next line, but must not prevent the
+  // stalled player from recovering forever after all retries have stopped.
+  bool get blocksStallRecovery =>
+      isPending && (_attempts < _maxAttempts || _seeking);
   bool get isSeeking => _seeking;
   bool get isDisposed => _disposed;
 

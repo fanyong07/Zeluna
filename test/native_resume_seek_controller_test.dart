@@ -33,6 +33,32 @@ void main() {
     openSerial++;
   });
 
+  testWidgets('exhausted resume releases stall recovery but preserves target', (
+    tester,
+  ) async {
+    final controller = NativeResumeSeekController(
+      readOpenSerial: () => 1,
+      seek: (_) async {},
+      initialDelay: Duration.zero,
+      retryDelay: const Duration(seconds: 2),
+      maxAttempts: 2,
+    );
+    addTearDown(controller.dispose);
+    controller.arm(openSerial: 1, position: const Duration(minutes: 5));
+    expect(controller.blocksStallRecovery, isTrue);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    expect(controller.attempts, 2);
+    expect(controller.blocksStallRecovery, isFalse);
+    expect(
+      controller.recoveryPosition(const Duration(minutes: 1)),
+      const Duration(minutes: 5),
+    );
+    controller.nudge(mediaReady: true);
+    expect(controller.blocksStallRecovery, isTrue);
+    controller.dispose();
+  });
+
   test('stale opens and disposal reject delayed seek callbacks', () async {
     var openSerial = 1;
     var seeks = 0;
