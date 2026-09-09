@@ -8,6 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'src/app/anime_app.dart';
 import 'src/app/deferred_fonts.dart';
 import 'src/app/desktop_window.dart';
+import 'src/player/video/native_video_compatibility.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -63,6 +64,7 @@ class _ZelunaBootstrapState extends State<ZelunaBootstrap> {
 
   Future<void> _initializeRuntime() async {
     MediaKit.ensureInitialized();
+    await NativeVideoCompatibility.instance.initialize();
     await Hive.initFlutter('anime');
   }
 

@@ -4,6 +4,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../playback_line_display.dart';
+import 'native_video_compatibility.dart';
 
 /// Rejects shared media-kit stream events while a media open is being
 /// replaced, and after a newer open has taken ownership of the player.
@@ -341,7 +342,10 @@ final class NativeFirstFrameWatchdog {
 /// individual native resources itself.
 final class NativeVideoController {
   NativeVideoController({int Function()? readOpenSerial}) : player = Player() {
-    surfaceController = VideoController(player);
+    surfaceController = VideoController(
+      player,
+      configuration: NativeVideoCompatibility.instance.configuration,
+    );
     resumeSeek = NativeResumeSeekController(
       readOpenSerial: readOpenSerial ?? () => 0,
       seek: player.seek,
