@@ -19,6 +19,7 @@ import '../recommendations/recommendation_playback.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
+import '../shared_ui/danmaku_display_controls.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import 'anime4k/anime4k_controller.dart';
@@ -860,6 +861,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         onEpisodeSelected: _selectEpisode,
                         onLinePanel: _toggleLinePanel,
                         onDanmakuPanel: _toggleDanmakuPanel,
+                        onDanmakuEnabledChanged: _setDanmakuEnabled,
                         danmakuInput: _danmakuController.input,
                         danmakuInputFocus: _danmakuInputFocus,
                         onSendDanmaku: (text) => unawaited(
@@ -916,11 +918,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                       ),
                     if (_danmakuPanel)
                       _PlayerFunctionPage(
-                        title: '弹幕',
+                        title: '弹幕设置',
                         onClose: _closePanels,
                         child: _DanmakuPanel(
-                          subject: widget.request.subject,
-                          episode: _episode,
                           comments: _danmakuController.remoteComments,
                           onDelete: _deleteDanmaku,
                           onReload: () =>
@@ -2840,6 +2840,19 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _settingsPanel = false;
     });
     if (opening) _startExpandedLineLookup();
+  }
+
+  Future<void> _setDanmakuEnabled(bool enabled) async {
+    _revealPlayerControls();
+    try {
+      final current = ref.read(animeControllerProvider).value?.danmaku;
+      if (current == null) return;
+      await ref
+          .read(animeControllerProvider.notifier)
+          .updateDanmaku(current.copyWith(enabled: enabled));
+    } catch (_) {
+      if (mounted) _showPlayerToast('弹幕设置未保存，请重试');
+    }
   }
 
   void _toggleDanmakuPanel() {

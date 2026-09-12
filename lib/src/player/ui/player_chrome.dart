@@ -211,6 +211,7 @@ class PlayerBottomBar extends StatelessWidget {
     this.onControlMenuChanged,
     required this.onFullscreen,
     required this.onDanmakuPanel,
+    this.onDanmakuEnabledChanged,
     required this.danmakuInput,
     this.danmakuInputFocus,
     required this.onSendDanmaku,
@@ -241,6 +242,7 @@ class PlayerBottomBar extends StatelessWidget {
   final ValueChanged<bool>? onControlMenuChanged;
   final Future<void> Function() onFullscreen;
   final VoidCallback onDanmakuPanel;
+  final ValueChanged<bool>? onDanmakuEnabledChanged;
   final TextEditingController danmakuInput;
   final FocusNode? danmakuInputFocus;
   final ValueChanged<String> onSendDanmaku;
@@ -299,16 +301,40 @@ class PlayerBottomBar extends StatelessWidget {
           if (portraitMobile)
             SizedBox(
               height: 36,
-              child: _MobilePlayerControls(
-                playing: playing,
-                buffering: buffering,
-                loadingLine: loadingLine,
-                fullscreen: fullscreen,
-                onPlayPause: onPlayPause,
-                onPreviousEpisode: onPreviousEpisode,
-                onNextEpisode: onNextEpisode,
-                onFullscreen: onFullscreen,
-                landscape: false,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _MobilePlayerControls(
+                      playing: playing,
+                      buffering: buffering,
+                      loadingLine: loadingLine,
+                      fullscreen: fullscreen,
+                      onPlayPause: onPlayPause,
+                      onPreviousEpisode: onPreviousEpisode,
+                      onNextEpisode: onNextEpisode,
+                      onFullscreen: onFullscreen,
+                      landscape: false,
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: '弹幕设置',
+                    onPressed: onDanmakuPanel,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 36,
+                      height: 36,
+                    ),
+                    icon: const Icon(
+                      Icons.comment_outlined,
+                      size: 18,
+                      color: AppColors.theaterInk,
+                    ),
+                  ),
+                  DanmakuQuickSwitch(
+                    enabled: danmaku.enabled,
+                    onChanged: onDanmakuEnabledChanged,
+                  ),
+                ],
               ),
             )
           else
@@ -337,6 +363,7 @@ class PlayerBottomBar extends StatelessWidget {
               onControlMenuChanged: onControlMenuChanged,
               onFullscreen: onFullscreen,
               onDanmakuPanel: onDanmakuPanel,
+              onDanmakuEnabledChanged: onDanmakuEnabledChanged,
               onEpisodePanel: onEpisodePanel,
               onLinePanel: onLinePanel,
             ),
@@ -372,6 +399,7 @@ class _UnifiedPlayerControls extends StatelessWidget {
     this.onControlMenuChanged,
     required this.onFullscreen,
     required this.onDanmakuPanel,
+    this.onDanmakuEnabledChanged,
     required this.onEpisodePanel,
     required this.onLinePanel,
   });
@@ -400,6 +428,7 @@ class _UnifiedPlayerControls extends StatelessWidget {
   final ValueChanged<bool>? onControlMenuChanged;
   final Future<void> Function() onFullscreen;
   final VoidCallback onDanmakuPanel;
+  final ValueChanged<bool>? onDanmakuEnabledChanged;
   final VoidCallback onEpisodePanel;
   final VoidCallback onLinePanel;
 
@@ -433,12 +462,9 @@ class _UnifiedPlayerControls extends StatelessWidget {
         Widget composer() => Row(
           children: [
             Tooltip(
-              message:
-                  services.dandanplayDanmakuEnabled ||
-                      services.bilibiliDanmakuEnabled
-                  ? '弹幕源与显示设置'
-                  : '弹幕源已关闭',
+              message: '弹幕设置',
               child: IconButton(
+                key: const ValueKey('playerDanmakuSettings'),
                 onPressed: onDanmakuPanel,
                 style: IconButton.styleFrom(
                   minimumSize: const Size(40, 40),
@@ -451,6 +477,10 @@ class _UnifiedPlayerControls extends StatelessWidget {
                   color: AppColors.theaterInk,
                 ),
               ),
+            ),
+            DanmakuQuickSwitch(
+              enabled: danmaku.enabled,
+              onChanged: onDanmakuEnabledChanged,
             ),
             SizedBox(width: dense ? 4 : 8),
             Expanded(

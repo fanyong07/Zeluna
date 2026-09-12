@@ -907,7 +907,10 @@ class DanmakuSettings {
     this.enabled = true,
     this.opacity = 0.86,
     this.fontSize = 18,
+    this.displayArea = .75,
+    this.speed = 1,
     this.blockTop = false,
+    this.blockBottom = false,
     this.blockScroll = false,
     this.blockKeywords = const [],
   });
@@ -915,7 +918,14 @@ class DanmakuSettings {
   final bool enabled;
   final double opacity;
   final double fontSize;
+
+  /// Fraction of the video height available to every danmaku mode.
+  final double displayArea;
+
+  /// Danmaku travel speed, independent of video playback speed.
+  final double speed;
   final bool blockTop;
+  final bool blockBottom;
   final bool blockScroll;
   final List<String> blockKeywords;
 
@@ -923,35 +933,51 @@ class DanmakuSettings {
     bool? enabled,
     double? opacity,
     double? fontSize,
+    double? displayArea,
+    double? speed,
     bool? blockTop,
+    bool? blockBottom,
     bool? blockScroll,
     List<String>? blockKeywords,
-  }) {
-    return DanmakuSettings(
-      enabled: enabled ?? this.enabled,
-      opacity: opacity ?? this.opacity,
-      fontSize: fontSize ?? this.fontSize,
-      blockTop: blockTop ?? this.blockTop,
-      blockScroll: blockScroll ?? this.blockScroll,
-      blockKeywords: blockKeywords ?? this.blockKeywords,
-    );
-  }
+  }) => DanmakuSettings(
+    enabled: enabled ?? this.enabled,
+    opacity: opacity ?? this.opacity,
+    fontSize: fontSize ?? this.fontSize,
+    displayArea: displayArea ?? this.displayArea,
+    speed: speed ?? this.speed,
+    blockTop: blockTop ?? this.blockTop,
+    blockBottom: blockBottom ?? this.blockBottom,
+    blockScroll: blockScroll ?? this.blockScroll,
+    blockKeywords: blockKeywords ?? this.blockKeywords,
+  );
 
   Map<String, dynamic> toJson() => {
     'enabled': enabled,
     'opacity': opacity,
     'fontSize': fontSize,
+    'displayArea': displayArea,
+    'speed': speed,
     'blockTop': blockTop,
+    'blockBottom': blockBottom,
     'blockScroll': blockScroll,
     'blockKeywords': blockKeywords,
   };
 
   factory DanmakuSettings.fromJson(Map<String, dynamic> json) {
+    double number(String key, double fallback, double min, double max) {
+      final raw = json[key];
+      final value = raw is num ? raw.toDouble() : fallback;
+      return (value.isFinite ? value : fallback).clamp(min, max).toDouble();
+    }
+
     return DanmakuSettings(
       enabled: json['enabled'] as bool? ?? true,
-      opacity: (json['opacity'] as num?)?.toDouble() ?? 0.86,
-      fontSize: (json['fontSize'] as num?)?.toDouble() ?? 18,
+      opacity: number('opacity', .86, .2, 1),
+      fontSize: number('fontSize', 18, 12, 28),
+      displayArea: number('displayArea', .75, .25, 1),
+      speed: number('speed', 1, .5, 2),
       blockTop: json['blockTop'] as bool? ?? false,
+      blockBottom: json['blockBottom'] as bool? ?? false,
       blockScroll: json['blockScroll'] as bool? ?? false,
       blockKeywords: _stringListFromJson(json['blockKeywords']),
     );

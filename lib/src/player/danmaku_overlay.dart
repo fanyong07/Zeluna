@@ -29,13 +29,15 @@ class RemoteDanmakuOverlay extends StatelessWidget {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final fontSize = settings.fontSize.clamp(12, 30).toDouble();
-          final laneHeight = fontSize + 10;
-          final availableHeight = math.max(80.0, constraints.maxHeight * 0.68);
-          final lanes = ((availableHeight - 52) / laneHeight).floor().clamp(
-            2,
-            12,
+          final laneHeight =
+              MediaQuery.textScalerOf(context).scale(fontSize) * 1.4 + 4;
+          final bounds = danmakuDisplayBounds(
+            constraints.biggest,
+            settings.displayArea,
           );
+          final lanes = (bounds.height / laneHeight).floor().clamp(1, 12);
           return ClipRect(
+            clipper: DanmakuAreaClipper(bounds),
             child: Stack(
               children: [
                 for (final comment in visible)
@@ -44,7 +46,7 @@ class RemoteDanmakuOverlay extends StatelessWidget {
                     comment: comment,
                     position: position,
                     width: constraints.maxWidth,
-                    height: constraints.maxHeight,
+                    bounds: bounds,
                     lane: _laneFor(comment, lanes),
                     laneHeight: laneHeight,
                     settings: settings,
@@ -67,7 +69,9 @@ List<DanmakuComment> visibleDanmakuComments(
   if (!settings.enabled || comments.isEmpty || position.isNegative) {
     return const [];
   }
-  final earliest = position - const Duration(seconds: 12);
+  final earliest =
+      position -
+      Duration(milliseconds: (12000 / settings.speed.clamp(.5, 2)).ceil());
   var low = 0;
   var high = comments.length;
   while (low < high) {
@@ -85,7 +89,9 @@ List<DanmakuComment> visibleDanmakuComments(
     if (comment.time > position) break;
     if (_isBlocked(comment, settings)) continue;
     final elapsed = position - comment.time;
-    if (elapsed <= _displayDuration(comment)) visible.add(comment);
+    if (elapsed <= _displayDuration(comment, settings.speed)) {
+      visible.add(comment);
+    }
   }
   if (visible.length <= limit) return visible;
   return visible.sublist(visible.length - limit);
@@ -93,11 +99,15 @@ List<DanmakuComment> visibleDanmakuComments(
 
 bool _isBlocked(DanmakuComment comment, DanmakuSettings settings) {
   if (settings.blockKeywords.any(comment.text.contains)) return true;
-  if (settings.blockTop && comment.mode == DanmakuMode.top) return true;
+  if (settings.blockTop &&
+      (comment.mode == DanmakuMode.top ||
+          comment.mode == DanmakuMode.advanced)) {
+    return true;
+  }
+  if (settings.blockBottom && comment.mode == DanmakuMode.bottom) return true;
   if (settings.blockScroll &&
       (comment.mode == DanmakuMode.scroll ||
-          comment.mode == DanmakuMode.reverse ||
-          comment.mode == DanmakuMode.advanced)) {
+          comment.mode == DanmakuMode.reverse)) {
     return true;
   }
   return false;
@@ -107,14 +117,37 @@ int _laneFor(DanmakuComment comment, int lanes) {
   return (comment.id.hashCode & 0x7fffffff) % lanes;
 }
 
-Duration _displayDuration(DanmakuComment comment) {
-  return switch (comment.mode) {
+Duration _displayDuration(DanmakuComment comment, double speed) {
+  final base = switch (comment.mode) {
     DanmakuMode.top || DanmakuMode.bottom => const Duration(seconds: 4),
     DanmakuMode.advanced => const Duration(seconds: 5),
     DanmakuMode.scroll || DanmakuMode.reverse => Duration(
       milliseconds: 7000 + comment.text.runes.length.clamp(0, 45).toInt() * 80,
     ),
   };
+  return Duration(
+    milliseconds: (base.inMilliseconds / speed.clamp(.5, 2)).round(),
+  );
+}
+
+/// Keep all modes inside the chosen upper area, with room for controls.
+Rect danmakuDisplayBounds(Size size, double area) {
+  final bottom = math.min(
+    size.height * area.clamp(.25, 1),
+    size.height - math.min(48.0, size.height * .1),
+  );
+  final top = math.min(48.0, bottom * .2);
+  return Rect.fromLTRB(0, top, size.width, math.max(top, bottom));
+}
+
+class DanmakuAreaClipper extends CustomClipper<Rect> {
+  const DanmakuAreaClipper(this.bounds);
+  final Rect bounds;
+  @override
+  Rect getClip(Size size) => bounds;
+  @override
+  bool shouldReclip(covariant DanmakuAreaClipper oldClipper) =>
+      oldClipper.bounds != bounds;
 }
 
 class _DanmakuItem extends StatelessWidget {
@@ -123,7 +156,7 @@ class _DanmakuItem extends StatelessWidget {
     required this.comment,
     required this.position,
     required this.width,
-    required this.height,
+    required this.bounds,
     required this.lane,
     required this.laneHeight,
     required this.settings,
@@ -132,7 +165,7 @@ class _DanmakuItem extends StatelessWidget {
   final DanmakuComment comment;
   final Duration position;
   final double width;
-  final double height;
+  final Rect bounds;
   final int lane;
   final double laneHeight;
   final DanmakuSettings settings;
@@ -140,22 +173,23 @@ class _DanmakuItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fontSize = settings.fontSize.clamp(12, 30).toDouble();
-    final text = Text(
-      comment.text,
-      maxLines: 1,
-      overflow: TextOverflow.visible,
-      softWrap: false,
-      textAlign: TextAlign.center,
-      style: TextStyle(
-        color: Color(
-          0xFF000000 | comment.color,
-        ).withValues(alpha: settings.opacity.clamp(0.1, 1).toDouble()),
-        fontSize: fontSize,
-        fontWeight: FontWeight.w700,
-        shadows: const [
-          Shadow(color: Colors.black, blurRadius: 2, offset: Offset(1, 1)),
-          Shadow(color: Colors.black, blurRadius: 2, offset: Offset(-1, -1)),
-        ],
+    final text = Opacity(
+      opacity: settings.opacity.clamp(.2, 1).toDouble(),
+      child: Text(
+        comment.text,
+        maxLines: 1,
+        overflow: TextOverflow.visible,
+        softWrap: false,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: Color(0xFF000000 | comment.color),
+          fontSize: fontSize,
+          fontWeight: FontWeight.w700,
+          shadows: const [
+            Shadow(color: Colors.black, blurRadius: 2, offset: Offset(1, 1)),
+            Shadow(color: Colors.black, blurRadius: 2, offset: Offset(-1, -1)),
+          ],
+        ),
       ),
     );
 
@@ -164,7 +198,7 @@ class _DanmakuItem extends StatelessWidget {
       return Positioned(
         left: 12,
         right: 12,
-        top: 56 + lane * laneHeight,
+        top: bounds.top + lane * laneHeight,
         child: Center(child: text),
       );
     }
@@ -172,12 +206,12 @@ class _DanmakuItem extends StatelessWidget {
       return Positioned(
         left: 12,
         right: 12,
-        bottom: math.min(height * 0.18, 92.0) + lane * laneHeight,
+        top: math.max(bounds.top, bounds.bottom - (lane + 1) * laneHeight),
         child: Center(child: text),
       );
     }
 
-    final duration = _displayDuration(comment);
+    final duration = _displayDuration(comment, settings.speed);
     final elapsed = position - comment.time;
     final progress = (elapsed.inMilliseconds / duration.inMilliseconds)
         .clamp(0.0, 1.0)
@@ -190,6 +224,10 @@ class _DanmakuItem extends StatelessWidget {
     final x = comment.mode == DanmakuMode.reverse
         ? -estimatedWidth + travel * progress
         : width - travel * progress;
-    return Positioned(left: x, top: 56 + lane * laneHeight, child: text);
+    return Positioned(
+      left: x,
+      top: bounds.top + lane * laneHeight,
+      child: text,
+    );
   }
 }

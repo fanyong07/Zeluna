@@ -20,7 +20,7 @@ final class LocalDanmakuEntry {
 /// comment timers for one playback page.
 final class DanmakuController extends ChangeNotifier {
   DanmakuController({
-    Duration localCommentLifetime = const Duration(seconds: 9),
+    Duration localCommentLifetime = const Duration(seconds: 24),
     DateTime Function()? now,
   }) : _localCommentLifetime = localCommentLifetime,
        _now = now ?? DateTime.now;

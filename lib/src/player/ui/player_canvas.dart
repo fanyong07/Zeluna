@@ -8,18 +8,42 @@ class _LocalDanmakuOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!settings.enabled || settings.blockScroll) {
+      return const SizedBox.shrink();
+    }
     return IgnorePointer(
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final visible = entries.reversed.take(12).toList().reversed.toList();
+          final visible = entries
+              .where((e) => !settings.blockKeywords.any(e.text.contains))
+              .toList()
+              .reversed
+              .take(12)
+              .toList()
+              .reversed
+              .toList();
+          final bounds = danmakuDisplayBounds(
+            constraints.biggest,
+            settings.displayArea,
+          );
+          final laneHeight =
+              MediaQuery.textScalerOf(
+                    context,
+                  ).scale(settings.fontSize.clamp(12, 28).toDouble()) *
+                  1.4 +
+              4;
+          final lanes = (bounds.height / laneHeight).floor().clamp(1, 12);
           return ClipRect(
+            clipper: DanmakuAreaClipper(bounds),
             child: Stack(
               children: [
                 for (final entry in visible)
                   _LocalDanmakuBullet(
                     key: ValueKey(entry.id),
                     entry: entry,
-                    lane: entry.id.remainder(6),
+                    lane: entry.id.remainder(lanes),
+                    top: bounds.top,
+                    laneHeight: laneHeight,
                     width: constraints.maxWidth,
                     settings: settings,
                   ),
@@ -37,12 +61,16 @@ class _LocalDanmakuBullet extends StatefulWidget {
     super.key,
     required this.entry,
     required this.lane,
+    required this.top,
+    required this.laneHeight,
     required this.width,
     required this.settings,
   });
 
   final LocalDanmakuEntry entry;
   final int lane;
+  final double top;
+  final double laneHeight;
   final double width;
   final DanmakuSettings settings;
 
@@ -57,10 +85,24 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: Duration(seconds: 7 + widget.entry.text.length.clamp(0, 4)),
-    )..forward();
+    _controller = AnimationController(vsync: this, duration: _duration)
+      ..forward();
+  }
+
+  Duration get _duration => Duration(
+    milliseconds:
+        ((7000 + widget.entry.text.runes.length.clamp(0, 45) * 80) /
+                widget.settings.speed.clamp(.5, 2))
+            .round(),
+  );
+
+  @override
+  void didUpdateWidget(covariant _LocalDanmakuBullet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings.speed != widget.settings.speed) {
+      _controller.duration = _duration;
+      if (!_controller.isCompleted) _controller.forward();
+    }
   }
 
   @override
@@ -74,7 +116,7 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
     final fontSize = widget.settings.fontSize.clamp(12, 30).toDouble();
     final estimatedWidth = math.max(120.0, widget.entry.text.length * fontSize);
     return Positioned(
-      top: 68 + widget.lane * (fontSize + 12),
+      top: widget.top + widget.lane * widget.laneHeight,
       left: 0,
       child: AnimatedBuilder(
         animation: _controller,
@@ -84,21 +126,28 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
               (widget.width + estimatedWidth) * _controller.value;
           return Transform.translate(offset: Offset(x, 0), child: child);
         },
-        child: Text(
-          widget.entry.text,
-          maxLines: 1,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: widget.settings.opacity),
-            fontSize: fontSize,
-            fontWeight: FontWeight.w700,
-            shadows: const [
-              Shadow(color: Colors.black, blurRadius: 2, offset: Offset(1, 1)),
-              Shadow(
-                color: Colors.black,
-                blurRadius: 2,
-                offset: Offset(-1, -1),
-              ),
-            ],
+        child: Opacity(
+          opacity: widget.settings.opacity.clamp(.2, 1).toDouble(),
+          child: Text(
+            widget.entry.text,
+            maxLines: 1,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: fontSize,
+              fontWeight: FontWeight.w700,
+              shadows: const [
+                Shadow(
+                  color: Colors.black,
+                  blurRadius: 2,
+                  offset: Offset(1, 1),
+                ),
+                Shadow(
+                  color: Colors.black,
+                  blurRadius: 2,
+                  offset: Offset(-1, -1),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -166,6 +215,7 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onEpisodeSelected,
     required this.onLinePanel,
     required this.onDanmakuPanel,
+    this.onDanmakuEnabledChanged,
     required this.danmakuInput,
     required this.danmakuInputFocus,
     required this.onSendDanmaku,
@@ -234,6 +284,7 @@ class _PlayerCanvas extends StatelessWidget {
   final ValueChanged<AnimeEpisode> onEpisodeSelected;
   final VoidCallback onLinePanel;
   final VoidCallback onDanmakuPanel;
+  final ValueChanged<bool>? onDanmakuEnabledChanged;
   final TextEditingController danmakuInput;
   final FocusNode danmakuInputFocus;
   final ValueChanged<String> onSendDanmaku;
@@ -458,6 +509,8 @@ class _PlayerCanvas extends StatelessWidget {
                                               onControlMenuChanged,
                                           onFullscreen: onFullscreen,
                                           onDanmakuPanel: onDanmakuPanel,
+                                          onDanmakuEnabledChanged:
+                                              onDanmakuEnabledChanged,
                                           danmakuInput: danmakuInput,
                                           danmakuInputFocus: danmakuInputFocus,
                                           onSendDanmaku: onSendDanmaku,

@@ -749,50 +749,20 @@ class _LinePanelBody extends StatelessWidget {
 
 class _DanmakuPanel extends ConsumerStatefulWidget {
   const _DanmakuPanel({
-    required this.subject,
-    required this.episode,
     required this.comments,
     required this.onDelete,
     required this.onReload,
   });
-
-  final AnimeSubject subject;
-  final AnimeEpisode episode;
   final List<DanmakuComment> comments;
   final Future<void> Function(DanmakuComment comment) onDelete;
   final Future<void> Function() onReload;
-
   @override
   ConsumerState<_DanmakuPanel> createState() => _DanmakuPanelState();
 }
 
 class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
-  late Future<List<DanmakuMatch>> _future;
   String? _deletingId;
-
-  @override
-  void initState() {
-    super.initState();
-    _future = _load();
-  }
-
-  @override
-  void didUpdateWidget(covariant _DanmakuPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.subject.id != widget.subject.id ||
-        oldWidget.subject.source != widget.subject.source ||
-        oldWidget.episode.id != widget.episode.id) {
-      _future = _load();
-    }
-  }
-
-  Future<List<DanmakuMatch>> _load() {
-    return ref
-        .read(animeControllerProvider.notifier)
-        .danmakuTimelineForEpisode(widget.subject, widget.episode)
-        .then((timeline) => timeline.sources);
-  }
-
+  bool _reloading = false;
   Future<void> _delete(DanmakuComment comment) async {
     if (_deletingId != null) return;
     setState(() => _deletingId = comment.id);
@@ -803,110 +773,84 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
     }
   }
 
+  Future<void> _reload() async {
+    if (_reloading) return;
+    setState(() => _reloading = true);
+    try {
+      await widget.onReload();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('弹幕暂时无法刷新，请稍后重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _reloading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings =
         ref.watch(animeControllerProvider).value?.danmaku ??
         const DanmakuSettings();
-    return Column(
+    final mine = widget.comments
+        .where((c) => c.provider == 'Zeluna' && c.isMine)
+        .toList(growable: false);
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 24),
       children: [
-        SwitchListTile.adaptive(
-          key: const ValueKey('playerDanmakuEnabled'),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-          title: const Text(
-            '显示弹幕',
-            style: TextStyle(color: AppColors.theaterInk),
-          ),
-          subtitle: Text(
-            settings.enabled ? '播放和切集后自动加载' : '已关闭，开启后显示滚动弹幕',
-            style: const TextStyle(color: AppColors.theaterMuted),
-          ),
-          value: settings.enabled,
-          onChanged: (enabled) async {
-            try {
-              await ref
-                  .read(animeControllerProvider.notifier)
-                  .updateDanmaku(settings.copyWith(enabled: enabled));
-            } catch (_) {
-              if (context.mounted) {
-                ScaffoldMessenger.of(
-                  context,
-                ).showSnackBar(const SnackBar(content: Text('弹幕设置未保存，请重试')));
-              }
-            }
-          },
+        DanmakuDisplayControls(
+          settings: settings,
+          theater: true,
+          onChanged: ref.read(animeControllerProvider.notifier).updateDanmaku,
         ),
-        Row(
-          children: [
-            const Expanded(child: _PanelSectionTitle('弹幕来源')),
-            TextButton.icon(
-              key: const ValueKey('reloadDanmaku'),
-              onPressed: () => setState(
-                () => _future = widget.onReload().then((_) => _load()),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.comments.isEmpty
+                      ? '本集暂无弹幕'
+                      : '已加载 ${widget.comments.length} 条弹幕',
+                  style: const TextStyle(
+                    color: AppColors.theaterMuted,
+                    fontSize: 11,
+                  ),
+                ),
               ),
-              icon: const Icon(Icons.refresh_rounded),
-              label: const Text('重新加载'),
-            ),
-          ],
-        ),
-        Expanded(
-          child: FutureBuilder<List<DanmakuMatch>>(
-            future: _future,
-            builder: (context, snapshot) {
-              final items = snapshot.data ?? const <DanmakuMatch>[];
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              if (snapshot.hasError) {
-                return _PanelEmpty(
-                  title: '弹幕源读取失败',
-                  message: _friendlyPlaybackError(snapshot.error!),
-                );
-              }
-              final mine = widget.comments
-                  .where(
-                    (comment) => comment.provider == 'Zeluna' && comment.isMine,
-                  )
-                  .toList(growable: false);
-              if (items.isEmpty && mine.isEmpty) {
-                return const _PanelEmpty(
-                  title: '没有匹配弹幕',
-                  message: '当前集还没有可显示的公开弹幕或 Zeluna 用户弹幕。',
-                );
-              }
-              return ListView(
-                padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-                children: [
-                  if (mine.isNotEmpty) ...[
-                    const _PanelSectionTitle('我的弹幕'),
-                    for (final comment in mine) ...[
-                      _OwnedDanmakuRow(
-                        key: ValueKey('owned-danmaku-${comment.id}'),
-                        comment: comment,
-                        deleting: _deletingId == comment.id,
-                        onDelete: () => _delete(comment),
-                      ),
-                      const SizedBox(height: 10),
-                    ],
-                  ],
-                  for (final item in items) ...[
-                    _PanelRow(
-                      title: item.title.isEmpty
-                          ? widget.subject.title
-                          : item.title,
-                      subtitle:
-                          '${item.provider} · ${item.episodeTitle.isEmpty ? widget.episode.displayTitle : item.episodeTitle}',
-                      trailing: item.available
-                          ? '${item.commentCount} 条'
-                          : item.message ?? '未启用',
-                    ),
-                    const SizedBox(height: 10),
-                  ],
-                ],
-              );
-            },
+              TextButton.icon(
+                key: const ValueKey('reloadDanmaku'),
+                onPressed: _reloading ? null : _reload,
+                icon: _reloading
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_rounded, size: 16),
+                label: Text(
+                  _reloading ? '刷新中' : '刷新',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
           ),
         ),
+        if (mine.isNotEmpty) ...[
+          const _PanelSectionTitle('我的弹幕'),
+          for (final comment in mine)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: _OwnedDanmakuRow(
+                key: ValueKey('owned-danmaku-${comment.id}'),
+                comment: comment,
+                deleting: _deletingId == comment.id,
+                onDelete: () => _delete(comment),
+              ),
+            ),
+        ],
       ],
     );
   }
@@ -996,53 +940,6 @@ class _OwnedDanmakuRow extends StatelessWidget {
       ),
     );
   }
-}
-
-class _PanelRow extends StatelessWidget {
-  const _PanelRow({
-    required this.title,
-    required this.subtitle,
-    required this.trailing,
-  });
-  final String title;
-  final String subtitle;
-  final String trailing;
-  @override
-  Widget build(BuildContext context) => Material(
-    color: Theme.of(context).colorScheme.surfaceContainerHigh,
-    borderRadius: BorderRadius.circular(8),
-    child: Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: Theme.of(context).colorScheme.onSurface,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            subtitle,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            trailing,
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: AppStatusColors.probing),
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 class _PanelEmpty extends StatelessWidget {

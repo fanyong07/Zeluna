@@ -127,7 +127,7 @@ void main() {
             '上一集',
             '暂停',
             '下一集',
-            '弹幕源与显示设置',
+            '弹幕设置',
             '选集',
             '播放速度',
             '线路',
@@ -147,7 +147,7 @@ void main() {
             findsNothing,
             reason: 'external subtitle source is not a primary player control',
           );
-          for (final tooltip in <String>['弹幕源与显示设置', '选集']) {
+          for (final tooltip in <String>['弹幕设置', '选集']) {
             final tapTarget = tester.getSize(find.byTooltip(tooltip));
             expect(
               tapTarget.shortestSide,

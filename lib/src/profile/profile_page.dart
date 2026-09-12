@@ -14,6 +14,7 @@ import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_navigation.dart';
 import '../shared_ui/poster_card.dart';
 import '../shared_ui/settings_ui.dart';
+import '../shared_ui/danmaku_display_controls.dart';
 import '../sync/sync_controller.dart';
 
 class ProfilePage extends ConsumerWidget {
@@ -1696,50 +1697,9 @@ class DanmakuSettingsPage extends ConsumerWidget {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
             children: [
-              SettingsCard(
-                children: [
-                  SettingsSwitchRow(
-                    title: '启用弹幕',
-                    value: settings.enabled,
-                    onChanged: (value) => controller.updateDanmaku(
-                      settings.copyWith(enabled: value),
-                    ),
-                  ),
-                  _SliderRow(
-                    title: '透明度',
-                    value: settings.opacity,
-                    min: 0.2,
-                    max: 1,
-                    label: '${(settings.opacity * 100).round()}%',
-                    onChanged: (value) => controller.updateDanmaku(
-                      settings.copyWith(opacity: value),
-                    ),
-                  ),
-                  _SliderRow(
-                    title: '字号',
-                    value: settings.fontSize,
-                    min: 12,
-                    max: 28,
-                    label: settings.fontSize.round().toString(),
-                    onChanged: (value) => controller.updateDanmaku(
-                      settings.copyWith(fontSize: value),
-                    ),
-                  ),
-                  SettingsSwitchRow(
-                    title: '屏蔽顶部弹幕',
-                    value: settings.blockTop,
-                    onChanged: (value) => controller.updateDanmaku(
-                      settings.copyWith(blockTop: value),
-                    ),
-                  ),
-                  SettingsSwitchRow(
-                    title: '屏蔽滚动弹幕',
-                    value: settings.blockScroll,
-                    onChanged: (value) => controller.updateDanmaku(
-                      settings.copyWith(blockScroll: value),
-                    ),
-                  ),
-                ],
+              DanmakuDisplayControls(
+                settings: settings,
+                onChanged: controller.updateDanmaku,
               ),
               const SizedBox(height: 12),
               _KeywordEditor(settings: settings),
@@ -2053,63 +2013,6 @@ class _ProfileMiniRail extends StatelessWidget {
                 ),
               ),
             ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SliderRow extends StatelessWidget {
-  const _SliderRow({
-    required this.title,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.label,
-    required this.onChanged,
-  });
-
-  final String title;
-  final double value;
-  final double min;
-  final double max;
-  final String label;
-  final ValueChanged<double> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 76,
-      child: Row(
-        children: [
-          SizedBox(
-            width: 86,
-            child: Text(
-              title,
-              style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                color: context.ink,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          Expanded(
-            child: Slider(
-              value: value,
-              min: min,
-              max: max,
-              onChanged: onChanged,
-            ),
-          ),
-          SizedBox(
-            width: 48,
-            child: Text(
-              label,
-              textAlign: TextAlign.end,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(color: context.inkMuted),
-            ),
-          ),
         ],
       ),
     );
