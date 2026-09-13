@@ -14,6 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ..base import BaseScraper, EpisodeInfo, SubjectDetail, SubjectResult, VideoLine
+from ..content_identity import classify_content, identity_from_html, movie_version_episode_number
 from .html_direct import HtmlDirectAnimeScraper
 
 
@@ -51,7 +52,7 @@ class GiriGiriScraper(BaseScraper):
 
     @property
     def content_types(self) -> list[str]:
-        return ["anime"]
+        return ["anime", "series", "movie"]
 
     @property
     def base_url(self) -> str:
@@ -83,6 +84,10 @@ class GiriGiriScraper(BaseScraper):
             if not source_id or not title or source_id in seen:
                 continue
             seen.add(source_id)
+            identity = classify_content(
+                title, [str(item.get("type_name") or ""), str(item.get("vod_class") or "")],
+                year=item.get("vod_year") or item.get("year"),
+            )
             results.append(
                 SubjectResult(
                     source_id=source_id,
@@ -90,8 +95,10 @@ class GiriGiriScraper(BaseScraper):
                     cover_url=urljoin(
                         self.base_url + "/", str(item.get("pic", ""))
                     ),
-                    type="anime",
-                    lang="ja",
+                    type=identity.type,
+                    lang="ja" if identity.type == "anime" else "",
+                    year=identity.year,
+                    extra=identity.extra(),
                 )
             )
         return results
@@ -123,12 +130,15 @@ class GiriGiriScraper(BaseScraper):
                     or image.get("src", "")
                 )
 
+        identity = identity_from_html(soup, title, detail=True)
         episodes: dict[int, EpisodeInfo] = {}
         for link in soup.select('.anthology-list-box a[href], a[href*="playGV"]'):
             match = _PLAY_PATH_RE.match(str(link.get("href", "")))
             if not match or match.group(1) != source_number:
                 continue
-            number = int(match.group(3))
+            number = movie_version_episode_number(
+                identity, link.get_text(" ", strip=True), int(match.group(3))
+            )
             episodes.setdefault(
                 number,
                 EpisodeInfo(
@@ -144,10 +154,11 @@ class GiriGiriScraper(BaseScraper):
             title=title,
             cover_url=urljoin(str(response.url), cover),
             summary=summary,
-            type="anime",
-            lang="ja",
+            type=identity.type,
+            lang="ja" if identity.type == "anime" else "",
+            year=identity.year,
             episodes=list(episodes.values()),
-            extra={"url": str(response.url)},
+            extra={"url": str(response.url), **identity.extra()},
         )
 
     async def get_video_urls(
@@ -162,6 +173,9 @@ class GiriGiriScraper(BaseScraper):
         if detail_response.status_code != 200:
             return []
         soup = BeautifulSoup(detail_response.text, "lxml")
+        heading = soup.select_one(".slide-info-title, h1")
+        title = heading.get_text(" ", strip=True) if heading else ""
+        identity = identity_from_html(soup, title, detail=True)
         play_paths: list[tuple[int, str]] = []
         seen_paths: set[str] = set()
         for link in soup.select('a[href*="playGV"]'):
@@ -170,7 +184,9 @@ class GiriGiriScraper(BaseScraper):
             if (
                 not match
                 or match.group(1) != source_number
-                or int(match.group(3)) != max(1, episode)
+                or movie_version_episode_number(
+                    identity, link.get_text(" ", strip=True), int(match.group(3))
+                ) != max(1, episode)
                 or path in seen_paths
             ):
                 continue
@@ -231,13 +247,17 @@ class GiriGiriScraper(BaseScraper):
                     or image.get("data-src", "")
                     or image.get("src", "")
                 )
+            parent = link.find_parent(["li", "article", "div"])
+            identity = identity_from_html(parent, title)
             results.append(
                 SubjectResult(
                     source_id=match.group(1),
                     title=title,
                     cover_url=urljoin(str(response.url), cover),
-                    type="anime",
-                    lang="ja",
+                    type=identity.type,
+                    lang="ja" if identity.type == "anime" else "",
+                    year=identity.year,
+                    extra=identity.extra(),
                 )
             )
             if len(results) >= 30:

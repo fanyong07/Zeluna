@@ -85,6 +85,63 @@ class XgCartoonScraperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.scraper.get_video_urls("test-anime@3", 1), [])
         self.assertEqual(XgCartoonScraper._requested_season("动画 Season 3"), 3)
 
+class XgCartoonDynamicPlayerTests(unittest.IsolatedAsyncioTestCase):
+    async def resolve(self, payload, *, status=200):
+        calls = []
+
+        def handler(request):
+            calls.append(request.url)
+            if request.url.path == "/video/cartoon/chapter-1.html":
+                return httpx.Response(200, text=(
+                    '<div id="video_content"><iframe id="xgct_player_iframe" '
+                    'loading="lazy"></iframe></div>'
+                ))
+            if request.url.path == "/user/amp/content_pframe_url":
+                self.assertEqual(request.url.params["chapter_id"], "chapter-1")
+                self.assertEqual(request.url.params["level"], "middle")
+                self.assertNotIn("Cookie", request.headers)
+                return httpx.Response(status, json=payload)
+            return httpx.Response(404)
+
+        scraper = XgCartoonScraper(
+            video_base_url="https://video.example", player_host="player.example",
+            media_base_url="https://media.example", transport=httpx.MockTransport(handler),
+        )
+        try:
+            line = await scraper._resolve_chapter("cartoon", 1, "chapter-1")
+        finally:
+            await scraper.aclose()
+        return line, calls
+
+    async def test_empty_dynamic_iframe_uses_public_site_endpoint(self):
+        line, calls = await self.resolve({
+            "result": True, "data": "https://player.example/pframe?vid=movie-1",
+        })
+        self.assertIsNotNone(line)
+        self.assertEqual(line.url, "https://media.example/movie-1/playlist.m3u8")
+        self.assertEqual(len(calls), 2)
+
+    async def test_supports_current_object_response_without_executing_scripts(self):
+        line, _ = await self.resolve({
+            "result": True, "data": {"player_url": "https://player.example/pframe?vid=movie-2"},
+        })
+        self.assertIsNotNone(line)
+        self.assertIn("movie-2/playlist.m3u8", line.url)
+
+    async def test_denied_untrusted_invalid_and_non_https_results_stay_unavailable(self):
+        for payload, status in [
+            ({"result": False, "data": "https://player.example/pframe?vid=x"}, 200),
+            ({"result": True, "data": "https://player.example/pframe?vid=x"}, 401),
+            ({"result": True, "data": "https://127.0.0.1/pframe?vid=x"}, 200),
+            ({"result": True, "data": "https://evil.example/pframe?vid=x"}, 200),
+            ({"result": True, "data": "http://player.example/pframe?vid=x"}, 200),
+            ({"result": True, "data": "https://player.example/pframe?vid=../../secret"}, 200),
+            ({"result": True, "data": ["unexpected"]}, 200),
+        ]:
+            with self.subTest(status=status, data_type=type(payload["data"]).__name__):
+                line, _ = await self.resolve(payload, status=status)
+                self.assertIsNone(line)
+
 
 if __name__ == "__main__":
     unittest.main()

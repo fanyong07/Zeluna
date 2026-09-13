@@ -15,6 +15,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ..base import BaseScraper, EpisodeInfo, SubjectDetail, SubjectResult, VideoLine
+from ..content_identity import identity_from_html, movie_version_episode_number
 
 
 _SOURCE_ID_RE = re.compile(r"^([a-zA-Z0-9-]+)(?:@(\d+))?$")
@@ -73,7 +74,7 @@ class XgCartoonScraper(BaseScraper):
 
     @property
     def content_types(self) -> list[str]:
-        return ["anime"]
+        return ["anime", "series", "movie"]
 
     @property
     def base_url(self) -> str:
@@ -113,13 +114,16 @@ class XgCartoonScraper(BaseScraper):
             seen.add(source_id)
             image = box.select_one("amp-img[src], img[src]")
             cover = str(image.get("src", "")) if image else ""
+            identity = identity_from_html(box, title)
             results.append(
                 SubjectResult(
                     source_id=source_id,
                     title=title,
                     cover_url=urljoin(str(response.url), html.unescape(cover)),
-                    type="anime",
+                    type=identity.type,
                     lang="zh",
+                    year=identity.year,
+                    extra=identity.extra(),
                 )
             )
             if len(results) >= 30:
@@ -138,15 +142,18 @@ class XgCartoonScraper(BaseScraper):
         title_element = soup.select_one(".detail-right__title h1, h1.h1")
         title = title_element.get_text(" ", strip=True) if title_element else ""
         description = soup.select_one(".detail-right__desc")
-        episodes = self._volume_episodes(soup, season)
+        identity = identity_from_html(soup, title, detail=True)
+        episodes = list({row[0]: row for row in reversed(self._volume_episodes(soup, season))}.values())
+        episodes.sort(key=lambda row: row[0])
         cover = f"https://static-a.xgcartoon.com/cover/{slug}.jpg"
         return SubjectDetail(
             source_id=f"{slug}@{season}",
             title=title,
             cover_url=cover,
             summary=description.get_text(" ", strip=True) if description else "",
-            type="anime",
+            type=identity.type,
             lang="zh",
+            year=identity.year,
             episodes=[
                 EpisodeInfo(
                     number=number,
@@ -155,7 +162,7 @@ class XgCartoonScraper(BaseScraper):
                 )
                 for number, label, chapter_id in episodes
             ],
-            extra={"url": str(response.url), "season": season},
+            extra={"url": str(response.url), "season": season, **identity.extra()},
         )
 
     async def get_video_urls(
@@ -169,52 +176,88 @@ class XgCartoonScraper(BaseScraper):
         if response.status_code != 200:
             return []
         soup = BeautifulSoup(response.text, "lxml")
-        target = next(
-            (
-                item
-                for item in self._volume_episodes(soup, season)
-                if item[0] == max(1, episode)
-            ),
-            None,
-        )
-        if target is None:
-            return []
-        chapter_id = target[2]
+        targets = [
+            item for item in self._volume_episodes(soup, season)
+            if item[0] == max(1, episode)
+        ]
+        lines: list[VideoLine] = []
+        seen_chapters: set[str] = set()
+        seen_urls: set[str] = set()
+        for _, _, chapter_id in targets:
+            if chapter_id in seen_chapters:
+                continue
+            seen_chapters.add(chapter_id)
+            try:
+                line = await self._resolve_chapter(slug, season, chapter_id)
+            except httpx.HTTPError:
+                continue
+            if line is not None and line.url not in seen_urls:
+                seen_urls.add(line.url)
+                lines.append(line)
+        return lines
+
+    async def _resolve_chapter(
+        self, slug: str, season: int, chapter_id: str
+    ) -> VideoLine | None:
         video_url = f"{self._video_base_url}/video/{slug}/{chapter_id}.html"
         video_response = await self._client.get(video_url)
         if video_response.status_code != 200:
-            return []
+            return None
         video_soup = BeautifulSoup(video_response.text, "lxml")
         iframe = video_soup.select_one("#video_content iframe[src], iframe[src]")
-        if not iframe:
-            return []
-        iframe_url = urljoin(
-            str(video_response.url), html.unescape(str(iframe.get("src", "")))
-        )
+        if iframe:
+            iframe_url = urljoin(
+                str(video_response.url), html.unescape(str(iframe.get("src", "")))
+            )
+        elif video_soup.select_one("#video_content #xgct_player_iframe") is not None:
+            # Current pages leave src empty and request this same-origin public
+            # endpoint from chapter.min.js. No login cookies, script execution,
+            # or alternate parser are needed; a denied response stays denied.
+            response = await self._client.get(
+                f"{self._video_base_url}/user/amp/content_pframe_url",
+                params={"chapter_id": chapter_id, "level": "middle", "expires": "3600"},
+                headers={"Referer": str(video_response.url)},
+            )
+            if response.status_code != 200:
+                return None
+            try:
+                payload = response.json()
+            except ValueError:
+                return None
+            if not isinstance(payload, dict) or payload.get("result") is not True:
+                return None
+            value = payload.get("data")
+            if isinstance(value, dict):
+                value = next((value.get(key) for key in (
+                    "url", "player_url", "pframe_url", "video_url"
+                ) if isinstance(value.get(key), str) and value[key]), "")
+            if not isinstance(value, str) or not value.strip():
+                return None
+            iframe_url = html.unescape(value.strip())
+        else:
+            return None
         parsed_iframe = urlparse(iframe_url)
         if (
             parsed_iframe.scheme != "https"
             or (parsed_iframe.hostname or "").lower() != self._player_host
         ):
-            return []
+            return None
         video_id = parse_qs(parsed_iframe.query).get("vid", [""])[0].strip()
         if not re.fullmatch(r"[a-zA-Z0-9-]+", video_id):
-            return []
+            return None
         media_url = f"{self._media_base_url}/{video_id}/playlist.m3u8"
-        return [
-            VideoLine(
-                url=media_url,
-                title=f"西瓜卡通 · 第{season}季",
-                format="hls",
-                headers={
-                    "Referer": str(video_response.url),
-                    "Origin": (
-                        f"{video_response.url.scheme}://{video_response.url.netloc}"
-                    ),
-                },
-                source_name=self.name,
-            )
-        ]
+        return VideoLine(
+            url=media_url,
+            title=f"西瓜卡通 · 第{season}季",
+            format="hls",
+            headers={
+                "Referer": str(video_response.url),
+                "Origin": (
+                    f"{video_response.url.scheme}://{video_response.url.netloc}"
+                ),
+            },
+            source_name=self.name,
+        )
 
     @classmethod
     def _volume_episodes(
@@ -224,6 +267,9 @@ class XgCartoonScraper(BaseScraper):
         if container is None:
             return []
         current_volume = 0
+        heading = soup.select_one(".detail-right__title h1, h1.h1")
+        title = heading.get_text(" ", strip=True) if heading else ""
+        identity = identity_from_html(soup, title, detail=True)
         result: list[tuple[int, str, str]] = []
         for element in container.select(".volume-title, div:has(> a.goto-chapter)"):
             classes = set(element.get("class", []))
@@ -240,7 +286,9 @@ class XgCartoonScraper(BaseScraper):
             if not re.fullmatch(r"[a-zA-Z0-9-]+", chapter_id):
                 continue
             label = link.get_text(" ", strip=True) or str(link.get("title", ""))
-            number = cls._episode_number(label, len(result) + 1)
+            number = movie_version_episode_number(
+                identity, label, cls._episode_number(label, len(result) + 1)
+            )
             result.append((number, label or f"第{number}话", chapter_id))
         return result
 

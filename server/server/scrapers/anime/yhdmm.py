@@ -21,8 +21,10 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import httpx
+from bs4 import BeautifulSoup
 
 from ..base import EpisodeInfo, SubjectDetail, SubjectResult, VideoLine
+from ..content_identity import classify_content, identity_from_html, movie_version_episode_number
 from ..site_index import SiteIndex, normalize_title
 from .site_base import (
     SITE_STATUS_OK,
@@ -79,6 +81,10 @@ class YhdmmScraper(SiteAnimeScraper):
         )
 
     @property
+    def content_types(self) -> list[str]:
+        return ["anime", "series", "movie"]
+
+    @property
     def index(self) -> SiteIndex | None:
         return self._index
 
@@ -106,7 +112,10 @@ class YhdmmScraper(SiteAnimeScraper):
             return []
         if self._index is None:
             try:
-                await self.build_local_index(pages=_LAZY_INDEX_PAGES)
+                await self.build_local_index(pages=_LAZY_INDEX_PAGES, max_duration_seconds=5.5)
+                if self._index is not None:
+                    # Foreground one-page coverage is provisional, not a full scheduled rebuild.
+                    self._index.built_at = 0
             except Exception:  # noqa: BLE001 - 建索引失败不应影响其它源
                 return []
         if self._index is None:
@@ -115,21 +124,27 @@ class YhdmmScraper(SiteAnimeScraper):
         for sid, title, score in self._index.search(keyword, limit=10):
             if score < _MIN_LOCAL_MATCH_SCORE:
                 continue
+            identity = classify_content(title)
             results.append(
                 SubjectResult(
                     source_id=sid,
                     title=title,
-                    type="anime",
-                    lang="ja",
-                    extra={"match_score": score},
+                    type=identity.type,
+                    lang="ja" if identity.type == "anime" else "",
+                    year=identity.year,
+                    extra={"match_score": score, **identity.extra()},
                 )
             )
         return results
 
-    async def _episode_candidates(self, sid: str) -> list[EpisodeCandidate]:
-        html = await self._get(self.detail_url(sid))
+    async def _episode_candidates(
+        self, sid: str, *, page_html: str | None = None
+    ) -> list[EpisodeCandidate]:
+        html = page_html if page_html is not None else await self._get(self.detail_url(sid))
         if not html:
             return []
+        soup = BeautifulSoup(html, "lxml")
+        identity = identity_from_html(soup, self._page_title(soup, html), detail=True)
         candidates: list[EpisodeCandidate] = []
         per_line: dict[str, int] = {}
         for path in self.extract_play_links(html):
@@ -142,7 +157,8 @@ class YhdmmScraper(SiteAnimeScraper):
             per_line[line_key] = index + 1
             candidates.append(
                 EpisodeCandidate(
-                    line_key=line_key, label=label, page_path=path, index=index
+                    line_key=line_key, label=label, page_path=path, index=index,
+                    episode_number=(1 if movie_version_episode_number(identity, label, 0) == 1 else None),
                 )
             )
         return candidates
@@ -155,6 +171,21 @@ class YhdmmScraper(SiteAnimeScraper):
         )
         return match.group(1).strip() if match else ""
 
+    @staticmethod
+    def _page_title(soup: BeautifulSoup, html: str) -> str:
+        heading = soup.select_one(".detail-header h2, .detail-info h1, h1:not(.navbar-brand)")
+        title = "".join(
+            text for text in heading.find_all(string=True) if not text.find_parent("small")
+        ).strip() if heading else ""
+        if not title:
+            title_match = re.search(r'"vod_name"\s*:\s*"([^"]{2,100})"', html)
+            title = title_match.group(1).strip() if title_match else ""
+        if not title and soup.title:
+            page_title = soup.title.get_text(" ", strip=True)
+            quoted = re.search(r"《([^》]+)》", page_title)
+            title = quoted.group(1) if quoted else page_title.split(" - ", 1)[0].strip()
+        return title
+
     async def get_detail(self, source_id: str) -> Optional[SubjectDetail]:
         sid = str(source_id).strip()
         if not sid.isdigit():
@@ -162,21 +193,20 @@ class YhdmmScraper(SiteAnimeScraper):
         html = await self._get(self.detail_url(sid))
         if not html:
             return None
-        title_match = (
-            re.search(r'<h1[^>]*>\s*([^<]{2,60})', html)
-            or re.search(r'"vod_name"\s*:\s*"([^"]{2,60})"', html)
-            or re.search(r"<title>\s*([^<|-]{2,60})", html)
-        )
-        title = title_match.group(1).strip() if title_match else ""
+        soup = BeautifulSoup(html, "lxml")
+        title = self._page_title(soup, html)
         cover_match = re.search(
             r'<meta property="og:image" content="([^"]+)"', html
         )
         cover = urljoin(self.base_url + "/", cover_match.group(1)) if cover_match else ""
 
+        identity = identity_from_html(soup, title, detail=True)
         episodes: dict[int, EpisodeInfo] = {}
-        for candidate in await self._episode_candidates(sid):
+        for candidate in await self._episode_candidates(sid, page_html=html):
             number_match = re.search(r"(\d+)", candidate.label)
-            number = int(number_match.group(1)) if number_match else candidate.index + 1
+            number = candidate.episode_number or (
+                int(number_match.group(1)) if number_match else candidate.index + 1
+            )
             episodes.setdefault(
                 number,
                 EpisodeInfo(
@@ -189,9 +219,11 @@ class YhdmmScraper(SiteAnimeScraper):
             source_id=sid,
             title=title,
             cover_url=cover,
-            type="anime",
-            lang="ja",
+            type=identity.type,
+            lang="ja" if identity.type == "anime" else "",
+            year=identity.year,
             episodes=[episodes[key] for key in sorted(episodes)],
+            extra=identity.extra(),
         )
 
     async def get_video_urls(
@@ -232,7 +264,9 @@ class YhdmmScraper(SiteAnimeScraper):
             )
         return lines
 
-    async def build_local_index(self, *, pages: int = 3) -> SiteIndex:
+    async def build_local_index(
+        self, *, pages: int = 3, max_duration_seconds: float | None = None
+    ) -> SiteIndex:
         """抓列表页建本地索引(该站站内搜索不可用时的唯一入口)。"""
         from ..site_index import build_index
 
@@ -244,6 +278,8 @@ class YhdmmScraper(SiteAnimeScraper):
             client=self._client,
             pages=pages,
             headers=self.request_headers(),
+            category_link_pattern=r"/list/[a-zA-Z0-9_-]+\.html",
+            max_duration_seconds=max_duration_seconds,
         )
         self._index = index
         return index

@@ -40,6 +40,7 @@ class EpisodeCandidate:
     label: str             # 站点标注:"第1集" / "OAD01" / "HD中字"
     page_path: str         # 播放页路径或完整 URL
     index: int = 0         # 该线路内的顺序(0 基)
+    episode_number: int | None = None  # Explicit full-film version identity
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,11 @@ def select_episode_candidates(
     regex = _episode_label_regex(episode)
     selected: list[EpisodeCandidate] = []
     for items in grouped.values():
+        film_versions = [item for item in items if item.episode_number is not None]
+        selected.extend(item for item in film_versions if item.episode_number == episode)
+        items = [item for item in items if item.episode_number is None]
+        if not items:
+            continue
         exact = [item for item in items if regex.fullmatch(item.label.strip())]
         if exact:
             selected.append(exact[0])

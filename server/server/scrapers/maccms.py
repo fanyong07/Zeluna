@@ -11,7 +11,7 @@
   剧集之间用     "#"     分隔
   单集内用       "$"     分隔  ->  "名称$地址"
 
-一个站点 = 一路源。加站点即加源,覆盖国内外电影/电视剧/动漫/综艺。
+一个站点是一个内容来源，同站可返回多个播放组，覆盖电影/电视剧/动漫/综艺。
 仅返回可播放 URL,不下载任何视频文件。
 """
 
@@ -143,15 +143,30 @@ def episode_from_group(group: list[dict], episode: int) -> dict | None:
 def media_type_from_name(type_name: str) -> str:
     raw = (type_name or "").strip()
     normalized = raw.lower()
+    # A named film subcategory is media-type evidence; a bare genre (喜剧/科幻)
+    # is not. Trailers/commentary must not acquire a positive movie identity.
+    if any(key in raw for key in ("解说", "预告", "花絮")):
+        return "unknown"
+    if any(key in raw for key in ("电影", "劇場版", "剧场版")) or "movie" in normalized:
+        return "movie"
     if any(key in raw for key in ("动漫", "动画", "番")) or "anime" in normalized:
         return "anime"
-    if any(key in raw for key in ("电影", "影片")) or "movie" in normalized:
+    movie_categories = (
+        "剧情片", "动作片", "喜剧片", "爱情片", "科幻片", "恐怖片", "惊悚片",
+        "战争片", "悬疑片", "犯罪片", "奇幻片", "冒险片", "武侠片", "灾难片",
+        "歌舞片", "历史片", "家庭片", "西部片", "经典片",
+    )
+    if (
+        any(key in raw for key in ("电影", "影片", *movie_categories))
+        or "movie" in normalized
+    ):
         return "movie"
     if (
         any(key in raw for key in (
             "电视剧", "连续剧", "剧集", "国产剧", "大陆剧", "内地剧",
             "港台剧", "香港剧", "台湾剧", "欧美剧", "美剧", "英剧",
-            "日剧", "韩剧", "泰剧", "海外剧", "短剧", "网剧", "综艺",
+            "日剧", "日本剧", "韩剧", "韩国剧", "泰剧", "泰国剧", "新马剧",
+            "港剧", "台剧", "海外剧", "短剧", "网剧", "综艺",
         ))
         or any(key in normalized for key in ("tv", "series", "drama", "show"))
     ):
@@ -192,7 +207,7 @@ def parse_vod_play_url(raw: str) -> list[list[dict]]:
 
 
 class MacCmsScraper(BaseScraper):
-    """MacCMS/苹果CMS 多站聚合。一个站 = 一路源。"""
+    """MacCMS/苹果CMS 多站聚合，保留同站不同播放组。"""
 
     def __init__(self):
         super().__init__()
@@ -472,25 +487,15 @@ class MacCmsScraper(BaseScraper):
             return None
         it = items[0]
 
-        # 解析剧集列表 (从 vod_play_url 第一个播放源取集数)
-        episodes: list[EpisodeInfo] = []
+        # Merge episode numbers from every route; a short first route must not
+        # hide later episodes available from another source group.
+        episodes_by_number: dict[int, EpisodeInfo] = {}
         raw_url = it.get("vod_play_url", "") or ""
-        sources = parse_vod_play_url(raw_url)
-        if sources:
-            group = sources[0]
-            parsed_numbers = [
-                episode_number_from_label(ep["name"])
-                for ep in group
-            ]
-            has_explicit_numbers = any(
-                number is not None for number in parsed_numbers
-            )
-            seen_numbers: set[int] = set()
+        for group in parse_vod_play_url(raw_url):
+            parsed_numbers = [episode_number_from_label(ep["name"]) for ep in group]
+            has_explicit_numbers = any(number is not None for number in parsed_numbers)
             fallback_number = 0
-            for i, (ep, parsed_number) in enumerate(
-                zip(group, parsed_numbers),
-                1,
-            ):
+            for i, (ep, parsed_number) in enumerate(zip(group, parsed_numbers), 1):
                 if parsed_number is None:
                     if has_explicit_numbers or _is_special_episode_label(ep["name"]):
                         continue
@@ -498,14 +503,10 @@ class MacCmsScraper(BaseScraper):
                     ep_num = fallback_number
                 else:
                     ep_num = parsed_number
-                if ep_num in seen_numbers:
-                    continue
-                seen_numbers.add(ep_num)
-                episodes.append(EpisodeInfo(
-                    number=ep_num,
-                    title=ep["name"],
-                    source_episode_id=str(i - 1),
+                episodes_by_number.setdefault(ep_num, EpisodeInfo(
+                    number=ep_num, title=ep["name"], source_episode_id=str(i - 1),
                 ))
+        episodes = [episodes_by_number[number] for number in sorted(episodes_by_number)]
 
         return SubjectDetail(
             source_id=f"maccms:{site_name}:{vod_id}",
@@ -557,7 +558,10 @@ class MacCmsScraper(BaseScraper):
             return []
 
         raw_url = items[0].get("vod_play_url", "") or ""
-        sources = parse_vod_play_url(raw_url)
+        sources = [
+            next(iter(parse_vod_play_url(group)), [])
+            for group in raw_url.split("$$$")
+        ]
 
         configured_headers = {
             str(name).strip(): str(value).strip()
@@ -582,7 +586,10 @@ class MacCmsScraper(BaseScraper):
                 title=ep["name"] or f"线路{src_idx + 1}",
                 format=fmt,
                 headers=dict(configured_headers),
-                source_name=f"maccms:{site_name}",
+                source_name=(
+                    f"maccms:{site_name}" if src_idx == 0
+                    else f"maccms:{site_name}:{site_name}-{src_idx + 1}"
+                ),
             ))
         return lines
 

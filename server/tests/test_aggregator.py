@@ -179,7 +179,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             ["maccms:correct:2"],
         )
 
-    async def test_default_crawlers_are_current_vps_playback_candidates(self):
+    async def test_default_crawlers_preserve_existing_candidates_and_add_xifan(self):
         self.aggregator = ContentAggregator()
 
         self.assertEqual(
@@ -195,6 +195,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 "ppnix",
                 "wedm",
                 "xgcartoon",
+                "xifan",
                 "yhdmm",
                 "yinghua2",
             },

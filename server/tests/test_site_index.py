@@ -181,3 +181,63 @@ class BuildIndexTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CategoryIndexDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_origin_categories_expand_without_removing_existing_paths(self):
+        calls = []
+        def handler(request):
+            calls.append(request.url.path)
+            if request.url.path == "/":
+                return httpx.Response(200, text=(
+                    '<nav><a href="/list/dongmandianying.html">动漫电影</a>'
+                    '<a href="/list/dianshiju.html">电视剧</a>'
+                    '<a href="https://other.test/list/injected.html">外部电影</a>'
+                    '<a href="/account/settings">账户</a></nav>' + _card(1, "原有番剧")))
+            if request.url.path == "/list/dongmandianying.html":
+                return httpx.Response(200, text=_card(2, "新入索引电影"))
+            if request.url.path == "/list/dianshiju.html":
+                return httpx.Response(200, text=_card(3, "新入索引电视剧"))
+            return httpx.Response(404)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            index = await build_index(
+                site="test", base_url="https://source.test", list_paths=("/", "/list/1.html"),
+                detail_pattern=_DETAIL_PAT, client=client, pages=1, request_gap_seconds=0,
+                category_link_pattern=r"/list/[a-zA-Z0-9_-]+\.html",
+            )
+        self.assertEqual(set(index.entries), {"1", "2", "3"})
+        self.assertIn("/list/1.html", calls)
+        self.assertNotIn("/list/injected.html", calls)
+        self.assertNotIn("/account/settings", calls)
+        self.assertEqual(paginate("/list/dongmandianying.html", 2), "/list/dongmandianying-2.html")
+
+    async def test_category_navigation_expansion_is_bounded(self):
+        calls = []
+        def handler(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, text=''.join(
+                f'<a href="/list/category{n}.html">分类{n}</a>' for n in range(100)
+            ) + _card(1, "番剧"))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await build_index(
+                site="test", base_url="https://source.test", list_paths=("/",),
+                detail_pattern=_DETAIL_PAT, client=client, pages=1, request_gap_seconds=0,
+                category_link_pattern=r"/list/[a-zA-Z0-9_-]+\.html",
+            )
+        self.assertLessEqual(len(calls), 13)
+
+class PartialIndexBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deadline_keeps_collected_entries_and_requests_later_rebuild(self):
+        import asyncio
+        async def handler(request):
+            if request.url.path == "/":
+                return httpx.Response(200, text=_card(1, "已经收集的电影"))
+            await asyncio.sleep(1)
+            return httpx.Response(200, text=_card(2, "超时的分类页"))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            index = await build_index(
+                site="test", base_url="https://source.test", list_paths=("/", "/list/1.html"),
+                detail_pattern=_DETAIL_PAT, client=client, pages=1, request_gap_seconds=0,
+                max_duration_seconds=0.05,
+            )
+        self.assertEqual(set(index.entries), {"1"})
+        self.assertEqual(index.built_at, 0)

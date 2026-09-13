@@ -8,6 +8,7 @@ import server.scrapers.maccms_sites as maccms_sites
 from server.scrapers.base import SubjectResult
 from server.scrapers.maccms import (
     MacCmsScraper,
+    media_type_from_name,
     episode_number_from_label,
     parse_vod_play_url,
 )
@@ -35,6 +36,51 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             request=httpx.Request("GET", site["api"]),
         ))
         return site
+
+    async def test_all_play_groups_contribute_episodes_without_collapsing_line_ids(self):
+        from server.aggregator import ContentAggregator
+        from server.playback import PlaybackService
+        site = self._configure_single_site({
+            "vod_id": "1", "vod_name": "庆余年第一季", "type_name": "国产剧", "vod_year": "2019",
+            "vod_play_url": (
+                "第1集$https://media.example/a/1.m3u8#第2集$https://media.example/a/2.m3u8"
+                "$$$第1集$https://media.example/b/1.m3u8#第3集$https://media.example/b/3.m3u8"
+            ),
+        })
+        site["headers"] = {"Referer": "https://source.example/", "Origin": "https://source.example"}
+        detail = await self.scraper.get_detail("maccms:测试站:1")
+        self.assertEqual([ep.number for ep in detail.episodes], [1, 2, 3])
+        aggregator = ContentAggregator(crawler_scrapers={}, enabled_provider_ids=frozenset({"aggregate.maccms"}), resolver_search_enabled=False)
+        await aggregator._maccms.aclose()
+        aggregator._maccms = self.scraper
+        try:
+            lines = await aggregator.get_video_urls("maccms:测试站:1", 1)
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(lines[0].source, "maccms:测试站")
+            self.assertTrue(all(line.headers == site["headers"] for line in lines))
+            payloads = [PlaybackService()._line_dict(line) for line in lines]
+            self.assertEqual({row["provider_id"] for row in payloads}, {"测试站", "测试站-2"})
+            self.assertEqual({row["catalog_source"] for row in payloads}, {"测试站"})
+            third = await aggregator.get_video_urls("maccms:测试站:1", 3)
+            self.assertEqual(len(third), 1)
+            self.assertEqual(third[0].source, "maccms:测试站:测试站-2")
+        finally:
+            await aggregator.aclose()
+
+    async def test_empty_nonmedia_group_does_not_renumber_following_routes(self):
+        self._configure_single_site({
+            "vod_play_url": "第1集$https://site.example/player.html"
+                "$$$第1集$https://media.example/ep1.m3u8",
+        })
+        lines = await self.scraper.get_video_urls("maccms:测试站:1", 1)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].source_name, "maccms:测试站:测试站-2")
+
+    def test_existing_comprehensive_sites_are_not_excluded_from_movies_or_series(self):
+        for kind in ("anime", "series", "movie"):
+            with self.subTest(kind=kind):
+                names = {source.name for source in self.scraper.discovery_sources_for(kind)}
+                self.assertTrue({"爱奇艺", "量子", "电影天堂"} <= names)
 
     def test_parse_vod_play_url_keeps_sources_and_episode_order(self):
         parsed = parse_vod_play_url(
@@ -283,6 +329,36 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
         outcome = await self.scraper.search_source("测试站", "测试剧集")
 
         self.assertEqual(outcome.results[0].type, "tv")
+
+    async def test_movie_genre_categories_survive_search_detail_and_matching(self):
+        from server.aggregator import ContentAggregator
+        for category in ("科幻片", "剧情片", "动作片", "喜剧片", "爱情片", "战争片", "惊悚片"):
+            with self.subTest(category=category):
+                site = self._configure_single_site({
+                    "vod_id": "movie-1", "vod_name": "流浪地球2",
+                    "vod_year": "2023", "type_name": category,
+                    "vod_play_url": "正片$https://media.example/movie.m3u8",
+                })
+                result = await self.scraper.search_source("测试站", "流浪地球2")
+                detail = await self.scraper.get_detail("maccms:测试站:movie-1")
+                self.assertEqual(result.results[0].type, "movie")
+                self.assertEqual(detail.type, "movie")
+                self.assertEqual(len(detail.episodes), 1)
+                self.assertEqual(len(ContentAggregator._score_scraper_results(
+                    "maccms", result.results, ["流浪地球2"],
+                    content_type="movie", year=2023,
+                )), 1)
+
+    def test_cross_category_mapping_keeps_ambiguous_and_derivative_types_separate(self):
+        for category in ("喜剧", "剧情", "科幻", "纪录片", "电影解说", "预告片", "未知"):
+            with self.subTest(category=category):
+                self.assertEqual(media_type_from_name(category), "unknown")
+        for category in ("日本剧", "韩国剧", "新马剧", "香港剧", "欧美剧"):
+            with self.subTest(category=category):
+                self.assertEqual(media_type_from_name(category), "tv")
+        for category in ("动画片", "日本动漫", "国产动漫"):
+            with self.subTest(category=category):
+                self.assertEqual(media_type_from_name(category), "anime")
 
     async def test_search_does_not_treat_genre_name_as_tv_type(self):
         self._configure_single_site({

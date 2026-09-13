@@ -19,9 +19,11 @@ import asyncio
 import difflib
 import re
 import time
+from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, field
 
 import httpx
+from bs4 import BeautifulSoup
 
 #: 就近文本搜索窗口:详情链接前后各取这么多字符找标题
 _TITLE_WINDOW = 260
@@ -180,7 +182,7 @@ def paginate(path: str, page: int) -> str | None:
     if page <= 1:
         return path
     patterns = (
-        (r"/list/(\d+)\.html$", lambda m: f"/list/{m.group(1)}-{page}.html"),
+        (r"/list/([a-zA-Z0-9_]+)\.html$", lambda m: f"/list/{m.group(1)}-{page}.html"),
         (r"/vodshow/(\d+)--------(\d*)---/?$",
          lambda m: f"/vodshow/{m.group(1)}--------{page}---/"),
         (r"/show/([\d-]+?)--------\d*---/?$",
@@ -208,22 +210,54 @@ async def build_index(
     request_gap_seconds: float = 0.8,
     sleep_func=asyncio.sleep,
     now: float | None = None,
+    category_link_pattern: str = "",
+    max_duration_seconds: float | None = None,
 ) -> SiteIndex:
     """抓列表页建索引。分页内容重复即提前停止(应对分页被缓存)。"""
     index = SiteIndex(site=site)
-    for path in list_paths:
+    deadline = time.monotonic() + max_duration_seconds if max_duration_seconds is not None else None
+    paths = list(dict.fromkeys(list_paths))
+    original_count = len(paths)
+    category_regex = re.compile(category_link_pattern) if category_link_pattern else None
+    origin = urlparse(base_url)
+    for path in paths:
         seen_signatures: set[int] = set()
         for page in range(1, max(1, pages) + 1):
             page_path = paginate(path, page)
             if page_path is None:
                 break
             url = base_url.rstrip("/") + page_path
+            remaining = max(0, deadline - time.monotonic()) if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                return index  # Keep usable metadata; built_at=0 requests a later full rebuild.
             try:
-                response = await client.get(url, headers=headers or {})
+                response = await asyncio.wait_for(
+                    client.get(url, headers=headers or {}), timeout=remaining
+                )
+            except TimeoutError:
+                return index
             except httpx.HTTPError:
                 break
             if response.status_code != 200:
                 break
+            if category_regex is not None and path == "/" and page == 1:
+                # Same-origin category paths only; no guessed API, external URL,
+                # script evaluation or unbounded recursive crawling.
+                soup = BeautifulSoup(response.text, "lxml")
+                discovered_paths: list[str] = []
+                for link in soup.select("a[href]"):
+                    target = urlparse(urljoin(base_url + "/", str(link.get("href", ""))))
+                    if (
+                        target.scheme == origin.scheme and target.netloc == origin.netloc
+                        and category_regex.fullmatch(target.path)
+                        and not target.query and not target.fragment
+                        and target.path not in paths and target.path not in discovered_paths
+                        and len(paths) + len(discovered_paths) < original_count + 12
+                    ):
+                        discovered_paths.append(target.path)
+                # Visit verified navigation before legacy guesses, without deleting them.
+                insert_at = paths.index(path) + 1
+                paths[insert_at:insert_at] = discovered_paths
             signature = hash(response.text)
             if signature in seen_signatures:
                 break  # 分页被缓存,继续翻无意义
@@ -234,6 +268,8 @@ async def build_index(
                     added += 1
             if added == 0 and page > 1:
                 break
+            if deadline is not None and time.monotonic() + request_gap_seconds >= deadline:
+                return index
             await sleep_func(request_gap_seconds)
     index.built_at = time.time() if now is None else now
     return index

@@ -1,0 +1,1786 @@
+{
+  "schema": "zeluna.anich-origin-analysis.v1",
+  "generated_utc": "2026-09-13T15:08:20.580131+00:00",
+  "runtime_configuration": false,
+  "source_snapshots": [
+    {
+      "file": "AniCh片源逆向报告.md",
+      "sha256": "2b833f59a37474212f600959eab2b0fb2a3a0bc832a62bd45038bd951d427173"
+    },
+    {
+      "file": "AniCh片源数据.json",
+      "sha256": "b5b468cc66e3f2bec2505308d01e8c67771e0fd99706cfe5cbcd6238dbd85ce7"
+    },
+    {
+      "file": "claude制作.zip",
+      "sha256": "1028265798210d5285de151cdfe36c23d3ffb01a14dcde6ddf026d7bd172043f"
+    }
+  ],
+  "boundaries": {
+    "no_attachment_code_executed": true,
+    "no_original_file_changed": true,
+    "no_runtime_source_removed": true,
+    "no_global_58_site_claim": true,
+    "host_attribution_is_not_site_identity": true,
+    "no_claim_of_rights_clearance": true
+  },
+  "input_totals": {
+    "labels": 52,
+    "hits": 1862,
+    "host_strings": 30
+  },
+  "rows": [
+    {
+      "upstream_label": "jo",
+      "snapshot": "2026-08-25",
+      "max_score": 6,
+      "hits": 76,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 76
+        }
+      ],
+      "sample_titles": [
+        "万古狂帝",
+        "万域封神",
+        "上班族去了异世界后成了四天王",
+        "中国奇谭2",
+        "乔西的虎与鱼"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 160,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "hb",
+      "snapshot": "2026-08-25",
+      "max_score": 10,
+      "hits": 164,
+      "observed_hosts": [
+        {
+          "host": "vod-cdn.sends.eu.org.cdn.cloudflare.net",
+          "hits": 163
+        },
+        {
+          "host": "s1.kwai.net",
+          "hits": 1
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "三角洲：造物主玩家",
+        "三骑士"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 137,
+      "delivery_class": "mixed_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "bf",
+      "snapshot": "2026-08-25",
+      "max_score": 3,
+      "hits": 104,
+      "observed_hosts": [
+        {
+          "host": "player.91ju.cc",
+          "hits": 104
+        }
+      ],
+      "sample_titles": [
+        "D5小队第二季",
+        "万古狂帝",
+        "万妖图录传 第十一季",
+        "万妖图录传 第十季",
+        "三骑士"
+      ],
+      "reported_attribution": "暴风影视",
+      "report_line": 170,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "播剧网/播剧影视（91ju 域名关联候选；非已确认暴风）",
+      "origin_mapping_status": "candidate_domain_link",
+      "content_scope_evidence": "movie/tv/anime 目录存在，但 bf 到站点内容的同集对应未闭环",
+      "existing_adapter_candidate": null,
+      "next_step": "优先补公开搜索/详情与同作品同集对应；现有暴风 MacCMS 不等同 bf",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "jok",
+      "snapshot": "2026-08-25",
+      "max_score": 9,
+      "hits": 26,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 26
+        }
+      ],
+      "sample_titles": [
+        "乔西的虎与鱼",
+        "今天开始做明星",
+        "假如…？ 第二季",
+        "剑网3·侠肝义胆沈剑心第二季",
+        "去你的岛"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`j` 族）",
+      "report_line": 143,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "j",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "lm",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 116,
+      "observed_hosts": [
+        {
+          "host": "lm.i.me.cdn.cloudflare.net",
+          "hits": 75
+        },
+        {
+          "host": "yun.92cj.com",
+          "hits": 38
+        },
+        {
+          "host": "vo-cdn.emmmm.eu.org",
+          "hits": 2
+        },
+        {
+          "host": "qietv-play.qiecdn.com",
+          "hits": 1
+        }
+      ],
+      "sample_titles": [
+        "101忠狗",
+        "万古狂帝",
+        "万域封神",
+        "三角洲：造物主玩家",
+        "上班族去了异世界后成了四天王"
+      ],
+      "reported_attribution": "92cj",
+      "report_line": 152,
+      "delivery_class": "mixed_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "路漫漫/92cj（历史域名线索；当前发布页 ho9）",
+      "origin_mapping_status": "candidate_domain_link",
+      "content_scope_evidence": "动漫/动画电影有站点证据；真人电影/电视剧未验证",
+      "existing_adapter_candidate": null,
+      "next_step": "按路漫漫独立 HTML 候选调查，保留原代理和 qiecdn 分支",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fc",
+      "snapshot": "2026-08-25",
+      "max_score": 5,
+      "hits": 58,
+      "observed_hosts": [
+        {
+          "host": "m3u8132.yhdmm3u8.top",
+          "hits": 58
+        }
+      ],
+      "sample_titles": [
+        "三角洲：造物主玩家",
+        "上班族去了异世界后成了四天王",
+        "中国奇谭2",
+        "五等分的新娘＊",
+        "从红月开始"
+      ],
+      "reported_attribution": "樱花动漫",
+      "report_line": 164,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "樱花系列（yhdmm 内容站为候选）",
+      "origin_mapping_status": "code_and_domain_link",
+      "content_scope_evidence": "动漫/动画电影；特摄不能当全面电视剧覆盖",
+      "existing_adapter_candidate": "crawler.yhdmm",
+      "next_step": "核对内容站→播放页→yhdmm3u8 同集关系；严禁映射为现有风车站",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fi",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 12,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 12
+        }
+      ],
+      "sample_titles": [
+        "中国奇谭2",
+        "仙剑奇侠传叁",
+        "光阴之外",
+        "剑来第二季",
+        "山海经密码"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `f` 族",
+      "report_line": 156,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "f",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fs",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 12,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 12
+        }
+      ],
+      "sample_titles": [
+        "中国奇谭2",
+        "仙剑奇侠传叁",
+        "光阴之外",
+        "剑来第二季",
+        "山海经密码"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`f` 族）",
+      "report_line": 157,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "f",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fok",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 13,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 13
+        }
+      ],
+      "sample_titles": [
+        "中国奇谭2",
+        "仙剑奇侠传叁",
+        "光阴之外",
+        "剑来第二季",
+        "山海经密码"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`f` 族）",
+      "report_line": 155,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "f",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fo",
+      "snapshot": "2026-08-25",
+      "max_score": 6,
+      "hits": 12,
+      "observed_hosts": [
+        {
+          "host": "vod-cdn.sends.eu.org.cdn.cloudflare.net",
+          "hits": 12
+        }
+      ],
+      "sample_titles": [
+        "中国奇谭2",
+        "仙剑奇侠传叁",
+        "光阴之外",
+        "剑来第二季",
+        "山海经密码"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 162,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "bfx",
+      "snapshot": "2026-08-25",
+      "max_score": 4,
+      "hits": 101,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 101
+        }
+      ],
+      "sample_titles": [
+        "D5小队第二季",
+        "万古狂帝",
+        "万妖图录传 第十一季",
+        "三骑士",
+        "上班族去了异世界后成了四天王"
+      ],
+      "reported_attribution": "暴风影视 (备线)",
+      "report_line": 169,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；报告推断暴风备线",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知；对象存储无作品目录",
+      "existing_adapter_candidate": null,
+      "next_step": "保留，与 bf 的关系待同集原始数据证明；不能按名字合并",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "dx",
+      "snapshot": "2026-08-25",
+      "max_score": 10,
+      "hits": 15,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 15
+        }
+      ],
+      "sample_titles": [
+        "中国奇谭2",
+        "乔西的虎与鱼",
+        "仙剑奇侠传叁",
+        "剑网3·侠肝义胆沈剑心第二季",
+        "命运/奇异赝品"
+      ],
+      "reported_attribution": "转存仓 · 金山云",
+      "report_line": 140,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "dl",
+      "snapshot": "2026-08-25",
+      "max_score": 9,
+      "hits": 48,
+      "observed_hosts": [
+        {
+          "host": "vod-cdn.sends.eu.org.cdn.cloudflare.net",
+          "hits": 36
+        },
+        {
+          "host": "m3u8.dlidli.cc",
+          "hits": 11
+        },
+        {
+          "host": "sns-video-bd.xhscdn.com",
+          "hits": 1
+        }
+      ],
+      "sample_titles": [
+        "三角洲：造物主玩家",
+        "中国奇谭2",
+        "乔西的虎与鱼",
+        "五等分的新娘＊",
+        "仙剑奇侠传叁"
+      ],
+      "reported_attribution": "dlidli",
+      "report_line": 142,
+      "delivery_class": "mixed_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "打驴动漫/dlidli（不是嘀哩嘀哩）",
+      "origin_mapping_status": "candidate_domain_link",
+      "content_scope_evidence": "发布页表明动漫；真人影视和目录尚未验证",
+      "existing_adapter_candidate": null,
+      "next_step": "官网发布网页为 sbdl.cc，本机受限；不下载 APP、不绕安全提示",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xgc",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 174,
+      "observed_hosts": [
+        {
+          "host": "xgct-video.vzcdn.net",
+          "hits": 174
+        }
+      ],
+      "sample_titles": [
+        "万域封神 第1、2季【国语】",
+        "三角洲：造物主玩家【国语】（4K）",
+        "中国奇谭 第1-2季（第2季更新中）【国语】",
+        "今天开始做明星【国语】",
+        "从红月开始【国语】"
+      ],
+      "reported_attribution": "xgct",
+      "report_line": 151,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "西瓜卡通",
+      "origin_mapping_status": "code_and_domain_link",
+      "content_scope_evidence": "动漫/动画电影及少量特摄线索；非综合真人影视验收",
+      "existing_adapter_candidate": "crawler.xgcartoon",
+      "next_step": "复核现有独立适配；补电影入口类型筛选，不把 xgk 自动当同站",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "hc",
+      "snapshot": "2026-08-25",
+      "max_score": 10,
+      "hits": 155,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 141
+        },
+        {
+          "host": "picasso-static.xiaohongshu.com",
+          "hits": 14
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "三骑士",
+        "上班族去了异世界后成了四天王"
+      ],
+      "reported_attribution": "金山云 / 小红书图床",
+      "report_line": 138,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ek",
+      "snapshot": "2026-08-25",
+      "max_score": 20,
+      "hits": 15,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 15
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "五等分的新娘＊",
+        "剧场版 间谍过家家 代号：白",
+        "咒术回战 0",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`e` 族）",
+      "report_line": 124,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "e",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "age",
+      "snapshot": "2026-08-25",
+      "max_score": 11,
+      "hits": 14,
+      "observed_hosts": [
+        {
+          "host": "vod-cdn.sends.eu.org.cdn.cloudflare.net",
+          "hits": 8
+        },
+        {
+          "host": "vo-cdn.emmmm.eu.org",
+          "hits": 6
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "五等分的新娘＊",
+        "剧场版 间谍过家家 代号：白",
+        "咒术回战 0",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "AGE 动漫",
+      "report_line": 134,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "AGE 动漫（报告/代码名称关联）",
+      "origin_mapping_status": "reported_identity_only",
+      "content_scope_evidence": "动漫；历史JSON只有代理主机",
+      "existing_adapter_candidate": "crawler.age",
+      "next_step": "现有适配可复用，但不能称附件证明 AGE 当前直链",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "es",
+      "snapshot": "2026-08-25",
+      "max_score": 6,
+      "hits": 15,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 15
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "五等分的新娘＊",
+        "剧场版 间谍过家家 代号：白",
+        "咒术回战 0",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`e` 族）",
+      "report_line": 161,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "e",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xs",
+      "snapshot": "2026-08-25",
+      "max_score": 8,
+      "hits": 24,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 24
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`x` 族）",
+      "report_line": 147,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "x",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xi",
+      "snapshot": "2026-08-25",
+      "max_score": 8,
+      "hits": 10,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 10
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜",
+        "缎带英雄",
+        "辉夜大小姐想让我告白 通往大人的阶梯",
+        "齐木楠雄的灾难 再始动篇"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `x` 族",
+      "report_line": 148,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "x",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ec",
+      "snapshot": "2026-08-25",
+      "max_score": 6,
+      "hits": 9,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 9
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "五等分的新娘＊",
+        "剧场版 间谍过家家 代号：白",
+        "咒术回战 0",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `e` 族",
+      "report_line": 163,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "e",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xf",
+      "snapshot": "2026-08-25",
+      "max_score": 5,
+      "hits": 30,
+      "observed_hosts": [
+        {
+          "host": "play.xfvod.pro:8088",
+          "hits": 13
+        },
+        {
+          "host": "play.xfvod.pro",
+          "hits": 7
+        },
+        {
+          "host": "apn.moedot.net",
+          "hits": 6
+        },
+        {
+          "host": "dl.playxf.top",
+          "hits": 4
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "剧场版 间谍过家家 代号：白"
+      ],
+      "reported_attribution": "xfvod",
+      "report_line": 165,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "稀饭动漫",
+      "origin_mapping_status": "sample_origin_confirmed",
+      "content_scope_evidence": "动画/剧场版；真人影视未验证",
+      "existing_adapter_candidate": "crawler.xifan",
+      "next_step": "保留同集直连证据；补动画电影查询能力，不把媒体主机当影视站 API",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "jk",
+      "snapshot": "2026-08-25",
+      "max_score": 20,
+      "hits": 31,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 31
+        }
+      ],
+      "sample_titles": [
+        "万古狂帝",
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "从红月开始",
+        "仙剑奇侠传三"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`j` 族）",
+      "report_line": 123,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "j",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yk",
+      "snapshot": "2026-08-25",
+      "max_score": 22,
+      "hits": 66,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 66
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "中国奇谭2"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`y` 族）",
+      "report_line": 120,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "y",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ys",
+      "snapshot": "2026-08-25",
+      "max_score": 14,
+      "hits": 66,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 66
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "中国奇谭2"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`y` 族）",
+      "report_line": 126,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "y",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yi",
+      "snapshot": "2026-08-25",
+      "max_score": 14,
+      "hits": 66,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 66
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "中国奇谭2"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `y` 族",
+      "report_line": 127,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "y",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yw",
+      "snapshot": "2026-08-25",
+      "max_score": 11,
+      "hits": 23,
+      "observed_hosts": [
+        {
+          "host": "s1.kwai.net",
+          "hits": 23
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "今天开始做明星",
+        "从红月开始",
+        "剑网3·侠肝义胆沈剑心第二季"
+      ],
+      "reported_attribution": "转存仓 · 快手（`y` 族）",
+      "report_line": 133,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "y",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yhdm-cn",
+      "snapshot": "2026-08-25",
+      "max_score": 10,
+      "hits": 70,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 70
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "万域封神",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "中国奇谭2"
+      ],
+      "reported_attribution": "樱花动漫 (国内)",
+      "report_line": 139,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "樱花动漫国内（具体站点未确定）",
+      "origin_mapping_status": "reported_identity_only",
+      "content_scope_evidence": "未知；只有 AniCh 代理",
+      "existing_adapter_candidate": null,
+      "next_step": "保留，不与 fc 或 ZIP 的任一个樱花域自动合并",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xk",
+      "snapshot": "2026-08-25",
+      "max_score": 14,
+      "hits": 23,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 23
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`x` 族）",
+      "report_line": 130,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "x",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "xgk",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 30,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 30
+        }
+      ],
+      "sample_titles": [
+        "万域封神 第1、2季【国语】",
+        "中国奇谭 第1-2季（第2季更新中）【国语】",
+        "从红月开始【国语】",
+        "全球高武【国语】",
+        "剑来 第1-2季【国语】（4K）"
+      ],
+      "reported_attribution": "转存仓 · 金山云",
+      "report_line": 153,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；与 xgc 标题有相似性",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知；对象存储",
+      "existing_adapter_candidate": null,
+      "next_step": "保留独立标签，同标题与同域不是归属证明",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yhk",
+      "snapshot": "2026-08-25",
+      "max_score": 21,
+      "hits": 35,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 35
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "今天开始做明星"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`yh` 族）",
+      "report_line": 121,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "yh",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yhs",
+      "snapshot": "2026-08-25",
+      "max_score": 14,
+      "hits": 35,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 35
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "今天开始做明星"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`yh` 族）",
+      "report_line": 128,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "yh",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yhi",
+      "snapshot": "2026-08-25",
+      "max_score": 14,
+      "hits": 35,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 35
+        }
+      ],
+      "sample_titles": [
+        "Jose与虎与鱼们",
+        "万古狂帝",
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "五等分的新娘＊",
+        "今天开始做明星"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `yh` 族",
+      "report_line": 129,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "yh",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "wk",
+      "snapshot": "2026-08-25",
+      "max_score": 21,
+      "hits": 28,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 28
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "五等分的新娘＊",
+        "假如…？ 第二季"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`w` 族）",
+      "report_line": 122,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "w",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "aw",
+      "snapshot": "2026-08-25",
+      "max_score": 11,
+      "hits": 13,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 13
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "五等分的新娘＊",
+        "假如…？ 第二季"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 135,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "wi",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 19,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 19
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "五等分的新娘＊",
+        "假如…？ 第二季"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `w` 族",
+      "report_line": 154,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "w",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ws",
+      "snapshot": "2026-08-25",
+      "max_score": 8,
+      "hits": 28,
+      "observed_hosts": [
+        {
+          "host": "p19-creative-tool-sg.ibyteimg.com",
+          "hits": 28
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "五等分的新娘＊",
+        "假如…？ 第二季"
+      ],
+      "reported_attribution": "转存仓 · 字节创作工具 (新加坡)（`w` 族）",
+      "report_line": 146,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "w",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "heibai",
+      "snapshot": "2026-08-25",
+      "max_score": 9,
+      "hits": 5,
+      "observed_hosts": [
+        {
+          "host": "p3-tt.byteimg.com",
+          "hits": 2
+        },
+        {
+          "host": "cdn.sm.cn",
+          "hits": 1
+        },
+        {
+          "host": "fe-video-qc.xhscdn.com",
+          "hits": 1
+        },
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 1
+        }
+      ],
+      "sample_titles": [
+        "上班族去了异世界后成了四天王",
+        "心灵奇旅",
+        "镇魂街第二季",
+        "防御全开"
+      ],
+      "reported_attribution": "黑白动漫",
+      "report_line": 145,
+      "delivery_class": "mixed_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "黑白动漫（报告标签释义，未找到一手目录链）",
+      "origin_mapping_status": "reported_identity_only",
+      "content_scope_evidence": "未知；混合平台/代理主机",
+      "existing_adapter_candidate": null,
+      "next_step": "保留待定位；hb 与 heibai 不自动合并",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "fk",
+      "snapshot": "2026-08-25",
+      "max_score": 5,
+      "hits": 7,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 7
+        }
+      ],
+      "sample_titles": [
+        "上班族去了异世界后成了四天王",
+        "五等分的新娘＊",
+        "幼女社长",
+        "辉夜大小姐想让我告白 通往大人的阶梯",
+        "间谍过家家 代号：白"
+      ],
+      "reported_attribution": "转存仓 · 金山云（`f` 族）",
+      "report_line": 167,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "f",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "gr",
+      "snapshot": "2026-08-25",
+      "max_score": 5,
+      "hits": 18,
+      "observed_hosts": [
+        {
+          "host": "ai.girigirilove.net",
+          "hits": 11
+        },
+        {
+          "host": "love.girigirilove.net",
+          "hits": 7
+        }
+      ],
+      "sample_titles": [
+        "上班族去了异世界后成了四天王",
+        "乔西的虎与鱼",
+        "命运/奇异赝品",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜",
+        "辉夜大小姐想让我告白 通往大人的阶梯"
+      ],
+      "reported_attribution": "GiriGiriLove",
+      "report_line": 166,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "GiriGiri 爱动漫",
+      "origin_mapping_status": "code_and_domain_link",
+      "content_scope_evidence": "日番/剧场版；真人影视未验证",
+      "existing_adapter_candidate": "crawler.girigiri",
+      "next_step": "保留独立适配与历史媒体域；新旧媒体链路需逐集复验",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "aniopen",
+      "snapshot": "2026-08-25",
+      "max_score": 3,
+      "hits": 7,
+      "observed_hosts": [
+        {
+          "host": "pro.op5.de5.net",
+          "hits": 7
+        }
+      ],
+      "sample_titles": [
+        "Fate／strange Fake",
+        "平凡上班族到異世界當上了四天王的故事",
+        "幼女社長",
+        "輝夜姬想讓人告白 邁向大人的階梯",
+        "青之壬生浪 第二季 芹澤暗殺篇"
+      ],
+      "reported_attribution": "ANi (Open)",
+      "report_line": 171,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "ANi/Open（报告名称，op5 内容目录未证实）",
+      "origin_mapping_status": "reported_identity_only",
+      "content_scope_evidence": "样本偏番剧；具体发布目录和真人影视未知",
+      "existing_adapter_candidate": null,
+      "next_step": "不能单凭名称认定为版权方、官方 ANi 或 Bilibili 源",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "jcy",
+      "snapshot": "2026-08-25",
+      "max_score": 12,
+      "hits": 9,
+      "observed_hosts": [
+        {
+          "host": "sns-video-al.xhscdn.com",
+          "hits": 3
+        },
+        {
+          "host": "lf3-static.bytednsdoc.com",
+          "hits": 2
+        },
+        {
+          "host": "p2.a.kwimgs.com",
+          "hits": 2
+        },
+        {
+          "host": "p3.toutiaoimg.com",
+          "hits": 2
+        }
+      ],
+      "sample_titles": [
+        "乔西的虎与鱼",
+        "从红月开始",
+        "咒术回战 0",
+        "希尔达与山丘之王",
+        "画江湖之天罡"
+      ],
+      "reported_attribution": "小红书图床",
+      "report_line": 131,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "jc",
+      "snapshot": "2026-08-25",
+      "max_score": 17,
+      "hits": 10,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 6
+        },
+        {
+          "host": "p3.toutiaoimg.com",
+          "hits": 2
+        },
+        {
+          "host": "sns-video-al.xhscdn.com",
+          "hits": 2
+        }
+      ],
+      "sample_titles": [
+        "万古狂帝",
+        "从红月开始",
+        "假如…？ 第二季",
+        "命运拳台",
+        "咒术回战 0"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `j` 族",
+      "report_line": 125,
+      "delivery_class": "mixed_hosts",
+      "proposed_family_from_report": "j",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "cyx",
+      "snapshot": "2026-08-25",
+      "max_score": 8,
+      "hits": 6,
+      "observed_hosts": [
+        {
+          "host": "fileproxy.scsusercontent.cn",
+          "hits": 6
+        }
+      ],
+      "sample_titles": [
+        "光阴之外",
+        "剑来 第二季",
+        "咒术回战0 剧场版",
+        "时光代理人 英都篇",
+        "永生之太元仙府"
+      ],
+      "reported_attribution": "转存仓 · 金山云",
+      "report_line": 149,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "yhw",
+      "snapshot": "2026-08-25",
+      "max_score": 12,
+      "hits": 3,
+      "observed_hosts": [
+        {
+          "host": "s1.kwai.net",
+          "hits": 3
+        }
+      ],
+      "sample_titles": [
+        "上班族转生异世界当上了四天王不是很正常吗",
+        "命运-奇异赝品",
+        "鲤氏侦探事务所"
+      ],
+      "reported_attribution": "转存仓 · 快手（`yh` 族）",
+      "report_line": 132,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "yh",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ji",
+      "snapshot": "2026-08-25",
+      "max_score": 9,
+      "hits": 8,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 8
+        }
+      ],
+      "sample_titles": [
+        "上班族去了异世界后成了四天王",
+        "五等分的新娘 新婚旅行篇",
+        "决斗大师 LOST ～月下的死神～",
+        "命运-奇异赝品",
+        "我们不可能成为恋人！绝对不行。（※似乎可行？）〜再次闪耀！"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `j` 族",
+      "report_line": 144,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "j",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "ck",
+      "snapshot": "2026-08-25",
+      "max_score": 10,
+      "hits": 3,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 3
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "上班族去了异世界后成了四天王",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN（`c` 族）",
+      "report_line": 141,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": "c",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "cc",
+      "snapshot": "2026-08-25",
+      "max_score": 11,
+      "hits": 5,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 5
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "我们不可能成为恋人！绝对不行。 (※似乎可行？) 〜再次闪耀！〜",
+        "辉夜大小姐想让我告白 通往大人的阶梯",
+        "青之壬生浪 -芹泽暗杀篇-"
+      ],
+      "reported_attribution": "上游未确定（服务端代理） · `c` 族",
+      "report_line": 136,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": "c",
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "guk",
+      "snapshot": "2026-08-25",
+      "max_score": 8,
+      "hits": 2,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 2
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "青之壬生浪 -芹泽暗杀篇-"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN",
+      "report_line": 150,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "gu",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 2,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 2
+        }
+      ],
+      "sample_titles": [
+        "Fate/strange Fake",
+        "青之壬生浪 -芹泽暗杀篇-"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 159,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "lk",
+      "snapshot": "2026-08-25",
+      "max_score": 7,
+      "hits": 5,
+      "observed_hosts": [
+        {
+          "host": "v1.adkwai.com",
+          "hits": 5
+        }
+      ],
+      "sample_titles": [
+        "仙剑奇侠传叁",
+        "光阴之外",
+        "命运/奇异赝品",
+        "山海经密码",
+        "开局就有王者账号"
+      ],
+      "reported_attribution": "转存仓 · 快手广告 CDN",
+      "report_line": 158,
+      "delivery_class": "other_delivery_hosts",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    },
+    {
+      "upstream_label": "mw",
+      "snapshot": "2026-08-25",
+      "max_score": 5,
+      "hits": 1,
+      "observed_hosts": [
+        {
+          "host": "v-cdn.emmmm.eu.org",
+          "hits": 1
+        }
+      ],
+      "sample_titles": [
+        "剑来第二季"
+      ],
+      "reported_attribution": "上游未确定（服务端代理）",
+      "report_line": 168,
+      "delivery_class": "proxy_host_only",
+      "proposed_family_from_report": null,
+      "family_merge_approved": false,
+      "origin_candidate": "未知；仅有交付主机/标题摘要",
+      "origin_mapping_status": "host_only",
+      "content_scope_evidence": "未知，不能据CDN判断内容范围",
+      "existing_adapter_candidate": null,
+      "next_step": "保留现有标签；补源站目录或同集第一方对应证据",
+      "retention": "keep_existing_route",
+      "can_replace_anich_now": false
+    }
+  ],
+  "later_project_sample": {
+    "checked_utc": "2026-09-12T23:44:16.836120+00:00",
+    "cases": [
+      {
+        "title": "CLANNAD AFTER STORY",
+        "returned_anich_routes": 46
+      },
+      {
+        "title": "葬送的芙莉莲",
+        "returned_anich_routes": 57
+      }
+    ],
+    "unique_tags_across_two_samples": 68,
+    "additional_labels_not_in_attachment": [
+      {
+        "upstream_label": "ccw",
+        "snapshot_checked_utc": "2026-09-12T23:44:16.836120+00:00",
+        "project_observed_tags": {
+          "ccw-5": [
+            "ipfs.omniflix.studio"
+          ]
+        },
+        "origin_mapping_status": "host_only",
+        "retention": "keep_existing_route",
+        "can_replace_anich_now": false
+      },
+      {
+        "upstream_label": "dm-xhs",
+        "snapshot_checked_utc": "2026-09-12T23:44:16.836120+00:00",
+        "project_observed_tags": {
+          "dm-xhs-1": [
+            "dc.xhscdn.com"
+          ],
+          "dm-xhs-6": [
+            "dc.xhscdn.com"
+          ]
+        },
+        "origin_mapping_status": "host_only",
+        "retention": "keep_existing_route",
+        "can_replace_anich_now": false
+      }
+    ],
+    "sample_absence_does_not_remove_old_labels": true
+  },
+  "implementation_update": {
+    "recorded_utc": "2026-09-13T20:18:13.343626+00:00",
+    "state": "local_code_updated_not_deployed",
+    "query_capability_not_inventory_claim": true,
+    "target_providers": [
+      "xifan",
+      "xgcartoon",
+      "girigiri",
+      "yhdmm"
+    ],
+    "content_scope_policy": "per-item category and bounded detail evidence; no anime-only directory gate",
+    "existing_routes_and_enablement_preserved": true,
+    "no_package_built": true,
+    "zip_audit": {
+      "files": 14,
+      "python_files_syntax_checked": 11,
+      "unique_seeds": 15,
+      "implemented_site_parsers": 8,
+      "default_assembled_sites": 4,
+      "executed": false
+    },
+    "verification": {
+      "tests_passed": 720,
+      "subtests_passed": 226,
+      "warnings": 1,
+      "seconds": 243.41,
+      "ruff_passed": true,
+      "git_diff_check_passed": true,
+      "scope": "local backend suite and origin metadata discovery, not production or device playback"
+    },
+    "validated_utc": "2026-09-13T20:26:17.603675+00:00"
+  }
+}

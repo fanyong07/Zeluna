@@ -32,6 +32,7 @@ from .playback_discovery.strategy import (
 from .playback_health import SourceFailureScope
 from .scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
 from .scrapers.maccms_sites import site_priority
+from .scrapers.content_identity import content_matches_request, needs_content_detail
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
 from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
@@ -39,7 +40,10 @@ from .scrapers.anime.age import AgeScraper
 from .scrapers.anime.anich import AniChScraper
 from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
-from .scrapers.anime.html_direct import create_html_direct_anime_scrapers
+from .scrapers.anime.html_direct import (
+    OriginSearchThrottledError,
+    create_html_direct_anime_scrapers,
+)
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.anime.yhdmm import YhdmmScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
@@ -111,7 +115,13 @@ DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 # 发现路径的 per-provider 超时与别名预算(独立于排名加成)。
 # anich 每次搜索必须保持 ≥1.2s 礼貌间隔且串行排队,
 # 缺省的 crawler 档位(2s/3别名)必然把它误判成 SEARCH_TIMEOUT。
-_PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {"anich": 8.0}
+# 稀饭公开搜索要求间隔至少 3 秒；允许别名回退礼貌排队，不把等待当作失效。
+# HTML/index results may need one bounded parallel metadata-detail round (2s).
+# Keep it inside the provider budget rather than cancelling all search hits at 2s.
+_PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {
+    "anich": 8.0, "xifan": 16.0, "xgcartoon": 6.0, "girigiri": 6.0,
+    "yhdmm": 10.0, "jibi": 6.0, "yinghua2": 6.0, "wedm": 6.0,
+}
 #: 该源对短标题命中良好,对带季号的长关键词几乎全是噪声,所以要多给一个
 #  别名的余量(别名序里基础标题通常排在带季号的之后)。
 _PROVIDER_SEARCH_ALIAS_BUDGET: dict[str, int] = {"anich": 2}
@@ -377,6 +387,8 @@ class SourceResolutionOutcome:
 
 
 def _classify_resolution_exception(error: BaseException) -> str:
+    if isinstance(error, OriginSearchThrottledError):
+        return RATE_LIMITED
     if isinstance(error, socket.gaierror):
         return DNS_FAILURE
     if isinstance(error, httpx.ConnectTimeout):
@@ -587,15 +599,20 @@ class ContentAggregator:
         successful_searches = 0
         search_hit_count = 0
         result_groups = []
+        # Shared across aliases: at most three metadata-only detail requests per origin.
+        content_details: dict[str, SubjectResult | None] = {}
         aliases_queried = 0
         for alias in attempted_aliases:
             aliases_queried += 1
             try:
                 results = await scraper.search(alias)
+                results = await self._refine_content_results(
+                    scraper, results, aliases, content_type=content_type, year=year,
+                    cache=content_details,
+                )
                 result_groups.append(results)
-                # AniCh serializes upstream requests. Once exact identity is
-                # established, another alias only consumes its lookup budget.
-                if provider == "anich" and any(
+                # Throttled origins need no further alias once identity is exact.
+                if provider in {"anich", "xifan"} and any(
                     match.evidence.exact_title or match.evidence.safe_title_variant
                     for match in self._score_scraper_results(
                         provider, results, aliases, content_type=content_type, year=year
@@ -677,6 +694,62 @@ class ContentAggregator:
         return result
 
     @staticmethod
+    async def _refine_content_results(
+        scraper: MediaProvider,
+        results: list[SubjectResult],
+        aliases: list[str],
+        *,
+        content_type: str,
+        year: int,
+        cache: dict[str, SubjectResult | None],
+    ) -> list[SubjectResult]:
+        """Resolve sparse suggest/index identities without crawling every search hit."""
+        ranked: dict[str, tuple[int, SubjectResult]] = {}
+        for result in results:
+            if result.source_id in cache or not needs_content_detail(
+                result, content_type, expected_year=year
+            ):
+                continue
+            analysis = analyze_source_match(
+                result.title, aliases, candidate_type="unknown", expected_type=content_type,
+                candidate_year=result.year, expected_year=year,
+            )
+            if analysis.playback_eligible:
+                ranked[result.source_id] = (analysis.ranking_score, result)
+        candidates = sorted(ranked.values(), key=lambda item: item[0], reverse=True)
+        selected = [result for _, result in candidates[:max(0, 3 - len(cache))]]
+
+        async def refine(result: SubjectResult) -> None:
+            cache[result.source_id] = None
+            try:
+                detail = await asyncio.wait_for(scraper.get_detail(result.source_id), timeout=2)
+            except Exception as error:
+                logger.debug("Content identity detail unavailable: %s", type(error).__name__)
+                return
+            if detail is None or not detail.title:
+                return
+            title_check = analyze_source_match(
+                detail.title, [result.title, *aliases], candidate_type="unknown",
+                expected_type=content_type, candidate_year=0, expected_year=0,
+            )
+            if not title_check.evidence.allows_circuit_recovery:
+                return
+            identity = detail.extra.get("content_identity")
+            explicit_detail = isinstance(identity, dict) and identity.get("evidence") != "default"
+            # A sparse detail page must not overwrite an explicit search-card category.
+            cache[result.source_id] = replace(
+                result,
+                title=detail.title,
+                type=detail.type if explicit_detail else result.type,
+                year=detail.year or result.year,
+                episode_count=len(detail.episodes) or result.episode_count,
+                extra={**result.extra, **({"content_identity": identity} if explicit_detail else {})},
+            )
+
+        await asyncio.gather(*(refine(result) for result in selected))
+        return [cache.get(result.source_id) or result for result in results]
+
+    @staticmethod
     def _score_scraper_results(
         provider: str,
         results: list[SubjectResult],
@@ -687,6 +760,8 @@ class ContentAggregator:
     ) -> list[SourceMatch]:
         matches: dict[str, SourceMatch] = {}
         for result in results:
+            if not content_matches_request(result, content_type):
+                continue
             analysis = analyze_source_match(
                 result.title,
                 aliases,
@@ -1562,7 +1637,7 @@ class ContentAggregator:
             for l in lines:
                 all_lines.append(AggregatedVideoLine(
                     url=l.url, title=l.title,
-                    format=l.format, source=l.source_name,
+                    format=l.format, source=l.source_name, headers=dict(l.headers),
                 ))
 
         elif (

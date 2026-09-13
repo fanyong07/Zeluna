@@ -234,7 +234,11 @@ class MacCmsProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hosts.isdisjoint(configured_hosts))
         for site in sites:
             parsed = urlparse(site["api"])
-            self.assertEqual(parsed.scheme, "https")
+            # Candidate review allows public HTTP APIs but never auto-enables them.
+            # Only this origin's verified published endpoint currently uses HTTP.
+            self.assertEqual(
+                parsed.scheme, "http" if site["name"] == "非凡资源" else "https"
+            )
             self.assertFalse(parsed.query)
             self.assertFalse(parsed.fragment)
             self.assertEqual(site["review_status"], "candidate")

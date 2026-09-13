@@ -1,6 +1,6 @@
 {
   "schema": "zeluna.maccms-candidates.v1",
-  "generated_on": "2026-08-24",
+  "generated_on": "2026-09-13",
   "source_document": "docs/research/maccms-candidate-sources-2026-08-24.md",
   "policy": {
     "logical_candidate_count": 80,
@@ -105,10 +105,10 @@
     },
     {
       "name": "U酷资源",
-      "api": "https://api.ukuapi.com/api.php/provide/vod/",
+      "api": "https://api.ukuapi88.com/api.php/provide/vod/",
       "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
       "review_status": "candidate",
-      "notes": "HTTPS；Epic 既有研究 lead，另有镜像条目不得重复计数。"
+      "notes": "2026-09-13 由 ukuzy8.com/help/ 核验当前域 api.ukuapi88.com；旧线索 api.ukuapi.com 保留为历史域，不重复计数。三类搜索有元数据证据，电影和电视剧有本机首帧成功样本；站方个别番剧错分类不得强行覆盖。目标出口、条款和内容授权仍待人工审核。详见 docs/research/general-video-origin-candidates-2026-09-13.md。"
     },
     {
       "name": "无限资源",
@@ -126,10 +126,10 @@
     },
     {
       "name": "新浪资源",
-      "api": "https://api.xinlangapi.com/xinlangapi.php/provide/vod/",
+      "api": "https://api.xinlangapi.com/xinlangapi.php/provide/vod/josn",
       "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
       "review_status": "candidate",
-      "notes": "HTTPS；脚本名不是标准 `api.php`，需做结构兼容验证。"
+      "notes": "2026-09-13 由 xinlangzy.com/index.php/help/index.html 确认当前官方路径末尾为 josn，保留站方原拼写；旧路径为同域 /xinlangapi.php/provide/vod/。三类搜索已有元数据证据，电视剧首帧样本通过；电影样本和稳定性不作全站承诺，目标出口、条款和内容授权待人工审核。详见 docs/research/general-video-origin-candidates-2026-09-13.md。"
     },
     {
       "name": "易看资源",
@@ -189,10 +189,10 @@
     },
     {
       "name": "非凡资源",
-      "api": "https://cj.ffzyapi.com/api.php/provide/vod/",
+      "api": "http://api.ffzyapi.com/api.php/provide/vod/",
       "discovered_from": "https://github.com/cluntop/tvbox/blob/b5c28cee65981db5cac56bed6b215a7a74a7804b/js/cj.json",
       "review_status": "candidate",
-      "notes": "HTTPS；存在多个历史域名，必须按同一 logical provider 去重。"
+      "notes": "2026-09-13 按 ffzy.tv/help/ 核验并更新为站方公开的 HTTP API；旧线索为 https://cj.ffzyapi.com/api.php/provide/vod/，不作为独立站重复计数。三类匹配与媒体样本已有本机证据，HTTP 传输安全、目标出口、条款和内容授权仍待人工审核；不自动晋级。详见 docs/research/general-video-origin-candidates-2026-09-13.md。"
     },
     {
       "name": "影图资源",

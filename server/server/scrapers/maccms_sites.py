@@ -1,7 +1,7 @@
 """
 MacCMS / 苹果CMS provide/vod 采集站清单
 
-每一项就是一路源。这些是公开的资源采集接口,返回标准 MacCMS JSON。
+每一项是一个资源站点，同一作品可以返回多条播放线路。这些是公开的资源采集接口,返回标准 MacCMS JSON。
 覆盖: 电影 / 国产剧 / 欧美剧 / 韩剧 / 日剧 / 动漫 / 综艺。
 
 字段说明:
@@ -65,10 +65,13 @@ MACCMS_SITES: list[dict] = [
     # (dongmandaquan.com / fcvod.com / api.fengchezy.com)均 ConnectError。
     # 与极速/暴风不同，这个站是真的关停了，不是货源问题。
     {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
-    # —— 第二梯队：VPS 实测部分类型可播(注释标注命中类型) ——
-    {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 78, "content_types": ["anime", "movie"]},
-    {"name": "量子", "api": "https://cj.lziapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 76, "content_types": ["anime", "movie"]},
-    {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 74, "content_types": ["anime", "tv"]},
+    # —— 第二梯队：综合站保留其真实三类资源范围，单集健康由验线决定。
+    # 2026-09-13 修复历史按一轮成功样本收窄类型造成的影视漏查：
+    # 爱奇艺/量子有国产剧，电影天堂含电影；不因此提升 quick/precache。
+    # 站点请求或媒体临时失败不代表整个内容类型应该被永久排除。 ——
+    {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 78, "content_types": ["anime", "tv", "movie"]},
+    {"name": "量子", "api": "https://cj.lziapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 76, "content_types": ["anime", "tv", "movie"]},
+    {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 74, "content_types": ["anime", "tv", "movie"]},
     # 2026-08-24 目标 VPS 能搜索详情，但 Smoke 18/18、Coverage 6/6
     # 媒体线路均为 stale_route；不是单纯机房受限，直接隔离。
     # 2026-08-28 复检:API 仍活(搜索命中 6 条)，但媒体地址返回 HTML 而非媒体；
@@ -84,6 +87,7 @@ MACCMS_SITES: list[dict] = [
     {"name": "360", "api": "https://360zy.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 64, "content_types": ["anime", "tv", "movie"]},
     # 洛杉矶 VPS 三类实播均通过，但国内客户端直连明显较慢；只作末位地区备用。
     {"name": "虎牙", "api": "https://www.huyaapi.com/api.php/provide/vod", "enabled": True, "tier": "fallback", "quick": False, "precache": False, "weight": 62, "content_types": ["anime", "tv", "movie"]},
+
 ]
 
 
