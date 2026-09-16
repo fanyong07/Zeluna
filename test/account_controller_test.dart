@@ -184,6 +184,7 @@ void main() {
       await library.put(recommendationServedStorageKey, served);
       await library.put('metadata.cache.home', homeCache);
       final searchHistory = SearchHistoryStore();
+      final deletedSubtitleScopes = <String>[];
       await searchHistory.add('', '科幻');
       await searchHistory.add('', '冒险');
 
@@ -206,6 +207,7 @@ void main() {
         publishSession: (_) {},
         publishProfile: (_) {},
         searchHistoryStore: searchHistory,
+        clearSubtitleAccount: (id) async => deletedSubtitleScopes.add(id),
       );
 
       await controller.initialize();
@@ -274,6 +276,7 @@ void main() {
         isFalse,
       );
       expect(await searchHistory.load(accountId), isEmpty);
+      expect(deletedSubtitleScopes, [accountId]);
     },
   );
 }

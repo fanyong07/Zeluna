@@ -1,7 +1,12 @@
 part of '../player_page.dart';
 
 class _LocalDanmakuOverlay extends StatelessWidget {
-  const _LocalDanmakuOverlay({required this.entries, required this.settings});
+  const _LocalDanmakuOverlay({
+    required this.entries,
+    required this.settings,
+    this.excludedArea,
+  });
+  final Rect? excludedArea;
 
   final List<LocalDanmakuEntry> entries;
   final DanmakuSettings settings;
@@ -25,6 +30,7 @@ class _LocalDanmakuOverlay extends StatelessWidget {
           final bounds = danmakuDisplayBounds(
             constraints.biggest,
             settings.displayArea,
+            excludedArea: excludedArea,
           );
           final laneHeight =
               MediaQuery.textScalerOf(
@@ -226,6 +232,8 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onWebPlaying,
     required this.onWebEnded,
     required this.onSettingsPanel,
+    required this.onSubtitlePanel,
+    this.supplementalSubtitles,
     required this.controlsVisible,
     required this.autoHideChrome,
     required this.onToggleControls,
@@ -295,6 +303,8 @@ class _PlayerCanvas extends StatelessWidget {
   final ValueChanged<bool> onWebPlaying;
   final VoidCallback onWebEnded;
   final VoidCallback onSettingsPanel;
+  final VoidCallback onSubtitlePanel;
+  final SupplementalSubtitleController? supplementalSubtitles;
   final VoidCallback onToggleControls;
   final VoidCallback onTemporaryDoubleSpeedStart;
   final VoidCallback onTemporaryDoubleSpeedEnd;
@@ -342,6 +352,20 @@ class _PlayerCanvas extends StatelessWidget {
                         : BorderRadius.circular(8),
                     child: LayoutBuilder(
                       builder: (context, constraints) {
+                        final subtitles = supplementalSubtitles;
+                        final subtitleVisible =
+                            subtitles?.visible == true &&
+                            !loadingLine &&
+                            !playbackFailed;
+                        final subtitleBand = subtitleVisible
+                            ? supplementalSubtitleBounds(
+                                constraints.biggest,
+                                subtitles!,
+                                MediaQuery.textScalerOf(context),
+                                controlsVisible: chromeVisible,
+                                text: subtitles.textAt(position),
+                              )
+                            : null;
                         final pixelRatio = MediaQuery.devicePixelRatioOf(
                           context,
                         );
@@ -416,13 +440,21 @@ class _PlayerCanvas extends StatelessWidget {
                                 if (danmaku.enabled && remoteDanmaku.isNotEmpty)
                                   RemoteDanmakuOverlay(
                                     comments: remoteDanmaku,
+                                    excludedArea: subtitleBand,
                                     position: position,
                                     settings: danmaku,
                                   ),
                                 if (danmaku.enabled && localDanmaku.isNotEmpty)
                                   _LocalDanmakuOverlay(
                                     entries: localDanmaku,
+                                    excludedArea: subtitleBand,
                                     settings: danmaku,
+                                  ),
+                                if (subtitleVisible)
+                                  SupplementalSubtitleOverlay(
+                                    controller: subtitles!,
+                                    position: position,
+                                    controlsVisible: chromeVisible,
                                   ),
                                 AnimatedOpacity(
                                   opacity: chromeVisible ? 1 : 0,
@@ -480,6 +512,7 @@ class _PlayerCanvas extends StatelessWidget {
                                             theaterMode: theaterMode,
                                             onCast: onCast,
                                             onSettings: onSettingsPanel,
+                                            onSubtitles: onSubtitlePanel,
                                           ),
                                         ),
                                         PlayerBottomBar(

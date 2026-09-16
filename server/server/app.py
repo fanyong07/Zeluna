@@ -25,6 +25,7 @@ from .routers import (
     legacy_lookup_router,
     playback_router,
     sync_router,
+    subtitles_router,
 )
 
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
@@ -47,6 +48,7 @@ def create_app(*, lifespan: Lifespan | None = None) -> FastAPI:
     app.include_router(danmaku_router)
     app.include_router(playback_router)
     app.include_router(sync_router)
+    app.include_router(subtitles_router)
     app.include_router(admin_managed_lines_router)
     app.include_router(admin_router)
     app.add_middleware(

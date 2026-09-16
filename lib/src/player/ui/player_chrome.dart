@@ -12,6 +12,7 @@ class _PlayerHeader extends StatelessWidget {
     required this.theaterMode,
     required this.onCast,
     required this.onSettings,
+    required this.onSubtitles,
   });
 
   final AnimeSubject subject;
@@ -24,6 +25,7 @@ class _PlayerHeader extends StatelessWidget {
   final bool theaterMode;
   final Future<void> Function() onCast;
   final VoidCallback onSettings;
+  final VoidCallback onSubtitles;
 
   @override
   Widget build(BuildContext context) {
@@ -110,6 +112,17 @@ class _PlayerHeader extends StatelessWidget {
               ),
             ),
             IconButton(
+              key: const ValueKey('playerSubtitles'),
+              tooltip: '字幕',
+              onPressed: onSubtitles,
+              style: iconButtonStyle,
+              icon: const Icon(
+                Icons.subtitles_outlined,
+                color: AppColors.theaterInk,
+                size: 23,
+              ),
+            ),
+            IconButton(
               tooltip: '播放设置',
               onPressed: onSettings,
               style: iconButtonStyle,
@@ -174,6 +187,15 @@ class _PlayerHeader extends StatelessWidget {
             onPressed: onTheaterMode,
           ),
           _HeaderIcon(Icons.cast, tooltip: '投屏 / 外部播放', onPressed: onCast),
+          IconButton(
+            key: const ValueKey('playerSubtitles'),
+            tooltip: '字幕',
+            onPressed: onSubtitles,
+            icon: const Icon(
+              Icons.subtitles_outlined,
+              color: AppColors.theaterInk,
+            ),
+          ),
           IconButton(
             tooltip: '播放设置',
             onPressed: onSettings,

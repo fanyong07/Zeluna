@@ -105,6 +105,8 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
       ..playsInline = true
       ..preload = 'auto';
     _video.volume = widget.volume.clamp(0, 1);
+    // load() resets playbackRate to defaultPlaybackRate in browsers.
+    _video.defaultPlaybackRate = _safePlaybackRate(widget.rate);
     _video.playbackRate = _safePlaybackRate(widget.rate);
     _video
       ..removeAttribute('controls')
@@ -179,6 +181,7 @@ class _WebStreamPlayerState extends State<WebStreamPlayer> {
     }
     _video.volume = widget.volume.clamp(0, 1);
     if (oldWidget.rate != widget.rate) {
+      _video.defaultPlaybackRate = _safePlaybackRate(widget.rate);
       _video.playbackRate = _safePlaybackRate(widget.rate);
     }
     if (widget.playing != oldWidget.playing) {

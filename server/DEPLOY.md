@@ -361,3 +361,12 @@ python tools/probe_all_routes.py --output /安全的证据目录/routes.json --e
 - 测试临时实例可以查询隔离项，但不改动生产配置、数据库、权重、启用状态或候选晋级状态。
 - 结果区分搜索/匹配、取流、服务器通过、客户端出口待确认、失败；报告不写媒体完整地址/签名参数或请求头。
 - 这不是全片库、所有集数、全设备或连续观看证明。原失败线路及未返回样本的来源仍保留。
+
+
+## 可选服务器字幕库（本地 / 私有 Google Drive）
+
+实现、权限边界和运营入库步骤见仓库 `docs/subtitle-server-library.md`。
+默认 `SUBTITLE_BLOB_STORAGE=local`；生产目录配置在私有持久卷，不挂静态路由。
+普通 API 启动不初始化字幕数据库；运营 `tools/subtitle_library.py import` 默认只检查，显式 `--apply` 才入库。
+只有确认用户 OAuth 和应用专用私有文件夹后，才允许启用 `google_drive`；不配置共享链接，不上传个人本地导入文件。
+这部分代码存在不代表生产已部署、字幕已收录或 Google 账号已连接；先检查目标机器 `storage-check`，再安排受控上线。

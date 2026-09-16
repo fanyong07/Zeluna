@@ -7,6 +7,7 @@ import '../data/bangumi_credential_store.dart';
 import '../data/search_history_store.dart';
 import '../data/tmdb_credential_store.dart';
 import '../domain/anime_models.dart';
+import '../player/subtitles/subtitle_store.dart';
 import '../recommendations/recommendation_models.dart'
     show recommendationBehaviorStorageKey, recommendationServedStorageKey;
 import 'cloud_account_repository.dart';
@@ -90,6 +91,7 @@ final class AccountController {
     required AccountSessionPublisher publishSession,
     required AccountProfilePublisher publishProfile,
     SearchHistoryStore? searchHistoryStore,
+    Future<void> Function(String accountId)? clearSubtitleAccount,
   }) : _cloudService = cloudService,
        _localRepository = localRepository,
        _settings = settings,
@@ -104,7 +106,9 @@ final class AccountController {
        _selectCredentialContext = selectCredentialContext,
        _publishSession = publishSession,
        _publishProfile = publishProfile,
-       _searchHistoryStore = searchHistoryStore ?? SearchHistoryStore();
+       _searchHistoryStore = searchHistoryStore ?? SearchHistoryStore(),
+       _clearSubtitleAccount =
+           clearSubtitleAccount ?? SubtitleStore.clearAccount;
 
   static const _pendingBangumiCredentialMigrationKey =
       'credentials.pending.bangumi.v1';
@@ -150,6 +154,7 @@ final class AccountController {
   final AccountSessionPublisher _publishSession;
   final AccountProfilePublisher _publishProfile;
   final SearchHistoryStore _searchHistoryStore;
+  final Future<void> Function(String accountId) _clearSubtitleAccount;
 
   LocalAccount? _activeAccount;
   var _contextVersion = 0;
@@ -569,6 +574,7 @@ final class AccountController {
     );
     await attempt(() => _tmdbCredentialStore.clearAccount(pending.accountId));
     await attempt(() => _searchHistoryStore.clearAccount(pending.accountId));
+    await attempt(() => _clearSubtitleAccount(pending.accountId));
     if (_settings.get(_pendingBangumiCredentialMigrationKey)?.toString() ==
         pending.accountId) {
       await attempt(

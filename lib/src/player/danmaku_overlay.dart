@@ -10,11 +10,13 @@ class RemoteDanmakuOverlay extends StatelessWidget {
     required this.comments,
     required this.position,
     required this.settings,
+    this.excludedArea,
   });
 
   final List<DanmakuComment> comments;
   final Duration position;
   final DanmakuSettings settings;
+  final Rect? excludedArea;
 
   @override
   Widget build(BuildContext context) {
@@ -34,6 +36,7 @@ class RemoteDanmakuOverlay extends StatelessWidget {
           final bounds = danmakuDisplayBounds(
             constraints.biggest,
             settings.displayArea,
+            excludedArea: excludedArea,
           );
           final lanes = (bounds.height / laneHeight).floor().clamp(1, 12);
           return ClipRect(
@@ -131,13 +134,23 @@ Duration _displayDuration(DanmakuComment comment, double speed) {
 }
 
 /// Keep all modes inside the chosen upper area, with room for controls.
-Rect danmakuDisplayBounds(Size size, double area) {
+Rect danmakuDisplayBounds(Size size, double area, {Rect? excludedArea}) {
   final bottom = math.min(
     size.height * area.clamp(.25, 1),
     size.height - math.min(48.0, size.height * .1),
   );
   final top = math.min(48.0, bottom * .2);
-  return Rect.fromLTRB(0, top, size.width, math.max(top, bottom));
+  final bounds = Rect.fromLTRB(0, top, size.width, math.max(top, bottom));
+  if (excludedArea == null || !bounds.overlaps(excludedArea)) return bounds;
+  final above = math.max(0.0, excludedArea.top - bounds.top - 6);
+  final below = math.max(0.0, bounds.bottom - excludedArea.bottom - 6);
+  if (above >= below) return Rect.fromLTWH(0, bounds.top, size.width, above);
+  return Rect.fromLTWH(
+    0,
+    math.min(bounds.bottom, excludedArea.bottom + 6),
+    size.width,
+    below,
+  );
 }
 
 class DanmakuAreaClipper extends CustomClipper<Rect> {

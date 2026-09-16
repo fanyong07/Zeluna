@@ -91,3 +91,6 @@ server/**/*.db
 server/.env
 server/.env.*
 !server/.env.example
+
+# Operator-managed subtitle content and provenance are never source assets.
+/server/data/subtitles/

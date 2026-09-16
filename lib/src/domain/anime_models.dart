@@ -200,6 +200,8 @@ class AnimeEpisode {
     this.thumbnailUrl,
     this.stableKey,
     this.legacyId,
+    this.seasonNumber,
+    this.seasonEpisodeNumber,
   });
 
   final int id;
@@ -212,6 +214,10 @@ class AnimeEpisode {
   final String? thumbnailUrl;
   final String? stableKey;
   final int? legacyId;
+
+  /// Optional subtitle matching metadata; never renumbers stable identities.
+  final int? seasonNumber;
+  final int? seasonEpisodeNumber;
 
   String identityKey({String? subjectKey}) {
     final explicit = stableKey?.trim() ?? '';
@@ -238,6 +244,8 @@ class AnimeEpisode {
     'thumbnailUrl': thumbnailUrl,
     'stableKey': identityKey(subjectKey: subjectKey),
     if (legacyId != null) 'legacyId': legacyId,
+    if (seasonNumber != null) 'seasonNumber': seasonNumber,
+    if (seasonEpisodeNumber != null) 'seasonEpisodeNumber': seasonEpisodeNumber,
   };
 
   factory AnimeEpisode.fromJson(Map<String, dynamic> json) {
@@ -252,6 +260,8 @@ class AnimeEpisode {
       thumbnailUrl: _blankToNull(json['thumbnailUrl']?.toString()),
       stableKey: _blankToNull(json['stableKey']?.toString()),
       legacyId: _nullableIntFromJson(json['legacyId']),
+      seasonNumber: _nullableIntFromJson(json['seasonNumber']),
+      seasonEpisodeNumber: _nullableIntFromJson(json['seasonEpisodeNumber']),
     );
   }
 }

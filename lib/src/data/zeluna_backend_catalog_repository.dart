@@ -85,6 +85,10 @@ class ZelunaBackendCatalogRepository {
             id: _stableEpisodeId(detailed, number),
             subjectId: detailed.id,
             number: number,
+            seasonNumber: int.tryParse('${item['season_number'] ?? ''}'),
+            seasonEpisodeNumber: int.tryParse(
+              '${item['episode_number'] ?? ''}',
+            ),
             title: item['title']?.toString() ?? '',
             airdate: _nullIfBlank(item['airdate']),
             duration: item['duration']?.toString() ?? '',

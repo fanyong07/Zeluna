@@ -40,6 +40,11 @@ import 'session/playback_session_state.dart';
 import 'video/native_video_controller.dart';
 import 'video/web_video_controller.dart';
 import 'web_stream_player.dart';
+import 'subtitles/subtitle_store.dart';
+import 'subtitles/subtitle_repository.dart';
+import 'subtitles/subtitle_overlay.dart';
+import 'subtitles/subtitle_panel.dart';
+import 'subtitles/supplemental_subtitle_controller.dart';
 
 part 'ui/player_canvas.dart';
 part 'ui/player_chrome.dart';
@@ -121,6 +126,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _linePanel = false;
   bool _danmakuPanel = false;
   bool _settingsPanel = false;
+  bool _subtitlePanel = false;
+  SupplementalSubtitleController? _supplementalSubtitles;
+  int _subtitleStoreEpoch = 0;
+  String? _subtitleStorageError;
   bool _theaterMode = false;
   RulePlaybackCancellationToken? _nextEpisodePrefetchCancellation;
   DateTime? _nextEpisodePrefetchStartedAt;
@@ -180,6 +189,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController = PlaybackSessionController(episodeId: _episode.id);
     _lineController = PlaybackLineController();
     _line = widget.request.initialLine;
+    unawaited(_initializeSupplementalSubtitles());
     _loadingLine = _isPlayableLine(_line);
     _lineRepository = PlaybackLineRepository(
       loadQuickLines: (subject, episode, cancellationToken) => ref
@@ -690,6 +700,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _subtitleStoreEpoch++;
+    _supplementalSubtitles?.dispose();
     unawaited(_persistPlaybackProgress(force: true));
     _nativeMediaEvents.invalidate();
     for (final subscription in _subscriptions) {
@@ -886,6 +898,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                             _handleWebPlaying(playbackGeneration, value),
                         onWebEnded: () => _handleWebEnded(playbackGeneration),
                         onSettingsPanel: _toggleSettingsPanel,
+                        onSubtitlePanel: _toggleSubtitlePanel,
+                        supplementalSubtitles: _supplementalSubtitles,
                       ),
                     ),
                     if (_episodePanel)
@@ -926,6 +940,39 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onReload: () =>
                               _loadDanmakuForCurrentEpisode(forceRefresh: true),
                         ),
+                      ),
+                    if (_subtitlePanel)
+                      _PlayerFunctionPage(
+                        title: '字幕 · 补充原文',
+                        onClose: _closePanels,
+                        child: _supplementalSubtitles == null
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      _subtitleStorageError ?? '正在读取本地字幕设置…',
+                                    ),
+                                    if (_subtitleStorageError != null)
+                                      TextButton(
+                                        onPressed:
+                                            _initializeSupplementalSubtitles,
+                                        child: const Text('重试'),
+                                      ),
+                                  ],
+                                ),
+                              )
+                            : SupplementalSubtitlePanel(
+                                key: ValueKey(
+                                  '$_subtitleStoreEpoch:${_episode.id}:${_line?.id}',
+                                ),
+                                controller: _supplementalSubtitles!,
+                                subject: widget.request.subject,
+                                episode: _episode,
+                                episodes: widget.request.episodes,
+                                createRepository: () =>
+                                    SubtitleRepository(state.services),
+                              ),
                       ),
                     if (_settingsPanel)
                       _PlayerFunctionPage(
@@ -1374,6 +1421,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         .accountContextVersion;
     if (accountContextVersion != _accountContextVersion) {
       _accountContextVersion = accountContextVersion;
+      unawaited(_initializeSupplementalSubtitles());
       _resetRecommendationTracking();
       _resetNextEpisodePrefetch();
       _preferredProviderId = null;
@@ -1928,6 +1976,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _duration = Duration.zero;
       _buffer = Duration.zero;
     });
+    _bindSupplementalSubtitles();
     if (!playbackLineCanStartImmediately(line)) {
       line = await ref
           .read(animeControllerProvider.notifier)
@@ -2509,6 +2558,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _episodePanel = false;
       _loadingLine = _isPlayableLine(preparedLine);
     });
+    _bindSupplementalSubtitles();
     _startPlaybackTrace();
     if (preparedLine != null) {
       final cacheAge = DateTime.now().difference(preparedBundle!.preparedAt);
@@ -2758,6 +2808,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _linePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
+      _subtitlePanel = false;
     });
   }
 
@@ -2797,6 +2848,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     if (_leaving) return;
     _leaving = true;
+    _supplementalSubtitles?.invalidate();
     _nativeMediaEvents.invalidate();
     _cancelSingleBackupLookup();
     await _lineRepository.cancelLookup();
@@ -2807,7 +2859,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   bool get _hasOpenPanel =>
-      _episodePanel || _linePanel || _danmakuPanel || _settingsPanel;
+      _episodePanel ||
+      _linePanel ||
+      _danmakuPanel ||
+      _settingsPanel ||
+      _subtitlePanel;
 
   void _closePanels() {
     if (!_hasOpenPanel) return;
@@ -2816,6 +2872,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _linePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
+      _subtitlePanel = false;
     });
     _revealPlayerControls();
   }
@@ -2827,6 +2884,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _linePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
+      _subtitlePanel = false;
     });
   }
 
@@ -2838,6 +2896,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _episodePanel = false;
       _danmakuPanel = false;
       _settingsPanel = false;
+      _subtitlePanel = false;
     });
     if (opening) _startExpandedLineLookup();
   }
@@ -2863,6 +2922,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _episodePanel = false;
       _linePanel = false;
       _settingsPanel = false;
+      _subtitlePanel = false;
     });
     // Opening the source panel may also inspect a timeline while display is off.
     if (opening) unawaited(_loadDanmakuForCurrentEpisode());
@@ -2872,9 +2932,122 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _revealPlayerControls();
     setState(() {
       _settingsPanel = !_settingsPanel;
+      _subtitlePanel = false;
       _episodePanel = false;
       _linePanel = false;
       _danmakuPanel = false;
+    });
+  }
+
+  Future<void> _initializeSupplementalSubtitles() async {
+    final epoch = ++_subtitleStoreEpoch;
+    _supplementalSubtitles?.dispose();
+    _supplementalSubtitles = null;
+    _subtitleStorageError = null;
+    final account = ref
+        .read(animeControllerProvider)
+        .value
+        ?.accountSession
+        .current
+        ?.id;
+    try {
+      final store = await SubtitleStore.open(account);
+      if (!mounted || epoch != _subtitleStoreEpoch || _leaving) return;
+      final controller = SupplementalSubtitleController(store);
+      _supplementalSubtitles = controller;
+      // bind first, then listen: initialization may originate in a build.
+      _bindSupplementalSubtitles();
+      controller.addListener(_handleSupplementalSubtitlesChanged);
+      setState(() {});
+    } catch (_) {
+      if (mounted && epoch == _subtitleStoreEpoch) {
+        setState(() => _subtitleStorageError = '本地字幕存储暂时不可用，播放不受影响');
+      }
+    }
+  }
+
+  void _handleSupplementalSubtitlesChanged() {
+    if (mounted && !_leaving) setState(() {});
+  }
+
+  void _bindSupplementalSubtitles() {
+    final controller = _supplementalSubtitles;
+    if (controller == null) return;
+    controller.bind(
+      subject: widget.request.subject.identityKey,
+      episode: _episode.identityKey(
+        subjectKey: widget.request.subject.identityKey,
+      ),
+      line: _line?.id ?? 'unselected',
+      originalLanguage: widget.request.subject.language,
+    );
+    if (controller.enabled &&
+        !controller.bilingual &&
+        controller.document == null &&
+        !widget.request.offlineOnly &&
+        controller.language != 'zh-Hans') {
+      unawaited(_restoreOnlineSupplementalSubtitles(controller));
+    }
+  }
+
+  Future<void> _restoreOnlineSupplementalSubtitles(
+    SupplementalSubtitleController controller,
+  ) async {
+    final generation = controller.generation;
+    final services = ref.read(animeControllerProvider).value?.services;
+    if (services == null || !services.playbackBackendEnabled) return;
+    final repository = SubtitleRepository(services);
+    try {
+      final prefs = controller.store.preferences(controller.subjectKey);
+      final result = await repository.search(
+        widget.request.subject,
+        _episode,
+        controller.language,
+        confirmedEntryId: prefs['entryId'] as String?,
+      );
+      if (!mounted || !controller.isCurrent(generation)) return;
+      controller.reportSource(result.message, expectedGeneration: generation);
+      final matches = result.candidates
+          .where(
+            (item) =>
+                item.autoMatch &&
+                (item.provider == 'library' ||
+                    (item.entryId == prefs['entryId'] &&
+                        item.provider == prefs['provider'])),
+          )
+          .toList();
+      if (matches.length != 1) {
+        return; // ambiguous or unavailable is never auto-selected
+      }
+      final selected = matches.single;
+      final cached =
+          controller.store.sourceDocument(
+            selected.provider,
+            selected.entryId,
+            selected.id,
+            selected.language,
+          ) ??
+          await repository.download(selected);
+      if (!mounted || !controller.isCurrent(generation)) return;
+      await controller.selectDocument(cached, expectedGeneration: generation);
+    } catch (_) {
+      controller.reportSource(
+        '服务器字幕暂时无法加载，原有中文字幕和播放不受影响；可在字幕面板重试',
+        expectedGeneration: generation,
+      );
+    } finally {
+      repository.dispose();
+    }
+  }
+
+  void _toggleSubtitlePanel() {
+    _revealPlayerControls();
+    setState(() {
+      _subtitlePanel = !_subtitlePanel;
+      _episodePanel = false;
+      _linePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
     });
   }
 

@@ -270,3 +270,17 @@ ACCOUNT_RATE_LIMIT_NAMESPACE = (
 PUBLIC_BASE_URL = (
     os.getenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000").strip().rstrip("/")
 )
+
+# Private persistent subtitle library; API reads never create the index.
+# Point this at a persistent volume, never a public/static upload directory.
+SUBTITLE_LIBRARY_DIR = Path(
+    os.getenv("SUBTITLE_LIBRARY_DIR", "").strip() or BASE_DIR.parent / "data" / "subtitles"
+).expanduser()
+
+SUBTITLE_BLOB_STORAGE = os.getenv("SUBTITLE_BLOB_STORAGE", "local").strip().lower()
+if SUBTITLE_BLOB_STORAGE not in {"local", "google_drive"}:
+    raise RuntimeError("SUBTITLE_BLOB_STORAGE must be local or google_drive")
+_subtitle_google_credentials = os.getenv("SUBTITLE_GOOGLE_CREDENTIALS_FILE", "").strip()
+SUBTITLE_GOOGLE_CREDENTIALS_FILE = Path(_subtitle_google_credentials).expanduser() if _subtitle_google_credentials else None
+SUBTITLE_GOOGLE_FOLDER_ID = os.getenv("SUBTITLE_GOOGLE_FOLDER_ID", "").strip()
+SUBTITLE_CACHE_MAX_BYTES = max(0, min(1024, int(os.getenv("SUBTITLE_CACHE_MAX_MB", "256")))) * 1024 * 1024
