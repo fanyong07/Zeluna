@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -101,6 +102,7 @@ class PlaybackRepository(Protocol):
         line_count: int,
         verified_at: float,
         scan_scope: str = "full",
+        can_replace: Callable[[PlaybackCacheEntry], bool] | None = None,
     ) -> None: ...
 
     async def oldest_cache(self, *, limit: int) -> list[PlaybackCacheEntry]: ...
@@ -211,6 +213,7 @@ class SqlPlaybackRepository:
         line_count: int,
         verified_at: float,
         scan_scope: str = "full",
+        can_replace: Callable[[PlaybackCacheEntry], bool] | None = None,
     ) -> None:
         await upsert_playback_cache(
             self._session,
@@ -221,6 +224,10 @@ class SqlPlaybackRepository:
             line_count=line_count,
             verified_at=verified_at,
             scan_scope=scan_scope,
+            can_replace=(
+                (lambda row: can_replace(_cache_entry(row)))
+                if can_replace is not None else None
+            ),
         )
 
     async def oldest_cache(self, *, limit: int) -> list[PlaybackCacheEntry]:

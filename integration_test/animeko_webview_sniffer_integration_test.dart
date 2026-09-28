@@ -9,8 +9,111 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:integration_test/integration_test.dart';
 
+import '../test/animeko_webview_native_fixture.dart';
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  group('CORE-005 real retained WebView2', () {
+    testWidgets('native fixture preflight and isolated cookie cleanup', (
+      tester,
+    ) async {
+      final fixture = await AnimekoWebViewNativeFixture.create();
+      addTearDown(fixture.close);
+      await fixture.seedOwnedCookie();
+      final result = await fixture.sniff(true);
+      fixture.report('preflight');
+      expect(fixture.errors, isEmpty);
+      expect(result, isNotNull);
+      expect(fixture.documents, hasLength(1));
+      expect(fixture.documents.single['inlineRuns'], '1');
+      expect(fixture.documents.single['javascript'], isTrue);
+      expect(fixture.controllerIds, hasLength(1));
+      expect(fixture.blankFailures, 1);
+      expect(fixture.nativeDisposals, 0);
+      expect(await fixture.ownedCookiesCleared, isTrue);
+      // This must complete the real onLoadStop -> safe disposal path, not a
+      // mocked callback or a forced destroy of the retained native controller.
+      await fixture.close();
+      expect(fixture.nativeDisposals, 1);
+      expect(fixture.environmentDisposals, 1);
+      expect(fixture.environmentDisposeChannels, hasLength(1));
+    });
+
+    for (final initialJavascript in [true, false]) {
+      final nextJavascript = !initialJavascript;
+      testWidgets(
+        'reapplies JS $initialJavascript to $nextJavascript after failed reset',
+        (tester) async {
+          final fixture = await AnimekoWebViewNativeFixture.create();
+          addTearDown(fixture.close);
+          await fixture.sniff(initialJavascript);
+          fixture.report('transition-prime');
+          expect(fixture.errors, isEmpty);
+          expect(fixture.documents, hasLength(1));
+          expect(
+            fixture.documents.single['inlineRuns'],
+            initialJavascript ? '1' : '0',
+          );
+          expect(fixture.blankFailures, 1);
+          expect(fixture.nativeDisposals, 0);
+
+          await fixture.sniff(nextJavascript);
+          fixture.report('transition-observed');
+          expect(fixture.errors, isEmpty);
+          expect(fixture.controllerIds, hasLength(1));
+          expect(fixture.nativeDisposals, 0);
+          expect(fixture.blankFailures, 2);
+          expect(fixture.documents, hasLength(2));
+          expect(
+            fixture.documents.last['controller'],
+            fixture.documents.first['controller'],
+          );
+          // Check actual inline-page execution first, not just a setter call.
+          expect(
+            fixture.documents.last['inlineRuns'],
+            nextJavascript ? '1' : '0',
+            reason:
+                'Retained WebView2 must obey the new rule, not the old rule',
+          );
+          expect(fixture.documents.last['javascript'], nextJavascript);
+        },
+      );
+    }
+
+    for (final fault in ['setSettings', 'nullReadback', 'mismatchedReadback']) {
+      testWidgets('forbids task navigation on $fault failure', (tester) async {
+        final fixture = await AnimekoWebViewNativeFixture.create();
+        addTearDown(fixture.close);
+        await fixture.sniff(true);
+        expect(fixture.errors, isEmpty);
+        expect(fixture.documents, hasLength(1));
+        expect(fixture.blankFailures, 1);
+        expect(fixture.nativeDisposals, 0);
+        fixture.fault = fault;
+
+        final result = await fixture.sniff(false);
+        fixture.report('failure-observed');
+        expect(fixture.errors, isEmpty);
+        expect(fixture.controllerIds, hasLength(1));
+        expect(fixture.nativeDisposals, 0);
+        expect(
+          fixture.forbiddenTaskNavigations,
+          0,
+          reason: 'Unconfirmed task permissions must prevent task navigation',
+        );
+        expect(fixture.documents, hasLength(1));
+        expect(result, isNull);
+        expect(
+          fault == 'setSettings'
+              ? fixture.injectedSettingsFailures
+              : fixture.injectedReadbackFailures,
+          1,
+          reason: 'The requested failure must actually reach the guard',
+        );
+      });
+    }
+  }, skip: !Platform.isWindows);
 
   testWidgets(
     'Windows headless WebView refuses loopback pages before navigation',

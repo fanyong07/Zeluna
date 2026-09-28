@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 
 import 'package:anime/src/rules/drpy_runtime.dart';
+import 'package:anime/src/rules/rule_playback_cancellation.dart';
 import 'package:charset/charset.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -15,6 +17,212 @@ void main() {
     final dllUri = await _resolveJsfDllUri();
     DynamicLibrary.open(File.fromUri(dllUri).path);
   });
+
+  const scopeRequest = DrpyRuntimeRequest(
+    ruleId: 'inline:scope',
+    keyword: 'Qing Yu Nian',
+    episodeNumber: 1,
+    episodeTitle: '',
+    ruleSource: _proceduralRule,
+  );
+  http.Response searchResult() => http.Response(
+    jsonEncode({
+      'list': [
+        {'vod_id': '/detail', 'vod_name': 'Qing Yu Nian'},
+      ],
+    }),
+    200,
+  );
+
+  test(
+    'CORE-003 reset during broker bind never snapshots or starts old worker',
+    () async {
+      final storage = _SnapshotStorage();
+      var calls = 0;
+      final client = MockClient((_) async {
+        calls++;
+        return searchResult();
+      });
+      final runtime = DrpyRuntime(
+        storage: storage,
+        addressLookup: _publicTestAddressLookup,
+      );
+      final pending = runtime.resolve(scopeRequest, client: client);
+      runtime.resetExecutionScope();
+      storage.replace(scopeRequest.ruleId, {'seen': 7});
+      final result = await pending;
+      expect(result.succeeded, isFalse);
+      expect(result.candidates, isEmpty);
+      expect(storage.reads, 0);
+      expect(calls, 0);
+      expect(storage.snapshot(scopeRequest.ruleId), {'seen': 7});
+      expect(
+        (await runtime.resolve(scopeRequest, client: client)).succeeded,
+        isTrue,
+      );
+      expect(storage.snapshot(scopeRequest.ruleId), {'seen': 8});
+    },
+  );
+
+  test(
+    'CORE-003 reset during address lookup rejects the retired HTTP send',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      var calls = 0;
+      final runtime = DrpyRuntime(
+        addressLookup: (host) async {
+          if (!entered.isCompleted) entered.complete();
+          await release.future;
+          return _publicTestAddressLookup(host);
+        },
+      );
+      final client = MockClient((_) async {
+        calls++;
+        return searchResult();
+      });
+      final pending = runtime.resolve(scopeRequest, client: client);
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        await pending;
+      });
+      await entered.future.timeout(const Duration(seconds: 3));
+      runtime.resetExecutionScope();
+      release.complete();
+      final result = await pending;
+      expect(result.succeeded, isFalse);
+      expect(calls, 0);
+      expect(runtime.storage.debugSnapshot, isEmpty);
+    },
+  );
+
+  test(
+    'CORE-003 cancelled worker cannot publish or replace same-scope storage',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final token = RulePlaybackCancellationToken();
+      final runtime = _testRuntime();
+      runtime.storage.replace(scopeRequest.ruleId, {'seen': 5});
+      final client = _TrackedDrpyClient(
+        MockClient((_) async {
+          entered.complete();
+          await release.future;
+          return searchResult();
+        }),
+      );
+      final pending = runtime.resolve(
+        scopeRequest,
+        client: client,
+        cancellationToken: token,
+      );
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        await pending;
+      });
+      await entered.future.timeout(const Duration(seconds: 3));
+      token.cancel();
+      release.complete();
+      final result = await pending;
+      expect(result.succeeded, isFalse);
+      expect(result.candidates, isEmpty);
+      expect(runtime.storage.snapshot(scopeRequest.ruleId), {'seen': 5});
+      expect(client.closeCalls, 0);
+    },
+  );
+
+  test(
+    'CORE-003 timed-out worker cannot restore state after scope retirement',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final delivered = Completer<void>();
+      final runtime = _testRuntime(
+        limits: const DrpyRuntimeLimits(
+          overallTimeout: Duration(seconds: 1),
+          networkTimeout: Duration(seconds: 3),
+        ),
+      );
+      final client = MockClient((_) async {
+        entered.complete();
+        await release.future;
+        delivered.complete();
+        return searchResult();
+      });
+      final pending = runtime.resolve(scopeRequest, client: client);
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        await pending;
+      });
+      await entered.future.timeout(const Duration(seconds: 3));
+      final result = await pending;
+      expect(result.error, contains('total time budget'));
+      runtime.resetExecutionScope();
+      final currentClient = MockClient((_) async => searchResult());
+      expect(
+        (await runtime.resolve(scopeRequest, client: currentClient)).succeeded,
+        isTrue,
+      );
+      release.complete();
+      await delivered.future;
+      expect(
+        (await runtime.resolve(scopeRequest, client: currentClient)).succeeded,
+        isTrue,
+      );
+      expect(runtime.storage.snapshot(scopeRequest.ruleId), {'seen': 2});
+    },
+  );
+
+  for (final scenario in ['limit', 'malformed']) {
+    test('CORE-001 broker $scenario releases redirect response once', () async {
+      var cancellations = 0;
+      var calls = 0;
+      final body = StreamController<List<int>>(onCancel: () => cancellations++);
+      addTearDown(() async {
+        if (cancellations == 0) await body.stream.listen(null).cancel();
+        await body.close();
+      });
+      final client = _TrackedDrpyClient(
+        MockClient.streaming((request, _) async {
+          calls++;
+          if (request.url.path == '/health') {
+            return http.StreamedResponse(Stream.value(utf8.encode('ok')), 200);
+          }
+          return http.StreamedResponse(
+            body.stream,
+            302,
+            headers: {
+              'location': scenario == 'limit'
+                  ? '/next'
+                  : 'https://[invalid/path',
+            },
+          );
+        }),
+      );
+      final runtime = _testRuntime(
+        limits: DrpyRuntimeLimits(maxRedirects: scenario == 'limit' ? 0 : 3),
+      );
+      final result = await runtime.resolve(
+        const DrpyRuntimeRequest(
+          ruleId: 'cleanup',
+          keyword: 'Qing Yu Nian',
+          episodeNumber: 1,
+          episodeTitle: '',
+          ruleSource: _proceduralRule,
+        ),
+        client: client,
+      );
+      expect(result.succeeded, isFalse);
+      expect(calls, 1);
+      expect(cancellations, 1);
+      expect(client.closeCalls, 0);
+      expect(
+        (await client.get(Uri.parse('https://example.com/health'))).body,
+        'ok',
+      );
+      expect(cancellations, 1);
+    });
+  }
 
   test(
     'procedural drpy resolves episode through the synchronous HTTP broker',
@@ -747,3 +955,28 @@ var rule = {
     'vod_play_url:"episode 1$https://media.example.com/target.mp4"};'
 };
 ''';
+
+class _TrackedDrpyClient extends http.BaseClient {
+  _TrackedDrpyClient(this.delegate);
+  final http.Client delegate;
+  var closeCalls = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      delegate.send(request);
+
+  @override
+  void close() {
+    closeCalls++;
+    delegate.close();
+  }
+}
+
+class _SnapshotStorage extends DrpyLocalStorage {
+  var reads = 0;
+  @override
+  Map<String, Object?> snapshot(String namespace) {
+    reads++;
+    return super.snapshot(namespace);
+  }
+}

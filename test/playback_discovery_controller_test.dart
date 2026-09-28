@@ -9,6 +9,839 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('REVIEW-SPEC-001 rule-state retirement', () {
+    for (final available in [true, false]) {
+      test(
+        'retires ${available ? 'positive' : 'negative'} cache before reset',
+        () async {
+          final rule = _rule.copyWith(
+            id: 'fixture:review-cache',
+            engine: 'tvbox-json-api',
+          );
+          final enabled = _enabledReviewRules([rule]);
+          final disabled = enabled.copyWith(enabledIds: {});
+          var resolutions = 0;
+          final resolver = _ReviewRuleResolver(
+            (rule, episode) async => [
+              _line(
+                'resolution-${++resolutions}',
+                provider: rule.id,
+                available: available,
+              ),
+            ],
+          );
+          final repository = RulePlaybackSourceRepository(
+            repository: RulePluginRepository(extraRules: [rule]),
+            ruleState: enabled,
+            resolver: resolver,
+            cacheNamespace: 'review-state-$available',
+          );
+          Future<List<PlaybackLine>> lookup() => repository.linesForEpisodeMode(
+            _subject,
+            _episode,
+            expandAll: true,
+          );
+          final resets = <Future<List<PlaybackLine>>>[];
+          final controller = _controller(
+            backend: _FakePlaybackRepository.empty(),
+            rule: repository,
+            activeVersion: () => 1,
+            clearRuleRuntimeCaches: () => resets.add(lookup()),
+          );
+          addTearDown(controller.dispose);
+          _load(
+            controller,
+            accountId: 'account-a',
+            contextVersion: 1,
+            ruleState: enabled,
+          );
+          expect((await resets.single).single.id, 'resolution-1');
+          expect((await lookup()).single.id, 'resolution-1');
+          controller.applyRuleState(disabled, contextVersion: 2);
+          controller.applyRuleState(enabled, contextVersion: 1);
+          controller.clearCaches();
+          expect(resets, hasLength(1));
+          expect((await lookup()).single.id, 'resolution-1');
+          controller.applyRuleState(disabled, contextVersion: 1);
+          expect((await resets.last).single.id, 'resolution-2');
+          controller.applyRuleState(enabled, contextVersion: 1);
+          expect((await resets.last).single.id, 'resolution-3');
+          expect((await lookup()).single.id, 'resolution-3');
+          expect(resets, hasLength(3));
+        },
+      );
+    }
+
+    for (final oldFirst in [true, false]) {
+      test(
+        'retired flight cannot populate active cache, oldFirst=$oldFirst',
+        () async {
+          final rule = _rule.copyWith(
+            id: 'fixture:review-flight',
+            engine: 'tvbox-json-api',
+          );
+          final enabled = _enabledReviewRules([rule]);
+          final oldEntered = Completer<void>();
+          final newEntered = Completer<void>();
+          final oldResult = Completer<List<PlaybackLine>>();
+          final newResult = Completer<List<PlaybackLine>>();
+          var calls = 0;
+          final resolver = _ReviewRuleResolver((rule, episode) {
+            calls++;
+            if (calls == 1) {
+              oldEntered.complete();
+              return oldResult.future;
+            }
+            if (calls == 2) {
+              newEntered.complete();
+              return newResult.future;
+            }
+            return Future.value([_line('unexpected-reparse')]);
+          });
+          final repository = RulePlaybackSourceRepository(
+            repository: RulePluginRepository(extraRules: [rule]),
+            ruleState: enabled,
+            resolver: resolver,
+            cacheNamespace: 'review-flight-$oldFirst',
+          );
+          final controller = _controller(
+            backend: _FakePlaybackRepository.empty(),
+            rule: repository,
+            activeVersion: () => 1,
+          );
+          addTearDown(controller.dispose);
+          _load(
+            controller,
+            accountId: 'account-a',
+            contextVersion: 1,
+            ruleState: enabled,
+          );
+          // Keep the public caller token and request context identical; old
+          // completion must never supply the new lookup's result cache.
+          final token = RulePlaybackCancellationToken();
+          Future<List<PlaybackLine>> lookup() =>
+              repository.verifiedLinesForProvider(
+                _subject,
+                _episode,
+                providerId: rule.id,
+                cancellationToken: token,
+              );
+          final oldLookup = lookup();
+          addTearDown(() async {
+            if (!oldResult.isCompleted) oldResult.complete([_line('old')]);
+            if (!newResult.isCompleted) newResult.complete([_line('new')]);
+            await oldLookup;
+          });
+          await oldEntered.future;
+          controller.applyRuleState(
+            enabled.copyWith(enabledIds: {}),
+            contextVersion: 1,
+          );
+          controller.applyRuleState(enabled, contextVersion: 1);
+          if (oldFirst) {
+            oldResult.complete([
+              _line('old', provider: rule.id, clientVerified: true),
+            ]);
+            await oldLookup;
+          }
+          final newLookup = lookup();
+          await newEntered.future.timeout(const Duration(seconds: 1));
+          newResult.complete([
+            _line('new', provider: rule.id, clientVerified: true),
+          ]);
+          expect((await newLookup).single.id, 'new');
+          if (!oldFirst) {
+            oldResult.complete([
+              _line('old', provider: rule.id, clientVerified: true),
+            ]);
+            await oldLookup;
+          }
+          expect((await lookup()).single.id, 'new');
+          expect(calls, 2);
+        },
+      );
+    }
+
+    test('rule-state change retires failure health demotion', () async {
+      final preferred = _rule.copyWith(
+        id: 'fixture:review-health-a',
+        engine: 'tvbox-json-api',
+        baseUrl: 'https://health-a.example',
+        priority: 1,
+      );
+      final fallback = _rule.copyWith(
+        id: 'fixture:review-health-b',
+        engine: 'tvbox-json-api',
+        baseUrl: 'https://health-b.example',
+        priority: 2,
+      );
+      final rules = [preferred, fallback];
+      final state = _enabledReviewRules(rules);
+      final order = <String>[];
+      final resolver = _ReviewRuleResolver((rule, episode) async {
+        order.add(rule.id);
+        return [_line('failure', provider: rule.id, available: false)];
+      });
+      RulePlaybackSourceRepository repository(List<RulePlugin> selected) =>
+          RulePlaybackSourceRepository(
+            repository: RulePluginRepository(extraRules: selected),
+            ruleState: _enabledReviewRules(selected),
+            resolver: resolver,
+            cacheNamespace: 'review-health',
+          );
+      final all = repository(rules);
+      final controller = _controller(
+        backend: _FakePlaybackRepository.empty(),
+        rule: all,
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: state,
+      );
+      final preferredOnly = repository([preferred]);
+      for (final number in [1, 2]) {
+        await preferredOnly.linesForEpisodeMode(
+          _subject,
+          _episodeFor(number),
+          expandAll: true,
+        );
+      }
+      order.clear();
+      await all.linesForEpisodeMode(_subject, _episodeFor(3));
+      expect(order, [
+        fallback.id,
+        preferred.id,
+      ], reason: 'two failures demote the preferred rule');
+      controller.applyRuleState(
+        state.copyWith(enabledIds: {}),
+        contextVersion: 1,
+      );
+      controller.applyRuleState(state, contextVersion: 1);
+      order.clear();
+      await all.linesForEpisodeMode(_subject, _episodeFor(4));
+      expect(order, [
+        preferred.id,
+        fallback.id,
+      ], reason: 'retirement restores configured priority');
+    });
+  });
+
+  test(
+    'CORE-003 discovery owns repository retirement before resolver reset',
+    () async {
+      final rule = _rule.copyWith(
+        id: 'fixture:scope-cache',
+        engine: 'tvbox-json-api',
+      );
+      final rules = RulePluginRepository(extraRules: [rule]);
+      final state = RulePluginState(
+        installedIds: {rule.id},
+        enabledIds: {rule.id},
+        customRules: [rule],
+        approvedPermissionDigests: {
+          rule.id: rule.effectiveManifest.permissionDigest,
+        },
+      );
+      final resolver = _ScopeCacheResolver();
+      final repository = RulePlaybackSourceRepository(
+        repository: rules,
+        ruleState: state,
+        resolver: resolver,
+        cacheNamespace: 'discovery-scope-retirement-fixture',
+      );
+      Future<List<PlaybackLine>> lookup() =>
+          repository.linesForEpisodeMode(_subject, _episode, expandAll: true);
+      RulePlaybackSourceRepository.clearRuntimeCaches();
+      addTearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
+      expect((await lookup()).single.id, 'resolve-1');
+      expect((await lookup()).single.id, 'resolve-1');
+
+      var activeVersion = 1;
+      final resetLookups = <Future<List<PlaybackLine>>>[];
+      final controller = PlaybackDiscoveryController(
+        backendRepository: (_) => _FakePlaybackRepository.empty(),
+        ruleRepository: (_) => repository,
+        verifyLine:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async => line,
+        isContextCurrent: (version) => version == activeVersion,
+        clearRuleRuntimeCaches: () => resetLookups.add(lookup()),
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: state,
+      );
+      expect((await resetLookups.single).single.id, 'resolve-2');
+      controller.clearCaches();
+      expect((await lookup()).single.id, 'resolve-2');
+      expect(resetLookups, hasLength(1));
+
+      activeVersion = 2;
+      _load(
+        controller,
+        accountId: 'account-b',
+        contextVersion: 2,
+        ruleState: state,
+      );
+      expect((await resetLookups.last).single.id, 'resolve-3');
+      expect(resetLookups, hasLength(2));
+      controller.dispose();
+      expect((await resetLookups.last).single.id, 'resolve-4');
+      controller.dispose();
+      expect(resetLookups, hasLength(3));
+      expect(resolver.calls, 4);
+    },
+  );
+
+  group('REVIEW-SPEC-002 progressive route versions', () {
+    const url = 'https://media.example/video.mp4?b=2&a=1';
+    const headers = {'Referer': 'https://request.example/'};
+    for (final hasRules in [false, true]) {
+      for (final verifiedFirst in [false, true]) {
+        for (final staleProbeSucceeds in [false, true]) {
+          for (final rulesFirst in hasRules ? [false, true] : [false]) {
+            test(
+              'rules=$hasRules verifiedFirst=$verifiedFirst staleSuccess=$staleProbeSucceeds rulesFirst=$rulesFirst',
+              () async {
+                final candidate = _line(
+                  'route',
+                  url: url,
+                  headers: headers,
+                  available: false,
+                  requiresClientProbe: true,
+                  publicHttpOnly: true,
+                );
+                final verified = _line(
+                  'route',
+                  url: url,
+                  headers: headers,
+                  serverVerified: true,
+                  latency: const Duration(milliseconds: 10),
+                );
+                final pending = _line(
+                  'pending',
+                  available: false,
+                  requiresClientProbe: true,
+                );
+                final before = _line('before', clientVerified: true);
+                final after = _line('after', clientVerified: true);
+                final added = _line('full-only', clientVerified: true);
+                final ruleLine = _line('rule-line', clientVerified: true);
+                final fullEntered = Completer<void>();
+                final releaseFull = Completer<void>();
+                final probeEntered = Completer<void>();
+                final releaseProbes = Completer<void>();
+                final releaseRules = Completer<void>();
+                final probePublished = Completer<void>();
+                final rulePublished = Completer<void>();
+                final snapshots = <List<PlaybackLine>>[];
+                final probeIds = <String>[];
+                final modes = <bool>[];
+                final controller = _controller(
+                  backend: _FakePlaybackRepository(
+                    load:
+                        (_, _, {required expandAll, cancellationToken}) async {
+                          modes.add(expandAll);
+                          if (!expandAll) {
+                            return [
+                              before,
+                              verifiedFirst ? verified : candidate,
+                              pending,
+                              after,
+                            ];
+                          }
+                          fullEntered.complete();
+                          await releaseFull.future;
+                          return [added, verifiedFirst ? candidate : verified];
+                        },
+                  ),
+                  rule: _FakePlaybackRepository(
+                    load:
+                        (_, _, {required expandAll, cancellationToken}) async =>
+                            [],
+                    updates: (_, _, {cancellationToken}) async* {
+                      await releaseRules.future;
+                      yield PlaybackLineLookupUpdate(
+                        lines: [ruleLine],
+                        completedRules: 1,
+                        totalRules: 1,
+                        phase: PlaybackLineLookupPhase.complete,
+                      );
+                    },
+                  ),
+                  activeVersion: () => 1,
+                  verify:
+                      (
+                        line, {
+                        enrichMetadata = true,
+                        forceRefresh = false,
+                        cancellationToken,
+                      }) async {
+                        probeIds.add(line.id);
+                        if (line.id == 'pending') probeEntered.complete();
+                        await releaseProbes.future;
+                        final success =
+                            line.id == 'pending' || staleProbeSucceeds;
+                        return _line(
+                          line.id,
+                          provider: line.providerId,
+                          url: line.url,
+                          headers: line.headers,
+                          publicHttpOnly: line.publicHttpOnly,
+                          available: success,
+                          clientVerified: success,
+                        );
+                      },
+                );
+                addTearDown(controller.dispose);
+                _load(
+                  controller,
+                  accountId: 'account-a',
+                  contextVersion: 1,
+                  ruleState: hasRules ? _ruleState : const RulePluginState(),
+                );
+                final done = Completer<void>();
+                final subscription = controller
+                    .lineUpdatesForEpisode(_subject, _episode)
+                    .listen(
+                      (update) {
+                        snapshots.add(update.lines);
+                        if (update.lines.any(
+                              (line) =>
+                                  line.id == 'pending' && line.clientVerified,
+                            ) &&
+                            !probePublished.isCompleted) {
+                          probePublished.complete();
+                        }
+                        if (update.lines.any(
+                              (line) => line.id == ruleLine.id,
+                            ) &&
+                            !rulePublished.isCompleted) {
+                          rulePublished.complete();
+                        }
+                      },
+                      onError: done.completeError,
+                      onDone: done.complete,
+                    );
+                addTearDown(() async {
+                  if (!releaseFull.isCompleted) releaseFull.complete();
+                  if (!releaseProbes.isCompleted) releaseProbes.complete();
+                  if (!releaseRules.isCompleted) releaseRules.complete();
+                  await subscription.cancel();
+                });
+                await fullEntered.future.timeout(const Duration(seconds: 3));
+                expect(snapshots.single.map((line) => line.id), [
+                  'before',
+                  'route',
+                  'pending',
+                  'after',
+                ]);
+                releaseFull.complete();
+                await probeEntered.future.timeout(const Duration(seconds: 3));
+                if (hasRules && rulesFirst) {
+                  releaseRules.complete();
+                  await rulePublished.future.timeout(
+                    const Duration(seconds: 3),
+                  );
+                }
+                releaseProbes.complete();
+                await probePublished.future.timeout(const Duration(seconds: 3));
+                if (!releaseRules.isCompleted) releaseRules.complete();
+                await done.future.timeout(const Duration(seconds: 3));
+                final authoritative = snapshots.last;
+                expect(authoritative.where((line) => line.id == 'route'), [
+                  same(verified),
+                ]);
+                expect(
+                  probeIds,
+                  ['pending'],
+                  reason:
+                      'superseded candidate must not be probed, even if that probe could succeed',
+                );
+                expect(modes, [false, true]);
+                expect(authoritative.map((line) => line.id), [
+                  'before',
+                  'route',
+                  'pending',
+                  'after',
+                  'full-only',
+                  if (hasRules) 'rule-line',
+                ]);
+                for (final snapshot in snapshots.skip(1)) {
+                  expect(snapshot.where((line) => line.id == 'route'), [
+                    same(verified),
+                  ]);
+                }
+                expect(verified.url, url);
+                expect(verified.headers, headers);
+              },
+            );
+          }
+        }
+      }
+    }
+
+    for (final hasRules in [false, true]) {
+      for (final distinct in ['headers', 'signed-url', 'provider', 'episode']) {
+        test(
+          'rules=$hasRules same ID keeps distinct $distinct request while its peer probe fails',
+          () async {
+            final candidate = _line(
+              'shared-id',
+              url: url,
+              headers: headers,
+              available: false,
+              requiresClientProbe: true,
+              publicHttpOnly: true,
+            );
+            final full = _line(
+              'shared-id',
+              url: distinct == 'signed-url'
+                  ? 'https://media.example/video.mp4?a=1&b=2'
+                  : url,
+              headers: distinct == 'headers'
+                  ? {'Referer': 'https://other.example/'}
+                  : headers,
+              provider: distinct == 'provider'
+                  ? 'zeluna:other'
+                  : candidate.providerId,
+              episodeId: distinct == 'episode' ? _episode.id + 1 : _episode.id,
+              serverVerified: true,
+              latency: const Duration(milliseconds: 10),
+            );
+            final probeEntered = Completer<void>();
+            final releaseProbe = Completer<void>();
+            final controller = _controller(
+              backend: _FakePlaybackRepository(
+                load: (_, _, {required expandAll, cancellationToken}) async => [
+                  expandAll ? full : candidate,
+                ],
+              ),
+              rule: _FakePlaybackRepository.empty(),
+              activeVersion: () => 1,
+              verify:
+                  (
+                    line, {
+                    enrichMetadata = true,
+                    forceRefresh = false,
+                    cancellationToken,
+                  }) async {
+                    expect(line, same(candidate));
+                    probeEntered.complete();
+                    await releaseProbe.future;
+                    return candidate;
+                  },
+            );
+            addTearDown(controller.dispose);
+            _load(
+              controller,
+              accountId: 'account-a',
+              contextVersion: 1,
+              ruleState: hasRules ? _ruleState : const RulePluginState(),
+            );
+            final updates = controller
+                .lineUpdatesForEpisode(_subject, _episode)
+                .toList();
+            addTearDown(() async {
+              if (!releaseProbe.isCompleted) releaseProbe.complete();
+              await updates;
+            });
+            await probeEntered.future.timeout(const Duration(seconds: 3));
+            releaseProbe.complete();
+            expect((await updates).last.lines, [same(candidate), same(full)]);
+            expect(full.available, isTrue);
+          },
+        );
+      }
+    }
+  });
+
+  group('REVIEW-STD-002 ordinary request writeback', () {
+    const url = 'https://media.example/video.mp4?b=2&a=1';
+    const headers = {'Referer': 'https://request.example/'};
+    for (final mode in ['full', 'warmup']) {
+      for (final distinct in [
+        'headers',
+        'signed-url',
+        'provider',
+        'episode',
+        'same-request',
+      ]) {
+        for (final probeSucceeds in [false, true]) {
+          test('$mode $distinct probeSuccess=$probeSucceeds', () async {
+            final warmup = mode == 'warmup';
+            final hasPeer = distinct != 'same-request';
+            // A single already-available route still awaits its real probe;
+            // with a peer, only B is initially playable, so warmup cannot exit.
+            final initiallyVerified = !hasPeer && !probeSucceeds;
+            final candidate = _line(
+              'shared-id',
+              url: url,
+              headers: headers,
+              available: initiallyVerified,
+              serverVerified: initiallyVerified,
+              requiresClientProbe: true,
+              publicHttpOnly: true,
+            );
+            final peer = _line(
+              'shared-id',
+              url: distinct == 'signed-url'
+                  ? 'https://media.example/video.mp4?a=1&b=2'
+                  : url,
+              headers: distinct == 'headers'
+                  ? {'Referer': 'https://other.example/'}
+                  : headers,
+              provider: distinct == 'provider'
+                  ? 'zeluna:other'
+                  : candidate.providerId,
+              episodeId: distinct == 'episode' ? _episode.id + 1 : _episode.id,
+              serverVerified: true,
+              latency: const Duration(milliseconds: 10),
+            );
+            final probed = _line(
+              candidate.id,
+              provider: candidate.providerId,
+              episodeId: candidate.episodeId,
+              url: url,
+              headers: headers,
+              publicHttpOnly: true,
+              available: probeSucceeds,
+              clientVerified: probeSucceeds,
+              latency: const Duration(milliseconds: 5),
+            );
+            final probeEntered = Completer<void>();
+            final releaseProbe = Completer<void>();
+            var backendCalls = 0;
+            var probeCalls = 0;
+            final controller = _controller(
+              backend: _FakePlaybackRepository(
+                load: (_, _, {required expandAll, cancellationToken}) async {
+                  backendCalls++;
+                  expect(expandAll, !warmup);
+                  return [candidate, if (hasPeer) peer];
+                },
+              ),
+              activeVersion: () => 1,
+              verify:
+                  (
+                    line, {
+                    enrichMetadata = true,
+                    forceRefresh = false,
+                    cancellationToken,
+                  }) async {
+                    expect(line, same(candidate));
+                    probeCalls++;
+                    if (!probeEntered.isCompleted) probeEntered.complete();
+                    await releaseProbe.future;
+                    return probed;
+                  },
+            );
+            addTearDown(controller.dispose);
+            _load(controller, accountId: 'account-a', contextVersion: 1);
+            Future<List<PlaybackLine>> lookup() =>
+                controller.linesForEpisodeMode(
+                  _subject,
+                  _episode,
+                  expandAll: !warmup,
+                  lookupIntent: warmup
+                      ? PlaybackLookupIntent.warmup
+                      : PlaybackLookupIntent.interactive,
+                );
+            var returned = false;
+            final first = lookup().then((lines) {
+              returned = true;
+              return lines;
+            });
+            addTearDown(() async {
+              if (!releaseProbe.isCompleted) releaseProbe.complete();
+              await first;
+            });
+            await probeEntered.future.timeout(const Duration(seconds: 3));
+            expect(returned, isFalse, reason: 'must reach the probe writeback');
+            releaseProbe.complete();
+            final expected = [
+              if (!warmup || probeSucceeds) same(probed),
+              if (hasPeer) same(peer),
+            ];
+            final result = await first.timeout(const Duration(seconds: 3));
+            expect(result, expected);
+            expect(result.where((line) => line.available), [
+              if (probeSucceeds) same(probed),
+              if (hasPeer) same(peer),
+            ]);
+            // Read the same public lookup again: cached payload must retain B.
+            // A warmup with no reusable line keeps its existing eviction policy.
+            final evicted = warmup && !hasPeer && !probeSucceeds;
+            expect(controller.cachedBackendEntries, evicted ? 0 : 1);
+            expect(
+              await lookup().timeout(const Duration(seconds: 3)),
+              expected,
+            );
+            expect(backendCalls, evicted ? 2 : 1);
+            // Full lookup retains its existing success-only cache-write policy;
+            // warmup caches only reusable results. Do not broaden semantics.
+            expect(probeCalls, evicted || (!warmup && !probeSucceeds) ? 2 : 1);
+          });
+        }
+      }
+    }
+  });
+
+  group('CORE-002 request equivalence', () {
+    const url = 'https://media.example/video.m3u8?b=2&a=1';
+    for (final name in ['Referer', 'Origin', 'Authorization', 'Cookie']) {
+      test('retains distinct $name contexts and original IDs in order', () {
+        final first = _line('first', url: url, headers: {name: 'fixture-a'});
+        final second = _line('second', url: url, headers: {name: 'fixture-b'});
+        final merged = mergePlaybackLines([first, second, first]);
+        expect(merged, [first, second]);
+        expect(merged.map((line) => line.id), ['first', 'second']);
+      });
+    }
+
+    test('retains distinct trust constraints', () {
+      final lines = [
+        _line('unverified', url: url),
+        _line('public-only', url: url, publicHttpOnly: true),
+        _line('server-verified', url: url, serverVerified: true),
+        _line('client-verified', url: url, clientVerified: true),
+        _line('needs-probe', url: url, requiresClientProbe: true),
+      ];
+      expect(mergePlaybackLines(lines), lines);
+    });
+
+    test('equivalent headers upgrade in place without changing signed URL', () {
+      final first = _line(
+        'first',
+        url: url,
+        available: false,
+        headers: {'Referer': 'https://example.com/', 'X-Test': 'yes'},
+      );
+      final other = _line('other');
+      final upgraded = _line(
+        'upgraded',
+        url: url,
+        headers: {'x-test': 'yes', 'referer': 'https://example.com/'},
+      );
+      final duplicate = _line(
+        'duplicate',
+        url: url,
+        headers: {'X-TEST': 'yes', 'REFERER': 'https://example.com/'},
+      );
+      expect(mergePlaybackLines([first, other, upgraded, duplicate]), [
+        upgraded,
+        other,
+      ]);
+      expect(upgraded.url, url);
+      expect(
+        mergePlaybackLines([
+          upgraded,
+          _line('reordered', url: 'https://media.example/video.m3u8?a=1&b=2'),
+        ]),
+        hasLength(2),
+      );
+    });
+
+    test('empty URLs retain provider and line placeholder identity', () {
+      final first = _line('missing', url: '');
+      final second = _line('missing', url: '', provider: 'other');
+      final third = _line('another', url: '');
+      expect(mergePlaybackLines([first, second, third, first]), [
+        first,
+        second,
+        third,
+      ]);
+    });
+  });
+
+  test(
+    'CORE-002 verification updates a route without duplicating its ID',
+    () async {
+      final candidate = _line(
+        'candidate',
+        available: false,
+        requiresClientProbe: true,
+      );
+      final verified = _line('candidate', clientVerified: true);
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            candidate,
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async => verified,
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      expect(await controller.linesForEpisodeMode(_subject, _episode), [
+        verified,
+      ]);
+    },
+  );
+
+  for (final mode in ['expanded', 'progressive', 'warmup']) {
+    test('CORE-002 $mode retains distinct header variants', () async {
+      final variants = [
+        _line(
+          'first-context',
+          url: 'https://media.example/video.mp4',
+          headers: {'Referer': 'https://first.example/'},
+          clientVerified: true,
+        ),
+        _line(
+          'second-context',
+          url: 'https://media.example/video.mp4',
+          headers: {'Referer': 'https://second.example/'},
+          clientVerified: true,
+        ),
+      ];
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              variants,
+        ),
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final List<PlaybackLine> lines;
+      if (mode == 'progressive') {
+        final updates = await controller
+            .lineUpdatesForEpisode(_subject, _episode)
+            .toList();
+        lines = updates.last.lines;
+      } else {
+        lines = await controller.linesForEpisodeMode(
+          _subject,
+          _episode,
+          expandAll: mode == 'expanded',
+          lookupIntent: mode == 'warmup'
+              ? PlaybackLookupIntent.warmup
+              : PlaybackLookupIntent.interactive,
+        );
+      }
+      expect(lines.map((line) => line.id), ['first-context', 'second-context']);
+    });
+  }
+
   for (final preferred in <String?>[null, 'zeluna:preferred']) {
     test(
       'expanded lookup retains all routes with preference $preferred',
@@ -594,6 +1427,390 @@ void main() {
     await prefetch;
 
     expect(controller.cachedWarmupEntries, 0);
+  });
+
+  group('REVIEW-SPEC-003 prefetch request writeback', () {
+    for (final successFirst in [true, false]) {
+      test('different Referer successFirst=$successFirst', () async {
+        final episode = _episodeFor(2);
+        const url = 'https://media.example/next.m3u8';
+        const aHeaders = {'Referer': 'https://a.example/'};
+        const bHeaders = {'Referer': 'https://b.example/'};
+        final a = _line(
+          'shared-id',
+          episodeId: episode.id,
+          url: url,
+          headers: aHeaders,
+          publicHttpOnly: true,
+          serverVerified: true,
+        );
+        final b = _line(
+          'shared-id',
+          episodeId: episode.id,
+          url: url,
+          headers: bHeaders,
+          publicHttpOnly: true,
+          serverVerified: true,
+        );
+        final success = _line(
+          a.id,
+          episodeId: episode.id,
+          url: url,
+          headers: aHeaders,
+          publicHttpOnly: true,
+          serverVerified: true,
+          clientVerified: true,
+        );
+        final failure = _line(
+          b.id,
+          episodeId: episode.id,
+          url: url,
+          headers: bHeaders,
+          publicHttpOnly: true,
+          available: false,
+        );
+        final entered = [Completer<void>(), Completer<void>()];
+        final release = [Completer<PlaybackLine>(), Completer<PlaybackLine>()];
+        final completed = [Completer<void>(), Completer<void>()];
+        final requests = <PlaybackLine>[];
+        final completionOrder = <int>[];
+        var backendCalls = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load:
+                (_, requested, {required expandAll, cancellationToken}) async {
+                  backendCalls++;
+                  expect(requested, same(episode));
+                  expect(expandAll, isFalse);
+                  return [a, b];
+                },
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                // Neither route requires the ordinary lookup's client probe.
+                // Both callbacks must be the public prefetch's second round.
+                expect(enrichMetadata, isFalse);
+                expect(line.requiresClientProbe, isFalse);
+                expect(line.clientVerified, isFalse);
+                expect(line.serverVerified, isTrue);
+                final index = identical(line, a) ? 0 : 1;
+                expect(line, same(index == 0 ? a : b));
+                requests.add(line);
+                entered[index].complete();
+                final result = await release[index].future;
+                completionOrder.add(index);
+                completed[index].complete();
+                return result;
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        var returned = false;
+        final prefetch = controller
+            .prefetchPlaybackForEpisode(_subject, episode)
+            .then((_) => returned = true);
+        addTearDown(() async {
+          if (!release[0].isCompleted) release[0].complete(success);
+          if (!release[1].isCompleted) release[1].complete(failure);
+          await prefetch;
+        });
+        await Future.wait(
+          entered.map((gate) => gate.future),
+        ).timeout(const Duration(seconds: 3));
+        expect(returned, isFalse);
+        expect(requests, [same(a), same(b)]);
+        expect(requests.map((line) => line.headers), [aHeaders, bHeaders]);
+        expect(backendCalls, 1);
+        expect(
+          controller.prefetchedWarmupBundleForEpisode(_subject, episode),
+          isNull,
+        );
+
+        final first = successFirst ? 0 : 1;
+        final second = 1 - first;
+        final results = [success, failure];
+        release[first].complete(results[first]);
+        await completed[first].future.timeout(const Duration(seconds: 3));
+        // Drain the first probe's async-stream writeback before releasing peer.
+        await Future<void>.delayed(Duration.zero);
+        expect(completionOrder, [first]);
+        expect(returned, isFalse);
+        release[second].complete(results[second]);
+        await prefetch.timeout(const Duration(seconds: 3));
+        expect(completionOrder, [first, second]);
+        expect(requests, hasLength(2));
+        final bundle = controller.prefetchedWarmupBundleForEpisode(
+          _subject,
+          episode,
+        );
+        expect(bundle, isNotNull);
+        expect(bundle!.primary, same(success));
+        expect(bundle.primary.headers, aHeaders);
+        expect(bundle.primary.available, isTrue);
+        expect(bundle.primary.serverVerified, isTrue);
+        expect(bundle.primary.clientVerified, isTrue);
+        expect(bundle.primary.publicHttpOnly, isTrue);
+        expect(bundle.primary.requiresClientProbe, isFalse);
+        expect(bundle.allLines, [same(success)]);
+        expect(controller.cachedWarmupEntries, 1);
+      });
+    }
+  });
+
+  group('REVIEW-SPEC-003 prefetch route versions', () {
+    for (final verifiedFirst in [false, true]) {
+      for (final staleSucceeds in [false, true]) {
+        test(
+          'verifiedFirst=$verifiedFirst staleSucceeds=$staleSucceeds',
+          () async {
+            final episode = _episodeFor(2);
+            const headers = {'Referer': 'https://same-request.example/'};
+            final obsolete = _line(
+              'same-route',
+              episodeId: episode.id,
+              headers: headers,
+              serverVerified: true,
+              publicHttpOnly: true,
+            );
+            final current = _line(
+              obsolete.id,
+              episodeId: episode.id,
+              headers: headers,
+              serverVerified: true,
+              clientVerified: true,
+            );
+            final inventory = verifiedFirst
+                ? [current, obsolete]
+                : [obsolete, current];
+            // Route-version qualification must not relax generic trust dedupe.
+            expect(mergePlaybackLines(inventory), inventory);
+            final probes = <PlaybackLine>[];
+            final controller = _controller(
+              backend: _FakePlaybackRepository(
+                load: (_, _, {required expandAll, cancellationToken}) async =>
+                    inventory,
+              ),
+              activeVersion: () => 1,
+              verify:
+                  (
+                    line, {
+                    enrichMetadata = true,
+                    forceRefresh = false,
+                    cancellationToken,
+                  }) async {
+                    probes.add(line);
+                    return _line(
+                      line.id,
+                      episodeId: episode.id,
+                      headers: headers,
+                      publicHttpOnly: true,
+                      available: staleSucceeds,
+                      clientVerified: staleSucceeds,
+                    );
+                  },
+            );
+            addTearDown(controller.dispose);
+            _load(controller, accountId: 'account-a', contextVersion: 1);
+            await controller
+                .prefetchPlaybackForEpisode(_subject, episode)
+                .timeout(const Duration(seconds: 3));
+            expect(
+              probes,
+              isEmpty,
+              reason:
+                  'do not probe obsolete trust versions of a usable request',
+            );
+            final bundle = controller.prefetchedWarmupBundleForEpisode(
+              _subject,
+              episode,
+            );
+            expect(bundle?.primary, same(current));
+            expect(bundle?.allLines, [same(current)]);
+            expect(bundle?.primary.headers, headers);
+            expect(bundle?.primary.clientVerified, isTrue);
+            expect(bundle?.primary.publicHttpOnly, isFalse);
+            expect(mergePlaybackLines(inventory), inventory);
+          },
+        );
+      }
+    }
+  });
+
+  group('REVIEW-SPEC-003 prefetch controls', () {
+    for (final succeeds in [false, true]) {
+      test('single request real probe succeeds=$succeeds', () async {
+        final episode = _episodeFor(2);
+        const headers = {'Referer': 'https://single.example/'};
+        final candidate = _line(
+          'single',
+          episodeId: episode.id,
+          headers: headers,
+          serverVerified: true,
+        );
+        final result = _line(
+          candidate.id,
+          episodeId: episode.id,
+          headers: headers,
+          available: succeeds,
+          serverVerified: succeeds,
+          clientVerified: succeeds,
+        );
+        final entered = Completer<void>();
+        final release = Completer<PlaybackLine>();
+        var probeCalls = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async => [
+              candidate,
+            ],
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                expect(line, same(candidate));
+                expect(line.requiresClientProbe, isFalse);
+                probeCalls++;
+                entered.complete();
+                return release.future;
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        var returned = false;
+        final prefetch = controller
+            .prefetchPlaybackForEpisode(_subject, episode)
+            .then((_) => returned = true);
+        addTearDown(() async {
+          if (!release.isCompleted) release.complete(result);
+          await prefetch;
+        });
+        await entered.future.timeout(const Duration(seconds: 3));
+        expect(returned, isFalse);
+        release.complete(result);
+        await prefetch.timeout(const Duration(seconds: 3));
+        expect(probeCalls, 1);
+        final bundle = controller.prefetchedWarmupBundleForEpisode(
+          _subject,
+          episode,
+        );
+        if (succeeds) {
+          expect(bundle?.primary, same(result));
+          expect(bundle?.primary.headers, headers);
+          expect(bundle?.allLines, [same(result)]);
+        } else {
+          expect(
+            bundle,
+            isNull,
+            reason: 'a real failure must retire even an available route',
+          );
+        }
+        expect(controller.cachedWarmupEntries, succeeds ? 1 : 0);
+      });
+    }
+
+    for (final retirement in [
+      'caller-cancel',
+      'account-switch',
+      'cache-epoch',
+    ]) {
+      test('$retirement rejects a late second-round probe', () async {
+        final episode = _episodeFor(2);
+        var version = 1;
+        final token = RulePlaybackCancellationToken();
+        final candidate = _line(
+          'late',
+          episodeId: episode.id,
+          headers: {'Referer': 'https://late.example/'},
+          serverVerified: true,
+        );
+        final result = _line(
+          candidate.id,
+          episodeId: candidate.episodeId,
+          headers: candidate.headers,
+          serverVerified: true,
+          clientVerified: true,
+        );
+        final entered = Completer<void>();
+        final release = Completer<PlaybackLine>();
+        RulePlaybackCancellationToken? probeToken;
+        var probeCalls = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async => [
+              candidate,
+            ],
+          ),
+          activeVersion: () => version,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                expect(line, same(candidate));
+                expect(line.requiresClientProbe, isFalse);
+                probeToken = cancellationToken;
+                probeCalls++;
+                entered.complete();
+                return release.future;
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: version);
+        var returned = false;
+        final prefetch = controller
+            .prefetchPlaybackForEpisode(
+              _subject,
+              episode,
+              cancellationToken: token,
+            )
+            .then((_) => returned = true);
+        addTearDown(() async {
+          if (!release.isCompleted) release.complete(result);
+          await prefetch;
+        });
+        await entered.future.timeout(const Duration(seconds: 3));
+        expect(returned, isFalse);
+        expect(probeToken, same(token));
+        switch (retirement) {
+          case 'caller-cancel':
+            token.cancel();
+          case 'account-switch':
+            version = 2;
+            _load(controller, accountId: 'account-b', contextVersion: version);
+          case 'cache-epoch':
+            controller.clearCaches();
+        }
+        expect(probeToken?.isCancelled, isTrue);
+        release.complete(result);
+        await prefetch.timeout(const Duration(seconds: 3));
+        expect(probeCalls, 1);
+        expect(
+          controller.prefetchedWarmupBundleForEpisode(_subject, episode),
+          isNull,
+        );
+        expect(controller.cachedWarmupEntries, 0);
+        if (retirement == 'account-switch') {
+          _load(controller, accountId: 'account-a', contextVersion: version);
+          expect(
+            controller.prefetchedWarmupBundleForEpisode(_subject, episode),
+            isNull,
+          );
+        }
+      });
+    }
   });
 
   test(
@@ -1624,6 +2841,7 @@ PlaybackDiscoveryController _controller({
   required int Function() activeVersion,
   PlaybackSourceRepository? rule,
   PlaybackLineVerifier? verify,
+  void Function()? clearRuleRuntimeCaches,
   Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
 }) => PlaybackDiscoveryController(
   backendRepository: (_) => backend,
@@ -1637,7 +2855,7 @@ PlaybackDiscoveryController _controller({
         cancellationToken,
       }) async => line,
   isContextCurrent: (version) => version == activeVersion(),
-  clearRuleRuntimeCaches: () {},
+  clearRuleRuntimeCaches: clearRuleRuntimeCaches ?? () {},
   interactivePreferredHeadStart: interactivePreferredHeadStart,
 );
 
@@ -1810,9 +3028,13 @@ PlaybackLine _line(
   bool available = true,
   bool serverVerified = false,
   bool clientVerified = false,
+  bool publicHttpOnly = false,
+  bool requiresClientProbe = false,
+  Map<String, String> headers = const {},
   int? episodeId,
   String? url,
   DateTime? expiresAt,
+  Duration? latency,
 }) => PlaybackLine(
   id: id,
   episodeId: episodeId ?? _episode.id,
@@ -1822,9 +3044,13 @@ PlaybackLine _line(
   quality: '1080P',
   format: 'hls',
   url: url ?? 'https://$id.example/video.m3u8',
+  headers: headers,
+  publicHttpOnly: publicHttpOnly,
+  requiresClientProbe: requiresClientProbe,
   serverVerified: serverVerified,
   clientVerified: clientVerified,
   expiresAt: expiresAt,
+  latency: latency,
   available: available,
 );
 
@@ -1911,3 +3137,40 @@ const _episode = AnimeEpisode(
   duration: '24:00',
   description: '',
 );
+
+class _ScopeCacheResolver extends RulePlaybackResolver {
+  var calls = 0;
+
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async => [
+    _line('resolve-${++calls}', provider: rule.id, clientVerified: true),
+  ];
+}
+
+RulePluginState _enabledReviewRules(List<RulePlugin> rules) => RulePluginState(
+  installedIds: {for (final rule in rules) rule.id},
+  enabledIds: {for (final rule in rules) rule.id},
+  customRules: rules,
+  approvedPermissionDigests: {
+    for (final rule in rules) rule.id: rule.effectiveManifest.permissionDigest,
+  },
+);
+
+class _ReviewRuleResolver extends RulePlaybackResolver {
+  _ReviewRuleResolver(this.load);
+  final Future<List<PlaybackLine>> Function(RulePlugin, AnimeEpisode) load;
+  @override
+  Future<List<PlaybackLine>> resolveRule({
+    required RulePlugin rule,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    bool verifyPlayable = true,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) => load(rule, episode);
+}

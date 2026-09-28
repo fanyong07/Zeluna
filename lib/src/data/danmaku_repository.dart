@@ -66,6 +66,7 @@ class DanmakuRepository {
   final Future<String?> Function()? _officialTokenProvider;
   final Map<String, _TimedTimeline> _cache = {};
   final Map<String, Future<DanmakuTimeline>> _inFlight = {};
+  var _generation = 0;
   String? _wbiMixinKey;
   DateTime? _wbiMixinKeyExpiresAt;
   Future<String?>? _wbiKeyInFlight;
@@ -85,9 +86,11 @@ class DanmakuRepository {
     final active = _inFlight[key];
     if (active != null) return active;
 
+    final generation = _generation;
     late final Future<DanmakuTimeline> future;
     future = _loadTimeline(subject, episode, settings)
         .then((timeline) {
+          if (generation != _generation) return timeline;
           _cache[key] = _TimedTimeline(
             timeline: timeline,
             expiresAt: _now().add(
@@ -108,7 +111,10 @@ class DanmakuRepository {
   }
 
   void invalidate() {
+    // Old callers may finish, but cannot serve or cache a new account view.
+    _generation++;
     _cache.clear();
+    _inFlight.clear();
   }
 
   void close() {

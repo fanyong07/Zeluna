@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -234,9 +236,43 @@ def test_playback_completion_ignores_stale_device_update(tmp_path):
         ignored = await client.post(
             "/api/v1/sync/push", json={"mutations": [stale]}
         )
+        assert ignored.status_code == 200
         ignored_record = ignored.json()["acknowledged"][0]
+        assert ignored_record["client_mutation_id"] == stale["mutationId"]
+        current = accepted.json()["acknowledged"][0]
+        assert ignored_record == {
+            **current,
+            "client_mutation_id": stale["mutationId"],
+        }
         assert ignored_record["server_revision"] == completed_revision
         assert ignored_record["payload"]["completed"] is True
+
+        replay = await client.post(
+            "/api/v1/sync/push", json={"mutations": [stale]}
+        )
+        assert replay.status_code == 200
+        assert replay.json() == ignored.json()
+        pulled = await client.get("/api/v1/sync/pull")
+        assert pulled.status_code == 200
+        assert pulled.json()["records"] == [current]
+
+        # Equal-time completion must also reject a regressing progress update.
+        equal_time = {
+            **stale,
+            "mutationId": "position-device-c-0001",
+            "payload": {
+                **stale["payload"],
+                "updatedAt": completed["payload"]["updatedAt"],
+            },
+        }
+        same_time = await client.post(
+            "/api/v1/sync/push", json={"mutations": [equal_time]}
+        )
+        assert same_time.status_code == 200
+        assert same_time.json()["acknowledged"] == [
+            {**current, "client_mutation_id": equal_time["mutationId"]}
+        ]
+        assert same_time.json()["next_revision"] == completed_revision
 
     asyncio.run(_exercise_api(tmp_path / "sync-position.db", exercise))
 
@@ -260,3 +296,135 @@ def test_sync_payload_is_allowlisted_and_identity_bound(tmp_path):
         assert rejected.status_code == 422
 
     asyncio.run(_exercise_api(tmp_path / "sync-validation.db", exercise))
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_lost_ack_replay_keeps_submitted_id_and_current_record(tmp_path, deleted):
+    async def exercise(client, sessions, switch_user, first_id, second_id):
+        original = _library_mutation("lost-ack-device-a-0001", title="Before update")
+        accepted = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original]}
+        )
+        assert accepted.status_code == 200
+        original_revision = accepted.json()["next_revision"]
+        # Device A loses this response; B supersedes the record before A retries.
+        newer = _library_mutation(
+            "lost-ack-device-b-0001",
+            title="Current remote metadata",
+            updated_at="2026-08-08T10:00:00Z",
+            deleted=deleted,
+        )
+        updated = await client.post(
+            "/api/v1/sync/push", json={"mutations": [newer]}
+        )
+        assert updated.status_code == 200
+        current = updated.json()["acknowledged"][0]
+        assert current["server_revision"] > original_revision
+
+        replay = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original]}
+        )
+        assert replay.status_code == 200
+        acknowledgement = replay.json()["acknowledged"][0]
+        assert acknowledgement["client_mutation_id"] == original["mutationId"]
+        assert acknowledgement == {
+            **current,
+            "client_mutation_id": original["mutationId"],
+        }
+        assert replay.json()["next_revision"] == current["server_revision"]
+
+        pulled = await client.get(
+            "/api/v1/sync/pull", params={"after_revision": original_revision}
+        )
+        assert pulled.status_code == 200
+        assert pulled.json()["records"] == [current]
+        assert pulled.json()["next_revision"] == current["server_revision"]
+        repeated = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original]}
+        )
+        assert repeated.status_code == 200
+        assert repeated.json() == replay.json()
+
+        altered = _library_mutation(original["mutationId"], title="Different input")
+        conflict = await client.post(
+            "/api/v1/sync/push", json={"mutations": [altered]}
+        )
+        assert conflict.status_code == 409
+        async with sessions() as session:
+            assert await session.scalar(select(func.count(SyncMutation.id))) == 2
+            assert await session.scalar(select(func.count(SyncRevision.revision))) == 2
+            assert await session.scalar(select(func.count(SyncRecord.id))) == 1
+
+        # Identical mutation IDs have independent content and receipts per account.
+        switch_user(second_id)
+        empty = await client.get("/api/v1/sync/pull")
+        assert empty.status_code == 200
+        assert empty.json()["records"] == []
+        other_account = await client.post(
+            "/api/v1/sync/push", json={"mutations": [altered]}
+        )
+        assert other_account.status_code == 200
+        other_record = other_account.json()["acknowledged"][0]
+        assert other_record["account_id"] == str(second_id)
+        assert other_record["client_mutation_id"] == original["mutationId"]
+        assert other_record["payload"]["subject"]["title"] == "Different input"
+
+        switch_user(first_id)
+        original_account = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original]}
+        )
+        assert original_account.status_code == 200
+        assert original_account.json() == replay.json()
+        unchanged = await client.get("/api/v1/sync/pull")
+        assert unchanged.status_code == 200
+        assert unchanged.json()["records"] == [current]
+
+    asyncio.run(_exercise_api(tmp_path / "sync-lost-ack.db", exercise))
+
+
+def test_same_record_batch_replay_and_hash_conflict_remain_atomic(tmp_path):
+    async def exercise(client, sessions, _switch_user, _first_id, _second_id):
+        original = _library_mutation("batch-device-a-0001", title="First value")
+        newer = _library_mutation(
+            "batch-device-b-0001",
+            title="Second value",
+            updated_at="2026-08-08T10:00:00Z",
+        )
+        accepted = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original, newer]}
+        )
+        assert accepted.status_code == 200
+        first, current = accepted.json()["acknowledged"]
+        assert first["client_mutation_id"] == original["mutationId"]
+        assert current["client_mutation_id"] == newer["mutationId"]
+        assert first["payload"]["subject"]["title"] == "First value"
+        assert current["payload"]["subject"]["title"] == "Second value"
+        assert current["server_revision"] > first["server_revision"]
+
+        replay = await client.post(
+            "/api/v1/sync/push", json={"mutations": [original, newer]}
+        )
+        assert replay.status_code == 200
+        assert replay.json()["acknowledged"] == [
+            {**current, "client_mutation_id": original["mutationId"]},
+            current,
+        ]
+        assert replay.json()["next_revision"] == current["server_revision"]
+
+        uncommitted = _library_mutation(
+            "batch-device-c-0001", title="Must be rolled back"
+        )
+        altered = _library_mutation(original["mutationId"], title="Hash conflict")
+        conflict = await client.post(
+            "/api/v1/sync/push", json={"mutations": [uncommitted, altered]}
+        )
+        assert conflict.status_code == 409
+        pulled = await client.get("/api/v1/sync/pull")
+        assert pulled.status_code == 200
+        assert pulled.json()["records"] == [current]
+        async with sessions() as session:
+            assert await session.scalar(select(func.count(SyncMutation.id))) == 2
+            assert await session.scalar(select(func.count(SyncRevision.revision))) == 2
+            assert await session.scalar(select(func.count(SyncRecord.id))) == 1
+
+    asyncio.run(_exercise_api(tmp_path / "sync-batch-replay.db", exercise))

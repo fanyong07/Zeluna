@@ -456,6 +456,67 @@ void main() {
     expect(attackerRequests, 0);
   });
 
+  for (final destination in <String, String>{
+    'denied': 'https://attacker.test/video.m3u8',
+    'malformed': 'https://[invalid/video.m3u8',
+  }.entries) {
+    test('CORE-001 ${destination.key} media redirect releases once', () async {
+      var cancellations = 0;
+      final seen = <Uri>[];
+      final body = StreamController<List<int>>(onCancel: () => cancellations++);
+      addTearDown(() async {
+        if (cancellations == 0) await body.stream.listen(null).cancel();
+        await body.close();
+      });
+      final client = _PageContractClient(
+        MockClient.streaming((request, _) async {
+          seen.add(request.url);
+          String content;
+          switch (request.url.path) {
+            case '/vod/search.html':
+              content =
+                  '<div class="item"><strong>测试番剧</strong>'
+                  '<a class="detail" href="/detail/cleanup.html">详情</a></div>';
+            case '/detail/cleanup.html':
+              content =
+                  '<ul class="line"><li>'
+                  '<a href="/play/cleanup.html">第1集</a></li></ul>';
+            case '/play/cleanup.html':
+              content =
+                  '<script>var player={"url":'
+                  '"https://cdn.example.com/cleanup.m3u8"};</script>';
+            case '/cleanup.m3u8':
+              return http.StreamedResponse(
+                body.stream,
+                302,
+                headers: {'location': destination.value},
+              );
+            default:
+              content = 'ok';
+          }
+          return http.StreamedResponse(
+            Stream.value(utf8.encode(content)),
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          );
+        }),
+      );
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _animeSubject,
+        episode: _episode,
+      );
+      expect(lines.single.available, isFalse);
+      expect(seen.map((uri) => uri.host), isNot(contains('attacker.test')));
+      expect(seen.where((uri) => uri.path == '/cleanup.m3u8'), hasLength(1));
+      expect(cancellations, 1);
+      expect(client.closeCalls, 0);
+      final health = await client.get(Uri.parse('https://example.com/health'));
+      expect(health.body, 'ok');
+      expect(cancellations, 1);
+    });
+  }
+
   test('media redirect cannot escape approved rule domains', () async {
     var attackerRequests = 0;
     final line = await _resolveSinglePlayableLine(

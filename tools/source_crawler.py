@@ -28,6 +28,7 @@ try:
     _HTTPX = True
 except ImportError:
     import urllib.request
+    import urllib.error
     import ssl
 
     _HTTPX = False
@@ -47,16 +48,26 @@ def _http_get(url: str, timeout: int = 12, headers: dict | None = None) -> str |
         default_headers.update(headers)
     try:
         if _HTTPX:
-            client = _http.Client(timeout=_http.Timeout(timeout), follow_redirects=True)
-            resp = client.get(url, headers=default_headers)
-            if resp.status_code < 200 or resp.status_code >= 500:
-                return None
-            return resp.text
+            with _http.Client(
+                timeout=_http.Timeout(timeout), follow_redirects=True
+            ) as client:
+                resp = client.get(url, headers=default_headers)
+                try:
+                    if resp.status_code < 200 or resp.status_code >= 500:
+                        return None
+                    return resp.text
+                finally:
+                    resp.close()
         else:
             req = urllib.request.Request(url, headers=default_headers)
             ctx = ssl.create_default_context()
-            resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
-            return resp.read().decode("utf-8", errors="replace")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    return resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as error:
+                # Rejected HTTP statuses also own a response body/socket.
+                error.close()
+                return None
     except Exception:
         return None
 
@@ -321,7 +332,7 @@ def parse_kazumi_rule(raw: dict, import_url: str | None = None) -> VideoSource |
         return None
     anti = raw.get("antiCrawlerEnabled", False)
     return VideoSource(
-        id=f"kazumi-rule:{_stable_id(f'{name}:{import_url or ""}')}",
+        id=f"""kazumi-rule:{_stable_id(f'{name}:{import_url or ""}')}""",
         name=str(name),
         kind="kazumiRule",
         import_url=import_url,
@@ -414,7 +425,7 @@ def parse_anich(raw: dict, import_url: str | None = None) -> VideoSource | None:
         if raw.get(key):
             endpoints[key] = str(raw[key])
     return VideoSource(
-        id=f"anich:{_stable_id(f'{base}:{import_url or ""}')}",
+        id=f"""anich:{_stable_id(f'{base}:{import_url or ""}')}""",
         name="AniCh API",
         kind="anichApi",
         import_url=import_url,
@@ -514,7 +525,7 @@ def smart_parse(raw: dict | list | str, import_url: str | None = None) -> list[V
         name = str(raw.get("name") or raw.get("title") or raw.get("baseUrl") or raw.get("url") or "未知")
         return [
             VideoSource(
-                id=f"generic:{_stable_id(f'{name}:{import_url or ""}')}",
+                id=f"""generic:{_stable_id(f'{name}:{import_url or ""}')}""",
                 name=name,
                 kind="genericJson",
                 import_url=import_url,

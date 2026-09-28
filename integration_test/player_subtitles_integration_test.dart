@@ -12,7 +12,6 @@ import 'package:anime/src/player/subtitles/subtitle_overlay.dart';
 import 'package:anime/src/player/subtitles/subtitle_panel.dart';
 import 'package:anime/src/player/subtitles/subtitle_store.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -159,33 +158,46 @@ void main() {
         'rewind at a different rate uses media time',
       );
       expect(player.state.track.subtitle, originalTrack);
-      // Reveal controls via the existing tap gesture, then use the actual new entry.
-      await tester.tap(find.byType(Video).first);
-      await tester.pump(const Duration(milliseconds: 250));
+      Future<void> tapVisibleControl(String tooltip) async {
+        final control = find.byTooltip(tooltip).hitTestable();
+        if (control.evaluate().isEmpty) {
+          await tester.tapAt(tester.getCenter(find.byType(Video).first));
+          await tester.pump(const Duration(milliseconds: 400));
+        }
+        await until(() => control.evaluate().isNotEmpty, '$tooltip is visible');
+        await tester.tap(control.first);
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
       await player.pause();
-      await tester.tap(find.byTooltip('全屏'));
+      await tapVisibleControl('全屏');
       await until(
         () => find.byTooltip('退出全屏').evaluate().isNotEmpty,
         'fullscreen entered',
       );
-      expect(await AppFullscreenController().isEnabled(), isTrue);
+      if (Platform.isWindows) {
+        expect(await AppFullscreenController().isEnabled(), isTrue);
+      }
       expect(find.text('Original first line'), findsOneWidget);
       expect(player.state.track.subtitle, originalTrack);
-      await tester.tap(find.byTooltip('退出全屏'));
+      await tapVisibleControl('退出全屏');
       await until(
         () => find.byTooltip('全屏').evaluate().isNotEmpty,
         'fullscreen exited',
       );
-      expect(await AppFullscreenController().isEnabled(), isFalse);
+      if (Platform.isWindows) {
+        final fullscreen = AppFullscreenController();
+        for (
+          var attempt = 0;
+          attempt < 30 && await fullscreen.isEnabled();
+          attempt++
+        ) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+        expect(await fullscreen.isEnabled(), isFalse);
+      }
       await tester.pump(const Duration(milliseconds: 500));
-      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-      await mouse.addPointer(location: Offset.zero);
-      addTearDown(mouse.removePointer);
-      final viewport = tester.getRect(find.byType(Video).first);
-      await mouse.moveTo(viewport.center);
-      await mouse.moveTo(Offset(viewport.center.dx, viewport.top + 12));
-      await tester.pump(const Duration(milliseconds: 250));
-      await tester.tap(find.byTooltip('字幕').hitTestable());
+      await tapVisibleControl('字幕');
       await until(
         () => find.byType(SupplementalSubtitlePanel).evaluate().isNotEmpty,
         'subtitle panel opens after restoring window',

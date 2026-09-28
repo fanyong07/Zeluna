@@ -2,11 +2,15 @@
 JWT 认证 + Protobuf token 解析
 """
 
+import asyncio
 import hashlib
 import secrets
 import struct
 import time
-from typing import NamedTuple
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple, TypeVar
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 import bcrypt
 import jwt
@@ -108,6 +112,131 @@ def verify_login_password(password: str, hashed: str | None) -> bool:
 
 def password_hash_needs_upgrade(hashed: str) -> bool:
     return not hashed.startswith(_BCRYPT_SHA256_PREFIX)
+
+
+# Separate from asyncio's shared executor: account traffic must not starve
+# unrelated network/file work. The process-wide pool bounds *real* workers even
+# across event loops; per-loop admission also avoids an unbounded executor queue.
+_PASSWORD_WORKERS = 2
+_password_executor = ThreadPoolExecutor(
+    max_workers=_PASSWORD_WORKERS, thread_name_prefix="zeluna-password"
+)
+_password_slots: WeakKeyDictionary[
+    asyncio.AbstractEventLoop, ReferenceType[asyncio.Semaphore]
+] = WeakKeyDictionary()
+_PasswordResult = TypeVar("_PasswordResult")
+
+
+async def run_password_work(
+    function: Callable[..., _PasswordResult], *args: str | None
+) -> _PasswordResult:
+    """Run only pure password/hash work, never a session or an ORM operation."""
+    loop = asyncio.get_running_loop()
+    slots_ref = _password_slots.get(loop)
+    slots = slots_ref() if slots_ref is not None else None
+    if slots is None:
+        slots = asyncio.Semaphore(_PASSWORD_WORKERS)
+        # A contended semaphore retains its loop. Weak values avoid keeping
+        # closed test/ASGI loops alive; jobs and waiters own the live semaphore.
+        _password_slots[loop] = ref(slots)
+    await slots.acquire()
+    try:
+        work = _password_executor.submit(function, *args)
+    except BaseException:
+        slots.release()
+        raise
+
+    def completed(_):
+        # Canceling an asyncio waiter cannot stop a running bcrypt call. Only
+        # completion of the underlying concurrent Future returns its capacity.
+        try:
+            loop.call_soon_threadsafe(slots.release)
+        except RuntimeError:
+            pass  # The owning loop has closed; the process pool is still bounded.
+
+    work.add_done_callback(completed)
+    return await asyncio.wrap_future(work, loop=loop)
+
+
+class PasswordAccountState(NamedTuple):
+    user_id: int
+    email: str
+    password_hash: str
+    deletion_requested_at: float
+    deletion_due_at: float
+
+    @classmethod
+    def capture(cls, user: User) -> "PasswordAccountState":
+        return cls(
+            user.id,
+            user.email,
+            user.password_hash,
+            user.deletion_requested_at,
+            user.deletion_due_at,
+        )
+
+
+class PasswordSessionState(NamedTuple):
+    token_id: int
+    token: str
+    jwt_id: str
+    session_id: str | None
+
+    @classmethod
+    def capture(cls, token: UserToken) -> "PasswordSessionState":
+        return cls(token.id, token.token, token.token_id, token.session_id)
+
+
+async def revalidate_password_account(
+    session: AsyncSession,
+    expected: PasswordAccountState,
+    token: PasswordSessionState | None = None,
+) -> User | None:
+    """Fence authorization after password awaits, on the event-loop thread.
+
+    A conditional no-op write both bypasses the identity map and locks the row
+    until the caller commits/rolls back. A SELECT/refresh alone would leave a
+    new race between revalidation and token issuance or mutation. No expensive
+    password work may follow this fence. A stale result is fail-closed.
+    """
+    with session.no_autoflush:
+        user = await session.scalar(
+            update(User)
+            .where(
+                User.id == expected.user_id,
+                User.email == expected.email,
+                User.password_hash == expected.password_hash,
+                User.deletion_requested_at == expected.deletion_requested_at,
+                User.deletion_due_at == expected.deletion_due_at,
+            )
+            .values(password_hash=User.password_hash)
+            .returning(User)
+            .execution_options(populate_existing=True, synchronize_session=False)
+        )
+        if user is not None and token is not None:
+            # Lock in the same user -> token order as password changes/deletion.
+            # Logout/revoke/refresh while the password worker ran must invalidate
+            # the old dependency result, even if the password itself is unchanged.
+            current_token_id = await session.scalar(
+                update(UserToken)
+                .where(
+                    UserToken.id == token.token_id,
+                    UserToken.user_id == expected.user_id,
+                    UserToken.token == token.token,
+                    UserToken.token_id == token.jwt_id,
+                    UserToken.session_id == token.session_id,
+                    UserToken.revoked_at == 0,
+                    (UserToken.expires_at == 0) | (UserToken.expires_at > time.time()),
+                )
+                .values(token=UserToken.token)
+                .returning(UserToken.id)
+                .execution_options(synchronize_session=False)
+            )
+            if current_token_id is None:
+                user = None
+    if user is None:
+        await session.rollback()
+    return user
 
 
 def create_jwt(user_id: int, session_id: str | None = None) -> str:

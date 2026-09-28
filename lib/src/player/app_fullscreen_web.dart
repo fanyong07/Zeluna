@@ -29,9 +29,10 @@ class AppFullscreenController {
         await web.document.exitFullscreen().toDart;
       }
     } catch (_) {
-      return false;
+      return _isEnabledSync;
     }
-    return _isEnabledSync == enabled;
+    // Match the native controller: return observed state, not a success flag.
+    return _isEnabledSync;
   }
 
   Future<bool> isEnabled() async => _isEnabledSync;

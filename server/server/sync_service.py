@@ -57,7 +57,7 @@ class SyncService:
                 )
                 if record is None:
                     raise RuntimeError("sync mutation receipt has no record")
-                results.append(_record_payload(record))
+                results.append(_acknowledgement_payload(record, mutation.mutation_id))
                 next_revision = max(next_revision, record.revision)
                 continue
 
@@ -94,7 +94,7 @@ class SyncService:
                 revision=revision,
                 now=now,
             )
-            results.append(_record_payload(record))
+            results.append(_acknowledgement_payload(record, mutation.mutation_id))
             next_revision = max(next_revision, record.revision)
 
         await self._repository.commit()
@@ -193,6 +193,12 @@ def _canonical_json(payload: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _acknowledgement_payload(record: SyncRecord, mutation_id: str) -> dict[str, Any]:
+    # Push acknowledges the submitted operation, even if a newer record won.
+    # Pull still identifies the mutation that produced the current record.
+    return {**_record_payload(record), "client_mutation_id": mutation_id}
 
 
 def _record_payload(record: SyncRecord) -> dict[str, Any]:

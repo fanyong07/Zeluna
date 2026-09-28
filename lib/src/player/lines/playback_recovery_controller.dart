@@ -19,7 +19,7 @@ final class PlaybackRecoveryController {
   DateTime? _lastStallRecoveryAt;
   DateTime? _stallSuppressedUntil;
   bool _autoSwitching = false;
-  bool _autoSwitchRetryPending = false;
+  Future<void> Function(Duration resumePosition)? _pendingAutoSwitchAttempt;
   Duration? _pendingAutoSwitchResumePosition;
   bool _disposed = false;
 
@@ -94,7 +94,7 @@ final class PlaybackRecoveryController {
   }) async {
     if (_disposed) return;
     if (_autoSwitching) {
-      _autoSwitchRetryPending = true;
+      _pendingAutoSwitchAttempt = attempt;
       final pending = playbackRecoveryPosition(resumePosition ?? Duration.zero);
       if (pending > (_pendingAutoSwitchResumePosition ?? Duration.zero)) {
         _pendingAutoSwitchResumePosition = pending;
@@ -104,28 +104,32 @@ final class PlaybackRecoveryController {
     final targetResumePosition = playbackRecoveryPosition(
       resumePosition ?? _pendingAutoSwitchResumePosition ?? Duration.zero,
     );
-    _pendingAutoSwitchResumePosition = null;
+    clearPendingAutoSwitch();
     _autoSwitching = true;
     try {
       await attempt(targetResumePosition);
     } finally {
       _autoSwitching = false;
-      if (_autoSwitchRetryPending && !_disposed) {
-        _autoSwitchRetryPending = false;
-        final pendingResumePosition = _pendingAutoSwitchResumePosition;
-        _pendingAutoSwitchResumePosition = null;
-        scheduleMicrotask(
-          () => runAutoSwitch(
-            resumePosition: pendingResumePosition,
-            attempt: attempt,
-          ),
-        );
+      if (_pendingAutoSwitchAttempt != null && !_disposed) {
+        scheduleMicrotask(() {
+          // Keep pending work revocable until dispatch, including manual resets.
+          final pendingAttempt = _pendingAutoSwitchAttempt;
+          if (_disposed || pendingAttempt == null) return;
+          final pendingResumePosition = _pendingAutoSwitchResumePosition;
+          clearPendingAutoSwitch();
+          unawaited(
+            runAutoSwitch(
+              resumePosition: pendingResumePosition,
+              attempt: pendingAttempt,
+            ),
+          );
+        });
       }
     }
   }
 
   void clearPendingAutoSwitch() {
-    _autoSwitchRetryPending = false;
+    _pendingAutoSwitchAttempt = null;
     _pendingAutoSwitchResumePosition = null;
   }
 

@@ -104,6 +104,8 @@ class DrpyLocalStorage {
     _namespaces[namespace] = Map<String, Object?>.from(values);
   }
 
+  void clear() => _namespaces.clear();
+
   UnmodifiableMapView<String, Map<String, Object?>> get debugSnapshot =>
       UnmodifiableMapView(_namespaces);
 }

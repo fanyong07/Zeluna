@@ -42,7 +42,6 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
     if (controller == null) return null;
 
     final session = _WindowsSniffSession(request, controller);
-    _activeSession = session;
     try {
       if (!await session.network.allows(
         request.pageUrl.toString(),
@@ -50,6 +49,19 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
       )) {
         return null;
       }
+      // A failed blank reset retains the native controller. Its permissions
+      // belong to the previous rule until this task reapplies and confirms them.
+      // Round-trip the existing settings: a JS-only settings object would reset
+      // the Windows plugin's other flags, including navigation interception.
+      final settings = await controller.getSettings();
+      if (settings == null) return null;
+      settings.javaScriptEnabled = request.manifest.javascript;
+      await controller.setSettings(settings: settings);
+      final appliedSettings = await controller.getSettings();
+      if (appliedSettings?.javaScriptEnabled != request.manifest.javascript) {
+        return null;
+      }
+      _activeSession = session;
       await clearAnimekoWebViewTaskStorage(controller);
       await session.seedCookies();
       session.startTimeout();

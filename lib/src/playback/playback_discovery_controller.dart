@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../core/identity/stable_identity.dart';
 import '../data/playback_prefetch_cache.dart';
 import '../data/playback_source_repository.dart';
 import '../data/zeluna_backend_playback_repository.dart';
@@ -224,7 +225,7 @@ final class PlaybackDiscoveryController {
     if (identical(_ruleState, ruleState)) return;
     _ruleState = ruleState;
     _invalidateAsyncWork();
-    _clearRuleRuntimeCaches();
+    _retireRuleRuntimeScope();
   }
 
   void updateHistory(
@@ -445,6 +446,11 @@ final class PlaybackDiscoveryController {
             startBackendCandidateProbe();
           case 'probe':
             probedBackendLines = event.lines;
+            // Verification updates only the matching route/request; a peer
+            // with the same ID may carry a different request context.
+            for (final line in probedBackendLines) {
+              backendLines = _replaceBackendRouteProbe(backendLines, line);
+            }
             if (hasPlayableLine(probedBackendLines)) {
               _cacheBackendPlaybackLines(
                 scope,
@@ -722,19 +728,17 @@ final class PlaybackDiscoveryController {
             startBackendCandidateProbe();
           case 'probe':
             probedBackendLines = event.lines;
+            // Verification updates only the matching route/request; a peer
+            // with the same ID may carry a different request context.
+            for (final line in probedBackendLines) {
+              backendLines = _replaceBackendRouteProbe(backendLines, line);
+            }
             if (probedBackendLines.isNotEmpty) {
-              var verifiedBackendLines = backendLines;
-              for (final line in probedBackendLines) {
-                verifiedBackendLines = replacePlaybackLine(
-                  verifiedBackendLines,
-                  line,
-                );
-              }
               _cacheBackendPlaybackLines(
                 scope,
                 subject,
                 episode,
-                verifiedBackendLines,
+                backendLines,
                 expandAll: expandAll,
               );
             }
@@ -922,10 +926,7 @@ final class PlaybackDiscoveryController {
       cancellationToken: token,
     );
     if (!_isCurrent(scope) || token.isCancelled) return;
-    baseLines = mergePlaybackLines(<PlaybackLine>[
-      ...baseLines,
-      ...expandedBackendLines,
-    ]);
+    baseLines = _mergeBackendRouteUpdates(baseLines, expandedBackendLines);
     final backendProbeCandidates = _backendLinesNeedingBackgroundProbe(
       baseLines,
     );
@@ -953,7 +954,7 @@ final class PlaybackDiscoveryController {
         ),
       )) {
         if (!_isCurrent(scope) || token.isCancelled) return;
-        clientCheckedBaseLines = replacePlaybackLine(
+        clientCheckedBaseLines = _replaceBackendRouteProbe(
           clientCheckedBaseLines,
           probedLine,
         );
@@ -1026,7 +1027,7 @@ final class PlaybackDiscoveryController {
             backendDone = true;
             backendNext = null;
           } else {
-            clientCheckedBaseLines = replacePlaybackLine(
+            clientCheckedBaseLines = _replaceBackendRouteProbe(
               clientCheckedBaseLines,
               backendIterator.current,
             );
@@ -1230,17 +1231,30 @@ final class PlaybackDiscoveryController {
     }
 
     final refreshThreshold = _now().add(const Duration(seconds: 15));
-    final probeCandidates = candidates
-        .where(
-          (line) =>
-              !line.clientVerified &&
-              (line.serverVerified || line.requiresClientProbe) &&
-              (line.url?.trim().isNotEmpty ?? false) &&
-              (line.expiresAt == null ||
-                  line.expiresAt!.isAfter(refreshThreshold)),
-        )
-        .take(cacheEpisode ? 2 : 3)
-        .toList(growable: false);
+    // Qualify one version per request before probing. An already client-checked
+    // route must not be re-probed through an obsolete trust version; independent
+    // requests still retain mergePlaybackLines' trust-sensitive identity.
+    final probeCandidates =
+        _mergeBackendRouteUpdates(
+              candidates.where(
+                (line) =>
+                    line.available &&
+                    line.clientVerified &&
+                    (line.expiresAt == null ||
+                        line.expiresAt!.isAfter(refreshThreshold)),
+              ),
+              candidates,
+            )
+            .where(
+              (line) =>
+                  !line.clientVerified &&
+                  (line.serverVerified || line.requiresClientProbe) &&
+                  (line.url?.trim().isNotEmpty ?? false) &&
+                  (line.expiresAt == null ||
+                      line.expiresAt!.isAfter(refreshThreshold)),
+            )
+            .take(cacheEpisode ? 2 : 3)
+            .toList(growable: false);
     await for (final verified in probePlaybackLinesProgressively(
       probeCandidates,
       maxConcurrent: cacheEpisode ? 2 : 3,
@@ -1252,7 +1266,7 @@ final class PlaybackDiscoveryController {
       ),
     )) {
       if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
-      candidates = replacePlaybackLine(candidates, verified);
+      candidates = _replaceBackendRouteProbe(candidates, verified);
     }
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final ranked = rankPlaybackLinesForStartup(candidates);
@@ -1573,6 +1587,13 @@ final class PlaybackDiscoveryController {
   void _invalidateScope() {
     _scopeEpoch++;
     _invalidateAsyncWork(incrementEpoch: false);
+    _retireRuleRuntimeScope();
+  }
+
+  void _retireRuleRuntimeScope() {
+    // Retire discovery's repository caches before resetting the injected
+    // resolver's account-scoped state. Ordinary refreshes do not enter here.
+    RulePlaybackSourceRepository.clearRuntimeCaches();
     _clearRuleRuntimeCaches();
   }
 
@@ -1631,12 +1652,64 @@ final class PlaybackDiscoveryController {
       ].join('|');
 }
 
+// Verification flags describe a version of one backend route, but are still
+// security distinctions between independent routes in mergePlaybackLines.
+Object _backendRouteRequestKey(PlaybackLine line) => (
+  line.providerId,
+  line.episodeId,
+  line.id,
+  line.url ?? '',
+  stableHeaderFingerprint(line.headers),
+);
+
+List<PlaybackLine> _mergeBackendRouteUpdates(
+  Iterable<PlaybackLine> previous,
+  Iterable<PlaybackLine> updates,
+) {
+  final versions = <PlaybackLine>[];
+  final indexes = <Object, int>{};
+  for (final line in [...previous, ...updates]) {
+    final key = _backendRouteRequestKey(line);
+    final index = indexes[key];
+    if (index == null) {
+      indexes[key] = versions.length;
+      versions.add(line);
+    } else if (!versions[index].available && line.available) {
+      // Upgrade in place; a later candidate must not downgrade a usable route.
+      versions[index] = line;
+    }
+  }
+  return mergePlaybackLines(versions);
+}
+
+List<PlaybackLine> _replaceBackendRouteProbe(
+  Iterable<PlaybackLine> lines,
+  PlaybackLine probe,
+) {
+  final key = _backendRouteRequestKey(probe);
+  return List<PlaybackLine>.unmodifiable([
+    for (final line in lines)
+      _backendRouteRequestKey(line) == key ? probe : line,
+  ]);
+}
+
 List<PlaybackLine> mergePlaybackLines(Iterable<PlaybackLine> lines) {
   final merged = <PlaybackLine>[];
-  final indexes = <String, int>{};
+  final indexes = <Object, int>{};
   for (final line in lines) {
     final url = line.url ?? '';
-    final key = url.isNotEmpty ? url : '${line.providerId}:${line.id}';
+    // A URL is playable only in its request and verification context. This
+    // ephemeral key must not normalize signed URLs or replace persistent IDs.
+    final Object key = url.isNotEmpty
+        ? (
+            url,
+            stableHeaderFingerprint(line.headers),
+            line.publicHttpOnly,
+            line.serverVerified,
+            line.clientVerified,
+            line.requiresClientProbe,
+          )
+        : (line.providerId, line.id);
     final previousIndex = indexes[key];
     if (previousIndex == null) {
       indexes[key] = merged.length;

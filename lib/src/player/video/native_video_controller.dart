@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -375,6 +376,21 @@ final class NativeVideoController {
     );
     resumeSeek = NativeResumeSeekController(
       readOpenSerial: readOpenSerial ?? () => 0,
+      seek: player.seek,
+    );
+  }
+
+  /// Keeps real subscription/watchdog ownership while replacing only the engine
+  /// and video surface in page tests. Disposal owns [player], as in production.
+  @visibleForTesting
+  NativeVideoController.forTesting({
+    required this.player,
+    required this.surfaceController,
+    required int Function() readOpenSerial,
+  }) {
+    assert(identical(surfaceController.player, player));
+    resumeSeek = NativeResumeSeekController(
+      readOpenSerial: readOpenSerial,
       seek: player.seek,
     );
   }

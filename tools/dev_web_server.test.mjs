@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as requestHttp } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 
@@ -616,4 +621,255 @@ test('source host allowlist is exact and redirect-safe', () => {
     ),
     (error) => error?.statusCode === 400,
   );
+});
+
+
+// Each child imports the server after entering its own fixture cwd. Never point
+// static tests at the repository build or change the server's default root.
+async function staticFixture(t, { index = true, build = true, setup = '' } = {}) {
+  const parent = await realpath(tmpdir());
+  const workspace = await mkdtemp(join(parent, 'zeluna-static-test-'));
+  const verified = await realpath(workspace);
+  assert.equal(dirname(verified), parent);
+  assert.ok(basename(verified).startsWith('zeluna-static-test-'));
+  let child;
+  let exited;
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
+    if (exited) await exited;
+    // Delete only the exact generated and verified test directory.
+    assert.equal(await realpath(workspace), verified);
+    assert.equal(dirname(verified), parent);
+    await rm(verified, { recursive: true, force: true });
+  });
+  if (build) {
+    await mkdir(join(workspace, 'build/web'), { recursive: true });
+    await mkdir(join(workspace, 'build/web-audit-fixture'), { recursive: true });
+    if (index) await writeFile(join(workspace, 'build/web/index.html'), 'SAFE_INDEX');
+    await writeFile(join(workspace, 'build/web/app.js'), 'SAFE_ASSET');
+    await writeFile(join(workspace, 'build/web/style.css'), 'SAFE_STYLE');
+    await writeFile(join(workspace, 'build/web/empty.txt'), '');
+    await writeFile(join(workspace, 'build/web/..notes.txt'), 'SAFE_DOT_NAME');
+    await writeFile(join(workspace, 'build/web-audit-fixture/probe.txt'), 'OUTSIDE_ROOT_FIXTURE');
+  }
+  const moduleUrl = new URL('./dev_web_server.mjs', import.meta.url).href;
+  child = spawn(process.execPath, ['--input-type=module', '--eval', `
+    ${setup}
+    const { createAnimeWebServer } = await import(${JSON.stringify(moduleUrl)});
+    const server = createAnimeWebServer({
+      fetchUpstream: async () => { throw new Error('Network forbidden in static fixture'); },
+    });
+    server.listen(0, '127.0.0.1', () => process.send({ port: server.address().port }));
+  `], { cwd: workspace, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  exited = once(child, 'exit');
+  const errors = [];
+  child.stderr.on('data', (chunk) => errors.push(chunk.toString()));
+  const [ready] = await Promise.race([
+    once(child, 'message'),
+    exited.then(() => { throw new Error('Static fixture exited before listening'); }),
+  ]);
+  return {
+    baseUrl: `http://127.0.0.1:${ready.port}`,
+    workspace,
+    child,
+    errors,
+    exited,
+  };
+}
+
+for (const separator of ['%2f', '%5c']) {
+  test(`static containment rejects same-prefix sibling via ${separator}`, { timeout: 5000 }, async (t) => {
+    const { baseUrl } = await staticFixture(t);
+    const response = await fetch(`${baseUrl}/..${separator}web-audit-fixture${separator}probe.txt`);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), 'SAFE_INDEX');
+  });
+}
+
+test('static root, assets and SPA fallback preserve content and headers', { timeout: 5000 }, async (t) => {
+  const { baseUrl } = await staticFixture(t);
+  for (const route of ['/', '/index.html', '/watch/episode?id=1', '/missing.js']) {
+    const response = await fetch(`${baseUrl}${route}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(await response.text(), 'SAFE_INDEX');
+  }
+  const asset = await fetch(`${baseUrl}/app.js?v=1`);
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get('content-type'), 'application/javascript; charset=utf-8');
+  assert.equal(asset.headers.get('cache-control'), 'no-store');
+  assert.equal(await asset.text(), 'SAFE_ASSET');
+  for (const [path, text] of [
+    ['/style.css', 'SAFE_STYLE'],
+    ['/empty.txt', ''],
+    ['/..notes.txt', 'SAFE_DOT_NAME'],
+  ]) {
+    const response = await fetch(`${baseUrl}${path}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=60');
+    assert.equal(await response.text(), text);
+  }
+});
+
+test('static missing index returns safe error and keeps server alive', { timeout: 5000 }, async (t) => {
+  const { baseUrl, workspace, child, errors, exited } = await staticFixture(t, { index: false });
+  for (const route of ['/', '/watch/episode']) {
+    const response = await fetch(`${baseUrl}${route}`).catch(async () => {
+      const [code] = await exited;
+      assert.fail(`Missing index terminated server: exit=${code}, unhandled=${errors.join('').includes('Unhandled')}, ENOENT=${errors.join('').includes('ENOENT')}`);
+    });
+    assert.equal(response.status, 404);
+    const body = await response.text();
+    assert.doesNotMatch(body, /ENOENT|build[/\\]web/);
+    assert.ok(!body.includes(workspace));
+  }
+  const asset = await fetch(`${baseUrl}/app.js`);
+  assert.equal(await asset.text(), 'SAFE_ASSET');
+  assert.equal(child.exitCode, null);
+  assert.deepEqual(errors, []);
+});
+
+
+for (const code of ['EACCES', 'EIO']) {
+  test(`static ${code} before body returns safe non-200 and survives`, { timeout: 5000 }, async (t) => {
+    const { baseUrl, workspace, child } = await staticFixture(t, { setup: `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { Readable } from 'node:stream';
+      fs.createReadStream = (path) => new Readable({
+        read() { this.destroy(Object.assign(new Error('private path: ' + path), { code: '${code}' })); },
+      });
+      syncBuiltinESMExports();
+    ` });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(`${baseUrl}/`);
+      assert.equal(response.status, 500);
+      const body = await response.text();
+      assert.ok(!body.includes(workspace));
+      assert.doesNotMatch(body, /private path|index\.html/);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+    }
+    assert.equal(child.exitCode, null);
+  });
+}
+
+test('static file removed after stat is handled without false 200', { timeout: 5000 }, async (t) => {
+  const { baseUrl, child } = await staticFixture(t, { setup: `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    const original = fs.createReadStream;
+    fs.createReadStream = (path) => { fs.unlinkSync(path); return original(path); };
+    syncBuiltinESMExports();
+  ` });
+  const response = await fetch(`${baseUrl}/app.js`);
+  assert.equal(response.status, 404);
+  assert.doesNotMatch(await response.text(), /ENOENT|app\.js/);
+  const health = await fetch(`${baseUrl}/reset-browser-cache`);
+  assert.equal(health.status, 200);
+  await health.text();
+  assert.equal(child.exitCode, null);
+});
+
+test('static directory index fails safely without leaking paths', { timeout: 5000 }, async (t) => {
+  const { baseUrl, workspace } = await staticFixture(t, { index: false });
+  await mkdir(join(workspace, 'build/web/index.html'));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await fetch(`${baseUrl}/`);
+    assert.equal(response.status, 500);
+    assert.ok(!(await response.text()).includes(workspace));
+  }
+});
+
+test('static error after partial body aborts transfer but keeps service alive', { timeout: 5000 }, async (t) => {
+  const { baseUrl, child } = await staticFixture(t, { setup: `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { Readable } from 'node:stream';
+    fs.createReadStream = () => {
+      let sent = false;
+      return new Readable({ read() {
+        if (sent) return;
+        sent = true;
+        this.push('PARTIAL');
+        setImmediate(() => this.destroy(new Error('offline late read error')));
+      } });
+    };
+    syncBuiltinESMExports();
+  ` });
+  await assert.rejects(async () => {
+    const response = await fetch(`${baseUrl}/`);
+    await response.text();
+  });
+  const health = await fetch(`${baseUrl}/reset-browser-cache`);
+  assert.equal(health.status, 200);
+  await health.text();
+  assert.equal(child.exitCode, null);
+});
+
+for (const started of [false, true]) {
+  test(`static disconnect closes file stream (${started ? 'after' : 'before'} body)`, { timeout: 5000 }, async (t) => {
+    const { baseUrl, child } = await staticFixture(t, { setup: `
+      import fs from 'node:fs';
+      import { syncBuiltinESMExports } from 'node:module';
+      const original = fs.createReadStream;
+      fs.createReadStream = (path) => {
+        const stream = original(path);
+        stream._read = () => {};
+        stream.once('open', () => {
+          ${started ? "stream.push('PARTIAL');" : ''}
+          process.send({ opened: true });
+        });
+        stream.once('close', () => process.send({ fileClosed: stream.closed, fd: stream.fd }));
+        return stream;
+      };
+      syncBuiltinESMExports();
+    ` });
+    const opened = once(child, 'message');
+    const request = requestHttp(`${baseUrl}/`);
+    request.on('error', () => {}); // Client cancellation is intentional.
+    let response;
+    request.on('response', (value) => { response = value; value.on('error', () => {}); });
+    const data = started ? once(request, 'response').then(([value]) => once(value, 'data')) : null;
+    request.end();
+    assert.deepEqual((await opened)[0], { opened: true });
+    if (data) await data;
+    const closed = once(child, 'message');
+    response?.destroy();
+    request.destroy();
+    assert.deepEqual((await closed)[0], { fileClosed: true, fd: null });
+    const health = await fetch(`${baseUrl}/reset-browser-cache`);
+    assert.equal(health.status, 200);
+    await health.text();
+    assert.equal(child.exitCode, null);
+  });
+}
+
+
+test('static absent build recovers when fixture files appear', { timeout: 5000 }, async (t) => {
+  const { baseUrl, workspace } = await staticFixture(t, { build: false });
+  const missing = await fetch(`${baseUrl}/`);
+  assert.equal(missing.status, 404);
+  assert.ok(!(await missing.text()).includes(workspace));
+  await mkdir(join(workspace, 'build/web'), { recursive: true });
+  await writeFile(join(workspace, 'build/web/index.html'), 'RECOVERED_INDEX');
+  const recovered = await fetch(`${baseUrl}/watch/episode`);
+  assert.equal(recovered.status, 200);
+  assert.equal(await recovered.text(), 'RECOVERED_INDEX');
+});
+
+test('static synchronous stat failure hides filesystem details', { timeout: 5000 }, async (t) => {
+  const { baseUrl, workspace } = await staticFixture(t, { setup: `
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    fs.statSync = (path) => { throw Object.assign(new Error('private path: ' + path), { code: 'EACCES' }); };
+    syncBuiltinESMExports();
+  ` });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await fetch(`${baseUrl}/`);
+    assert.equal(response.status, 500);
+    const body = await response.text();
+    assert.ok(!body.includes(workspace));
+    assert.doesNotMatch(body, /private path|index\.html/);
+  }
 });

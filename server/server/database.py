@@ -3,6 +3,7 @@ SQLAlchemy 异步引擎 + ORM 模型
 """
 
 import datetime
+from collections.abc import Callable
 from pathlib import Path
 
 from alembic.config import Config
@@ -18,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
     String, Integer, Float, Boolean, Text, ForeignKey, DateTime, func,
-    CheckConstraint, UniqueConstraint, Index, select, text,
+    CheckConstraint, UniqueConstraint, Index, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -836,31 +837,58 @@ async def upsert_playback_cache(
     line_count: int,
     verified_at: float,
     scan_scope: str = "full",
+    can_replace: Callable[[PlaybackCache], bool] | None = None,
 ) -> PlaybackCache:
-    """Store one cache row and recover cleanly from concurrent inserts."""
+    """Store a cache row; qualify conditional writes against the updated snapshot.
+
+    The optional predicate is synchronous and side-effect free. Full/legacy
+    writers remain unconditional. A contended quick write retries at most three
+    times, then retains the winner rather than delaying foreground playback.
+    """
     query = select(PlaybackCache).where(
         PlaybackCache.subject_id == subject_id,
         PlaybackCache.episode == episode,
+    ).execution_options(populate_existing=True)
+    values = dict(
+        title=title,
+        lines_json=lines_json,
+        line_count=line_count,
+        verified_at=verified_at,
+        scan_scope=scan_scope,
     )
-
-    def apply(target: PlaybackCache) -> None:
-        target.title = title
-        target.lines_json = lines_json
-        target.line_count = line_count
-        target.verified_at = verified_at
-        target.scan_scope = scan_scope
-
-    row = (await session.execute(query)).scalar_one_or_none()
-    if row is None:
-        row = PlaybackCache(subject_id=subject_id, episode=episode)
+    for _attempt in range(3):
+        row = (await session.execute(query)).scalar_one_or_none()
+        if row is not None:
+            if can_replace is not None and not can_replace(row):
+                return row
+            statement = update(PlaybackCache).where(PlaybackCache.id == row.id)
+            if can_replace is not None:
+                # Compare every qualifying field, including JSON route expiry.
+                # A timestamp alone need not identify a unique write.
+                statement = statement.where(
+                    *(getattr(PlaybackCache, field) == getattr(row, field)
+                      for field in values),
+                )
+            # Write ALL fields, even those unchanged from this session's read:
+            # a concurrent quick writer may have changed scope/count meanwhile.
+            result = await session.execute(
+                statement.values(**values).execution_options(synchronize_session=False)
+            )
+            if result.rowcount == 0:
+                await session.rollback()
+                continue
+            await session.commit()
+            await session.refresh(row)
+            return row
+        row = PlaybackCache(subject_id=subject_id, episode=episode, **values)
         session.add(row)
-    apply(row)
-    try:
-        await session.commit()
-        return row
-    except IntegrityError:
-        await session.rollback()
-        row = (await session.execute(query)).scalar_one()
-        apply(row)
-        await session.commit()
-        return row
+        try:
+            await session.commit()
+            return row
+        except IntegrityError:
+            await session.rollback()
+            # A cold insert can lose to a full/compat writer in another
+            # session. Re-qualify that row, never blindly apply the quick data.
+            if (await session.execute(query)).scalar_one_or_none() is None:
+                raise
+    return (await session.execute(query)).scalar_one()

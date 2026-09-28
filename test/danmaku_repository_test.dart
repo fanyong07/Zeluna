@@ -11,6 +11,181 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  for (final order in ['new first', 'old first', 'old before new request']) {
+    test(
+      'invalidation detaches old account future and protects new cache ($order)',
+      () async {
+        final oldResponse = Completer<http.Response>();
+        final newResponse = Completer<http.Response>();
+        final oldStarted = Completer<void>();
+        final newStarted = Completer<void>();
+        var token = 'synthetic-account-a';
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected public request'),
+          ),
+          officialTokenProvider: () async => token,
+          officialClient: MockClient((request) async {
+            attempts++;
+            expect(request.url.path, endsWith('/danmaku/mine'));
+            if (attempts == 1) {
+              expect(
+                request.headers['Authorization'],
+                'Bearer synthetic-account-a',
+              );
+              oldStarted.complete();
+              return oldResponse.future;
+            }
+            expect(
+              request.headers['Authorization'],
+              'Bearer synthetic-account-b',
+            );
+            newStarted.complete();
+            return newResponse.future;
+          }),
+        );
+        final pending = <Future<DanmakuTimeline>>[];
+        addTearDown(() async {
+          if (!oldResponse.isCompleted) {
+            oldResponse.complete(_jsonResponse({'comments': []}));
+          }
+          if (!newResponse.isCompleted) {
+            newResponse.complete(_jsonResponse({'comments': []}));
+          }
+          await Future.wait(pending);
+          repository.close();
+        });
+        const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+        final old = repository.timelineForEpisode(_subject, _episode, settings);
+        pending.add(old);
+        await oldStarted.future;
+
+        repository.invalidate();
+        token = 'synthetic-account-b';
+        if (order == 'old before new request') {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          await old;
+        }
+        final current = repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        pending.add(current);
+        expect(identical(old, current), isFalse);
+        await newStarted.future.timeout(const Duration(seconds: 1));
+        expect(attempts, 2);
+        expect(
+          identical(
+            current,
+            repository.timelineForEpisode(_subject, _episode, settings),
+          ),
+          isTrue,
+        );
+
+        if (order == 'old first') {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          await old;
+          expect(
+            identical(
+              current,
+              repository.timelineForEpisode(_subject, _episode, settings),
+            ),
+            isTrue,
+            reason:
+                'old completion must not remove or replace the current flight',
+          );
+        }
+        newResponse.complete(_ownedTimelineResponse(isMine: false));
+        final latest = await current;
+        if (!oldResponse.isCompleted) {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+        }
+        expect((await old).comments.single.isMine, isTrue);
+        expect(latest.comments.single.isMine, isFalse);
+        final cached = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(cached, latest), isTrue);
+        expect(cached.comments.single.isMine, isFalse);
+        expect(attempts, 2);
+      },
+    );
+  }
+
+  for (final deleted in [false, true]) {
+    test(
+      'mutation invalidation keeps the refreshed state (deleted=$deleted)',
+      () async {
+        final oldResponse = Completer<http.Response>();
+        final started = Completer<void>();
+        var attempts = 0;
+        final refreshed = deleted
+            ? _jsonResponse({'comments': []})
+            : _jsonResponse({
+                'comments': [
+                  {
+                    'id': 'published',
+                    'provider': 'Zeluna',
+                    'text': 'Published',
+                    'time_seconds': 2,
+                    'color': 16777215,
+                    'author': {'is_mine': true},
+                  },
+                ],
+              });
+        final repository = DanmakuRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected public request'),
+          ),
+          officialClient: MockClient((_) async {
+            attempts++;
+            if (attempts == 1) {
+              started.complete();
+              return oldResponse.future;
+            }
+            return refreshed;
+          }),
+        );
+        const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+        final old = repository.timelineForEpisode(_subject, _episode, settings);
+        addTearDown(() async {
+          if (!oldResponse.isCompleted) {
+            oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          }
+          await old;
+          repository.close();
+        });
+        await started.future;
+        // This is the same public invalidation boundary used after publish/delete.
+        repository.invalidate();
+        final current = repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(current, old), isFalse);
+        final latest = await current;
+        oldResponse.complete(_ownedTimelineResponse(isMine: true));
+        await old;
+        final cached = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(cached, latest), isTrue);
+        expect(
+          cached.comments.map((comment) => comment.text),
+          deleted ? <String>[] : ['Published'],
+        );
+        expect(attempts, 2);
+      },
+    );
+  }
+
   testWidgets(
     'six second partial response cannot restart an eight second budget',
     (tester) async {
@@ -865,6 +1040,19 @@ void main() {
     },
   );
 }
+
+http.Response _ownedTimelineResponse({required bool isMine}) => _jsonResponse({
+  'comments': [
+    {
+      'id': 'synthetic-comment',
+      'provider': 'Zeluna',
+      'text': 'Synthetic ownership view',
+      'time_seconds': 1,
+      'color': 16777215,
+      'author': {'is_mine': isMine},
+    },
+  ],
+});
 
 http.Response _jsonResponse(Object value) {
   return http.Response(

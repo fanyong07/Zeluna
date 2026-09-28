@@ -953,18 +953,21 @@ class ContentAggregator:
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )
+        # The batch deadline may cancel later sites after earlier matches
+        # have arrived. Keep those results outside the cancelled collector.
+        maccms_matches: list[SourceMatch] = []
+
         async def collect_maccms() -> list[SourceMatch]:
-            return [
-                match
-                async for match in self._discover_maccms_matches_progressively(
-                    clean_aliases,
-                    content_type=content_type,
-                    year=year,
-                    query_budget=MACCMS_FULL_QUERY_BUDGET,
-                    alias_limit=MACCMS_FULL_ALIAS_LIMIT,
-                    diagnostics=diagnostics,
-                )
-            ]
+            async for match in self._discover_maccms_matches_progressively(
+                clean_aliases,
+                content_type=content_type,
+                year=year,
+                query_budget=MACCMS_FULL_QUERY_BUDGET,
+                alias_limit=MACCMS_FULL_ALIAS_LIMIT,
+                diagnostics=diagnostics,
+            ):
+                maccms_matches.append(match)
+            return maccms_matches
 
         jobs: list[tuple[str, Awaitable[list[SourceMatch]]]] = []
         if self._provider_enabled("aggregate.maccms"):
@@ -1020,7 +1023,9 @@ class ContentAggregator:
                         diagnostic.error_category = _classify_resolution_exception(
                             group
                         )
-                continue
+                if name != "maccms":
+                    continue
+                group = maccms_matches
             for candidate in group:
                 previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:

@@ -38,6 +38,8 @@ import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
 import 'session/playback_session_state.dart';
 import 'video/native_video_controller.dart';
+import 'video/native_playback_gate_stub.dart'
+    if (dart.library.io) 'video/native_playback_gate_io.dart';
 import 'video/web_video_controller.dart';
 import 'web_stream_player.dart';
 import 'subtitles/subtitle_store.dart';
@@ -62,9 +64,18 @@ bool webPlaybackEventIsCurrent({
 }
 
 class PlayerPage extends ConsumerStatefulWidget {
-  const PlayerPage({super.key, required this.request});
+  const PlayerPage({
+    super.key,
+    required this.request,
+    this.nativeVideoControllerFactory,
+  });
 
   final PlaySessionRequest request;
+
+  /// Test-only engine seam. The page owns and disposes the returned controller.
+  @visibleForTesting
+  final NativeVideoController Function(int Function() readOpenSerial)?
+  nativeVideoControllerFactory;
 
   @override
   ConsumerState<PlayerPage> createState() => _PlayerPageState();
@@ -113,6 +124,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _muted = false;
   var _leaving = false;
   var _openLineSerial = 0;
+  var _automaticRecoveryEpoch = 0;
+  ({int epoch, int openSerial})? _expandedRecoveryOwner;
   int? _firstFrameTraceOpenSerial;
   String? _pendingRecoveryLineId;
   String? _pendingRecoveryStrategy;
@@ -178,7 +191,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _nativeVideo = NativeVideoController(readOpenSerial: () => _openLineSerial);
+    _nativeVideo =
+        widget.nativeVideoControllerFactory?.call(() => _openLineSerial) ??
+        NativeVideoController(readOpenSerial: () => _openLineSerial);
     _webVideo = WebVideoController();
     _gestureController = PlayerGestureController();
     _nextEpisodeWarmupCoordinator = NextEpisodeWarmupCoordinator();
@@ -846,7 +861,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                         onScreenshot: _captureScreenshot,
                         onTheaterMode: _toggleTheaterMode,
                         onCast: _showExternalPlayback,
-                        onPlayPause: _togglePlayPause,
+                        onPlayPause: _playing
+                            ? _pausePlayback
+                            : _resumePlayback,
                         onPreviousEpisode: _canPlayPreviousEpisode
                             ? _playPreviousEpisode
                             : null,
@@ -1476,11 +1493,17 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _anime4kController.updateViewport(physicalSize);
   }
 
+  // HTMLMediaElement cannot amplify above 100%; native libmpv still can.
+  double get _maximumVolume => kIsWeb ? 100 : 200;
+
   double _volumeFromSettings(PlaybackSettings settings) {
-    return (100 + settings.volumeBoost * 100).clamp(0, 200).toDouble();
+    return (100 + settings.volumeBoost * 100)
+        .clamp(0, _maximumVolume)
+        .toDouble();
   }
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
+    final recoveryEpoch = _automaticRecoveryEpoch;
     final preserveActivePlayback = _isPlayableLine(_line) && !_playbackFailed;
     if (!preserveActivePlayback) {
       _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
@@ -1532,8 +1555,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'playable_count': available.length,
         },
       );
-      if (autoplay && _isPlayableLine(nextLine)) {
-        await _openLine(nextLine!, force: true);
+      if (autoplay &&
+          _canRecoverAutomatically(recoveryEpoch) &&
+          _isPlayableLine(nextLine)) {
+        await _openLine(nextLine!, force: true, automatic: true);
       } else if (available.isEmpty && usesProgressiveLookup) {
         _startExpandedLineLookup(autoplay: autoplay);
       } else if (available.isEmpty) {
@@ -1811,14 +1836,22 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _startExpandedLineLookup({bool autoplay = false}) {
+    final recoveryEpoch = _automaticRecoveryEpoch;
     if (!mounted ||
         widget.request.offlineOnly ||
         !_usesProgressiveRuleLookup(widget.request.subject) ||
-        _lineScanComplete ||
-        _lineScanInProgress ||
-        _hasExpandedLineLookup) {
+        _lineScanComplete) {
       return;
     }
+    // A fresh recovery may adopt a still-running scan after Pause/resume.
+    // A manual open alone never authorizes an old scan to replace its choice.
+    if (autoplay || (!_lineScanInProgress && !_hasExpandedLineLookup)) {
+      _expandedRecoveryOwner = (
+        epoch: recoveryEpoch,
+        openSerial: _openLineSerial,
+      );
+    }
+    if (_lineScanInProgress || _hasExpandedLineLookup) return;
     _cancelSingleBackupLookup();
     final started = _lineRepository.startExpandedLookup(
       subject: widget.request.subject,
@@ -1842,10 +1875,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         final currentFailed =
             _playbackFailed ||
             (selected != null && _failedLineIds.contains(selected.id));
-        final target = currentFailed || !_isPlayableLine(selected)
+        final target = currentFailed
+            ? _lineController.nextPlayableLine(
+                    currentLine: selected,
+                    lines: available,
+                  ) ??
+                  _preferredPlayableLine(available)
+            : !_isPlayableLine(selected)
             ? _preferredPlayableLine(available)
             : selected;
+        final owner = _expandedRecoveryOwner;
         final shouldOpen =
+            owner != null &&
+            _canRecoverAutomatically(owner.epoch) &&
+            owner.openSerial == _openLineSerial &&
+            !_loadingLine &&
             target != null &&
             !_failedLineIds.contains(target.id) &&
             ((autoplay && (!_isPlayableLine(_line) || _loadedUrl == null)) ||
@@ -1868,7 +1912,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             );
           }
           unawaited(
-            _openLine(target, force: true, resumePosition: recoveryPosition),
+            _openLine(
+              target,
+              force: true,
+              resumePosition: recoveryPosition,
+              automatic: true,
+            ),
           );
         } else if (update.isComplete &&
             available.isEmpty &&
@@ -1916,7 +1965,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     PlaybackLine requestedLine, {
     bool force = false,
     Duration? resumePosition,
+    bool automatic = false,
   }) async {
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    if (automatic && !_canRecoverAutomatically(recoveryEpoch)) return;
     _resetNextEpisodePrefetch();
     var line = requestedLine;
     _recoveryController.cancelCurrentLineRetry();
@@ -1987,6 +2039,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           );
     }
     if (!mounted || serial != _openLineSerial) return;
+    // Verification may complete after a new explicit pause/manual selection.
+    if (automatic && !_canRecoverAutomatically(recoveryEpoch)) return;
     _lines = upsertPlaybackLine(_lines, line);
     if (!_isPlayableLine(line)) {
       _sessionController.dispatch(
@@ -2056,7 +2110,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         // This is the desired state passed to WebStreamPlayer. The browser
         // events below remain authoritative and will set it back to false if
         // autoplay is blocked or the user pauses playback.
-        _playing = true;
+        _playing =
+            _sessionController.state.userIntent == PlaybackIntent.playing;
         _playerMessage = null;
       });
       return;
@@ -2108,8 +2163,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'player': 'native',
         },
       );
-      await _player.open(media, play: true);
+      // Never hand an irrevocable play permission to an asynchronous native open.
+      await _player.open(media, play: false);
       if (!mounted || serial != _openLineSerial) return;
+      if (!_canRecoverAutomatically(recoveryEpoch)) return;
+      await playNativeIfCurrent(
+        _player,
+        isCurrent: () =>
+            serial == _openLineSerial &&
+            _canRecoverAutomatically(recoveryEpoch),
+      );
+      if (!mounted ||
+          serial != _openLineSerial ||
+          !_canRecoverAutomatically(recoveryEpoch)) {
+        return;
+      }
       _nativeMediaEvents.finishOpen(openSerial: serial);
       final openedState = _player.state;
       if (requestedResumePosition > Duration.zero) {
@@ -2157,6 +2225,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _handleRuntimeLineFailure(PlaybackLine line, {required String message}) {
     if (!mounted || _handledFailureOpenSerial == _openLineSerial) return;
     _handledFailureOpenSerial = _openLineSerial;
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    final failedOpenSerial = _openLineSerial;
+    final recoverAutomatically = _canRecoverAutomatically(recoveryEpoch);
     _webVideo.cancelStartupWatchdog();
     _nativeVideo.cancelFirstFrameWatchdog();
     final resumePosition = _currentRecoveryPosition;
@@ -2211,7 +2282,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         ..._lineTraceFields(line),
         'position_ms': resumePosition.inMilliseconds,
         'failure_count': _lineFailureCounts[line.id] ?? 0,
-        'will_switch': shouldSwitch && _currentSettings.autoSwitchLine,
+        'will_switch':
+            recoverAutomatically &&
+            shouldSwitch &&
+            _currentSettings.autoSwitchLine,
       },
     );
     _playbackTrace.recordBufferingChanged(
@@ -2222,17 +2296,29 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _loadingLine = false;
       _playbackFailed = true;
       _playing = false;
-      _playerMessage = shouldSwitch
+      _playerMessage = !recoverAutomatically
+          ? '当前线路播放中断，点击播放可重新尝试。'
+          : shouldSwitch
           ? (_currentSettings.autoSwitchLine
                 ? '当前线路连续播放失败，正在自动切换备用线路…'
                 : message)
           : '播放暂时中断，正在重试当前线路…';
     });
+    if (!recoverAutomatically) return;
+    // Reload resets the failure counter, so its first new failure may only queue
+    // a retry. Let that current failure adopt an existing scan immediately too.
+    if (_hasExpandedLineLookup) {
+      _expandedRecoveryOwner = (
+        epoch: recoveryEpoch,
+        openSerial: failedOpenSerial,
+      );
+    }
     if (!shouldSwitch) {
       _recoveryController.scheduleCurrentLineRetry(
         const Duration(milliseconds: 500),
         () async {
-          if (!mounted ||
+          if (!_canRecoverAutomatically(recoveryEpoch) ||
+              failedOpenSerial != _openLineSerial ||
               _line?.id != line.id ||
               _lineFailureCounts[line.id] != 1) {
             return;
@@ -2243,7 +2329,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             previous: line,
             position: resumePosition,
           );
-          await _openLine(line, force: true, resumePosition: resumePosition);
+          await _openLine(
+            line,
+            force: true,
+            resumePosition: resumePosition,
+            automatic: true,
+          );
         },
       );
       return;
@@ -2294,11 +2385,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _tryAutoSwitchLine({Duration? resumePosition}) async {
-    if (!_currentSettings.autoSwitchLine) return;
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    if (!_currentSettings.autoSwitchLine ||
+        !_canRecoverAutomatically(recoveryEpoch)) {
+      return;
+    }
     await _recoveryController.runAutoSwitch(
       resumePosition: resumePosition,
       attempt: (targetResumePosition) async {
-        if (!mounted || !_currentSettings.autoSwitchLine) return;
+        if (!_canRecoverAutomatically(recoveryEpoch) ||
+            !_currentSettings.autoSwitchLine) {
+          return;
+        }
         final next = _nextPlayableLine();
         if (next == null) {
           if (!widget.request.offlineOnly && !_lineScanComplete) {
@@ -2337,6 +2435,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           switchTarget,
           force: true,
           resumePosition: targetResumePosition,
+          automatic: true,
         );
       },
     );
@@ -2346,14 +2445,55 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     return _lineController.nextPlayableLine(currentLine: _line, lines: _lines);
   }
 
-  Future<void> _togglePlayPause() async {
+  bool _canRecoverAutomatically(int epoch) =>
+      mounted &&
+      !_leaving &&
+      epoch == _automaticRecoveryEpoch &&
+      _sessionController.state.userIntent == PlaybackIntent.playing;
+
+  void _cancelAutomaticRecovery() {
+    _automaticRecoveryEpoch++;
+    _recoveryController.cancelCurrentLineRetry();
+    _recoveryController.clearPendingAutoSwitch();
+  }
+
+  void _requestManualPlayback() {
+    _cancelAutomaticRecovery();
+    _sessionController.dispatch(PlaybackSessionEvent.playbackResumed());
+  }
+
+  Future<void> _togglePlayPause() =>
+      _playing ? _pausePlayback() : _resumePlayback();
+
+  Future<void> _pausePlayback() async {
     _revealPlayerControls();
+    _sessionController.dispatch(PlaybackSessionEvent.playbackPaused());
+    _cancelAutomaticRecovery();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
+    _cancelSingleBackupLookup();
+    setState(() {
+      // A cancelled opening attempt needs a fresh manual open, not play() on
+      // whichever previous media remains in the engine.
+      if (_loadingLine) _playbackFailed = true;
+      _loadingLine = false;
+      _playing = false;
+    });
+    if (_usesWebPlayer) {
+      _webPlayerController.pause();
+    } else {
+      await _player.pause();
+    }
+  }
+
+  Future<void> _resumePlayback() async {
+    _revealPlayerControls();
+    _requestManualPlayback();
     if (!_isPlayableLine(_line)) {
       await _resolveLinesForCurrentEpisode();
       return;
     }
-    if (_playbackFailed) {
-      _sessionController.dispatch(PlaybackSessionEvent.playbackResumed());
+    if (_playbackFailed || _loadingLine) {
       await _openLine(
         _line!,
         force: true,
@@ -2361,20 +2501,18 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
       return;
     }
-    _sessionController.dispatch(
-      _playing
-          ? PlaybackSessionEvent.playbackPaused()
-          : PlaybackSessionEvent.playbackResumed(),
-    );
     if (_usesWebPlayer) {
-      if (_playing) {
-        _webPlayerController.pause();
-      } else {
-        _webPlayerController.play();
-      }
-      return;
+      _webPlayerController.play();
+    } else {
+      final serial = _openLineSerial;
+      final recoveryEpoch = _automaticRecoveryEpoch;
+      await playNativeIfCurrent(
+        _player,
+        isCurrent: () =>
+            serial == _openLineSerial &&
+            _canRecoverAutomatically(recoveryEpoch),
+      );
     }
-    await _player.playOrPause();
   }
 
   Future<void> _seekBy(Duration delta) {
@@ -2409,7 +2547,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Future<void> _setGestureVolume(double value) => _applyVolume(value);
 
   Future<void> _applyVolume(double value) async {
-    final clamped = value.clamp(0, 200).toDouble();
+    final clamped = value.clamp(0, _maximumVolume).toDouble();
     _manualVolumeOverride = true;
     setState(() {
       _muted = clamped <= 0;
@@ -2431,7 +2569,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Future<void> _adjustVolume(double delta) async {
     _revealPlayerControls();
     final next = (_muted ? _lastNonZeroVolume : _volume) + delta;
-    final clamped = next.clamp(0, 200).toDouble();
+    final clamped = next.clamp(0, _maximumVolume).toDouble();
     _manualVolumeOverride = true;
     if (clamped <= 0) {
       setState(() {
@@ -2472,6 +2610,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _reloadCurrentLine() async {
     _revealPlayerControls();
+    _requestManualPlayback();
     _failedLineIds.clear();
     _lineFailureCounts.clear();
     _handledFailureOpenSerial = null;
@@ -2496,6 +2635,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     unawaited(_persistPlaybackProgress(force: true));
+    _cancelAutomaticRecovery();
     _sessionController.dispatch(
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
@@ -2651,6 +2791,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _selectLine(PlaybackLine line) {
     _revealPlayerControls();
+    _requestManualPlayback();
     _resetNextEpisodePrefetch();
     _clearWarmupTransitionState();
     if (_line?.id != line.id) {
@@ -2687,6 +2828,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final file = result?.files.singleOrNull;
     final path = file?.xFile.path.trim() ?? '';
     if (path.isEmpty || !mounted) return;
+    _requestManualPlayback();
     final id = DateTime.now().microsecondsSinceEpoch;
     final line = PlaybackLine(
       id: 'local:$id',
@@ -2734,6 +2876,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       available: true,
     );
     if (!mounted) return;
+    _requestManualPlayback();
     setState(() {
       _lines = upsertPlaybackLine(_lines, line);
       _line = line;

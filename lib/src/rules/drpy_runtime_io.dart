@@ -14,6 +14,7 @@ import 'package:http/io_client.dart';
 import 'package:jsf/jsf.dart';
 
 import 'drpy_runtime_models.dart';
+import 'rule_playback_cancellation.dart';
 
 const _loopbackHost = '127.0.0.1';
 const _maxBrokerRequestBytes = 512 * 1024;
@@ -111,6 +112,13 @@ class DrpyRuntime {
   final DrpyLocalStorage storage;
   final DrpyRuntimeLimits limits;
   final DrpyAddressLookup _addressLookup;
+  var _executionGeneration = 0;
+
+  /// Retires account/context work, not ordinary page or probe cache refreshes.
+  void resetExecutionScope() {
+    _executionGeneration++;
+    storage.clear();
+  }
 
   Future<void> ensurePublicUri(Uri uri) =>
       _ensurePublicHttpUri(uri, _addressLookup);
@@ -121,7 +129,17 @@ class DrpyRuntime {
   Future<DrpyRuntimeResult> resolve(
     DrpyRuntimeRequest request, {
     http.Client? client,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async {
+    final generation = _executionGeneration;
+    bool isCurrent() =>
+        generation == _executionGeneration &&
+        cancellationToken?.isCancelled != true;
+    const retired = DrpyRuntimeResult(
+      candidates: [],
+      error: 'drpy execution scope is no longer active.',
+    );
+    if (!isCurrent()) return retired;
     if (request.ruleSource.trim().isEmpty && request.ruleUrl.trim().isEmpty) {
       return const DrpyRuntimeResult(
         candidates: [],
@@ -131,14 +149,19 @@ class DrpyRuntime {
 
     final ownedClient = client == null;
     final effectiveClient = client ?? createPublicHttpClient();
-    final broker = await _DrpyHttpBroker.start(
-      client: effectiveClient,
-      limits: limits,
-      baseHeaders: request.requestHeaders,
-      credentialOrigin: request.credentialOrigin,
-      addressLookup: _addressLookup,
-    );
+    _DrpyHttpBroker? broker;
+    late Map<String, Object?> raw;
     try {
+      broker = await _DrpyHttpBroker.start(
+        client: effectiveClient,
+        limits: limits,
+        baseHeaders: request.requestHeaders,
+        credentialOrigin: request.credentialOrigin,
+        addressLookup: _addressLookup,
+        isCurrent: isCurrent,
+      );
+      // Account activation can retire this resolve while the broker binds.
+      if (!isCurrent()) return retired;
       final payload = <String, Object?>{
         'brokerPort': broker.port,
         'brokerToken': broker.token,
@@ -151,28 +174,33 @@ class DrpyRuntime {
         'episodeTitle': request.episodeTitle,
         'storage': storage.snapshot(request.ruleId),
       };
-      final raw = await Isolate.run(() => _runDrpyWorker(payload)).timeout(
+      raw = await _startDrpyWorker(payload).timeout(
         limits.overallTimeout,
         onTimeout: () => <String, Object?>{
           'ok': false,
           'error': 'drpy execution exceeded the total time budget.',
           'candidates': const <Object?>[],
           'logs': const <Object?>[],
-          'storage': storage.snapshot(request.ruleId),
         },
       );
-      final nextStorage = raw['storage'];
-      if (nextStorage is Map) {
-        storage.replace(
-          request.ruleId,
-          nextStorage.map((key, value) => MapEntry(key.toString(), value)),
-        );
-      }
-      return _runtimeResultFromJson(raw);
     } finally {
-      await broker.close();
-      if (ownedClient) effectiveClient.close();
+      try {
+        await broker?.close();
+      } finally {
+        if (ownedClient) effectiveClient.close();
+      }
     }
+    // Recheck after every owner await, including broker cleanup, before a
+    // worker can publish candidates or replace this scope's script storage.
+    if (!isCurrent()) return retired;
+    final nextStorage = raw['storage'];
+    if (nextStorage is Map) {
+      storage.replace(
+        request.ruleId,
+        nextStorage.map((key, value) => MapEntry(key.toString(), value)),
+      );
+    }
+    return _runtimeResultFromJson(raw);
   }
 }
 
@@ -209,6 +237,11 @@ DrpyRuntimeResult _runtimeResultFromJson(Map<String, Object?> raw) {
       : raw['error'].toString();
   return DrpyRuntimeResult(candidates: candidates, error: error, logs: logs);
 }
+
+// Keep the isolate closure outside resolve's scope: it must capture only the
+// serializable payload, never the runtime, cancellation token or broker owner.
+Future<Map<String, Object?>> _startDrpyWorker(Map<String, Object?> payload) =>
+    Isolate.run(() => _runDrpyWorker(payload));
 
 Map<String, Object?> _runDrpyWorker(Map<String, Object?> payload) {
   final limits = (payload['limits'] as Map).cast<String, Object?>();
@@ -738,6 +771,7 @@ class _DrpyHttpBroker {
     required Map<String, String> baseHeaders,
     required String credentialOrigin,
     required this.addressLookup,
+    required this.isCurrent,
   }) : _baseHeaders = _validatedHeaders(baseHeaders),
        _credentialOrigin = _normalizedHttpOrigin(
          Uri.tryParse(credentialOrigin.trim()),
@@ -750,6 +784,14 @@ class _DrpyHttpBroker {
   final Map<String, String> _baseHeaders;
   final String? _credentialOrigin;
   final DrpyAddressLookup addressLookup;
+  final bool Function() isCurrent;
+
+  void _ensureCurrentScope() {
+    if (!isCurrent()) {
+      throw StateError('drpy execution scope is no longer active.');
+    }
+  }
+
   late final StreamSubscription<Socket> _subscription;
 
   int get port => server.port;
@@ -760,6 +802,7 @@ class _DrpyHttpBroker {
     required Map<String, String> baseHeaders,
     required String credentialOrigin,
     required DrpyAddressLookup addressLookup,
+    required bool Function() isCurrent,
   }) async {
     final server = await ServerSocket.bind(
       InternetAddress.loopbackIPv4,
@@ -778,6 +821,7 @@ class _DrpyHttpBroker {
       baseHeaders: baseHeaders,
       credentialOrigin: credentialOrigin,
       addressLookup: addressLookup,
+      isCurrent: isCurrent,
     );
     broker._subscription = server.listen(
       (socket) => unawaited(broker._handle(socket)),
@@ -852,7 +896,9 @@ class _DrpyHttpBroker {
         options['redirect'] != 0 && options['redirect'] != false;
 
     for (var redirect = 0; ; redirect++) {
+      _ensureCurrentScope();
       await _ensurePublicHttpUri(uri, addressLookup);
+      _ensureCurrentScope();
       final request = http.Request(method, uri)
         ..followRedirects = false
         ..headers.addAll(headers);
@@ -862,9 +908,16 @@ class _DrpyHttpBroker {
       final streamed = await client
           .send(request)
           .timeout(limits.networkTimeout);
+      if (!isCurrent()) {
+        await streamed.stream.listen(null).cancel();
+        _ensureCurrentScope();
+      }
       if (followRedirects &&
           _isRedirect(streamed.statusCode) &&
           streamed.headers['location'] != null) {
+        // Only this response is owned here; release it even when the limit
+        // or Location parsing rejects the next hop.
+        await streamed.stream.listen(null).cancel();
         if (redirect >= limits.maxRedirects) {
           throw const HttpException('drpy redirect limit reached.');
         }
@@ -878,8 +931,6 @@ class _DrpyHttpBroker {
           method = 'GET';
           body = const [];
         }
-        final redirectSubscription = streamed.stream.listen(null);
-        await redirectSubscription.cancel();
         uri = next;
         continue;
       }
@@ -888,6 +939,7 @@ class _DrpyHttpBroker {
       await for (final chunk in streamed.stream.timeout(
         limits.networkTimeout,
       )) {
+        _ensureCurrentScope();
         if (bytes.length + chunk.length > limits.maxResponseBytes) {
           throw const HttpException(
             'drpy response exceeds the configured limit.',
@@ -895,6 +947,7 @@ class _DrpyHttpBroker {
         }
         bytes.add(chunk);
       }
+      _ensureCurrentScope();
       final data = bytes.takeBytes();
       final bufferMode = int.tryParse(options['buffer']?.toString() ?? '') ?? 0;
       final content = bufferMode > 0

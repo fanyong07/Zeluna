@@ -646,10 +646,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             cancellationToken: cancellationToken,
           ),
       isContextCurrent: _accounts.isContextCurrent,
-      clearRuleRuntimeCaches: () {
-        RulePlaybackSourceRepository.clearRuntimeCaches();
-        playbackResolver.clearCaches();
-      },
+      clearRuleRuntimeCaches: playbackResolver.resetExecutionScope,
     );
     _playbackDiscoveryDomain.loadForAccount(
       accountId: activeAccount?.id,
@@ -1455,6 +1452,9 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   );
 
   Future<void> _applyAccountScope(AccountScopeActivation activation) async {
+    // The account context is already retired; do not let script workers keep
+    // its state alive while the new account's stores are loading.
+    ref.read(rulePlaybackResolverProvider).resetExecutionScope();
     final account = activation.account;
     final accountId = account?.id;
     final settingsSnapshot = _settingsDomain.loadForAccount(

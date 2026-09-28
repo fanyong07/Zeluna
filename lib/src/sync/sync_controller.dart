@@ -518,10 +518,8 @@ final class SyncController {
             ),
           ),
         ];
-        final maxRevision = acknowledged.fold<int>(
-          _persistentState.cursor,
-          (value, item) => max(value, item.serverRevision),
-        );
+        // Push receipts cover only submitted mutations, not intervening remote
+        // records. Only an applied pull page may advance the pull cursor.
         _persistentState = _persistentState.copyWith(
           queue: _persistentState.queue
               .where((item) => !acknowledgedIds.contains(item.mutationId))
@@ -529,7 +527,6 @@ final class SyncController {
           receipts: receipts.length <= _maxReceipts
               ? receipts
               : receipts.sublist(receipts.length - _maxReceipts),
-          cursor: maxRevision,
         );
         await _persistState(scope);
       });

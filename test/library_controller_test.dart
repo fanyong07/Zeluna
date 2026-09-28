@@ -8,6 +8,151 @@ import 'package:anime/src/sync/cloud_sync_transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('first nullable history persists a detail-only entry', () async {
+    final storage = _MemoryLibraryStorage();
+    final journal = <LibraryEntry>[];
+    final controller = LibraryController(
+      storage: storage,
+      publishSnapshot: (_) {},
+      syncHistory: (_, _, episode) async {
+        expect(episode, isNull);
+        expect(storage.entriesFor('account-a', 'history'), hasLength(1));
+      },
+      writeCloudMutation: (context, type, entry, {required deleted}) async {
+        expect(context.accountId, 'account-a');
+        expect(type, CloudSyncRecordType.history);
+        expect(deleted, isFalse);
+        expect(
+          storage.entriesFor('account-a', 'history'),
+          isEmpty,
+          reason: 'journal precedes local snapshot persistence',
+        );
+        journal.add(entry);
+        return true;
+      },
+      now: () => DateTime.utc(2026, 8, 2, 12),
+    );
+    addTearDown(controller.dispose);
+    await controller.loadForAccount(accountId: 'account-a', contextVersion: 1);
+
+    expect(await controller.addHistory(_subject, null), isTrue);
+
+    final entry = controller.snapshot.history.single;
+    expect(entry.episode, isNull);
+    expect(entry.positionSeconds, 0);
+    expect(entry.durationSeconds, 0);
+    expect(entry.note, '打开详情');
+    expect(journal.single.toJson(), entry.toJson());
+    expect(storage.entriesFor('account-a', 'history').single, entry.toJson());
+  });
+
+  test(
+    'repeated nullable history stays isolated from guest and other accounts',
+    () async {
+      final storage = _MemoryLibraryStorage();
+      final controller = _controller(storage);
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(accountId: null, contextVersion: 1);
+      expect(await controller.addHistory(_subject, null), isTrue);
+      expect(await controller.addHistory(_subject, null), isTrue);
+      expect(controller.snapshot.history, hasLength(1));
+      final guestHistory = List<Object?>.from(
+        storage.values['history']! as List,
+      );
+
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 2,
+      );
+      expect(controller.snapshot.history, isEmpty);
+      await controller.addHistory(_subject, _episode);
+      await controller.updatePlaybackProgress(
+        _subject,
+        _episode,
+        position: const Duration(seconds: 120),
+        duration: const Duration(seconds: 600),
+      );
+      await controller.addHistory(_subject, null);
+      await controller.addHistory(_subject, null);
+      final detail = controller.snapshot.history.single;
+      expect(detail.episode, isNull);
+      expect(
+        detail.positionSeconds,
+        0,
+        reason: 'a different episode must not inherit progress',
+      );
+      expect(detail.durationSeconds, 0);
+      expect(storage.values['history'], guestHistory);
+      expect(
+        storage.entriesFor('account-a', 'history').single,
+        detail.toJson(),
+      );
+
+      await controller.loadForAccount(
+        accountId: 'account-b',
+        contextVersion: 3,
+      );
+      expect(controller.snapshot.history, isEmpty);
+      expect(storage.entriesFor('account-b', 'history'), isEmpty);
+      await controller.loadForAccount(accountId: null, contextVersion: 4);
+      expect(controller.snapshot.history.single.episode, isNull);
+      expect(controller.snapshot.history.single.toJson(), guestHistory.single);
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 5,
+      );
+      expect(controller.snapshot.history.single.toJson(), detail.toJson());
+    },
+  );
+
+  test(
+    'non-null history preserves same-episode resume and resets another episode',
+    () async {
+      final storage = _MemoryLibraryStorage();
+      final controller = _controller(storage);
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      await controller.addHistory(_subject, _episode);
+      await controller.updatePlaybackProgress(
+        _subject,
+        _episode,
+        position: const Duration(seconds: 120),
+        duration: const Duration(seconds: 600),
+      );
+      await controller.addHistory(_subject, _episode);
+      final resumed = controller.snapshot.history.single;
+      expect(resumed.episode?.id, _episode.id);
+      expect(resumed.positionSeconds, 120);
+      expect(resumed.durationSeconds, 600);
+      expect(
+        storage.entriesFor('account-a', 'history').single,
+        resumed.toJson(),
+      );
+
+      const otherEpisode = AnimeEpisode(
+        id: 102,
+        subjectId: 1,
+        number: 2,
+        title: '第二集',
+        airdate: '2026-01-08',
+        duration: '24:00',
+        description: '',
+      );
+      await controller.addHistory(_subject, otherEpisode);
+      final changed = controller.snapshot.history.single;
+      expect(changed.episode?.id, 102);
+      expect(changed.positionSeconds, 0);
+      expect(changed.durationSeconds, 0);
+      expect(
+        storage.entriesFor('account-a', 'history').single,
+        changed.toJson(),
+      );
+    },
+  );
+
   test(
     'concurrent mutations serialize and remain isolated by account',
     () async {

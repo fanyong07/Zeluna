@@ -1,62 +1,172 @@
 part of '../player_page.dart';
 
+/// Keeps local-send lane reservations in sync with the actual animations.
+/// Completed IDs stay retired until their transient controller entries expire.
+class PlayerDanmakuLayers extends StatefulWidget {
+  const PlayerDanmakuLayers({
+    super.key,
+    required this.remoteComments,
+    required this.localComments,
+    required this.settings,
+    required this.position,
+    this.excludedArea,
+    this.reservedInsets = EdgeInsets.zero,
+  });
+  final List<DanmakuComment> remoteComments;
+  final List<LocalDanmakuEntry> localComments;
+  final DanmakuSettings settings;
+  final Duration position;
+  final Rect? excludedArea;
+  final EdgeInsets reservedInsets;
+
+  @override
+  State<PlayerDanmakuLayers> createState() => _PlayerDanmakuLayersState();
+}
+
+class _PlayerDanmakuLayersState extends State<PlayerDanmakuLayers> {
+  final _completedLocalIds = <int>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _retireOverflow();
+  }
+
+  void _retireOverflow() {
+    final pending = widget.localComments.reversed
+        .where((entry) => !_completedLocalIds.contains(entry.id))
+        .toList();
+    // Once displaced, a controller record must not create a new animation
+    // when a newer comment finishes; it lives for longer than its flight.
+    _completedLocalIds.addAll(pending.skip(2).map((entry) => entry.id));
+    _completedLocalIds.addAll(
+      pending
+          .where(
+            (entry) => widget.settings.blockKeywords.any(entry.text.contains),
+          )
+          .map((entry) => entry.id),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant PlayerDanmakuLayers oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final existing = widget.localComments.map((entry) => entry.id).toSet();
+    _completedLocalIds.removeWhere((id) => !existing.contains(id));
+    _retireOverflow();
+  }
+
+  void _complete(int id) {
+    if (mounted) setState(() => _completedLocalIds.add(id));
+  }
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: LayoutBuilder(
+      builder: (context, constraints) {
+        final settings = widget.settings;
+        final bounds = danmakuDisplayBounds(
+          constraints.biggest,
+          settings.displayArea,
+          excludedArea: widget.excludedArea,
+          reservedInsets: widget.reservedInsets,
+        );
+        final laneHeight =
+            DanmakuText.measure(
+              text: '弹幕Ag',
+              fontSize: settings.fontSize,
+              textScaler: MediaQuery.textScalerOf(context),
+              textDirection: Directionality.of(context),
+            ).height +
+            4;
+        final localEntries = widget.localComments.reversed
+            .where(
+              (entry) =>
+                  !_completedLocalIds.contains(entry.id) &&
+                  !settings.blockKeywords.any(entry.text.contains),
+            )
+            .take(2)
+            .toList();
+        final capacity = settings.enabled && !settings.blockScroll
+            ? math.min(
+                localEntries.length,
+                (bounds.height / laneHeight).floor(),
+              )
+            : 0;
+        final band = Rect.fromLTWH(
+          bounds.left,
+          bounds.bottom - capacity * laneHeight,
+          bounds.width,
+          capacity * laneHeight,
+        );
+        final remoteInsets = capacity == 0
+            ? widget.reservedInsets
+            : widget.reservedInsets.copyWith(
+                bottom: constraints.maxHeight - band.top + 4,
+              );
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            if (settings.enabled && widget.remoteComments.isNotEmpty)
+              RemoteDanmakuOverlay(
+                comments: widget.remoteComments,
+                settings: settings,
+                position: widget.position,
+                excludedArea: widget.excludedArea,
+                reservedInsets: remoteInsets,
+              ),
+            // Empty clips keep animations alive while chrome/settings obscure
+            // their lane, so toggling controls cannot replay an old local send.
+            _LocalDanmakuOverlay(
+              entries: localEntries,
+              settings: settings,
+              bounds: band,
+              laneHeight: laneHeight,
+              onCompleted: _complete,
+            ),
+          ],
+        );
+      },
+    ),
+  );
+}
+
 class _LocalDanmakuOverlay extends StatelessWidget {
   const _LocalDanmakuOverlay({
     required this.entries,
     required this.settings,
-    this.excludedArea,
+    required this.bounds,
+    required this.laneHeight,
+    required this.onCompleted,
   });
-  final Rect? excludedArea;
 
+  final ValueChanged<int> onCompleted;
   final List<LocalDanmakuEntry> entries;
   final DanmakuSettings settings;
+  final Rect bounds;
+  final double laneHeight;
 
   @override
   Widget build(BuildContext context) {
-    if (!settings.enabled || settings.blockScroll) {
-      return const SizedBox.shrink();
-    }
+    if (entries.isEmpty) return const SizedBox.shrink();
     return IgnorePointer(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final visible = entries
-              .where((e) => !settings.blockKeywords.any(e.text.contains))
-              .toList()
-              .reversed
-              .take(12)
-              .toList()
-              .reversed
-              .toList();
-          final bounds = danmakuDisplayBounds(
-            constraints.biggest,
-            settings.displayArea,
-            excludedArea: excludedArea,
-          );
-          final laneHeight =
-              MediaQuery.textScalerOf(
-                    context,
-                  ).scale(settings.fontSize.clamp(12, 28).toDouble()) *
-                  1.4 +
-              4;
-          final lanes = (bounds.height / laneHeight).floor().clamp(1, 12);
-          return ClipRect(
-            clipper: DanmakuAreaClipper(bounds),
-            child: Stack(
-              children: [
-                for (final entry in visible)
-                  _LocalDanmakuBullet(
-                    key: ValueKey(entry.id),
-                    entry: entry,
-                    lane: entry.id.remainder(lanes),
-                    top: bounds.top,
-                    laneHeight: laneHeight,
-                    width: constraints.maxWidth,
-                    settings: settings,
-                  ),
-              ],
-            ),
-          );
-        },
+      child: ClipRect(
+        clipper: DanmakuAreaClipper(bounds),
+        child: Stack(
+          children: [
+            for (var index = 0; index < entries.length; index++)
+              _LocalDanmakuBullet(
+                key: ValueKey(entries[index].id),
+                entry: entries[index],
+                lane: index,
+                top: bounds.top,
+                laneHeight: laneHeight,
+                width: bounds.width,
+                settings: settings,
+                onCompleted: () => onCompleted(entries[index].id),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -71,8 +181,10 @@ class _LocalDanmakuBullet extends StatefulWidget {
     required this.laneHeight,
     required this.width,
     required this.settings,
+    required this.onCompleted,
   });
 
+  final VoidCallback onCompleted;
   final LocalDanmakuEntry entry;
   final int lane;
   final double top;
@@ -92,6 +204,9 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
   void initState() {
     super.initState();
     _controller = AnimationController(vsync: this, duration: _duration)
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed) widget.onCompleted();
+      })
       ..forward();
   }
 
@@ -120,7 +235,12 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
   @override
   Widget build(BuildContext context) {
     final fontSize = widget.settings.fontSize.clamp(12, 30).toDouble();
-    final estimatedWidth = math.max(120.0, widget.entry.text.length * fontSize);
+    final textSize = DanmakuText.measure(
+      text: widget.entry.text,
+      fontSize: fontSize,
+      textScaler: MediaQuery.textScalerOf(context),
+      textDirection: Directionality.of(context),
+    );
     return Positioned(
       top: widget.top + widget.lane * widget.laneHeight,
       left: 0,
@@ -129,32 +249,13 @@ class _LocalDanmakuBulletState extends State<_LocalDanmakuBullet>
         builder: (context, child) {
           final x =
               widget.width -
-              (widget.width + estimatedWidth) * _controller.value;
+              (widget.width + textSize.width) * _controller.value;
           return Transform.translate(offset: Offset(x, 0), child: child);
         },
-        child: Opacity(
-          opacity: widget.settings.opacity.clamp(.2, 1).toDouble(),
-          child: Text(
-            widget.entry.text,
-            maxLines: 1,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: fontSize,
-              fontWeight: FontWeight.w700,
-              shadows: const [
-                Shadow(
-                  color: Colors.black,
-                  blurRadius: 2,
-                  offset: Offset(1, 1),
-                ),
-                Shadow(
-                  color: Colors.black,
-                  blurRadius: 2,
-                  offset: Offset(-1, -1),
-                ),
-              ],
-            ),
-          ),
+        child: DanmakuText(
+          text: widget.entry.text,
+          fontSize: fontSize,
+          opacity: widget.settings.opacity,
         ),
       ),
     );
@@ -366,6 +467,18 @@ class _PlayerCanvas extends StatelessWidget {
                                 text: subtitles.textAt(position),
                               )
                             : null;
+                        final portrait = usesCompactPlayerBottomControlsForSize(
+                          MediaQuery.sizeOf(context),
+                          defaultTargetPlatform,
+                        );
+                        final danmakuInsets = EdgeInsets.only(
+                          top: chromeVisible
+                              ? topInset + (portrait ? 46 : 52) + 8
+                              : safePadding.top,
+                          bottom: chromeVisible
+                              ? 112 + safePadding.bottom
+                              : safePadding.bottom,
+                        );
                         final pixelRatio = MediaQuery.devicePixelRatioOf(
                           context,
                         );
@@ -437,19 +550,64 @@ class _PlayerCanvas extends StatelessWidget {
                                     title: subject.title,
                                   ),
                                 ),
-                                if (danmaku.enabled && remoteDanmaku.isNotEmpty)
-                                  RemoteDanmakuOverlay(
-                                    comments: remoteDanmaku,
-                                    excludedArea: subtitleBand,
-                                    position: position,
-                                    settings: danmaku,
+                                // The scrim belongs to the video, not the
+                                // comments. Painting it above danmaku turns
+                                // bright glyphs gray and muddies the outline.
+                                Positioned.fill(
+                                  child: IgnorePointer(
+                                    child: AnimatedOpacity(
+                                      opacity: chromeVisible ? 1 : 0,
+                                      duration: const Duration(
+                                        milliseconds: 180,
+                                      ),
+                                      child: Stack(
+                                        children: [
+                                          Positioned(
+                                            left: 0,
+                                            right: 0,
+                                            top: 0,
+                                            height: compact ? 88 : 126,
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                gradient:
+                                                    AppOverlays.playerTopFade,
+                                              ),
+                                            ),
+                                          ),
+                                          Positioned(
+                                            left: 0,
+                                            right: 0,
+                                            bottom: 0,
+                                            height:
+                                                compact &&
+                                                    MediaQuery.sizeOf(
+                                                          context,
+                                                        ).height >
+                                                        MediaQuery.sizeOf(
+                                                          context,
+                                                        ).width
+                                                ? 124
+                                                : 190,
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                gradient: AppOverlays
+                                                    .playerBottomFade,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   ),
-                                if (danmaku.enabled && localDanmaku.isNotEmpty)
-                                  _LocalDanmakuOverlay(
-                                    entries: localDanmaku,
-                                    excludedArea: subtitleBand,
-                                    settings: danmaku,
-                                  ),
+                                ),
+                                PlayerDanmakuLayers(
+                                  remoteComments: remoteDanmaku,
+                                  localComments: localDanmaku,
+                                  settings: danmaku,
+                                  position: position,
+                                  excludedArea: subtitleBand,
+                                  reservedInsets: danmakuInsets,
+                                ),
                                 if (subtitleVisible)
                                   SupplementalSubtitleOverlay(
                                     controller: subtitles!,
@@ -464,39 +622,6 @@ class _PlayerCanvas extends StatelessWidget {
                                     child: Stack(
                                       fit: StackFit.expand,
                                       children: [
-                                        Positioned(
-                                          left: 0,
-                                          right: 0,
-                                          top: 0,
-                                          height: compact ? 88 : 126,
-                                          child: DecoratedBox(
-                                            decoration: BoxDecoration(
-                                              gradient:
-                                                  AppOverlays.playerTopFade,
-                                            ),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          left: 0,
-                                          right: 0,
-                                          bottom: 0,
-                                          height:
-                                              compact &&
-                                                  MediaQuery.sizeOf(
-                                                        context,
-                                                      ).height >
-                                                      MediaQuery.sizeOf(
-                                                        context,
-                                                      ).width
-                                              ? 124
-                                              : 190,
-                                          child: DecoratedBox(
-                                            decoration: BoxDecoration(
-                                              gradient:
-                                                  AppOverlays.playerBottomFade,
-                                            ),
-                                          ),
-                                        ),
                                         Positioned(
                                           left: horizontalInset,
                                           right: horizontalInset,

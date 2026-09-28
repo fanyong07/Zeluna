@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
@@ -18,6 +19,101 @@ import 'package:http/testing.dart';
 
 void main() {
   setUpAll(_preloadJsfForWindowsTests);
+
+  test(
+    'CORE-001 DRPY public denial cancels redirect before address validation',
+    () async {
+      var cancellations = 0;
+      var calls = 0;
+      final body = StreamController<List<int>>(onCancel: () => cancellations++);
+      addTearDown(() async {
+        if (cancellations == 0) await body.stream.listen(null).cancel();
+        await body.close();
+      });
+      final client = MockClient.streaming((request, _) async {
+        calls++;
+        expect(request.url.host, 'media.example.com');
+        return http.StreamedResponse(
+          body.stream,
+          302,
+          headers: {'location': 'http://[::ffff:10.0.0.10]/blocked.mp4'},
+        );
+      });
+      final resolver = RulePlaybackResolver(
+        client: client,
+        drpyRuntime: _FixedDrpyRuntime(const [
+          DrpyPlaybackCandidate(
+            lineName: 'direct',
+            episodeName: 'Episode 2',
+            url: 'https://media.example.com/video.mp4',
+          ),
+        ]),
+      );
+      final result = await resolver.resolveRule(
+        rule: _importDrpyRule('cleanup.js'),
+        subject: _subject,
+        episode: _episode,
+      );
+      expect(result, isEmpty);
+      expect(calls, 1);
+      expect(cancellations, 1);
+    },
+  );
+
+  test(
+    'CORE-003 resolver cancellation reaches actual DRPY storage writeback',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final token = RulePlaybackCancellationToken();
+      final runtime = _testDrpyRuntime();
+      var mediaRequests = 0;
+      final source = _integrationRule.replaceFirst(
+        'VODS = JSON.parse(request(',
+        'setItem("marker", "retired");VODS = JSON.parse(request(',
+      );
+      final base = _importDrpyRule('cancellation.js');
+      final rule = base.copyWith(
+        rawConfig: {...base.rawConfig, 'inlineSource': source},
+      );
+      final client = MockClient((request) async {
+        if (request.url.path != '/api/search') {
+          mediaRequests++;
+          return http.Response('', 404);
+        }
+        entered.complete();
+        await release.future;
+        return http.Response(
+          jsonEncode({
+            'list': [
+              {'vod_id': '/detail', 'vod_name': _subject.title},
+            ],
+          }),
+          200,
+        );
+      });
+      final resolver = RulePlaybackResolver(
+        drpyRuntime: runtime,
+        drpyPublicClient: client,
+      );
+      final pending = resolver.resolveRule(
+        rule: rule,
+        subject: _subject,
+        episode: _episode,
+        cancellationToken: token,
+      );
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        await pending;
+      });
+      await entered.future.timeout(const Duration(seconds: 3));
+      token.cancel();
+      release.complete();
+      expect(await pending, isEmpty);
+      expect(runtime.storage.snapshot(rule.id), isEmpty);
+      expect(mediaRequests, 0);
+    },
+  );
 
   test('TVBox drpy entries resolve relative and mirrored script URLs', () {
     const importer = RuleImporter();
@@ -684,6 +780,7 @@ class _FixedDrpyRuntime extends DrpyRuntime {
   Future<DrpyRuntimeResult> resolve(
     DrpyRuntimeRequest request, {
     http.Client? client,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async => DrpyRuntimeResult(candidates: fixedCandidates);
 }
 

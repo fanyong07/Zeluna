@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import (
     AuthConfigurationError,
+    PasswordAccountState,
+    PasswordSessionState,
     decode_jwt,
     RefreshTokenRejected,
     RefreshTokenReuseDetected,
@@ -27,7 +29,9 @@ from .auth import (
     password_hash_needs_upgrade,
     signing_key,
     token_digest,
+    revalidate_password_account,
     rotate_refresh_token,
+    run_password_work,
     validate_session_token,
     verify_login_password,
     verify_password,
@@ -483,7 +487,7 @@ async def register(
     user = User(
         email=email,
         name=payload.nickname,
-        password_hash=hash_password(payload.password),
+        password_hash=await run_password_work(hash_password, payload.password),
     )
     session.add(user)
     try:
@@ -511,16 +515,26 @@ async def login(
     await _rate_limit(f"login:ip:{_client_key(request)}", limit=30, window_seconds=900)
     await _rate_limit(f"login:email:{email}", limit=10, window_seconds=900)
     user = await session.scalar(select(User).where(User.email == email))
-    password_valid = verify_login_password(
+    expected = PasswordAccountState.capture(user) if user is not None else None
+    password_valid = await run_password_work(
+        verify_login_password,
         payload.password,
-        user.password_hash if user is not None else None,
+        expected.password_hash if expected is not None else None,
     )
-    if user is None or not password_valid:
+    if expected is None or not password_valid:
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    upgraded = (
+        await run_password_work(hash_password, payload.password)
+        if password_hash_needs_upgrade(expected.password_hash)
+        else None
+    )
+    user = await revalidate_password_account(session, expected)
+    if user is None:
         raise HTTPException(status_code=401, detail="邮箱或密码不正确")
     if user.deletion_due_at > 0:
         raise _deletion_pending_error(user)
-    if password_hash_needs_upgrade(user.password_hash):
-        user.password_hash = hash_password(payload.password)
+    if upgraded is not None:
+        user.password_hash = upgraded
     user.updated_at = time.time()
     credentials = await _issue_credentials(
         session,
@@ -686,8 +700,15 @@ async def request_account_deletion(
         f"delete:ip:{_client_key(request)}", limit=5, window_seconds=86400
     )
     await _rate_limit(f"delete:user:{user.id}", limit=3, window_seconds=86400)
-    if not verify_password(payload.password, user.password_hash):
+    expected = PasswordAccountState.capture(user)
+    current_token = PasswordSessionState.capture(account[1])
+    if not await run_password_work(
+        verify_password, payload.password, expected.password_hash
+    ):
         raise HTTPException(status_code=400, detail="密码不正确，账号没有进入删除流程")
+    user = await revalidate_password_account(session, expected, current_token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
     requested_at = time.time()
     due_at = requested_at + ACCOUNT_DELETION_GRACE_SECONDS
     user.deletion_requested_at = requested_at
@@ -718,16 +739,26 @@ async def cancel_account_deletion(
     )
     await _rate_limit(f"cancel-delete:email:{email}", limit=5, window_seconds=3600)
     user = await session.scalar(select(User).where(User.email == email))
-    password_valid = verify_login_password(
+    expected = PasswordAccountState.capture(user) if user is not None else None
+    password_valid = await run_password_work(
+        verify_login_password,
         payload.password,
-        user.password_hash if user is not None else None,
+        expected.password_hash if expected is not None else None,
     )
-    if user is None or not password_valid:
+    if expected is None or not password_valid:
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    upgraded = (
+        await run_password_work(hash_password, payload.password)
+        if password_hash_needs_upgrade(expected.password_hash)
+        else None
+    )
+    user = await revalidate_password_account(session, expected)
+    if user is None:
         raise HTTPException(status_code=401, detail="邮箱或密码不正确")
     if user.deletion_due_at > 0 and user.deletion_due_at <= time.time():
         raise HTTPException(status_code=410, detail="删除冷静期已经结束，无法撤销")
-    if password_hash_needs_upgrade(user.password_hash):
-        user.password_hash = hash_password(payload.password)
+    if upgraded is not None:
+        user.password_hash = upgraded
     user.deletion_requested_at = 0
     user.deletion_due_at = 0
     user.updated_at = time.time()
@@ -757,17 +788,24 @@ async def change_password(
     account: tuple[User, UserToken] = Depends(current_account),
     session: AsyncSession = Depends(get_session),
 ):
-    user, current_token = account
-    if not verify_password(payload.current_password, user.password_hash):
+    expected = PasswordAccountState.capture(account[0])
+    current_token = PasswordSessionState.capture(account[1])
+    if not await run_password_work(
+        verify_password, payload.current_password, expected.password_hash
+    ):
         raise HTTPException(status_code=400, detail="当前密码不正确")
     if payload.current_password == payload.new_password:
         raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
-    user.password_hash = hash_password(payload.new_password)
+    replacement = await run_password_work(hash_password, payload.new_password)
+    user = await revalidate_password_account(session, expected, current_token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+    user.password_hash = replacement
     user.updated_at = time.time()
     await session.execute(
         delete(UserToken).where(
             UserToken.user_id == user.id,
-            UserToken.id != current_token.id,
+            UserToken.id != current_token.token_id,
         )
     )
     await session.commit()
@@ -778,9 +816,18 @@ async def change_password(
 async def verify_account_password(
     payload: VerifyPasswordRequest,
     account: tuple[User, UserToken] = Depends(current_account),
+    session: AsyncSession = Depends(get_session),
 ):
-    if not verify_password(payload.password, account[0].password_hash):
+    expected = PasswordAccountState.capture(account[0])
+    current_token = PasswordSessionState.capture(account[1])
+    if not await run_password_work(
+        verify_password, payload.password, expected.password_hash
+    ):
         raise HTTPException(status_code=400, detail="密码不正确，数据没有清除")
+    if await revalidate_password_account(session, expected, current_token) is None:
+        raise HTTPException(status_code=401, detail="登录状态已失效，请重新登录")
+    # Verification is read-only; release the authorization fence without writes.
+    await session.rollback()
 
 
 @router.post("/password/reset")
@@ -795,7 +842,12 @@ async def reset_password(
     user = await session.scalar(select(User).where(User.email == email))
     if user is None:
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
-    user.password_hash = hash_password(payload.new_password)
+    expected = PasswordAccountState.capture(user)
+    replacement = await run_password_work(hash_password, payload.new_password)
+    user = await revalidate_password_account(session, expected)
+    if user is None:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    user.password_hash = replacement
     user.updated_at = time.time()
     await session.execute(delete(UserToken).where(UserToken.user_id == user.id))
     await session.commit()

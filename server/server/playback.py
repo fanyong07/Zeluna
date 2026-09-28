@@ -1363,17 +1363,6 @@ class PlaybackService:
         scan_scope: str = "full",
     ) -> None:
         repository = self._repository_factory(session)
-        if scan_scope == "quick":
-            # A quick result must never replace a full round that is still
-            # usable, otherwise every player start would downgrade the cache
-            # to a partial inventory.
-            existing = await repository.get_cache(stable_id, episode)
-            if (
-                existing is not None
-                and self._cached_scan_scope(existing) == "full"
-                and self._cache_state_for(existing) != "miss"
-            ):
-                return
         await repository.upsert_cache(
             subject_id=stable_id,
             episode=episode,
@@ -1387,6 +1376,18 @@ class PlaybackService:
             ),
             verified_at=time.time(),
             scan_scope=scan_scope,
+            can_replace=(
+                self._quick_cache_can_replace if scan_scope == "quick" else None
+            ),
+        )
+
+    @classmethod
+    def _quick_cache_can_replace(cls, existing: object) -> bool:
+        # Apply the existing freshness/route policy at the atomic write boundary,
+        # not at an earlier service read that another writer can invalidate.
+        return (
+            cls._cached_scan_scope(existing) != "full"
+            or cls._cache_state_for(existing) == "miss"
         )
 
     @classmethod

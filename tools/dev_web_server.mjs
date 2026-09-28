@@ -1,7 +1,7 @@
 import { createServer, request as requestHttp } from 'node:http';
 import { request as requestHttps } from 'node:https';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { lookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
@@ -148,18 +148,46 @@ class ProxyError extends Error {
 }
 
 function serveStatic(requestUrl, response) {
-  let path = decodeURIComponent(requestUrl.pathname);
-  if (path === '/') path = '/index.html';
-  const file = safePath(path);
-  const target = existsSync(file) && statSync(file).isFile()
-    ? file
-    : join(root, 'index.html');
-  const ext = extname(target).toLowerCase();
-  response.writeHead(200, {
-    'content-type': mimeTypes.get(ext) ?? 'application/octet-stream',
-    'cache-control': ext === '.html' || ext === '.js' ? 'no-store' : 'public, max-age=60',
-  });
-  createReadStream(target).pipe(response);
+  let stream;
+  const fail = (error) => {
+    stream?.unpipe(response);
+    stream?.destroy();
+    if (response.destroyed || response.writableEnded) return;
+    if (response.headersSent) {
+      // A partial response cannot be changed to an error status. Abort it so
+      // clients do not mistake truncated bytes for a successful complete file.
+      response.destroy();
+      return;
+    }
+    const status = error instanceof URIError
+      ? 400
+      : ['ENOENT', 'ENOTDIR'].includes(error?.code) ? 404 : 500;
+    response.writeHead(status, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    response.end(status === 404 ? 'Static file not found' : 'Static file unavailable');
+  };
+  try {
+    let path = decodeURIComponent(requestUrl.pathname);
+    if (path === '/') path = '/index.html';
+    const file = safePath(path);
+    const target = existsSync(file) && statSync(file).isFile()
+      ? file
+      : join(root, 'index.html');
+    const ext = extname(target).toLowerCase();
+    // Do not commit a 200 until the stream actually produces data (or ends).
+    response.setHeader('content-type', mimeTypes.get(ext) ?? 'application/octet-stream');
+    response.setHeader('cache-control', ext === '.html' || ext === '.js' ? 'no-store' : 'public, max-age=60');
+    stream = createReadStream(target);
+    const dispose = () => stream.destroy();
+    response.once('close', dispose);
+    stream.once('close', () => response.off('close', dispose));
+    stream.once('error', fail);
+    stream.pipe(response);
+  } catch (error) {
+    fail(error);
+  }
 }
 
 function serveCacheReset(response) {
@@ -189,8 +217,12 @@ function serveCacheReset(response) {
 }
 
 function safePath(path) {
-  const target = normalize(join(root, path));
-  if (!target.startsWith(root)) return join(root, 'index.html');
+  // Treat both URL separator spellings consistently on Windows and POSIX.
+  const target = join(root, path.replaceAll('\\', '/'));
+  const fromRoot = relative(root, target);
+  if (isAbsolute(fromRoot) || /^\.\.(?:[/\\]|$)/.test(fromRoot)) {
+    return join(root, 'index.html');
+  }
   return target;
 }
 

@@ -96,6 +96,13 @@ class RulePlaybackResolver {
     _probeRequests.clear();
   }
 
+  /// Retires account/context-owned script state as well as transient caches.
+  /// Ordinary force refreshes must continue using [clearCaches] instead.
+  void resetExecutionScope() {
+    _drpyRuntime.resetExecutionScope();
+    clearCaches();
+  }
+
   /// Verifies a concrete media URL before it is handed to the player.
   ///
   /// `PlaybackLine.available` is intentionally upgraded here from a source
@@ -309,6 +316,7 @@ class RulePlaybackResolver {
         credentialOrigin: rule.baseUrl,
       ),
       client: client,
+      cancellationToken: _activeRulePlaybackResolveContext?.cancellationToken,
     );
     if (runtimeResult.error != null || runtimeResult.candidates.isEmpty) {
       return const [];
@@ -2561,12 +2569,14 @@ class RulePlaybackResolver {
             location.trim().isEmpty) {
           break;
         }
+        // Release this hop before URI parsing or policy validation can throw.
+        // The client is shared; only this response belongs to the probe.
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
         final redirectLimit = drpyPublicOnly
             ? _maxDrpyMediaRedirects
             : _maxRuleRedirects;
         if (redirect >= redirectLimit) {
-          final subscription = response.stream.listen(null);
-          await subscription.cancel();
           throw const HttpException('media redirect limit reached.');
         }
         final nextUri = currentUri.resolve(location.trim());
@@ -2579,8 +2589,6 @@ class RulePlaybackResolver {
           );
         }
         currentHeaders = ruleChildHeaders(currentUri, nextUri, currentHeaders);
-        final subscription = response.stream.listen(null);
-        await subscription.cancel();
         currentUri = nextUri;
       }
       if (response.statusCode < 200 || response.statusCode >= 400) {

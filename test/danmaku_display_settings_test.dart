@@ -223,45 +223,50 @@ void main() {
     },
   );
 
-  testWidgets('display area bounds all modes and opacity includes shadows', (
-    tester,
-  ) async {
-    final comments = [
-      comment('s', DanmakuMode.scroll),
-      comment('t', DanmakuMode.top),
-      comment('b', DanmakuMode.bottom),
-    ];
-    for (final area in [.25, .5, .75, 1.0]) {
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Center(
-            child: SizedBox(
-              width: 640,
-              height: 360,
-              child: RemoteDanmakuOverlay(
-                comments: comments,
-                position: const Duration(seconds: 1),
-                settings: DanmakuSettings(displayArea: area, opacity: .4),
+  testWidgets(
+    'display area bounds admitted modes and opacity includes outlines',
+    (tester) async {
+      final comments = [
+        comment('s', DanmakuMode.scroll),
+        comment('t', DanmakuMode.top),
+        comment('b', DanmakuMode.bottom),
+      ];
+      for (final area in [.25, .5, .75, 1.0]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Center(
+              child: SizedBox(
+                width: 640,
+                height: 360,
+                child: RemoteDanmakuOverlay(
+                  comments: comments,
+                  position: const Duration(seconds: 1),
+                  settings: DanmakuSettings(displayArea: area, opacity: .4),
+                ),
               ),
             ),
           ),
-        ),
-      );
-      final origin = tester.getTopLeft(find.byType(RemoteDanmakuOverlay));
-      for (final text in find.text('弹幕').evaluate()) {
-        final rect = tester.getRect(find.byWidget(text.widget));
-        expect(rect.top, greaterThanOrEqualTo(origin.dy));
-        expect(rect.bottom, lessThanOrEqualTo(origin.dy + 360 * area + 1));
+        );
+        final origin = tester.getTopLeft(find.byType(RemoteDanmakuOverlay));
+        for (final text in find.text('弹幕').evaluate()) {
+          final rect = tester.getRect(find.byWidget(text.widget));
+          expect(rect.top, greaterThanOrEqualTo(origin.dy));
+          expect(rect.bottom, lessThanOrEqualTo(origin.dy + 360 * area + 1));
+        }
+        expect(
+          tester
+              .widgetList<Opacity>(find.byType(Opacity))
+              .where((e) => e.opacity == .4),
+          hasLength(find.byType(DanmakuText).evaluate().length),
+        );
+        expect(
+          find.byType(DanmakuText).evaluate().length,
+          inInclusiveRange(1, 3),
+        );
+        expect(tester.takeException(), isNull);
       }
-      expect(
-        tester
-            .widgetList<Opacity>(find.byType(Opacity))
-            .where((e) => e.opacity == .4),
-        hasLength(3),
-      );
-      expect(tester.takeException(), isNull);
-    }
-  });
+    },
+  );
 
   testWidgets('compact settings are editable and contain no provider list', (
     tester,

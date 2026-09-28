@@ -2,6 +2,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/network/network_http_client.dart';
 import 'drpy_runtime_models.dart';
+import 'rule_playback_cancellation.dart';
 
 Future<void> ensurePublicDrpyHttpUri(Uri uri) async {
   final scheme = uri.scheme.toLowerCase();
@@ -34,6 +35,8 @@ class DrpyRuntime {
   final DrpyLocalStorage storage;
   final DrpyRuntimeLimits limits;
 
+  void resetExecutionScope() => storage.clear();
+
   Future<void> ensurePublicUri(Uri uri) => ensurePublicDrpyHttpUri(uri);
 
   http.Client createPublicHttpClient() => createDrpyPublicHttpClient();
@@ -41,6 +44,7 @@ class DrpyRuntime {
   Future<DrpyRuntimeResult> resolve(
     DrpyRuntimeRequest request, {
     http.Client? client,
+    RulePlaybackCancellationToken? cancellationToken,
   }) async {
     return const DrpyRuntimeResult(
       candidates: [],
