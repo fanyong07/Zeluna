@@ -233,6 +233,46 @@ void main() {
     expect(repository.scanInProgress, isFalse);
   });
 
+  for (final failure in ['error', 'incomplete', 'timedOut']) {
+    test('a $failure scan can be retried after its stream closes', () async {
+      var calls = 0;
+      final done = Completer<void>();
+      final repository = _repository(
+        loadExpandedLines: (_, _, _) async* {
+          calls++;
+          yield PlaybackLineLookupUpdate(
+            lines: [_line('partial', clientVerified: true)],
+            completedRules: 1,
+            totalRules: 3,
+            phase: failure == 'timedOut'
+                ? PlaybackLineLookupPhase.complete
+                : PlaybackLineLookupPhase.discovery,
+            timedOut: failure == 'timedOut',
+          );
+          if (failure == 'error') throw StateError('temporary');
+        },
+      );
+      addTearDown(repository.dispose);
+      bool start(void Function() onDone) => repository.startExpandedLookup(
+        subject: _subject,
+        episode: _episode,
+        hasActivePlayableLine: true,
+        preserveLoadedLine: (lines) => lines,
+        onUpdate: (_) {},
+        onError: (_, _) {},
+        onDone: onDone,
+      );
+      expect(start(done.complete), isTrue);
+      await done.future;
+      expect(repository.scanComplete, isFalse);
+      expect(repository.lines.map((line) => line.id), contains('partial'));
+      final retried = Completer<void>();
+      expect(start(retried.complete), isTrue);
+      await retried.future;
+      expect(calls, 2);
+    });
+  }
+
   test(
     'dispose cancels expanded and backup work without late callbacks',
     () async {

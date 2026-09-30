@@ -44,18 +44,16 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
       widget.episodes,
       widget.episode,
     );
-    final availableLines = selectablePlaybackLinesForDisplay(
-      widget.lines,
-      failedLineIds: widget.failedLineIds,
-    ).toList(growable: true);
+    final displayLines = allPlaybackLinesForDisplay(widget.lines).toList();
     final selectedLine = widget.line;
     if (selectedLine != null &&
-        selectedLine.available &&
-        (selectedLine.url?.trim().isNotEmpty ?? false) &&
-        !widget.failedLineIds.contains(selectedLine.id) &&
-        !availableLines.any((item) => item.id == selectedLine.id)) {
-      availableLines.insert(0, selectedLine);
+        !displayLines.any((line) => line.id == selectedLine.id)) {
+      displayLines.insert(0, selectedLine);
     }
+    final playableCount = selectablePlaybackLinesForDisplay(
+      displayLines,
+      failedLineIds: widget.failedLineIds,
+    ).length;
     final metadata = <String>[
       if (widget.subject.year != '未知') widget.subject.year,
       if (widget.subject.platform.trim().isNotEmpty) widget.subject.platform,
@@ -180,13 +178,13 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
                   children: [
                     _PortraitSectionHeader(
                       title: '播放线路',
-                      trailing: availableLines.isEmpty
+                      trailing: displayLines.isEmpty
                           ? (widget.loadingLines ? '查找中' : '暂无')
-                          : '${availableLines.length} 条',
+                          : '${displayLines.length} 条 · $playableCount 可播',
                       onTap: widget.onLinePanel,
                     ),
                     const Divider(height: 21, color: AppColors.theaterBorder),
-                    if (availableLines.isEmpty)
+                    if (displayLines.isEmpty)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 4),
                         child: Row(
@@ -218,32 +216,13 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
                           ],
                         ),
                       )
-                    else ...[
-                      for (
-                        var i = 0;
-                        i < math.min(availableLines.length, 4);
-                        i++
-                      ) ...[
-                        _PortraitPlaybackLineRow(
-                          line: availableLines[i],
-                          selected: availableLines[i].id == widget.line?.id,
-                          onTap: () => widget.onLineSelected(availableLines[i]),
-                        ),
-                        if (i < math.min(availableLines.length, 4) - 1)
-                          const Divider(
-                            height: 1,
-                            color: AppColors.theaterBorder,
-                          ),
-                      ],
-                      if (availableLines.length > 4)
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: TextButton(
-                            onPressed: widget.onLinePanel,
-                            child: Text('查看全部 ${availableLines.length} 条'),
-                          ),
-                        ),
-                    ],
+                    else
+                      PortraitPlaybackLineList(
+                        lines: displayLines,
+                        selectedLineId: widget.line?.id,
+                        failedLineIds: widget.failedLineIds,
+                        onSelected: widget.onLineSelected,
+                      ),
                   ],
                 ),
               ),
@@ -251,6 +230,49 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Scrollable full inventory: no hidden "first four" subset on mobile.
+class PortraitPlaybackLineList extends StatelessWidget {
+  const PortraitPlaybackLineList({
+    super.key,
+    required this.lines,
+    required this.selectedLineId,
+    required this.failedLineIds,
+    required this.onSelected,
+  });
+  final List<PlaybackLine> lines;
+  final String? selectedLineId;
+  final Set<String> failedLineIds;
+  final ValueChanged<PlaybackLine> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = allPlaybackLinesForDisplay(lines);
+    return SizedBox(
+      height: math.min(visible.length * 57.0, 285),
+      child: ListView.separated(
+        primary: false,
+        itemCount: visible.length,
+        separatorBuilder: (_, _) =>
+            const Divider(height: 1, color: AppColors.theaterBorder),
+        itemBuilder: (_, index) {
+          final line = visible[index];
+          final selectable =
+              line.available &&
+              (line.url?.isNotEmpty ?? false) &&
+              !failedLineIds.contains(line.id);
+          return _PortraitPlaybackLineRow(
+            key: ValueKey('portrait-route-${line.id}'),
+            line: line,
+            selected: line.id == selectedLineId,
+            failed: failedLineIds.contains(line.id),
+            onTap: selectable ? () => onSelected(line) : null,
+          );
+        },
+      ),
     );
   }
 }
@@ -453,20 +475,29 @@ class _PortraitEpisodeCard extends StatelessWidget {
 
 class _PortraitPlaybackLineRow extends StatelessWidget {
   const _PortraitPlaybackLineRow({
+    super.key,
     required this.line,
     required this.selected,
+    required this.failed,
     required this.onTap,
   });
 
   final PlaybackLine line;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
+  final bool failed;
 
   @override
   Widget build(BuildContext context) {
     final quality = playbackQualityChipLabel(line);
     final details = <String>[
-      playbackLineLatencyLabel(line),
+      if (line.title.trim().isNotEmpty) line.title.trim(),
+      if (failed)
+        '播放失败'
+      else if (!line.available && !line.requiresClientProbe)
+        playbackLineFailureLabel(line)
+      else
+        playbackLineLatencyLabel(line),
       ?quality,
     ].join(' · ');
     return InkWell(

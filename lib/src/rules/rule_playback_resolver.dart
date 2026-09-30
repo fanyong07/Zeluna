@@ -473,7 +473,7 @@ class RulePlaybackResolver {
       if (groups.isEmpty) return const [];
       return _collectPlaybackCandidates(
         [
-          for (var index = 0; index < groups.length && index < 8; index++)
+          for (var index = 0; index < groups.length; index++)
             () => _resolveAndroidCspLine(
               client,
               rule,
@@ -545,6 +545,7 @@ class RulePlaybackResolver {
         episode,
         url: playableUrl,
         title: '${selected.title} · $lineName',
+        routeKey: '${group.index}:${group.name}',
         probe: probe,
         referer: referer,
         headers: headers,
@@ -729,9 +730,8 @@ class RulePlaybackResolver {
       if (rawLine is! Map) continue;
       final url = _aikanbotEpisodeUrl(rawLine['resData'], episode.number);
       if (url != null) candidates.add(url);
-      // A bounded first wave prevents one source with dozens of mirrors from
-      // delaying the player. The normal health fallback still retries later.
-      if (candidates.length >= 8) break;
+      // The quick collector already bounds its first wave. Keep the complete
+      // inventory here so expanded lookup can visit every upstream group.
     }
     if (candidates.isEmpty) {
       return [_unavailableLine(rule, subject, episode, '没有找到当前集的 HLS 线路。')];
@@ -742,36 +742,67 @@ class RulePlaybackResolver {
         for (var index = 0; index < candidates.length; index++)
           () async {
             final url = candidates[index];
-            final probe = await _playableCandidateStatus(
-              client,
-              url,
-              headers,
-              verifyPlayable: verifyPlayable,
-            );
             final title = '${episode.displayTitle} · 线路 ${index + 1}';
-            return probe.available
-                ? _availableLine(
-                    rule,
-                    episode,
-                    url: url,
-                    title: title,
-                    probe: probe,
-                    referer: detailUrl.toString(),
-                    headers: headers,
-                  )
-                : _deadLine(
-                    rule,
-                    episode,
-                    url: url,
-                    title: title,
-                    latency: probe.latency,
-                    message: probe.message,
-                    headers: headers,
-                  );
+            try {
+              final probe = await _playableCandidateStatus(
+                client,
+                url,
+                headers,
+                verifyPlayable: verifyPlayable,
+              );
+              return probe.available
+                  ? _availableLine(
+                      rule,
+                      episode,
+                      url: url,
+                      title: title,
+                      probe: probe,
+                      referer: detailUrl.toString(),
+                      headers: headers,
+                      routeKey: '$index',
+                    )
+                  : _deadLine(
+                      rule,
+                      episode,
+                      url: url,
+                      title: title,
+                      latency: probe.latency,
+                      message: probe.message,
+                      headers: headers,
+                      routeKey: '$index',
+                    );
+            } catch (error) {
+              if (_activeRulePlaybackResolveContext
+                      ?.cancellationToken
+                      ?.isCancelled ==
+                  true) {
+                return null;
+              }
+              return _deadLine(
+                rule,
+                episode,
+                url: url,
+                title: title,
+                latency: null,
+                message: _friendlyError(error),
+                headers: headers,
+                routeKey: '$index',
+              );
+            }
           },
       ],
       verifyPlayable: verifyPlayable,
       candidateTimeout: timeout,
+      pendingCandidate: (index) => _deadLine(
+        rule,
+        episode,
+        url: candidates[index],
+        title: '${episode.displayTitle} · 线路 ${index + 1}',
+        latency: null,
+        message: '线路验证未完成，仍保留在完整列表中，可重新查找。',
+        headers: headers,
+        routeKey: '$index',
+      ),
     );
     return lines.isEmpty
         ? [_unavailableLine(rule, subject, episode, '播放线路验证失败。')]
@@ -1276,6 +1307,7 @@ class RulePlaybackResolver {
               probe: probe,
               referer: playPageUrl,
               headers: headers,
+              routeKey: '$roadIndex',
             )
           : _deadLine(
               rule,
@@ -1285,6 +1317,7 @@ class RulePlaybackResolver {
               latency: probe.latency,
               message: probe.message,
               headers: headers,
+              routeKey: '$roadIndex',
             );
     } catch (_) {
       return null;
@@ -1449,6 +1482,7 @@ class RulePlaybackResolver {
               probe: probe,
               referer: playPageUrl,
               headers: headers,
+              routeKey: '$groupIndex',
             )
           : _deadLine(
               rule,
@@ -1458,6 +1492,7 @@ class RulePlaybackResolver {
               latency: probe.latency,
               message: probe.message,
               headers: headers,
+              routeKey: '$groupIndex',
             );
     } catch (_) {
       return null;
@@ -1623,7 +1658,7 @@ class RulePlaybackResolver {
     final groups = _tvBoxPlayGroups(item);
     final lines = await _collectPlaybackCandidates(
       [
-        for (var index = 0; index < groups.length && index < 8; index++)
+        for (var index = 0; index < groups.length; index++)
           () => _resolveTvBoxLine(
             client,
             rule,
@@ -1636,6 +1671,23 @@ class RulePlaybackResolver {
       ],
       verifyPlayable: verifyPlayable,
       candidateTimeout: timeout,
+      pendingCandidate: (index) {
+        final group = groups[index];
+        final selected = _pickTvBoxEpisode(group.episodes, episode);
+        if (selected == null) return null;
+        final url = _normalizePlayableUrl(selected.url, endpoint.toString());
+        if (!_looksPlayable(url)) return null;
+        return _deadLine(
+          rule,
+          episode,
+          url: url,
+          title: '${selected.title} · ${group.name}',
+          latency: null,
+          message: '线路验证未完成，仍保留在完整列表中，可重新查找。',
+          headers: _headers(rule: rule, referer: endpoint.toString()),
+          routeKey: '${group.index}:${group.name}',
+        );
+      },
     );
     if (lines.isEmpty) {
       return [
@@ -1686,34 +1738,56 @@ class RulePlaybackResolver {
     );
     if (!_looksPlayable(playableUrl)) return null;
     final headers = _headers(rule: rule, referer: endpoint.toString());
-    final probe = await _playableCandidateStatus(
-      client,
-      playableUrl,
-      headers,
-      verifyPlayable: verifyPlayable,
-    );
     final title = group.name.trim().isEmpty
         ? selected.title
         : '${selected.title} · ${group.name}';
-    return probe.available
-        ? _availableLine(
-            rule,
-            episode,
-            url: playableUrl,
-            title: title,
-            probe: probe,
-            referer: endpoint.toString(),
-            headers: headers,
-          )
-        : _deadLine(
-            rule,
-            episode,
-            url: playableUrl,
-            title: title,
-            latency: probe.latency,
-            message: probe.message,
-            headers: headers,
-          );
+    final routeKey = '${group.index}:${group.name}';
+    try {
+      final probe = await _playableCandidateStatus(
+        client,
+        playableUrl,
+        headers,
+        verifyPlayable: verifyPlayable,
+      );
+      return probe.available
+          ? _availableLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              probe: probe,
+              referer: endpoint.toString(),
+              headers: headers,
+              routeKey: routeKey,
+            )
+          : _deadLine(
+              rule,
+              episode,
+              url: playableUrl,
+              title: title,
+              latency: probe.latency,
+              message: probe.message,
+              headers: headers,
+              routeKey: routeKey,
+            );
+    } catch (error) {
+      if (_activeRulePlaybackResolveContext?.cancellationToken?.isCancelled ==
+          true) {
+        return null;
+      }
+      // Keep the route and explain policy/network failures; never relax its
+      // media permissions just to make an inventory entry appear playable.
+      return _deadLine(
+        rule,
+        episode,
+        url: playableUrl,
+        title: title,
+        latency: started.elapsed,
+        message: _friendlyError(error),
+        headers: headers,
+        routeKey: routeKey,
+      );
+    }
   }
 
   Future<String> _get(
@@ -1770,6 +1844,7 @@ class RulePlaybackResolver {
     String? quality,
     Map<String, String>? headers,
     bool publicHttpOnly = false,
+    String? routeKey,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, referer);
     final lineHeaders = headers ?? _headers(rule: rule, referer: referer);
@@ -1780,7 +1855,7 @@ class RulePlaybackResolver {
     );
     return PlaybackLine(
       id: stablePlaybackLineKey(
-        providerId: rule.id,
+        providerId: routeKey == null ? rule.id : '${rule.id}|route:$routeKey',
         episodeKey: episodeKey,
         uri: normalizedUrl,
         headers: lineHeaders,
@@ -1823,6 +1898,7 @@ class RulePlaybackResolver {
     required Duration? latency,
     required String message,
     required Map<String, String> headers,
+    String? routeKey,
   }) {
     final normalizedUrl = _normalizePlayableUrl(url, headers['Referer'] ?? '');
     final episodeKey = episode.identityKey();
@@ -1830,7 +1906,7 @@ class RulePlaybackResolver {
       // Keep the same logical id as the optimistic quick result so a failed
       // verified probe replaces it instead of leaving a stale playable row.
       id: stablePlaybackLineKey(
-        providerId: rule.id,
+        providerId: routeKey == null ? rule.id : '${rule.id}|route:$routeKey',
         episodeKey: episodeKey,
         uri: normalizedUrl,
         headers: headers,
@@ -4044,6 +4120,7 @@ List<_TvBoxPlayGroup> _tvBoxPlayGroups(Map<String, dynamic>? item) {
             ? sourceNames[groupIndex].trim()
             : '线路${groupIndex + 1}',
         episodes: episodes,
+        index: groupIndex,
       ),
     );
   }
@@ -4071,10 +4148,15 @@ _TvBoxEpisode? _pickTvBoxEpisode(
 }
 
 class _TvBoxPlayGroup {
-  const _TvBoxPlayGroup({required this.name, required this.episodes});
+  const _TvBoxPlayGroup({
+    required this.name,
+    required this.episodes,
+    required this.index,
+  });
 
   final String name;
   final List<_TvBoxEpisode> episodes;
+  final int index;
 }
 
 class _TvBoxEpisode {
@@ -4144,19 +4226,44 @@ Future<List<PlaybackLine>> _collectPlaybackCandidates(
   Duration candidateTimeout = const Duration(seconds: 10),
   bool Function(PlaybackLine line)? preferredQuickCandidate,
   Duration preferredCandidateGrace = Duration.zero,
+  PlaybackLine? Function(int index)? pendingCandidate,
 }) async {
   if (requests.isEmpty) return const [];
   if (verifyPlayable) {
-    return (await Future.wait(
-      requests.map((start) async {
+    final results = List<PlaybackLine?>.filled(requests.length, null);
+    var nextIndex = 0;
+    var expired = false;
+    Future<void> worker() async {
+      while (!expired && nextIndex < requests.length) {
+        final index = nextIndex++;
         try {
-          return await start().timeout(candidateTimeout);
+          results[index] = await requests[index]().timeout(candidateTimeout);
         } catch (_) {
-          // Keep verified siblings when one playback road is slow or broken.
-          return null;
+          // One slow/broken route must not erase the other returned routes.
         }
-      }),
-    )).whereType<PlaybackLine>().toList(growable: false);
+      }
+    }
+
+    final work = Future.wait(
+      List.generate(requests.length < 4 ? requests.length : 4, (_) => worker()),
+    );
+    if (pendingCandidate == null) {
+      await work;
+    } else {
+      // Direct API inventories are known before probes. Return every known
+      // route within the rule budget, keeping pending ones non-playable.
+      await work.timeout(
+        candidateTimeout,
+        onTimeout: () {
+          expired = true;
+          return <void>[];
+        },
+      );
+    }
+    return [
+      for (var index = 0; index < results.length; index++)
+        ?(results[index] ?? pendingCandidate?.call(index)),
+    ];
   }
 
   // The startup lookup only needs one usable route. Waiting for every road in

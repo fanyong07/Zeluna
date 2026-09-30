@@ -170,7 +170,11 @@ final class SourceController {
       }
       await _replaceRulePlugins(
         scope,
-        current.copyWith(installedIds: installed, enabledIds: enabled),
+        current.copyWith(
+          installedIds: installed,
+          enabledIds: enabled,
+          uninstalledIds: {...current.uninstalledIds}..remove(id),
+        ),
       );
     });
   }
@@ -188,6 +192,7 @@ final class SourceController {
           installedIds: installed,
           enabledIds: enabled,
           approvedPermissionDigests: approvals,
+          uninstalledIds: {...current.uninstalledIds, id},
         ),
       );
     });
@@ -549,7 +554,9 @@ final class SourceController {
   RulePluginState _installNewRecommendedRules(RulePluginState state) {
     final repository = repositoryFor(state);
     final defaults = repository.defaultState();
-    final missing = defaults.installedIds.difference(state.installedIds);
+    final missing = defaults.installedIds
+        .difference(state.installedIds)
+        .difference(state.uninstalledIds);
     if (missing.isEmpty) return state;
     return repository.normalizeState(
       state.copyWith(

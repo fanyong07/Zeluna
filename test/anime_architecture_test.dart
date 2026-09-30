@@ -381,8 +381,8 @@ void main() {
       final movieLines = await source.linesForEpisode(_movieSubject, episode);
 
       expect(repository.rulesFor(RuleContentType.anime), hasLength(3));
-      expect(repository.rulesFor(RuleContentType.series), isEmpty);
-      expect(repository.rulesFor(RuleContentType.movie), hasLength(2));
+      expect(repository.rulesFor(RuleContentType.series), hasLength(2));
+      expect(repository.rulesFor(RuleContentType.movie), hasLength(5));
       expect(state.installedIds, contains('zeluna:recommended:fantuan'));
       expect(state.installedIds, contains('zeluna:recommended:aikanbot'));
       expect(state.installedIds, contains('zeluna:recommended:sorani'));
@@ -394,7 +394,7 @@ void main() {
       expect(state.enabledIds, contains('zeluna:recommended:dbku'));
       expect(state.enabledIds, contains('zeluna:recommended:nivod'));
       expect(animeLines, isNotEmpty);
-      expect(seriesLines, hasLength(1));
+      expect(seriesLines, hasLength(2));
       expect(movieLines, isNotEmpty);
     },
   );
@@ -1594,7 +1594,7 @@ void main() {
         everyElement(rules.length),
       );
       expect(discoveryRuleIds.toSet(), rules.map((rule) => rule.id).toSet());
-      expect(verifiedRuleIds, [rules.last.id]);
+      expect(verifiedRuleIds.toSet(), rules.map((rule) => rule.id).toSet());
       expect(resolver.maxActive, 6);
       expect(updates.last.isComplete, isTrue);
       expect(updates.last.completedRules, rules.length);
@@ -1609,7 +1609,7 @@ void main() {
   );
 
   test(
-    'progressive verification only revisits providers with available candidates',
+    'full progressive inventory revisits unavailable providers as well',
     () async {
       final rules = List.generate(
         4,
@@ -1646,20 +1646,20 @@ void main() {
           if (resolver.verifyPlayableCalls[index]) resolver.calls[index],
       ];
 
-      expect(verifiedRuleIds.toSet(), candidateIds);
-      expect(verifiedRuleIds, hasLength(candidateIds.length));
-      expect(verificationUpdates, hasLength(candidateIds.length));
+      expect(verifiedRuleIds.toSet(), rules.map((rule) => rule.id).toSet());
+      expect(verifiedRuleIds, hasLength(rules.length));
+      expect(verificationUpdates, hasLength(rules.length));
       expect(
         verificationUpdates.map((update) => update.totalRules),
-        everyElement(candidateIds.length),
+        everyElement(rules.length),
       );
-      expect(verificationUpdates.last.completedRules, candidateIds.length);
+      expect(verificationUpdates.last.completedRules, rules.length);
       expect(updates.last.isComplete, isTrue);
     },
   );
 
   test(
-    'progressive rule timeout stays visible as an unavailable line',
+    'a discovery timeout stays visible until the full pass recovers',
     () async {
       final rule = _animekoLookupRule(
         id: 'custom:animeko:progressive-timeout',
@@ -1687,7 +1687,7 @@ void main() {
       final timeoutUpdate = updates.firstWhere(
         (update) => update.phase == PlaybackLineLookupPhase.discovery,
       );
-      final timeoutLine = updates.last.lines.single;
+      final timeoutLine = timeoutUpdate.lines.single;
 
       expect(timeoutUpdate.completedRules, 1);
       expect(timeoutUpdate.totalRules, 1);
@@ -1698,7 +1698,8 @@ void main() {
       expect(timeoutLine.message, contains('检索超时'));
       expect(updates.last.isComplete, isTrue);
       expect(updates.last.timedOut, isTrue);
-      expect(resolver.verifyPlayableCalls, everyElement(isFalse));
+      expect(resolver.verifyPlayableCalls, [false, true]);
+      expect(updates.last.lines.single.available, isTrue);
     },
   );
 

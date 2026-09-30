@@ -225,7 +225,7 @@ final class PlaybackLineRepository {
         replaceLines(merged);
         final inventory = _inventory();
         _scanInProgress = !update.isComplete;
-        _scanComplete = update.isComplete;
+        _scanComplete = update.isComplete && !update.timedOut;
         _scanCompletedRules = update.completedRules;
         _scanTotalRules = update.totalRules;
         _lookupInProgress =
@@ -250,7 +250,8 @@ final class PlaybackLineRepository {
           return;
         }
         _scanInProgress = false;
-        _scanComplete = true;
+        // Closing a partial/failed stream is not proof of a complete scan.
+        // Keep it retryable when the user opens the inventory again.
         _lookupInProgress = false;
         onDone();
       },

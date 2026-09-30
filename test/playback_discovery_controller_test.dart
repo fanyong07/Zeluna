@@ -1224,6 +1224,73 @@ void main() {
     },
   );
 
+  test(
+    'enabled rules publish before slow full backend discovery completes',
+    () async {
+      final expanded = Completer<List<PlaybackLine>>();
+      var fullCalls = 0;
+      final backend = _FakePlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async {
+          if (expandAll) {
+            fullCalls++;
+            return expanded.future;
+          }
+          return [_line('quick', clientVerified: true)];
+        },
+      );
+      final rule = _FakePlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async => [],
+        updates: (_, _, {cancellationToken}) async* {
+          yield PlaybackLineLookupUpdate(
+            lines: [
+              _line(
+                'early-rule',
+                provider: 'rule:enabled',
+                clientVerified: true,
+              ),
+            ],
+            completedRules: 1,
+            totalRules: 1,
+            phase: PlaybackLineLookupPhase.complete,
+          );
+        },
+      );
+      final controller = _controller(
+        backend: backend,
+        rule: rule,
+        activeVersion: () => 1,
+      );
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .forEach(snapshots.add);
+      addTearDown(() async {
+        if (!expanded.isCompleted) expanded.complete([]);
+        await done;
+        controller.dispose();
+      });
+      await _waitUntil(() => fullCalls == 1);
+      await _waitUntil(
+        () => snapshots.any((u) => u.lines.any((l) => l.id == 'early-rule')),
+      );
+      expect(expanded.isCompleted, isFalse);
+      expect(snapshots.last.phase, isNot(PlaybackLineLookupPhase.complete));
+      expanded.complete([_line('full', clientVerified: true)]);
+      await done;
+      expect(
+        snapshots.last.lines.map((l) => l.id),
+        containsAll(['quick', 'full', 'early-rule']),
+      );
+      expect(snapshots.last.phase, PlaybackLineLookupPhase.complete);
+    },
+  );
+
   test('account switch cancels a late detail prefetch write', () async {
     var activeVersion = 1;
     final verification = Completer<void>();

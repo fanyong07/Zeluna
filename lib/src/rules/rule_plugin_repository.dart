@@ -19,7 +19,7 @@ class RulePluginRepository {
 
   List<RulePlugin> rulesFor(RuleContentType type) {
     return allRules
-        .where((rule) => rule.contentType == type)
+        .where((rule) => rule.supportsContentType(type))
         .toList(growable: false);
   }
 
@@ -38,7 +38,7 @@ class RulePluginRepository {
     return collection.rules
         .where(
           (rule) =>
-              rule.contentType == type &&
+              rule.supportsContentType(type) &&
               collection.anyAliasIn(rule.id, state.installedIds) &&
               collection.anyAliasIn(rule.id, state.enabledIds) &&
               canEnableRule(rule, state),
@@ -137,6 +137,10 @@ class RulePluginRepository {
     return state.copyWith(
       installedIds: installed,
       enabledIds: enabled,
+      uninstalledIds: {
+        for (final id in state.uninstalledIds)
+          collection.canonicalIdByAlias[id] ?? id,
+      }.difference(installed),
       approvedPermissionDigests: approvedPermissionDigests,
       customRules: customRules,
       repositories: _deduplicateRepositories(state.repositories),
@@ -442,9 +446,9 @@ final _verifiedBuiltInRules = <RulePlugin>[
       name: '饭团动漫(替换)',
       version: '2026-07-28',
       engine: 'animeko-web-selector',
-      contentTypes: ['anime'],
+      contentTypes: ['anime', 'movie'],
       pageDomains: ['acgpost.com'],
-      mediaDomains: ['acgpost.com'],
+      mediaDomains: ['acgpost.com', 'play.modujx10.com'],
       javascript: true,
       webViewSniffing: true,
       cookiePolicy: RuleCookiePolicy.taskScoped,
@@ -475,9 +479,22 @@ final _verifiedBuiltInRules = <RulePlugin>[
       name: '爱看机器人',
       version: '2026-07-28',
       engine: 'aikanbot-api',
-      contentTypes: ['anime'],
+      contentTypes: ['anime', 'series', 'movie'],
       pageDomains: ['www1.aikanbot.com'],
-      mediaDomains: ['www1.aikanbot.com'],
+      // Host-only evidence covers the manifest, AES key and segment chain.
+      // Media permission intentionally does not grant page/script access.
+      mediaDomains: [
+        'www1.aikanbot.com',
+        'v.gsuus.com',
+        'gs.gszyi.com',
+        'play.xluuss.com',
+        'g.xlzyd.com',
+        'play.hhuus.com',
+        'p.hhwenjian.com',
+        'vv.jisuzyv.com',
+        'p.jisuts.com',
+        'yzzy.play-cdn19.com',
+      ],
       customReferer: true,
     ),
     note: '通过站点公开的页面播放清单接口获取 HLS，客户端不加载广告播放器。',
@@ -505,9 +522,9 @@ final _verifiedBuiltInRules = <RulePlugin>[
       name: '青空次元',
       version: '2026-07-28',
       engine: 'sorani-api',
-      contentTypes: ['anime'],
+      contentTypes: ['anime', 'series', 'movie'],
       pageDomains: ['api.sorani.cc', 'www.sorani.net'],
-      mediaDomains: ['api.sorani.cc'],
+      mediaDomains: ['api.sorani.cc', 'www.sorani-vids.xyz'],
       customReferer: true,
     ),
     note: '播放时从公开接口获取短时 HLS 清单，并在客户端验证媒体分片。',

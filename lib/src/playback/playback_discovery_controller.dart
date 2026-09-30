@@ -918,33 +918,29 @@ final class PlaybackDiscoveryController {
       totalRules: 1,
       phase: PlaybackLineLookupPhase.discovery,
     );
-    final expandedBackendLines = await _backendLinesForEpisode(
-      scope,
-      subject,
-      episode,
-      expandAll: true,
-      cancellationToken: token,
-    );
-    if (!_isCurrent(scope) || token.isCancelled) return;
-    baseLines = _mergeBackendRouteUpdates(baseLines, expandedBackendLines);
-    final backendProbeCandidates = _backendLinesNeedingBackgroundProbe(
-      baseLines,
-    );
-    final backendProbeTotal = backendProbeCandidates.isEmpty
-        ? 1
-        : backendProbeCandidates.length;
-    yield PlaybackLineLookupUpdate(
-      lines: baseLines,
-      completedRules: 0,
-      totalRules: backendProbeTotal,
-      phase: PlaybackLineLookupPhase.discovery,
-    );
-    var clientCheckedBaseLines = baseLines;
-    var completedBackendProbes = 0;
-    final ruleState = _ruleState;
-    if (!_mayHaveRuleProviders(ruleState)) {
-      await for (final probedLine in probePlaybackLinesProgressively(
-        backendProbeCandidates,
+    // Full backend discovery and installed rules are independent producers.
+    // A slow source must not prevent already-found rule routes from appearing.
+    Stream<PlaybackLineLookupUpdate> backendUpdates() async* {
+      final expandedBackendLines = await _backendLinesForEpisode(
+        scope,
+        subject,
+        episode,
+        expandAll: true,
+        cancellationToken: token,
+      );
+      if (!_isCurrent(scope) || token.isCancelled) return;
+      var checked = _mergeBackendRouteUpdates(baseLines, expandedBackendLines);
+      final candidates = _backendLinesNeedingBackgroundProbe(checked);
+      final total = candidates.isEmpty ? 1 : candidates.length;
+      var completed = 0;
+      yield PlaybackLineLookupUpdate(
+        lines: checked,
+        completedRules: 0,
+        totalRules: total,
+        phase: PlaybackLineLookupPhase.discovery,
+      );
+      await for (final line in probePlaybackLinesProgressively(
+        candidates,
         maxConcurrent: 4,
         cancellationToken: token,
         verify: (line) => verifyPlaybackLine(
@@ -954,60 +950,70 @@ final class PlaybackDiscoveryController {
         ),
       )) {
         if (!_isCurrent(scope) || token.isCancelled) return;
-        clientCheckedBaseLines = _replaceBackendRouteProbe(
-          clientCheckedBaseLines,
-          probedLine,
-        );
-        completedBackendProbes++;
+        checked = _replaceBackendRouteProbe(checked, line);
+        completed++;
         yield PlaybackLineLookupUpdate(
-          lines: clientCheckedBaseLines,
-          completedRules: completedBackendProbes,
-          totalRules: backendProbeTotal,
-          phase: PlaybackLineLookupPhase.discovery,
+          lines: checked,
+          completedRules: completed,
+          totalRules: total,
+          phase: PlaybackLineLookupPhase.verification,
         );
       }
       if (!_isCurrent(scope) || token.isCancelled) return;
       yield PlaybackLineLookupUpdate(
-        lines: clientCheckedBaseLines,
-        completedRules: backendProbeTotal,
-        totalRules: backendProbeTotal,
+        lines: checked,
+        completedRules: total,
+        totalRules: total,
         phase: PlaybackLineLookupPhase.complete,
       );
-      return;
     }
 
-    final repository = _ruleRepository(ruleState);
-    final backendIterator = StreamIterator<PlaybackLine>(
-      probePlaybackLinesProgressively(
-        backendProbeCandidates,
-        maxConcurrent: 4,
-        cancellationToken: token,
-        verify: (line) => verifyPlaybackLine(
-          line,
-          enrichMetadata: false,
-          cancellationToken: token,
-        ),
-      ),
+    final ruleState = _ruleState;
+    if (!_mayHaveRuleProviders(ruleState)) {
+      yield* backendUpdates();
+      return;
+    }
+    final backendIterator = StreamIterator<PlaybackLineLookupUpdate>(
+      backendUpdates(),
     );
     final ruleIterator = StreamIterator<PlaybackLineLookupUpdate>(
-      repository.lineUpdatesForEpisode(
-        subject,
-        episode,
-        cancellationToken: token,
-      ),
+      _ruleRepository(
+        ruleState,
+      ).lineUpdatesForEpisode(subject, episode, cancellationToken: token),
     );
-    Future<bool>? backendNext = backendProbeCandidates.isEmpty
-        ? null
-        : backendIterator.moveNext();
+    Future<bool>? backendNext = backendIterator.moveNext();
     Future<bool>? ruleNext = ruleIterator.moveNext();
-    var backendDone = backendNext == null;
+    var backendDone = false;
     var ruleDone = false;
+    PlaybackLineLookupUpdate? latestBackendUpdate;
     PlaybackLineLookupUpdate? latestRuleUpdate;
 
-    List<PlaybackLine> mergedLines() => mergePlaybackLines(<PlaybackLine>[
-      ...clientCheckedBaseLines,
-      ...?latestRuleUpdate?.lines,
-    ]);
+    PlaybackLineLookupUpdate combined({bool complete = false}) =>
+        PlaybackLineLookupUpdate(
+          lines: mergePlaybackLines(<PlaybackLine>[
+            ...?latestBackendUpdate?.lines,
+            if (latestBackendUpdate == null) ...baseLines,
+            ...?latestRuleUpdate?.lines,
+          ]),
+          completedRules:
+              (latestBackendUpdate?.completedRules ?? 0) +
+              (latestRuleUpdate?.completedRules ?? 0),
+          totalRules:
+              (latestBackendUpdate?.totalRules ?? 1) +
+              (latestRuleUpdate?.totalRules ?? 0),
+          phase: complete
+              ? PlaybackLineLookupPhase.complete
+              : latestRuleUpdate?.phase ==
+                        PlaybackLineLookupPhase.verification ||
+                    latestBackendUpdate?.phase ==
+                        PlaybackLineLookupPhase.verification
+              ? PlaybackLineLookupPhase.verification
+              : PlaybackLineLookupPhase.discovery,
+          timedOut:
+              (latestBackendUpdate?.timedOut ?? false) ||
+              (latestRuleUpdate?.timedOut ?? false),
+          resolvedProviderId: latestRuleUpdate?.resolvedProviderId,
+        );
 
     try {
       while (!backendDone || !ruleDone) {
@@ -1020,18 +1026,13 @@ final class PlaybackDiscoveryController {
             ruleNext!.then((hasValue) => (kind: 'rules', hasValue: hasValue)),
         ]);
         if (!_isCurrent(scope) || token.isCancelled) return;
-
         var changed = false;
         if (event.kind == 'backend') {
           if (!event.hasValue) {
             backendDone = true;
             backendNext = null;
           } else {
-            clientCheckedBaseLines = _replaceBackendRouteProbe(
-              clientCheckedBaseLines,
-              backendIterator.current,
-            );
-            completedBackendProbes++;
+            latestBackendUpdate = backendIterator.current;
             backendNext = backendIterator.moveNext();
             changed = true;
           }
@@ -1043,41 +1044,14 @@ final class PlaybackDiscoveryController {
           ruleNext = ruleIterator.moveNext();
           changed = true;
         }
-
-        if (changed && (!backendDone || !ruleDone)) {
-          final ruleUpdate = latestRuleUpdate;
-          final completedBackend = backendProbeCandidates.isEmpty
-              ? backendProbeTotal
-              : completedBackendProbes;
-          yield PlaybackLineLookupUpdate(
-            lines: mergedLines(),
-            completedRules:
-                completedBackend + (ruleUpdate?.completedRules ?? 0),
-            totalRules: backendProbeTotal + (ruleUpdate?.totalRules ?? 0),
-            phase: ruleUpdate?.phase == PlaybackLineLookupPhase.verification
-                ? PlaybackLineLookupPhase.verification
-                : PlaybackLineLookupPhase.discovery,
-            timedOut: ruleUpdate?.timedOut ?? false,
-            resolvedProviderId: ruleUpdate?.resolvedProviderId,
-          );
-        }
+        if (changed) yield combined();
       }
     } finally {
       await backendIterator.cancel();
       await ruleIterator.cancel();
     }
-
     if (!_isCurrent(scope) || token.isCancelled) return;
-    final completedTotal =
-        backendProbeTotal + (latestRuleUpdate?.totalRules ?? 0);
-    yield PlaybackLineLookupUpdate(
-      lines: mergedLines(),
-      completedRules: completedTotal,
-      totalRules: completedTotal,
-      phase: PlaybackLineLookupPhase.complete,
-      timedOut: latestRuleUpdate?.timedOut ?? false,
-      resolvedProviderId: latestRuleUpdate?.resolvedProviderId,
-    );
+    yield combined(complete: true);
   }
 
   void prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {

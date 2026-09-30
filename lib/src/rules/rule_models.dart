@@ -127,6 +127,18 @@ class RulePlugin {
 
   String get contentLabel => contentType.label;
 
+  /// The primary category is a display label, not the complete capability set.
+  /// Only explicitly declared categories extend legacy single-category rules.
+  List<RuleContentType> get supportedContentTypes {
+    final declared = permissionManifest?.contentTypes ?? const <String>[];
+    return RuleContentType.values
+        .where((type) => type == contentType || declared.contains(type.name))
+        .toList(growable: false);
+  }
+
+  bool supportsContentType(RuleContentType type) =>
+      supportedContentTypes.contains(type);
+
   RulePermissionManifest get effectiveManifest {
     final declared = permissionManifest;
     final fallbackDomains = ruleDomainsFromUrls([baseUrl, searchUrl]);
@@ -149,7 +161,7 @@ class RulePlugin {
       name: name,
       version: version,
       engine: engine,
-      contentTypes: [contentType.name],
+      contentTypes: supportedContentTypes.map((type) => type.name).toList(),
       sourceRepository:
           declared?.sourceRepository ??
           rawConfig['sourceRepository']?.toString().trim() ??
@@ -1007,6 +1019,7 @@ class RulePluginState {
   const RulePluginState({
     this.installedIds = const {},
     this.enabledIds = const {},
+    this.uninstalledIds = const {},
     this.approvedPermissionDigests = const {},
     this.customRules = const [],
     this.repositories = const [],
@@ -1014,6 +1027,7 @@ class RulePluginState {
 
   final Set<String> installedIds;
   final Set<String> enabledIds;
+  final Set<String> uninstalledIds;
   final Map<String, String> approvedPermissionDigests;
   final List<RulePlugin> customRules;
   final List<RuleRepositoryRecord> repositories;
@@ -1031,6 +1045,7 @@ class RulePluginState {
   RulePluginState copyWith({
     Set<String>? installedIds,
     Set<String>? enabledIds,
+    Set<String>? uninstalledIds,
     Map<String, String>? approvedPermissionDigests,
     List<RulePlugin>? customRules,
     List<RuleRepositoryRecord>? repositories,
@@ -1038,6 +1053,7 @@ class RulePluginState {
     return RulePluginState(
       installedIds: installedIds ?? this.installedIds,
       enabledIds: enabledIds ?? this.enabledIds,
+      uninstalledIds: uninstalledIds ?? this.uninstalledIds,
       approvedPermissionDigests:
           approvedPermissionDigests ?? this.approvedPermissionDigests,
       customRules: customRules ?? this.customRules,
@@ -1048,6 +1064,7 @@ class RulePluginState {
   Map<String, dynamic> toJson() => {
     'installedIds': installedIds.toList(),
     'enabledIds': enabledIds.toList(),
+    'uninstalledIds': uninstalledIds.toList(),
     'approvedPermissionDigests': approvedPermissionDigests,
     'customRules': customRules.map((rule) => rule.toJson()).toList(),
     'repositories': repositories.map((record) => record.toJson()).toList(),
@@ -1057,6 +1074,7 @@ class RulePluginState {
     return RulePluginState(
       installedIds: _stringSet(json['installedIds']),
       enabledIds: _stringSet(json['enabledIds']),
+      uninstalledIds: _stringSet(json['uninstalledIds']),
       approvedPermissionDigests: _stringMapFromJson(
         json['approvedPermissionDigests'],
       ),

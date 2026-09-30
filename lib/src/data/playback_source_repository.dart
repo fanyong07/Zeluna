@@ -574,9 +574,10 @@ class RulePlaybackSourceRepository
           return;
         }
 
-        final verificationRules = orderedRules
-            .where((rule) => discovery.availableProviderIds.contains(rule.id))
-            .toList(growable: false);
+        // Full inventory includes failed/blocked routes too. A quick lookup
+        // returns only one candidate, so its availability cannot decide which
+        // sources are allowed to reveal their remaining routes.
+        final verificationRules = orderedRules;
         var timedOut = discovery.timedOut;
         if (verificationRules.isNotEmpty) {
           final verification = await _runProgressivePhase(
@@ -695,7 +696,9 @@ class RulePlaybackSourceRepository
         completedRules++;
         timedOut |= resolution.timedOut;
         final rule = rules[resolution.index];
-        inventory.removeWhere((_, line) => line.providerId == rule.id);
+        if (!resolution.timedOut) {
+          inventory.removeWhere((_, line) => line.providerId == rule.id);
+        }
         if (resolution.lines.isNotEmpty) {
           for (final line in resolution.lines) {
             inventory[line.id] = line;

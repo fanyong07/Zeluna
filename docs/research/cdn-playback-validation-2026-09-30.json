@@ -1,0 +1,2030 @@
+{
+  "schema": "zeluna.cdn-native-validation.v1",
+  "updated_utc": "2026-09-30T10:22:51.439452+00:00",
+  "base_git_sha": "d07d3e40306433b239e0d7e2eed91974eb6aab7d",
+  "client_delivery": {
+    "source_modified_uncommitted": true,
+    "formal_package_created": false,
+    "existing_release_unchanged": true,
+    "blocked_on": "User authorized commit/push; this audit is a pre-delivery snapshot. The new exact-HEAD Quality Gates and immutable release manifest are the authoritative delivery records.",
+    "android_device_available": false,
+    "planned_version": "1.1.16+70"
+  },
+  "authorization": {
+    "user_approved_minimal_cdn_domains": true,
+    "production_deploy": false,
+    "public_release": false,
+    "korean_resident_service": false,
+    "commit_and_push": true
+  },
+  "permission_changes": {
+    "utc": "2026-09-30T09:59:43.739418Z",
+    "rules": [
+      {
+        "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+        "name": "饭团动漫",
+        "trust": "untrusted",
+        "pageDomains": [
+          "acgfta.com"
+        ],
+        "mediaDomains": [
+          "acgfta.com",
+          "play.modujx10.com"
+        ],
+        "types": [
+          "anime"
+        ],
+        "fresh_exact_approval": true
+      },
+      {
+        "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+        "name": "樱花动漫",
+        "trust": "untrusted",
+        "pageDomains": [
+          "www.yinghua2.com",
+          "www.yinghuaaa.com"
+        ],
+        "mediaDomains": [
+          "play.modujx10.com",
+          "www.yinghua2.com"
+        ],
+        "types": [
+          "anime"
+        ],
+        "fresh_exact_approval": true
+      },
+      {
+        "id": "custom:tvbox:a6c6b6e7e102",
+        "name": "光速资源",
+        "trust": "untrusted",
+        "pageDomains": [
+          "api.guangsuapi.com"
+        ],
+        "mediaDomains": [
+          "api.guangsuapi.com",
+          "gs.gszyi.com",
+          "v.gsuus.com"
+        ],
+        "types": [
+          "anime",
+          "series",
+          "movie"
+        ],
+        "fresh_exact_approval": true
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e",
+        "name": "🎥┃光速┃资源",
+        "trust": "untrusted",
+        "pageDomains": [
+          "api.guangsuapi.com"
+        ],
+        "mediaDomains": [
+          "api.guangsuapi.com",
+          "gs.gszyi.com",
+          "v.gsuus.com"
+        ],
+        "types": [
+          "anime",
+          "series",
+          "movie"
+        ],
+        "fresh_exact_approval": true
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e:movie",
+        "name": "🎥┃光速┃资源",
+        "trust": "untrusted",
+        "pageDomains": [
+          "api.guangsuapi.com"
+        ],
+        "mediaDomains": [
+          "api.guangsuapi.com",
+          "gs.gszyi.com",
+          "v.gsuus.com"
+        ],
+        "types": [
+          "anime",
+          "series",
+          "movie"
+        ],
+        "fresh_exact_approval": true
+      }
+    ],
+    "unrelated_settings_unchanged": true,
+    "installed_enabled_sets_unchanged": true,
+    "encrypted_backup_verified": true
+  },
+  "current_permission_state": [
+    {
+      "id": "zeluna:recommended:fantuan",
+      "name": "饭团动漫(替换)",
+      "engine": "animeko-web-selector",
+      "enabled": true,
+      "canEnable": true,
+      "custom": false,
+      "trust": "official",
+      "types": [
+        "anime",
+        "movie"
+      ],
+      "pageDomains": [
+        "acgpost.com"
+      ],
+      "mediaDomains": [
+        "acgpost.com",
+        "play.modujx10.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": false,
+      "digest": "9202d1e64a7a0e6a883b37727fbd1f6fac316a3529d94be16a1c40fafe24a25d",
+      "old_client_compatible": true
+    },
+    {
+      "id": "zeluna:recommended:aikanbot",
+      "name": "爱看机器人",
+      "engine": "aikanbot-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": false,
+      "trust": "official",
+      "types": [
+        "anime",
+        "series",
+        "movie"
+      ],
+      "pageDomains": [
+        "www1.aikanbot.com"
+      ],
+      "mediaDomains": [
+        "g.xlzyd.com",
+        "gs.gszyi.com",
+        "p.hhwenjian.com",
+        "p.jisuts.com",
+        "play.hhuus.com",
+        "play.xluuss.com",
+        "v.gsuus.com",
+        "vv.jisuzyv.com",
+        "www1.aikanbot.com",
+        "yzzy.play-cdn19.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": false,
+      "digest": "3802aa6b3d308848b06a4cd5d27aac458962acedfeb40f4f1b016dcf500e2f92",
+      "old_client_compatible": true
+    },
+    {
+      "id": "zeluna:recommended:sorani",
+      "name": "青空次元",
+      "engine": "sorani-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": false,
+      "trust": "official",
+      "types": [
+        "anime",
+        "series",
+        "movie"
+      ],
+      "pageDomains": [
+        "api.sorani.cc",
+        "www.sorani.net"
+      ],
+      "mediaDomains": [
+        "api.sorani.cc",
+        "www.sorani-vids.xyz"
+      ],
+      "cleartext": false,
+      "requiresApproval": false,
+      "digest": "4c86b78a178f838479b7ddb23197f127e447788c3d5bbef25198036c401ee7b7",
+      "old_client_compatible": true
+    },
+    {
+      "id": "zeluna:recommended:dbku",
+      "name": "独播库",
+      "engine": "XBPQ",
+      "enabled": true,
+      "canEnable": true,
+      "custom": false,
+      "trust": "official",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "www.dbku.tv"
+      ],
+      "mediaDomains": [
+        "www.dbku.tv"
+      ],
+      "cleartext": false,
+      "requiresApproval": false,
+      "digest": "1a3cc36a77e75fadd7721609d53583967fb0f7e576c0973e59eaab9cfe621bdf",
+      "old_client_compatible": true
+    },
+    {
+      "id": "zeluna:recommended:nivod",
+      "name": "泥视频",
+      "engine": "XBPQ",
+      "enabled": false,
+      "canEnable": true,
+      "custom": false,
+      "trust": "official",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "www.nivod.vip"
+      ],
+      "mediaDomains": [
+        "www.nivod.vip"
+      ],
+      "cleartext": false,
+      "requiresApproval": false,
+      "digest": "44058d70652d14745113d0798d70b63444b07f712d615dc7ca3595a451d19425",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:1da9fe061a65a247c41c56da1a3f598c10e55b6f404125b7bc43b071723ac8e0",
+      "name": "girigiri愛動漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "ani.girigirilove.com"
+      ],
+      "mediaDomains": [
+        "ani.girigirilove.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "28b5ddf6eaab4519c6070bca96a1f04c384ae512eab2368d160834b0f9af03fc",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:1638446d966b520c3d8fc3f794d31d0edd44bf60c83a0947e4ef984b6f20be7f",
+      "name": "风铃动漫",
+      "engine": "animeko-web-selector",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.aafun.cc"
+      ],
+      "mediaDomains": [
+        "www.aafun.cc"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "647060a914656b8e417453fcb98680880e14131b1edd307fcffc702700ab9c51",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:f8f70ca20cba06e2cb3987f08dea824e3662d1c3e81dfc5e28384929c1cf373c",
+      "name": "叽哔动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.jibi.cc"
+      ],
+      "mediaDomains": [
+        "www.jibi.cc"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "7292ec992033555b495359a1d946282c009aba80ae82d060756e54e27e7def8e",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:d9501129dd59890baa212b6c1fff727202357297257e3356fd48d252780a5d44",
+      "name": "E-ACG",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "eacg.net"
+      ],
+      "mediaDomains": [
+        "eacg.net"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "205af9b75661f8ab91bd81aae471c8b8fb36d51f55984d0ab9a32d7721fd27e9",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:66bcca316c6a4132e1eae065889bfc0c811f7b4f9f099e1a8882690af571d309",
+      "name": "稀饭动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "dm1.xfdm.pro"
+      ],
+      "mediaDomains": [
+        "dm1.xfdm.pro"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "4d00916345b295f236d8f889a9b11d3fddb6b911bfe8d913f17dc0f907452498",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:e134bedf332bb431efc2d6e70bbe58c629d86948b3e29adf062acd08b317714a",
+      "name": "森之屋动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "senfun.in"
+      ],
+      "mediaDomains": [
+        "senfun.in"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "065d6f48076bba0096a7fcb496b5d945913cd515520a2c95b4c8f1ff2e975b31",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:519c123f6657fe4f729e7fa6f4f54b3c0eae7fffcbcf5d8c407498f962d9bd5b",
+      "name": "风车影视",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.dongmandaquan.vip"
+      ],
+      "mediaDomains": [
+        "www.dongmandaquan.vip"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "9df7f64d0647cad5bc3fde84b54712f95a44e5c669e6a15a59285593e36d4ad4",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:16e42a9765a60eef30a19ce36fcdd9e6549f22882c5b346c4250da6064ecb320",
+      "name": "去看吧",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "11kt.net"
+      ],
+      "mediaDomains": [
+        "11kt.net"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "bf5897d71ab481648ce9138b2fa663ba531acd253e3c2fa14a8a59b889c9bc00",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:c2333015a78350f59d64171ef289ec33ad83380a6450fc11c0fa52a7a7e33eea",
+      "name": "海星动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.haixingdmx.com"
+      ],
+      "mediaDomains": [
+        "www.haixingdmx.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "fa1bf9b3f05e0f7a1b976717fd8faf6f9545e729f52a7c83c306b2f95312ed10",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:ead908211106230d7eece558c60c0bca47780d48521f331bc994983a4c39be17",
+      "name": "樱花动漫",
+      "engine": "animeko-web-selector",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "yhdm6go.top"
+      ],
+      "mediaDomains": [
+        "yhdm6go.top"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "b9d675b5988982eab127ea1285d46ab2f9e49e6426230d65a2010830a6b25a87",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:9286185cf3f3260d99f402112f82405b38a50b136074ce8c7b483f3ceb9f2e77",
+      "name": "第一动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "1anime2025.me"
+      ],
+      "mediaDomains": [
+        "1anime2025.me"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "9ac7f7155cbe728ccfaf567e3927beeca3ef4b1b26d5adbcdf553dccd47ba080",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:7dc702484678c627380b07c05c49026b315446a0fd9dc71d5a8f1264a9f4c83c",
+      "name": "次元方舟",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.cyfz.vip"
+      ],
+      "mediaDomains": [
+        "www.cyfz.vip"
+      ],
+      "cleartext": true,
+      "requiresApproval": true,
+      "digest": "95a266ac4b6e31b4026bfbe774e7051f0c678a3892256fce97345964c3b83d8d",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:bb78dac763cf94990afc90ad1569c4fd4cc4b96e9da12474b902a2e3b3a26671",
+      "name": "米粒动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "milimili.nl"
+      ],
+      "mediaDomains": [
+        "milimili.nl"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "2defb7e928b235dd817d9ae3e7456036e000181e86a567748f58e877b0d0ebd4",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:2df52efaade1e2e46ab757676eb737d9a88f06a87375c586f5dc98818da102d0",
+      "name": "萌道动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.gpjda.com"
+      ],
+      "mediaDomains": [
+        "www.gpjda.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "392db7827425f4fe8973c19cd21f48ce501cf3ede7cab7b3d6cba42e6a8f52fa",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:8486f8d2fcf8152c2e1ed6287211c2537a4f7de2bfe5c96fe5cb291caeed801f",
+      "name": "UZVOD",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "uzvod.com"
+      ],
+      "mediaDomains": [
+        "uzvod.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "0917f5c8de124104b4b5ef6ad6ad3e1170871d393ee607007eadbbca1e5c7836",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:a6ba30b4fc4f61c04c18b1ef77ab964e7d120ab6a6ad8aeb8562818322fd8971",
+      "name": "嘀哩嘀哩",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "dilidili.io"
+      ],
+      "mediaDomains": [
+        "dilidili.io"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "5226fbaf7bd3513f51ecefd2800ed9db73c5b20ce623e6a0e378a3b734d5d68b",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:4a71053d12605a304a0d6e190fd10e61ad920f8a5359d8a30be5161bbe9e8623",
+      "name": "2k动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.2kdm.org"
+      ],
+      "mediaDomains": [
+        "www.2kdm.org"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "37efd9bbd5db81c19f59f9a5c40a5ad0a8dad637d7ac4da718b47313d9f0dabc",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:22dbfc07f174849a8be42ec883205b3121ff5885245c109678b9746873da0c5c",
+      "name": "新优酷",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.youknow.tv"
+      ],
+      "mediaDomains": [
+        "www.youknow.tv"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "d7e07fe2f628f33ad75853355a2b2bae7162f8b4ddea4b498f0ddbaeea667eb3",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:33fa77e01cc611a2e7da48a4731314b4747249466cf31f46334b03036360b5ed",
+      "name": "hanime1_1080p",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "hanime1.me"
+      ],
+      "mediaDomains": [
+        "hanime1.me"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "1a373d559fca0c05dfc76a287fd5cc6ac5c461e2525766a0054ab1526efb56d2",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:f7a979b462eaf0232f4f4f88b5472ca5e05ccff50525ff9dfb92716d9a1cffb2",
+      "name": "hanime1_720p",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "hanime1.me"
+      ],
+      "mediaDomains": [
+        "hanime1.me"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "33c318e91b9c186fc02e631612f35f19ef7b7476d78dcb2fa77ac2f51af92972",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:2990905dabf4f8848fd3d5701314977152c12b93e1057afed758e1dfaedd0212",
+      "name": "风车动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "vdm10.com"
+      ],
+      "mediaDomains": [
+        "vdm10.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "e802b48b75fa626e3e5d88894f886f370834ddbe687f2cf63b83b9c9726c4204",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:b5c294eb5d769575a3c5fd8daafb2103051583f3ba0b7eca388a454add07a0a3",
+      "name": "趣动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.qdm8.com"
+      ],
+      "mediaDomains": [
+        "www.qdm8.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "053db86de44c0061557515edceef1565467b0975d64f1525c5b407b1d69179e2",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:a5640e2582654536201e39165bfda2f377b93f97ca0a167d36819956d7080e3d",
+      "name": "咕咕番",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.gugu3.com"
+      ],
+      "mediaDomains": [
+        "www.gugu3.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "01bb30b5bfe096807254dbc546aebe23fd64ea195d794651490d04cdd6d9a5f7",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:9d97d7bde43e8099db93381207c9441d0d99e4dd1a4bbf6a108eed2278b16fa6",
+      "name": "喵物次元",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.mwcy.net"
+      ],
+      "mediaDomains": [
+        "www.mwcy.net"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "0006736ad28fc29ce1c1860134993ecf926f18a289e9bdc978a13392a9d5d4cc",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:f17c7ba13f0f970e963a3317b3082a4fd5815dca47482c458ec2c4ab7eabcfc0",
+      "name": "虾皮动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "xiapidm.com"
+      ],
+      "mediaDomains": [
+        "xiapidm.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "a41552415106e1154ae388949f172461d991069ba908ad5f22057102c7b1b10d",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:50ffc690456b9861f1b7e6fc96bd55311fcc3c14efa923fe9d85e611c89542d9",
+      "name": "漫次元",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.mcydh.com"
+      ],
+      "mediaDomains": [
+        "www.mcydh.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "fcfdea33639cf2be0f532ec4115085d68a18a5e26ff311be3ed5daaaa493d8e9",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:ac9256fd3eda0085a6fc5aeb88bb683131a2f9c38cb3c22ffe8a1261e1691ff6",
+      "name": "蜜桃动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.mitaodm.com"
+      ],
+      "mediaDomains": [
+        "www.mitaodm.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "f2d56e5585a941fb0788442b0f9dda40d778d4135b3daa1f7a8f8066a91ea163",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:e40ab0f871c995883d7fc3258216c63d6f04738ca657294b8cf502f6fbb827db",
+      "name": "次元城动画",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.cyc-anime.net"
+      ],
+      "mediaDomains": [
+        "www.cyc-anime.net"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "8f4be4137cb7ec89c3446d777aebe49b114e6c1ecbaff5bde68af75ed296156b",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:fa6bdaf74f9a266a6c628b0a6983d9b111b79318d29c6db3742a3c12d80a3438",
+      "name": "MX动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.mxdm.xyz"
+      ],
+      "mediaDomains": [
+        "www.mxdm.xyz"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "f26b8c4865ef0c175e070a57801501974e9f20be7d44c335b50f69445b98f7d0",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:d6cfd1ecf2faeb3bd87451b0a59a95ec64129f64ef0bca39a018bc7863407888",
+      "name": "动漫蛋",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.dmdan8.com"
+      ],
+      "mediaDomains": [
+        "www.dmdan8.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "b55cafde079e206a08601e979bb59df6340529a196b0a69db7ddeeaf4358a97f",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+      "name": "饭团动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "acgfta.com"
+      ],
+      "mediaDomains": [
+        "acgfta.com",
+        "play.modujx10.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "bdfe737730a985c7465acb770813d2e3ecd49cf25cbf2d6fc9e77c79189e0741",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:0760bd85e2843a5a6df0858fdd6bb1ec1a29c60d77f7b932b48c451b511d58d6",
+      "name": "番茄动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.fqdm.cc"
+      ],
+      "mediaDomains": [
+        "www.fqdm.cc"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "20b44cd2f657ebd71b61e167922f7a4ee68310c3ba3f70c6510fe2efc29c8372",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:daad3a21688a7b7fbb95cc9c12db945e5f22ff8175e746f38bcb343d57bc1766",
+      "name": "嘀嗒影视",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.didahd.pro"
+      ],
+      "mediaDomains": [
+        "www.didahd.pro"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "029700c838d14449bfc7f45b3180f0f94a6dc2c99cbbecb239ab6479f5a5b699",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:130af2fcacfd23821d3332dc44ef1f10c52cb60a23d271fc54dc12005ff4b176",
+      "name": "E-ACG",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.eacg1.com"
+      ],
+      "mediaDomains": [
+        "www.eacg1.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "a49ce25a76cef5a285a7ed2eee450a24ceb135c54b6091538a3121331fd81d8b",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+      "name": "樱花动漫",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.yinghua2.com",
+        "www.yinghuaaa.com"
+      ],
+      "mediaDomains": [
+        "play.modujx10.com",
+        "www.yinghua2.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "8014e80d8f4ff12454ee209ccee9d6bcb5f06f54a8788897329614de20ca86b4",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:5e7ff91f135cc49d539050ff2e41eaf84b086077f8d0a4f4e8f218294123bc0d",
+      "name": "wedm",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.vdm5.com"
+      ],
+      "mediaDomains": [
+        "www.vdm5.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "b9cbc0c96f0552e46fccb5e1100d394eee94f1db98a209a55d350475e44c5b8d",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:fc500124d56507b0ba7a0141278b555ead14d85176df4a53ca4618ce9c4226be",
+      "name": "影视森林",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.hc34567.com"
+      ],
+      "mediaDomains": [
+        "www.hc34567.com"
+      ],
+      "cleartext": true,
+      "requiresApproval": true,
+      "digest": "8c8e40397927300571e9544b2d89b07749813ec64dc319e74cef7d997adbf1e6",
+      "old_client_compatible": true
+    },
+    {
+      "id": "rule:v1:a7c59117995725929c1b2de0cc199a0efa2a20522b334949c0d6acfbc9ec9a4e",
+      "name": "热播之家",
+      "engine": "animeko-web-selector",
+      "enabled": false,
+      "canEnable": false,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "www.rebozj.pro"
+      ],
+      "mediaDomains": [
+        "www.rebozj.pro"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "cbe9425a38ecf9995883471fcc1a61c1d22203fc6c4e226996e5ccea26c7af33",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:c22656316a0d",
+      "name": "茅台资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "caiji.maotaizy.cc"
+      ],
+      "mediaDomains": [
+        "caiji.maotaizy.cc"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "ff68ca7c3c7a611981db4dbf7ed82b168ad5dca9c608ba6fd7bab8bd26b412fd",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:a6c6b6e7e102",
+      "name": "光速资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "api.guangsuapi.com"
+      ],
+      "mediaDomains": [
+        "api.guangsuapi.com",
+        "gs.gszyi.com",
+        "v.gsuus.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "90876a5cec1c61ad555f160e1bf82a08f25b9bf26eb3947f895c6d78bed8c988",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:ca3534f7eb6c",
+      "name": "🧡┃初恋┃官源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "video.adminqt.cn"
+      ],
+      "mediaDomains": [
+        "video.adminqt.cn"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "dace8a6af601c504d24a3686cf00a2afd130bbb17dd967e0ca8342fb148230a3",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:ca3534f7eb6c:series",
+      "name": "🧡┃初恋┃官源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "series"
+      ],
+      "pageDomains": [
+        "video.adminqt.cn"
+      ],
+      "mediaDomains": [
+        "video.adminqt.cn"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "f417b7c1e89603d27de1782b216c90d99fa9ec01bc88b0c606f687e93645973b",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:ca3534f7eb6c:movie",
+      "name": "🧡┃初恋┃官源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "video.adminqt.cn"
+      ],
+      "mediaDomains": [
+        "video.adminqt.cn"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "2636949d821a804aa847c586c28c103553fe22f6d819e11887732634ea7a8238",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:b2f8af7c735e",
+      "name": "🎥┃光速┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "series"
+      ],
+      "pageDomains": [
+        "api.guangsuapi.com"
+      ],
+      "mediaDomains": [
+        "api.guangsuapi.com",
+        "gs.gszyi.com",
+        "v.gsuus.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "871d325f8ba8b8644fab371996f0f3e273c409e1379e2bc69a991c643b43d99b",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:b2f8af7c735e:movie",
+      "name": "🎥┃光速┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "api.guangsuapi.com"
+      ],
+      "mediaDomains": [
+        "api.guangsuapi.com",
+        "gs.gszyi.com",
+        "v.gsuus.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "0ed2bd619be0d2260fe9fcf6e95570c00c4512a0a6d3b1e8565f406c892beccf",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:f404c1a9817a",
+      "name": "🎥┃量子┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "anime"
+      ],
+      "pageDomains": [
+        "cj.lziapi.com"
+      ],
+      "mediaDomains": [
+        "cj.lziapi.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "bbbd9dce267b2f8a98b05ec55f3d510623d66e60ddb843dcc7f649ff7e63258e",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:f404c1a9817a:series",
+      "name": "🎥┃量子┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "series"
+      ],
+      "pageDomains": [
+        "cj.lziapi.com"
+      ],
+      "mediaDomains": [
+        "cj.lziapi.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "e6acbade1d86cdca3317a3a7ac24ecb7fc4bb4fcc782ee903adc7334d982ce88",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:f404c1a9817a:movie",
+      "name": "🎥┃量子┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "cj.lziapi.com"
+      ],
+      "mediaDomains": [
+        "cj.lziapi.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "725ce10bc1c7e1a5a66249363811ce9e60251ddc256e6336ddfddb6502ee7e34",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:2e6ca30871d0",
+      "name": "🎥┃索尼┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "series"
+      ],
+      "pageDomains": [
+        "suoniapi.com"
+      ],
+      "mediaDomains": [
+        "suoniapi.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "31360b0c15b1485ac52b18429a9e7623a7f86eb969df1188829b40aafd9c5d07",
+      "old_client_compatible": true
+    },
+    {
+      "id": "custom:tvbox:2e6ca30871d0:movie",
+      "name": "🎥┃索尼┃资源",
+      "engine": "tvbox-json-api",
+      "enabled": true,
+      "canEnable": true,
+      "custom": true,
+      "trust": "untrusted",
+      "types": [
+        "movie"
+      ],
+      "pageDomains": [
+        "suoniapi.com"
+      ],
+      "mediaDomains": [
+        "suoniapi.com"
+      ],
+      "cleartext": false,
+      "requiresApproval": true,
+      "digest": "34f2a0da7fb0e4b155234c6bc1f606b4a9d830d8aa3631b1df13148da1eef483",
+      "old_client_compatible": true
+    }
+  ],
+  "backward_compatibility": {
+    "enabled_rule_legacy_approval_compatible": true,
+    "capability_additions_deferred_until_client_update": true,
+    "note": "Three active Guangsu entries retain their original primary-category manifests until the new client understands multiple categories; CDN additions remain approved. This preserves all three existing category entries and prevents silently disabling them in v1.1.15."
+  },
+  "server_chain_evidence": [
+    {
+      "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+      "name": "饭团动漫",
+      "media": {
+        "play.modujx10.com": [
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:segment",
+          "kr:variant"
+        ]
+      },
+      "page": {
+        "acgfta.com": [
+          "kr:200"
+        ]
+      }
+    },
+    {
+      "id": "zeluna:recommended:fantuan",
+      "name": "饭团动漫(替换)",
+      "media": {
+        "play.modujx10.com": [
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:segment",
+          "kr:variant"
+        ]
+      },
+      "page": {
+        "acgpost.com": [
+          "kr:200"
+        ]
+      }
+    },
+    {
+      "id": "zeluna:recommended:sorani",
+      "name": "青空次元",
+      "media": {
+        "www.sorani-vids.xyz": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:segment",
+          "la:key",
+          "la:playlist_reference",
+          "la:root",
+          "la:segment"
+        ]
+      },
+      "page": {}
+    },
+    {
+      "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+      "name": "樱花动漫",
+      "media": {
+        "play.modujx10.com": [
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:segment",
+          "kr:variant",
+          "la:playlist_reference",
+          "la:root",
+          "la:segment",
+          "la:variant"
+        ]
+      },
+      "page": {
+        "www.yinghua2.com": [
+          "kr:301",
+          "la:301"
+        ],
+        "www.yinghuaaa.com": [
+          "kr:200",
+          "la:200"
+        ]
+      }
+    },
+    {
+      "id": "custom:tvbox:a6c6b6e7e102",
+      "name": "光速资源",
+      "media": {
+        "v.gsuus.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:variant",
+          "la:key",
+          "la:playlist_reference",
+          "la:root",
+          "la:variant"
+        ],
+        "gs.gszyi.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ]
+      },
+      "page": {}
+    },
+    {
+      "id": "custom:tvbox:b2f8af7c735e",
+      "name": "🎥┃光速┃资源",
+      "media": {
+        "v.gsuus.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:variant",
+          "la:key",
+          "la:playlist_reference",
+          "la:root",
+          "la:variant"
+        ],
+        "gs.gszyi.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ]
+      },
+      "page": {}
+    },
+    {
+      "id": "custom:tvbox:b2f8af7c735e:movie",
+      "name": "🎥┃光速┃资源",
+      "media": {
+        "v.gsuus.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:variant",
+          "la:key",
+          "la:playlist_reference",
+          "la:root",
+          "la:variant"
+        ],
+        "gs.gszyi.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ]
+      },
+      "page": {}
+    },
+    {
+      "id": "zeluna:recommended:aikanbot",
+      "name": "爱看机器人",
+      "media": {
+        "v.gsuus.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:variant",
+          "la:key",
+          "la:playlist_reference",
+          "la:root",
+          "la:variant"
+        ],
+        "gs.gszyi.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ],
+        "play.xluuss.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "la:key",
+          "la:playlist_reference",
+          "la:root"
+        ],
+        "g.xlzyd.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ],
+        "play.hhuus.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root",
+          "la:key",
+          "la:playlist_reference",
+          "la:root"
+        ],
+        "p.hhwenjian.com": [
+          "kr:playlist_reference",
+          "kr:segment",
+          "la:playlist_reference",
+          "la:segment"
+        ],
+        "vv.jisuzyv.com": [
+          "kr:key",
+          "kr:playlist_reference",
+          "kr:root"
+        ],
+        "p.jisuts.com": [
+          "kr:playlist_reference",
+          "kr:segment"
+        ],
+        "yzzy.play-cdn19.com": [
+          "kr:playlist_reference",
+          "kr:root",
+          "kr:segment",
+          "kr:variant"
+        ]
+      },
+      "page": {}
+    }
+  ],
+  "server_completed_utc": {
+    "la": "2026-09-29T20:56:15.151963+00:00",
+    "kr": "2026-09-29T20:56:42.146084+00:00"
+  },
+  "windows_sample_summary": {
+    "native_playback_pass": 6,
+    "no_verified_route": 17,
+    "resolver_incomplete": 1
+  },
+  "windows_three_genres": {
+    "schema": "zeluna.windows-cdn-native.v1",
+    "utc": "2026-09-30T10:08:11.991553Z",
+    "platform": "windows",
+    "settings_isolated": true,
+    "scope": "Real installed configuration and native resolver; native PlayerPage rendering, 12s progress, seek and pause/resume. Not full-episode long playback.",
+    "results": [
+      {
+        "id": "zeluna:recommended:sorani",
+        "name": "青空次元",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "native_playback_pass",
+        "routes": 1,
+        "available": 1,
+        "messages": [
+          "可以播放。"
+        ],
+        "attempts": [
+          {
+            "host": "www.sorani-vids.xyz",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "zeluna:recommended:sorani",
+        "name": "青空次元",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "native_playback_pass",
+        "routes": 1,
+        "available": 1,
+        "messages": [
+          "可以播放。"
+        ],
+        "attempts": [
+          {
+            "host": "www.sorani-vids.xyz",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "zeluna:recommended:sorani",
+        "name": "青空次元",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "native_playback_pass",
+        "routes": 1,
+        "available": 1,
+        "messages": [
+          "可以播放。"
+        ],
+        "attempts": [
+          {
+            "host": "www.sorani-vids.xyz",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "zeluna:recommended:aikanbot",
+        "name": "爱看机器人",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "native_playback_pass",
+        "routes": 30,
+        "available": 1,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。",
+          "可以播放。",
+          "这个来源想访问未授权的网站，已拦下。"
+        ],
+        "attempts": [
+          {
+            "host": "yzzy.play-cdn19.com",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "zeluna:recommended:aikanbot",
+        "name": "爱看机器人",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "没有找到当前集的 HLS 线路。"
+        ]
+      },
+      {
+        "id": "zeluna:recommended:aikanbot",
+        "name": "爱看机器人",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "no_verified_route",
+        "routes": 28,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。",
+          "这个来源想访问未授权的网站，已拦下。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:a6c6b6e7e102",
+        "name": "光速资源",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:a6c6b6e7e102",
+        "name": "光速资源",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:a6c6b6e7e102",
+        "name": "光速资源",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e",
+        "name": "🎥┃光速┃资源",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "视频地址返回的是网页或错误信息，不是媒体内容。",
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e",
+        "name": "🎥┃光速┃资源",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "视频地址返回的是网页或错误信息，不是媒体内容。",
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e",
+        "name": "🎥┃光速┃资源",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。",
+          "视频地址返回的是网页或错误信息，不是媒体内容。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e:movie",
+        "name": "🎥┃光速┃资源",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "视频地址返回的是网页或错误信息，不是媒体内容。",
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e:movie",
+        "name": "🎥┃光速┃资源",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "视频地址返回的是网页或错误信息，不是媒体内容。",
+          "HLS 清单存在，但媒体分片无法读取。"
+        ]
+      },
+      {
+        "id": "custom:tvbox:b2f8af7c735e:movie",
+        "name": "🎥┃光速┃资源",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "no_verified_route",
+        "routes": 2,
+        "available": 0,
+        "messages": [
+          "HLS 清单存在，但媒体分片无法读取。",
+          "视频地址返回的是网页或错误信息，不是媒体内容。"
+        ]
+      },
+      {
+        "id": "zeluna:recommended:fantuan",
+        "name": "饭团动漫(替换)",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "找到了播放页，但没有解析到 mp4/m3u8 直链。"
+        ]
+      },
+      {
+        "id": "zeluna:recommended:fantuan",
+        "name": "饭团动漫(替换)",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "没有匹配到当前条目的详情页。"
+        ]
+      },
+      {
+        "id": "zeluna:recommended:fantuan",
+        "name": "饭团动漫(替换)",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "native_playback_pass",
+        "routes": 1,
+        "available": 1,
+        "messages": [
+          "可以播放。"
+        ],
+        "attempts": [
+          {
+            "host": "play.modujx10.com",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+        "name": "饭团动漫",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "找到了播放页，但没有解析到 mp4/m3u8 直链。"
+        ]
+      },
+      {
+        "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+        "name": "饭团动漫",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "没有匹配到当前条目的详情页。"
+        ]
+      },
+      {
+        "id": "rule:v1:2b0a765ba41c6e10431f2e786637107bafe98aff41a95d83a7cede527f52d17a",
+        "name": "饭团动漫",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "native_playback_pass",
+        "routes": 1,
+        "available": 1,
+        "messages": [
+          "可以播放。"
+        ],
+        "attempts": [
+          {
+            "host": "play.modujx10.com",
+            "first_frame": true,
+            "status": "native_playback_pass",
+            "advanced_seconds": 12,
+            "pause_resume": true,
+            "seek_45_seconds": true
+          }
+        ]
+      },
+      {
+        "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+        "name": "樱花动漫",
+        "kind": "anime",
+        "sample": "葬送的芙莉莲",
+        "status": "resolver_incomplete",
+        "error_type": "TimeoutException"
+      },
+      {
+        "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+        "name": "樱花动漫",
+        "kind": "series",
+        "sample": "狂飙",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "找到了播放页，但没有解析到 mp4/m3u8 直链。"
+        ]
+      },
+      {
+        "id": "rule:v1:3a6e6d28b5518bfa605b3640dd5355ffbb5400b767414940f89caefb479c9b29",
+        "name": "樱花动漫",
+        "kind": "movie",
+        "sample": "铃芽之旅",
+        "status": "no_verified_route",
+        "routes": 1,
+        "available": 0,
+        "messages": [
+          "找到了播放页，但没有解析到 mp4/m3u8 直链。"
+        ]
+      }
+    ]
+  },
+  "windows_full_inventory": {
+    "schema": "zeluna.live-inventory-ui.v1",
+    "platform": "windows",
+    "utc": "2026-09-30T10:18:56.125108Z",
+    "success": true,
+    "enumerated_routes": 30,
+    "unavailable_routes": 28,
+    "all_returned_routes_visible": true,
+    "failed_route_visible_disabled": true,
+    "switched_from": "zeluna:recommended:sorani",
+    "switched_to": "zeluna:recommended:fantuan",
+    "decoded_first_frames": 2,
+    "live_line_switch": true,
+    "runtime_failures": 0
+  },
+  "switch_caveat": "An earlier switch rendered two real first frames but also logged a stall/runtime failure. Treat this as observed instability even if a bounded repeat passes; no whole-episode stability claim.",
+  "local_tls": [
+    {
+      "host": "gs.gszyi.com",
+      "verified": false,
+      "category": "SSLEOFError",
+      "reason": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)"
+    },
+    {
+      "host": "g.xlzyd.com",
+      "verified": false,
+      "category": "SSLEOFError",
+      "reason": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)"
+    },
+    {
+      "host": "p.hhwenjian.com",
+      "verified": false,
+      "category": "SSLEOFError",
+      "reason": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)"
+    },
+    {
+      "host": "p.jisuts.com",
+      "verified": false,
+      "category": "SSLEOFError",
+      "reason": "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)"
+    },
+    {
+      "host": "www.sorani-vids.xyz",
+      "verified": true,
+      "expires": "Dec 26 19:19:07 2026 GMT",
+      "tls": "TLSv1.3"
+    },
+    {
+      "host": "play.modujx10.com",
+      "verified": true,
+      "expires": "Dec 27 23:59:59 2026 GMT",
+      "tls": "TLSv1.3"
+    }
+  ],
+  "postflight": {
+    "la": {
+      "utc": "2026-09-30T10:16:36.928878+00:00",
+      "memory_available_kib": 912308,
+      "zeluna_service": "active",
+      "running_audit_processes": 0,
+      "health_http": 200,
+      "role": "la"
+    },
+    "kr": {
+      "utc": "2026-09-30T10:16:34.276450+00:00",
+      "memory_available_kib": 582384,
+      "zeluna_service": "inactive",
+      "running_audit_processes": 0,
+      "role": "kr"
+    }
+  },
+  "validation": {
+    "flutter_all_passed": true,
+    "flutter_all_summary": "00:36 +1091 ~26: All tests passed!",
+    "analyze_no_issues": true,
+    "diff_check": true
+  },
+  "remaining": [
+    "55 installed rules are NOT all proven playable: only the eight server-positive installed IDs received this native three-genre pass.",
+    "118 registered backend entries still do not have a complete read-only per-work status inventory UI; the native test proves all 30 actual returned routes are visible, not that 118 entries are enabled.",
+    "No Android real-device validation; no full-episode or multi-day reliability proof.",
+    "Animeko no-direct-media/timeouts and local CDN TLS EOF are not deletion evidence.",
+    "Formal Android/Windows artifacts must be created only after the authorized source commit passes exact-HEAD CI. This document records the pre-delivery audit; release receipts and manifest record final delivery. No public Release or backend deployment is authorized."
+  ]
+}

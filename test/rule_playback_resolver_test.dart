@@ -2403,6 +2403,54 @@ segment-1.ts
     expect(lines.single.headers['Cookie'], 'quality=1080; session=active');
   });
 
+  test('Aikanbot full inventory keeps more than eight independent routes', () async {
+    final client = MockClient((request) async {
+      switch (request.url.path) {
+        case '/search':
+          return _html(
+            '<a class="title-text" href="/play/722004">${_animeSubject.title} 2022</a>',
+          );
+        case '/play/722004':
+          return _html(
+            '<input id="current_id" value="722004"/><input id="e_token" value="abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"/><input id="mtype" value="18"/>',
+          );
+        case '/api/getResN':
+          return http.Response(
+            jsonEncode({
+              'state': 1,
+              'data': {
+                'list': List.generate(
+                  12,
+                  (_) => {
+                    'resData': jsonEncode([
+                      {
+                        'url':
+                            r'第01集$https://cdn.example.com/aikan/all.m3u8#第02集$https://cdn.example.com/aikan/all.m3u8',
+                      },
+                    ]),
+                  },
+                ),
+              },
+            }),
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          );
+        case '/aikan/all.m3u8':
+          return _playableHls();
+        case '/aikan/segment-1.ts':
+          return _playableSegment();
+      }
+      return http.Response('not found', 404);
+    });
+    final lines = await RulePlaybackResolver(client: client).resolveRule(
+      rule: _aikanbotRule,
+      subject: _animeSubject,
+      episode: _episode2,
+    );
+    expect(lines, hasLength(12));
+    expect(lines.map((l) => l.id).toSet(), hasLength(12));
+  });
+
   test(
     'Aikanbot API resolves the selected episode without loading its player',
     () async {

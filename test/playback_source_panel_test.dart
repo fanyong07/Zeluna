@@ -5,6 +5,65 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
+    'portrait inventory includes routes beyond four and unavailable rows',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final lines = List.generate(
+        58,
+        (i) => PlaybackLine(
+          id: 'route-$i',
+          episodeId: 1,
+          providerId: 'source',
+          providerName: '来源',
+          title: '线路$i',
+          quality: '',
+          format: 'HLS',
+          url: 'https://cdn.example/$i.m3u8',
+          available: i != 57,
+          clientVerified: i != 57,
+          diagnosticStatus: i == 57
+              ? PlaybackDiscoveryStatus.routeUnavailable
+              : '',
+        ),
+      );
+      var selections = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PortraitPlaybackLineList(
+              lines: lines,
+              selectedLineId: null,
+              failedLineIds: const {},
+              onSelected: (_) => selections++,
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('portrait-route-route-57')),
+        250,
+        scrollable: find.byType(Scrollable).last,
+        maxScrolls: 25,
+      );
+      expect(find.textContaining('线路失败'), findsOneWidget);
+      final disabledRow = find.byKey(const ValueKey('portrait-route-route-57'));
+      expect(
+        tester
+            .widget<InkWell>(
+              find.descendant(of: disabledRow, matching: find.byType(InkWell)),
+            )
+            .onTap,
+        isNull,
+      );
+      expect(selections, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'all 58 AniCh routes are listed on a narrow screen without expansion',
     (tester) async {
       tester.view.physicalSize = const Size(360, 760);

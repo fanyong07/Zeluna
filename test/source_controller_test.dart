@@ -11,6 +11,48 @@ import 'package:anime/src/sources/source_rule_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'uninstalled recommended rules stay uninstalled after account reload',
+    () async {
+      final storage = _MemorySourceStorage();
+      final controller = SourceController(
+        storage: storage,
+        catalogRepository: const _EmptyCatalogRepository(),
+        sourceRuleBridge: const SourceRuleBridge(),
+        publishSnapshot: (_) {},
+      );
+      final first = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      const id = 'zeluna:recommended:dbku';
+      expect(first.rulePlugins.installedIds, contains(id));
+      await controller.uninstallRulePlugin(id);
+      expect(controller.snapshot.rulePlugins.installedIds, isNot(contains(id)));
+      final reloaded = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 2,
+      );
+      expect(reloaded.rulePlugins.installedIds, isNot(contains(id)));
+      expect(reloaded.rulePlugins.enabledIds, isNot(contains(id)));
+      final other = await controller.loadForAccount(
+        accountId: 'account-b',
+        contextVersion: 3,
+      );
+      expect(other.rulePlugins.installedIds, contains(id));
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 4,
+      );
+      await controller.installRulePlugin(id);
+      final restored = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 5,
+      );
+      expect(restored.rulePlugins.installedIds, contains(id));
+    },
+  );
+
   test('loads rule and source state from the selected account scope', () async {
     final storage = _MemorySourceStorage({
       'account.account-a.rulePlugins': RulePluginState(
