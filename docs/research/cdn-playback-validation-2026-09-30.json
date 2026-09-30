@@ -2026,5 +2026,17 @@
     "No Android real-device validation; no full-episode or multi-day reliability proof.",
     "Animeko no-direct-media/timeouts and local CDN TLS EOF are not deletion evidence.",
     "Formal Android/Windows artifacts must be created only after the authorized source commit passes exact-HEAD CI. This document records the pre-delivery audit; release receipts and manifest record final delivery. No public Release or backend deployment is authorized."
-  ]
+  ],
+  "build_dependency_fix": {
+    "first_ci_run": "36703741387",
+    "failure": "pip-audit reported 10 known PyJWT vulnerabilities at locked 2.13.0",
+    "updated_package": "pyjwt",
+    "old_version": "2.13.0",
+    "new_version": "2.15.1",
+    "changed_dependencies": 1,
+    "local_strict_audit": "No known vulnerabilities found",
+    "production_dependency_updated": false,
+    "official_changelog_reviewed": true,
+    "new_exact_head_gate_required": true
+  }
 }
