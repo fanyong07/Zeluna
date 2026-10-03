@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../core/identity/stable_identity.dart';
 import '../data/playback_prefetch_cache.dart';
+import '../data/local_maccms_playback.dart';
 import '../data/playback_source_repository.dart';
 import '../data/zeluna_backend_playback_repository.dart';
 import '../domain/anime_models.dart';
@@ -252,6 +253,48 @@ final class PlaybackDiscoveryController {
     cancellationToken: cancellationToken,
     lookupIntent: lookupIntent,
   );
+
+  /// Device-only search for an explicitly selected admitted protocol source.
+  /// Neither result nor route preference is persisted into normal VPS caches.
+  Future<List<PlaybackLine>> lookupSourceOnDevice({
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    required PlaybackLine source,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final scope = _scope();
+    if (cancellationToken?.isCancelled == true) return const [];
+    if (!source.clientQuerySupported) throw StateError('此来源暂不支持本机查询');
+    final repository = _backendRepository(_services);
+    if (repository is! ZelunaBackendPlaybackRepository) {
+      throw StateError('在线服务未启用');
+    }
+    final token = RulePlaybackCancellationToken();
+    _activeLookupTokens.add(token);
+    final unlink = cancellationToken?.register(token.cancel);
+    final unregisterClient = token.register(repository.dispose);
+    final adapter = LocalMacCmsPlayback();
+    try {
+      final descriptor = await repository.localSourceDescriptor(
+        source.sourceInventoryId,
+      );
+      if (!_isCurrent(scope) || token.isCancelled) return const [];
+      final lines = await adapter.lookup(
+        descriptor: descriptor,
+        source: source,
+        subject: subject,
+        episode: episode,
+        cancellationToken: token,
+      );
+      return _isCurrent(scope) && !token.isCancelled ? lines : const [];
+    } finally {
+      unlink?.call();
+      unregisterClient();
+      _activeLookupTokens.remove(token);
+      adapter.dispose();
+      repository.dispose();
+    }
+  }
 
   Future<PlaybackLine> verifyPlaybackLine(
     PlaybackLine line, {
@@ -1676,6 +1719,9 @@ List<PlaybackLine> mergePlaybackLines(Iterable<PlaybackLine> lines) {
     // ephemeral key must not normalize signed URLs or replace persistent IDs.
     final Object key = url.isNotEmpty
         ? (
+            line.sourceInventoryId.isEmpty
+                ? ''
+                : (line.sourceInventoryId, line.id, line.queryLocation),
             url,
             stableHeaderFingerprint(line.headers),
             line.publicHttpOnly,

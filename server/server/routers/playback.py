@@ -12,6 +12,7 @@ from ..public_http import PublicHttpTransport, is_public_http_url as _is_public_
 from ..catalog import parse_stable_id
 from ..dependencies import get_session
 from ..playback import playback_service
+from ..playback_inventory import complete_registered_playback_inventory, local_query_descriptor
 from ..playlist_tokens import PlaylistTokenError, parse_playlist_token
 from ..scrapers.hls_clean import clean_url
 
@@ -33,6 +34,15 @@ def _playlist_client() -> httpx.AsyncClient:
         trust_env=False,
         transport=playlist_transport if playlist_transport is not None else PublicHttpTransport(),
     )
+
+
+@router.get("/playback-source/{inventory_id}")
+async def playback_source_descriptor(inventory_id: str) -> JSONResponse:
+    """Metadata only; this endpoint never queries or proxies the source."""
+    descriptor = local_query_descriptor(inventory_id)
+    if descriptor is None:
+        raise HTTPException(404, "此来源暂不支持本机查询")
+    return JSONResponse(descriptor, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/quick-playback/{stable_id:path}")
@@ -58,7 +68,7 @@ async def quick_stable_playback(
         content_type=content_type,
         year=year,
     )
-    return JSONResponse(lines)
+    return JSONResponse(complete_registered_playback_inventory(lines))
 
 
 @router.get("/playback/{stable_id:path}")
@@ -82,7 +92,7 @@ async def stable_playback(
         content_type=content_type,
         year=year,
     )
-    return JSONResponse(lines)
+    return JSONResponse(complete_registered_playback_inventory(lines))
 
 
 @router.get("/playlist/{token:path}")

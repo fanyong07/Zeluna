@@ -383,6 +383,8 @@ class PlaybackSourcePanel extends StatefulWidget {
     required this.onPickLocal,
     required this.onOpenNetwork,
     required this.onSearch,
+    this.onQueryLocally,
+    this.localLookupInProgress = false,
   });
 
   final PlaybackLine? selected;
@@ -396,6 +398,8 @@ class PlaybackSourcePanel extends StatefulWidget {
   final Future<void> Function(String url, Map<String, String> headers)
   onOpenNetwork;
   final Future<void> Function() onSearch;
+  final Future<void> Function(PlaybackLine source)? onQueryLocally;
+  final bool localLookupInProgress;
 
   @override
   State<PlaybackSourcePanel> createState() => _LinePanelState();
@@ -445,6 +449,8 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         completedRules: widget.completedRules,
         totalRules: widget.totalRules,
         onSelected: widget.onSelected,
+        onQueryLocally: widget.onQueryLocally,
+        localLookupInProgress: widget.localLookupInProgress,
       ),
       _PlaybackSourceMode.local => _sourceAction(
         context,
@@ -668,6 +674,8 @@ class _LinePanelBody extends StatelessWidget {
     required this.completedRules,
     required this.totalRules,
     required this.onSelected,
+    this.onQueryLocally,
+    this.localLookupInProgress = false,
   });
 
   final List<PlaybackLine> lines;
@@ -677,6 +685,8 @@ class _LinePanelBody extends StatelessWidget {
   final int completedRules;
   final int totalRules;
   final ValueChanged<PlaybackLine> onSelected;
+  final Future<void> Function(PlaybackLine source)? onQueryLocally;
+  final bool localLookupInProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -686,10 +696,15 @@ class _LinePanelBody extends StatelessWidget {
       selectedLineId: selected?.id,
     );
     final cards = [...groups.primary, ...groups.other];
+    final localQueryCards = <String, String>{};
+    for (final card in cards.where((line) => line.clientQuerySupported)) {
+      localQueryCards.putIfAbsent(card.sourceInventoryId, () => card.id);
+    }
     final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
     final routeCount = routes.length;
     final playableCount = routes.where((line) => line.available).length;
     final unresolvedCount = cards.length - routeCount;
+    final sourceSummary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 110),
@@ -702,6 +717,15 @@ class _LinePanelBody extends StatelessWidget {
                 : '共 $routeCount 条线路，$playableCount 条可以播放'
                       '${unresolvedCount > 0 ? ' · $unresolvedCount 个来源暂无线路' : ''}',
           ),
+          if (unresolvedCount > 0) ...[
+            const SizedBox(height: 6),
+            Text(
+              '来源状态：共 ${sourceSummary.totalSources} 个来源，已检查 ${sourceSummary.queriedSources} 个',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+            ),
+          ],
           const SizedBox(height: 12),
         ],
         if (displayLines.isEmpty && scanning)
@@ -727,6 +751,19 @@ class _LinePanelBody extends StatelessWidget {
                     line: cards[i],
                     selected: selected?.id == cards[i].id,
                     runtimeFailed: failedLineIds.contains(cards[i].id),
+                    onQueryLocally:
+                        !localLookupInProgress &&
+                            cards[i].clientQuerySupported &&
+                            localQueryCards[cards[i].sourceInventoryId] ==
+                                cards[i].id &&
+                            onQueryLocally != null
+                        ? () => onQueryLocally!(cards[i])
+                        : null,
+                    showLocalQuery:
+                        cards[i].clientQuerySupported &&
+                        localQueryCards[cards[i].sourceInventoryId] ==
+                            cards[i].id &&
+                        onQueryLocally != null,
                     onTap: cards[i].available
                         ? () => onSelected(cards[i])
                         : null,
@@ -1118,6 +1155,8 @@ class _LineTile extends StatelessWidget {
     required this.selected,
     required this.runtimeFailed,
     required this.onTap,
+    this.onQueryLocally,
+    this.showLocalQuery = false,
   });
 
   final int index;
@@ -1125,6 +1164,8 @@ class _LineTile extends StatelessWidget {
   final bool selected;
   final bool runtimeFailed;
   final VoidCallback? onTap;
+  final VoidCallback? onQueryLocally;
+  final bool showLocalQuery;
 
   @override
   Widget build(BuildContext context) {
@@ -1205,13 +1246,34 @@ class _LineTile extends StatelessWidget {
                       // a sanitized reason rather than the resolver's own text.
                       line.available
                           ? line.url ?? '没有可播放的地址'
+                          : line.sourceInventoryId.isNotEmpty
+                          ? playbackSourceStateExplanation(line)
                           : playbackLineFailureLabel(line),
-                      maxLines: 1,
+                      maxLines:
+                          line.sourceInventoryId.isNotEmpty && !line.available
+                          ? 3
+                          : 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: AppColors.theaterFaint,
                       ),
                     ),
+                    if (line.queryLocation.isNotEmpty && line.queried == true)
+                      Text(
+                        line.queryLocation == 'local'
+                            ? '搜索与解析：本机网络'
+                            : '搜索与解析：VPS',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.theaterMuted,
+                        ),
+                      ),
+                    if (showLocalQuery)
+                      TextButton.icon(
+                        key: ValueKey('local-query-${line.id}'),
+                        onPressed: onQueryLocally,
+                        icon: const Icon(Icons.devices_rounded, size: 16),
+                        label: const Text('本机重查（本集）'),
+                      ),
                     if (line.available && metadata.isNotEmpty) ...[
                       const SizedBox(height: 3),
                       Text(

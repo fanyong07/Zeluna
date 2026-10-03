@@ -85,7 +85,11 @@ class PlaybackApiTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), expected)
+        payload = response.json()
+        self.assertEqual(payload[0], expected[0])
+        self.assertEqual(len(payload), 119)
+        self.assertTrue(all(item["source_inventory_entry"] for item in payload[1:]))
+        self.assertTrue(all(item["available"] is False for item in payload[1:]))
         self.assertEqual(quick.await_args.args[:2], ("bangumi:123", 2))
 
 

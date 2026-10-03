@@ -288,6 +288,9 @@ abstract final class PlaybackDiscoveryStatus {
   static const serverVerified = 'server_verified';
   static const quarantined = 'quarantined';
   static const retired = 'retired';
+  static const sourceDisabled = 'source_disabled';
+  static const candidateUnadmitted = 'candidate_unadmitted';
+  static const compatibilityInactive = 'compatibility_inactive';
 }
 
 class PlaybackLine {
@@ -319,6 +322,9 @@ class PlaybackLine {
     this.cacheState = 'unknown',
     this.sourceErrorCategory = '',
     this.sourceName = '',
+    this.sourceInventoryId = '',
+    this.clientQuerySupported = false,
+    this.queryLocation = '',
     this.sourceAddress = '',
     this.diagnosticStatus = '',
     this.queried,
@@ -367,6 +373,13 @@ class PlaybackLine {
   final String cacheState;
   final String sourceErrorCategory;
   final String sourceName;
+
+  /// Stable registered-source identity, independent of upstream route labels.
+  final String sourceInventoryId;
+  final bool clientQuerySupported;
+
+  /// Query execution location, not a promise about the device public IP.
+  final String queryLocation;
   final String sourceAddress;
   final String diagnosticStatus;
   final bool? queried;

@@ -3736,7 +3736,16 @@ PlaybackLine _copyPlaybackLineWithProbe(
     cacheState: line.cacheState,
     sourceErrorCategory: line.sourceErrorCategory,
     sourceName: line.sourceName,
-    diagnosticStatus: line.diagnosticStatus,
+    sourceInventoryId: line.sourceInventoryId,
+    clientQuerySupported: line.clientQuerySupported,
+    queryLocation: line.queryLocation,
+    diagnosticStatus:
+        line.queryLocation == 'local' &&
+            line.diagnosticStatus == PlaybackDiscoveryStatus.clientProbeRequired
+        ? (probe.available
+              ? PlaybackDiscoveryStatus.matched
+              : PlaybackDiscoveryStatus.routeUnavailable)
+        : line.diagnosticStatus,
     queried: line.queried,
     aliasesAttempted: line.aliasesAttempted,
     searchHitCount: line.searchHitCount,
@@ -3746,7 +3755,9 @@ PlaybackLine _copyPlaybackLineWithProbe(
     discoveryElapsed: line.discoveryElapsed,
     expiresAt: line.expiresAt,
     available: probe.available,
-    message: probe.available ? line.message : probe.message,
+    message: probe.available
+        ? (line.queryLocation == 'local' ? '本机媒体探测通过；实际播放以播放器为准' : line.message)
+        : probe.message,
   );
 }
 

@@ -210,9 +210,8 @@ PlaybackSourceDiagnosticSummary summarizePlaybackSourceDiagnostics(
     final legacyResolved =
         status.isEmpty &&
         (line.available || line.serverVerified || line.requiresClientProbe);
-    if (line.queried == true ||
-        _diagnosticStatusWasQueried(status) ||
-        legacyResolved) {
+    if (line.queried ??
+        (_diagnosticStatusWasQueried(status) || legacyResolved)) {
       queried.add(key);
     }
     if (line.matched == true ||
@@ -233,6 +232,7 @@ PlaybackSourceDiagnosticSummary summarizePlaybackSourceDiagnostics(
 }
 
 String playbackSourceIdentityKey(PlaybackLine line) {
+  if (line.sourceInventoryId.isNotEmpty) return line.sourceInventoryId;
   final sourceName = line.sourceName.trim().toLowerCase();
   final providerId = line.providerId.trim().toLowerCase();
   if (sourceName.isNotEmpty) return '$providerId|$sourceName';
@@ -243,6 +243,9 @@ String playbackSourceIdentityKey(PlaybackLine line) {
 bool _diagnosticStatusWasQueried(String status) {
   return status.isNotEmpty &&
       status != PlaybackDiscoveryStatus.notQueried &&
+      status != PlaybackDiscoveryStatus.sourceDisabled &&
+      status != PlaybackDiscoveryStatus.candidateUnadmitted &&
+      status != PlaybackDiscoveryStatus.compatibilityInactive &&
       status != PlaybackDiscoveryStatus.quarantined &&
       status != PlaybackDiscoveryStatus.retired;
 }
@@ -335,6 +338,7 @@ List<PlaybackLine> _playbackSourceCardsForDisplay(
 }
 
 String _playbackSourceCardIdentityKey(PlaybackLine line) {
+  if (line.sourceInventoryId.isNotEmpty) return line.sourceInventoryId;
   final providerId = line.providerId.trim().toLowerCase();
   final sourceName = line.sourceName.trim().toLowerCase();
   if (providerId == 'managed.urls' || providerId.startsWith('managed:')) {
@@ -460,6 +464,14 @@ PlaybackLine preservePlaybackLineProbeMetadata({
     sourceName: incoming.sourceName.isEmpty
         ? previous.sourceName
         : incoming.sourceName,
+    sourceInventoryId: incoming.sourceInventoryId.isEmpty
+        ? previous.sourceInventoryId
+        : incoming.sourceInventoryId,
+    clientQuerySupported:
+        incoming.clientQuerySupported || previous.clientQuerySupported,
+    queryLocation: incoming.queryLocation.isEmpty
+        ? previous.queryLocation
+        : incoming.queryLocation,
     diagnosticStatus: incoming.diagnosticStatus.isEmpty
         ? previous.diagnosticStatus
         : incoming.diagnosticStatus,
@@ -773,6 +785,9 @@ String playbackLineFailureLabel(PlaybackLine line) {
     // sees rather than naming the mechanism behind it: no 验线 (internal probe
     // slang), 已隔离 (quarantine), or 暂缓请求 (circuit breaker).
     PlaybackDiscoveryStatus.notQueried => '未检查',
+    PlaybackDiscoveryStatus.sourceDisabled => '未启用',
+    PlaybackDiscoveryStatus.candidateUnadmitted => '候选未接入',
+    PlaybackDiscoveryStatus.compatibilityInactive => '旧接口未启用',
     PlaybackDiscoveryStatus.searching => '搜索中',
     PlaybackDiscoveryStatus.searchTimeout => '搜索超时',
     PlaybackDiscoveryStatus.searchError => '来源异常',
@@ -831,6 +846,30 @@ String playbackLineFailureLabel(PlaybackLine line) {
   }
   final latency = line.latency;
   return latency == null ? reason : '$reason · ${latency.inMilliseconds}ms';
+}
+
+/// Curated explanations never display resolver payloads, URLs or private headers.
+String playbackSourceStateExplanation(PlaybackLine line) {
+  return switch (line.diagnosticStatus) {
+    PlaybackDiscoveryStatus.notQueried => '尚未查询这部作品；未查询不等于没有资源。',
+    PlaybackDiscoveryStatus.sourceDisabled => '此源当前未启用，本集没有发起查询。',
+    PlaybackDiscoveryStatus.candidateUnadmitted => '该来源仅为候选，尚未接入查询；本集没有播放验证结果。',
+    PlaybackDiscoveryStatus.compatibilityInactive => '旧兼容接口未启用，仅保留登记信息。',
+    PlaybackDiscoveryStatus.quarantined => '此源原先已停用，本集未查询；不是本次播放失败。',
+    PlaybackDiscoveryStatus.retired => '此源已停用，不会发起播放查询。',
+    PlaybackDiscoveryStatus.searching => '正在搜索当前作品，暂未取得结果。',
+    PlaybackDiscoveryStatus.searchTimeout => '本次搜索响应超时，不能据此认定源已永久失效。',
+    PlaybackDiscoveryStatus.searchError => '本次搜索请求失败，未取得可靠的匹配结果。',
+    PlaybackDiscoveryStatus.searchMiss => '已发起搜索，但当前作品的搜索词没有命中。',
+    PlaybackDiscoveryStatus.searchHitNoMatch => '搜索有结果，但未匹配到当前作品；不会播放其他作品。',
+    PlaybackDiscoveryStatus.matched => '已匹配作品，正在取得本集播放线路。',
+    PlaybackDiscoveryStatus.matchedNoEpisode => '已匹配作品，但没有取得当前集的媒体候选。',
+    PlaybackDiscoveryStatus.circuitSuppressed => '近期请求连续失败，当前暂时跳过；不代表永久失效。',
+    PlaybackDiscoveryStatus.routeUnavailable => '已取得候选线路，但本次媒体验证未通过。',
+    PlaybackDiscoveryStatus.clientProbeRequired => '已有媒体候选，仍需在客户端确认能否播放。',
+    PlaybackDiscoveryStatus.serverVerified => '服务器已验证媒体响应，仍以播放器实际播放为准。',
+    _ => '本集暂无可播放媒体，详细原因尚未确认。',
+  };
 }
 
 String playbackLineMediaLabel(PlaybackLine line) {

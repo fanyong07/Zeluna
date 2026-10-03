@@ -222,7 +222,10 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final item = entry.$2;
         if (item is! Map) continue;
         final json = item.cast<Object?, Object?>();
-        final rawUrl = json['url']?.toString().trim() ?? '';
+        final inventoryEntry = json['source_inventory_entry'] == true;
+        final rawUrl = inventoryEntry
+            ? ''
+            : json['url']?.toString().trim() ?? '';
         final url = _decodeAniChUrl(rawUrl);
         final mediaUri = Uri.tryParse(url);
         if (mediaUri != null && _isObviousPlaybackPageUri(mediaUri)) {
@@ -241,10 +244,12 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
                 status == 'playable' ||
                 (status.isEmpty && json['available'] != false));
         final available = serverVerified && json['available'] != false;
-        if (json['available'] != false && !hasPlayableUrl) {
+        if (!inventoryEntry && json['available'] != false && !hasPlayableUrl) {
           continue;
         }
-        final expiresAt = _epochDateTime(json['expires_at']);
+        final expiresAt = inventoryEntry
+            ? null
+            : _epochDateTime(json['expires_at']);
         if (expiresAt != null &&
             expiresAt.isBefore(
               DateTime.now().add(const Duration(seconds: 15)),
@@ -263,7 +268,7 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         );
         final headers = <String, String>{};
         final rawHeaders = json['headers'];
-        if (rawHeaders is Map) {
+        if (!inventoryEntry && rawHeaders is Map) {
           for (final entry in rawHeaders.entries) {
             final name = entry.key.toString().trim();
             final value = entry.value?.toString().trim() ?? '';
@@ -286,15 +291,36 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           json['source_name'],
           maxLength: 200,
         );
-        final diagnosticStatus = _diagnosticStatusFromJson(
+        var diagnosticStatus = _diagnosticStatusFromJson(
           json['diagnostic_status'] ?? status,
         );
-        final queried = _nullableBool(json['queried']);
+        if (inventoryEntry &&
+            !const {
+              PlaybackDiscoveryStatus.notQueried,
+              PlaybackDiscoveryStatus.sourceDisabled,
+              PlaybackDiscoveryStatus.candidateUnadmitted,
+              PlaybackDiscoveryStatus.compatibilityInactive,
+              PlaybackDiscoveryStatus.quarantined,
+              PlaybackDiscoveryStatus.retired,
+            }.contains(diagnosticStatus)) {
+          diagnosticStatus = PlaybackDiscoveryStatus.notQueried;
+        }
+        final inventoryId = _trustedServerText(
+          json['inventory_source_id'],
+          maxLength: 64,
+        );
+        final sourceInventoryId =
+            RegExp(r'^registered:[a-f0-9]{24}$').hasMatch(inventoryId)
+            ? inventoryId
+            : '';
+        final queried = inventoryEntry ? false : _nullableBool(json['queried']);
         final aliasesAttempted = _nullableInt(json['aliases_attempted']);
         final searchHitCount = _nullableInt(json['search_hit_count']);
         final bestMatchScore = _nullableInt(json['best_match_score']);
-        final matched = _nullableBool(json['matched']);
-        final episodeFound = _nullableBool(json['episode_found']);
+        final matched = inventoryEntry ? null : _nullableBool(json['matched']);
+        final episodeFound = inventoryEntry
+            ? null
+            : _nullableBool(json['episode_found']);
         final discoveryElapsedMs = _nullableInt(json['elapsed_ms']);
         final sourceLatencyMs = int.tryParse(
           json['source_latency_ms']?.toString() ?? '',
@@ -333,10 +359,12 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
                 uri: url,
                 headers: headers,
               )
-            : 'line:$stableIdentityVersion:${stableDigest('placeholder|$providerId|$episodeKey|$source|${json['title'] ?? ''}|$status')}';
+            : 'line:$stableIdentityVersion:${stableDigest(sourceInventoryId.isNotEmpty ? 'registered-placeholder|$sourceInventoryId|$episodeKey' : 'placeholder|$providerId|$episodeKey|$source|${json['title'] ?? ''}|$status')}';
         lines.add(
           PlaybackLine(
-            id: lineId,
+            id: sourceInventoryId.isNotEmpty && hasPlayableUrl
+                ? 'registered-route:${stableDigest('$sourceInventoryId|$lineId')}'
+                : lineId,
             episodeId: episode.id,
             providerId: providerId,
             providerName: serverProviderName.isNotEmpty
@@ -373,6 +401,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
                 ? sourceHost
                 : _sourceName(source),
             sourceAddress: sourceAddress,
+            sourceInventoryId: sourceInventoryId,
+            clientQuerySupported: json['client_query_supported'] == true,
+            queryLocation: json['query_location'] == 'vps' ? 'vps' : '',
             diagnosticStatus: diagnosticStatus,
             queried: queried,
             aliasesAttempted: aliasesAttempted,
@@ -411,6 +442,25 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
     } on FormatException {
       return const [];
     }
+  }
+
+  /// Returns static protocol metadata only. No source search runs on the VPS.
+  Future<Map<String, dynamic>> localSourceDescriptor(String inventoryId) async {
+    if (_baseUri == null ||
+        !RegExp(r'^registered:[a-f0-9]{24}$').hasMatch(inventoryId)) {
+      throw StateError('此来源暂不支持本机查询');
+    }
+    final response = await _client
+        .get(_endpoint(['api', 'v3', 'playback-source', inventoryId]))
+        .timeout(requestTimeout);
+    if (response.statusCode != 200) throw StateError('此来源暂不支持本机查询');
+    final descriptor = jsonDecode(utf8.decode(response.bodyBytes));
+    if (descriptor is! Map ||
+        descriptor['inventory_source_id'] != inventoryId ||
+        descriptor['protocol'] != 'maccms-json') {
+      throw StateError('本机查询配置不正确');
+    }
+    return descriptor.cast<String, dynamic>();
   }
 
   Uri _endpoint(List<String> segments, {Map<String, String>? query}) {
@@ -466,6 +516,12 @@ String _startupProfileFromJson(Object? value) {
 String _diagnosticStatusFromJson(Object? value) {
   return switch (value?.toString().trim().toLowerCase()) {
     PlaybackDiscoveryStatus.notQueried => PlaybackDiscoveryStatus.notQueried,
+    PlaybackDiscoveryStatus.sourceDisabled =>
+      PlaybackDiscoveryStatus.sourceDisabled,
+    PlaybackDiscoveryStatus.candidateUnadmitted =>
+      PlaybackDiscoveryStatus.candidateUnadmitted,
+    PlaybackDiscoveryStatus.compatibilityInactive =>
+      PlaybackDiscoveryStatus.compatibilityInactive,
     PlaybackDiscoveryStatus.searching => PlaybackDiscoveryStatus.searching,
     PlaybackDiscoveryStatus.searchTimeout =>
       PlaybackDiscoveryStatus.searchTimeout,

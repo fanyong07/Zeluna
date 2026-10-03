@@ -459,7 +459,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     return controller;
   }
 
-  PlaybackDiscoveryController get _playbackDiscoveryDomain {
+  PlaybackDiscoveryController get playbackDiscovery {
     final controller = _playbackDiscoveryController;
     if (controller == null) {
       throw StateError('播放发现尚未准备好');
@@ -648,7 +648,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       isContextCurrent: _accounts.isContextCurrent,
       clearRuleRuntimeCaches: playbackResolver.resetExecutionScope,
     );
-    _playbackDiscoveryDomain.loadForAccount(
+    playbackDiscovery.loadForAccount(
       accountId: activeAccount?.id,
       contextVersion: _accounts.contextVersion,
       services: services,
@@ -680,7 +680,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       enrichDetail: (bundle, _) => _enrichSparseDetail(bundle),
       prefetchPlayback: (subject, episodes) {
         if (_settingsDomain.snapshot.playback.rememberLine) {
-          _playbackDiscoveryDomain.prefetchPlayback(subject, episodes);
+          playbackDiscovery.prefetchPlayback(subject, episodes);
         }
       },
       fallbackSeries: _fallbackExternalSeries,
@@ -874,7 +874,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) => _playbackDiscoveryDomain.linesForEpisode(
+  }) => playbackDiscovery.linesForEpisode(
     subject,
     episode,
     cancellationToken: cancellationToken,
@@ -885,7 +885,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     bool enrichMetadata = true,
     bool forceRefresh = false,
     RulePlaybackCancellationToken? cancellationToken,
-  }) => _playbackDiscoveryDomain.verifyPlaybackLine(
+  }) => playbackDiscovery.verifyPlaybackLine(
     line,
     enrichMetadata: enrichMetadata,
     forceRefresh: forceRefresh,
@@ -897,7 +897,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode, {
     bool expandAll = false,
     RulePlaybackCancellationToken? cancellationToken,
-  }) => _playbackDiscoveryDomain.linesForEpisodeMode(
+  }) => playbackDiscovery.linesForEpisodeMode(
     subject,
     episode,
     expandAll: expandAll,
@@ -917,7 +917,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         (rememberLine
             ? _playbackLineMemory.preferredProviderFor(subject)
             : null);
-    return _playbackDiscoveryDomain.prefetchedLineForEpisode(
+    return playbackDiscovery.prefetchedLineForEpisode(
       subject,
       episode,
       preferredProviderId: preferred,
@@ -931,7 +931,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     Duration minValidity = const Duration(seconds: 60),
   }) {
     if (!(state.value?.settings.rememberLine ?? true)) return null;
-    return _playbackDiscoveryDomain.prefetchedWarmupBundleForEpisode(
+    return playbackDiscovery.prefetchedWarmupBundleForEpisode(
       subject,
       episode,
       minValidity: minValidity,
@@ -968,7 +968,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (!(state.value?.settings.rememberLine ?? true)) {
       return Future<void>.value();
     }
-    return _playbackDiscoveryDomain.prefetchPlaybackForEpisode(
+    return playbackDiscovery.prefetchPlaybackForEpisode(
       subject,
       episode,
       preferredProviderId: preferredProviderId,
@@ -982,7 +982,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeEpisode episode, {
     required PlaybackLine currentLine,
     RulePlaybackCancellationToken? cancellationToken,
-  }) => _playbackDiscoveryDomain.prepareSingleBackupForEpisode(
+  }) => playbackDiscovery.prepareSingleBackupForEpisode(
     subject,
     episode,
     currentLine: currentLine,
@@ -1055,7 +1055,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) => _playbackDiscoveryDomain.lineUpdatesForEpisode(
+  }) => playbackDiscovery.lineUpdatesForEpisode(
     subject,
     episode,
     cancellationToken: cancellationToken,
@@ -1491,7 +1491,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     );
     _recommendationNonce = 0;
     _lastServedRecommendationFingerprint = null;
-    _playbackDiscoveryDomain.loadForAccount(
+    playbackDiscovery.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,
       services: settingsSnapshot.services,
@@ -2138,7 +2138,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       contextVersion: change.contextVersion,
     );
     if (change.playbackBackendChanged) {
-      _playbackDiscoveryDomain.applyServices(
+      playbackDiscovery.applyServices(
         change.current,
         contextVersion: change.contextVersion,
       );
