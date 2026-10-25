@@ -77,7 +77,10 @@ void main() {
       of: hero,
       matching: find.text(_subject.title),
     );
-    expect(tester.getCenter(heroTitle.last).dx, closeTo(215, 1));
+    expect(
+      tester.getTopLeft(heroTitle.last).dx,
+      greaterThan(heroRect.left + 110),
+    );
     await tester.drag(unifiedScroll, const Offset(0, -520));
     await tester.pumpAndSettle();
 

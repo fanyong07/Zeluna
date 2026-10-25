@@ -9,6 +9,73 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'schedule never invents weekdays from historical catalogue dates',
+    () async {
+      final controller = _controller(
+        _MemoryCatalogStorage(),
+        loadHome: (_, _) async => [_subject],
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'test',
+        contextVersion: 1,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      final schedule = await controller.weeklySchedule();
+      expect(schedule.values.expand((items) => items), isEmpty);
+    },
+  );
+
+  test(
+    'schedule uses the calendar loader rather than home recommendations',
+    () async {
+      final controller = _controller(
+        _MemoryCatalogStorage(),
+        loadHome: (_, _) async => throw StateError('must not load home'),
+        loadSchedule: () async => {
+          2: [_subject],
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'one',
+        contextVersion: 1,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      expect((await controller.weeklySchedule())[2]!.single.id, _subject.id);
+    },
+  );
+
+  test('query response is discarded after an account switch', () async {
+    final pending = Completer<CatalogPageResult>();
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      loadQuery: (_, _, _) => pending.future,
+    );
+    addTearDown(controller.dispose);
+    await controller.loadForAccount(
+      accountId: 'one',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    final response = controller.queryCatalog(
+      const CatalogQuery(contentType: SubjectContentType.anime, year: 2026),
+    );
+    await controller.loadForAccount(
+      accountId: 'two',
+      contextVersion: 2,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    final assertion = expectLater(response, throwsA(isA<AccountException>()));
+    pending.complete(CatalogPageResult(subjects: [_subject]));
+    await assertion;
+  });
+
+  test(
     'late detail from an old account cannot publish into the new scope',
     () async {
       final storage = _MemoryCatalogStorage();
@@ -487,6 +554,8 @@ CatalogController _controller(
   CatalogSearchLoader? search,
   CatalogHomeLoader? loadHome,
   CatalogCandidateLoader? loadCandidates,
+  CatalogQueryLoader? loadQuery,
+  CatalogScheduleLoader? loadSchedule,
   CatalogDetailLoader? loadDetail,
 }) => CatalogController(
   storage: storage,
@@ -494,6 +563,8 @@ CatalogController _controller(
   search: search ?? (_, _) async => const [],
   loadHome: loadHome ?? (_, _) async => const [],
   loadCandidates: loadCandidates,
+  loadQuery: loadQuery,
+  loadSchedule: loadSchedule,
   loadDetail: loadDetail ?? (_, _) async => _detailBundle,
   enrichDetail: (bundle, _) async => bundle,
   prefetchPlayback: (_, _) {},

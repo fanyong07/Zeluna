@@ -63,7 +63,7 @@ class AppChrome extends StatelessWidget {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     final mobileBottomSpace = desktop
         ? 0.0
-        : AppLayout.mobileNavigationHeight + bottomInset + 20;
+        : AppLayout.mobileNavigationHeightFor(context) + bottomInset + 12;
 
     return Scaffold(
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
@@ -345,7 +345,9 @@ class SectionTitle extends StatelessWidget {
     if (action == null) return heading;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final stack = constraints.maxWidth < 460;
+        final stack =
+            constraints.maxWidth < 340 ||
+            MediaQuery.textScalerOf(context).scale(1) > 1.3;
         if (stack) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -621,7 +623,10 @@ class CompactSubjectRow extends StatelessWidget {
                     ),
                     const SizedBox(height: AppSpacing.xxs),
                     Text(
-                      subject.subtitle,
+                      [
+                        subject.subtitle,
+                        ?trailing,
+                      ].where((value) => value.trim().isNotEmpty).join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -631,16 +636,6 @@ class CompactSubjectRow extends StatelessWidget {
                   ],
                 ),
               ),
-              if (trailing != null) ...[
-                const SizedBox(width: AppSpacing.sm),
-                Text(
-                  trailing!,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
               if (onTap != null) ...[
                 const SizedBox(width: AppSpacing.xs),
                 Icon(
@@ -797,10 +792,10 @@ class _BottomNavigation extends StatelessWidget {
           color: scheme.surfaceContainerLow,
           borderRadius: BorderRadius.circular(AppRadius.xl),
           border: Border.all(color: scheme.outlineVariant),
-          boxShadow: AppShadows.elevated,
+          boxShadow: const [],
         ),
         child: SizedBox(
-          height: AppLayout.mobileNavigationHeight,
+          height: AppLayout.mobileNavigationHeightFor(context),
           child: Row(
             children: [
               for (final item in items)

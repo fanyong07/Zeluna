@@ -292,9 +292,9 @@ class DanmakuQuickSwitch extends StatelessWidget {
         child: Container(
           width: 12,
           height: 12,
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: Colors.white,
+            color: enabled ? Colors.black : Colors.white,
           ),
         ),
       ),

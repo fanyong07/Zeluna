@@ -30,7 +30,11 @@ void main() {
     final image = tester.widget<Image>(find.byType(Image));
     final provider = image.image as ResizeImage;
     expect(provider.width, 200);
-    expect(provider.height, 300);
+    expect(
+      provider.height,
+      isNull,
+      reason: 'one decode bound preserves source aspect ratio',
+    );
     expect(image.filterQuality, FilterQuality.low);
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });

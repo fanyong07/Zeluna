@@ -22,7 +22,7 @@ Avoid decorative player chrome, crowded icon strips, inconsistent desktop/mobile
 
 ## Design Principles
 
-- Reuse the established gallery/theater tokens and existing components.
+- Reuse the established gallery/theater components with a monochrome palette: pure black dark backgrounds, pure white light backgrounds, and neutral gray hierarchy. Artwork keeps its original colors.
 - Keep desktop and landscape playback visually consistent; adapt spacing to width and retain touch gestures.
 - Reserve simplified compact controls for portrait phones; keep full playback capabilities reachable in landscape.
 - Show clear loading, source-failure and retry states without exposing internal provider details or credentials.
@@ -32,4 +32,4 @@ Avoid decorative player chrome, crowded icon strips, inconsistent desktop/mobile
 
 Retain readable Chinese text, semantic tooltips, contrast, safe-area insets and usable touch targets; validate compact landscapes and increased text scaling. No formal accessibility certification is claimed.
 
-Context: existing `.impeccable.md`, `lib/src/shared_ui/app_design.dart`, player components, and the user's 2026-09-09 request to reuse Windows player UI on Android landscape. No new visual theme or web live-mode setup is introduced.
+Context: existing `.impeccable.md`, `lib/src/shared_ui/app_design.dart`, player components, and the user's 2026-09-09 request to reuse Windows player UI on Android landscape. Monochrome theme and compact content-first layouts requested on 2026-10-04.

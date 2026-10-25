@@ -9,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../accounts/account_controller.dart';
 import '../accounts/local_account_repository.dart';
 import '../catalog/catalog_controller.dart';
+import '../catalog/catalog_sorting.dart';
 import '../accounts/cloud_account_repository.dart';
 import '../core/identity/local_identity_migration.dart';
 import '../core/network/network_http_client.dart';
@@ -673,6 +674,26 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             ? const <CatalogCandidate>[]
             : repository.homeCandidates(type);
       },
+      loadSchedule: () => bangumiRepository.withPublicCatalogFallback(
+        () => bangumiRepository.weeklySchedule(strict: true),
+        _backendCatalogRepositoryFor(
+          _settingsDomain.snapshot.services,
+        )?.weeklySchedule,
+      ),
+      loadQuery: (query, settings, cursor) async {
+        if (query.contentType == SubjectContentType.anime) {
+          final backend = _backendCatalogRepositoryFor(settings);
+          return bangumiRepository.withPublicCatalogFallback(
+            () => bangumiRepository.queryCatalog(query, cursor: cursor),
+            backend == null
+                ? null
+                : () => backend.queryAnimeCatalog(query, cursor: cursor),
+          );
+        }
+        final repository = _backendCatalogRepositoryFor(settings);
+        if (repository == null) throw StateError('片库服务未连接');
+        return repository.queryCatalog(query, cursor: cursor);
+      },
       loadDetail: (subject, settings) async {
         final repository = _backendCatalogRepositoryFor(settings);
         return await repository?.detail(subject) ?? _fallbackDetail(subject);
@@ -811,6 +832,11 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     waitForRefresh: waitForRefresh,
   );
 
+  Future<CatalogPageResult> queryCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) => _catalogDomain.queryCatalog(query, cursor: cursor);
+
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() =>
       _catalogDomain.weeklySchedule();
 
@@ -877,6 +903,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   }) => playbackDiscovery.linesForEpisode(
     subject,
     episode,
+    preferredProviderId: rememberedPlaybackProvider(subject),
     cancellationToken: cancellationToken,
   );
 
@@ -901,6 +928,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     subject,
     episode,
     expandAll: expandAll,
+    preferredProviderId: rememberedPlaybackProvider(subject),
     cancellationToken: cancellationToken,
   );
 
@@ -914,9 +942,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     if (!rememberLine) return null;
     final preferred =
         preferredProviderId ??
-        (rememberLine
-            ? _playbackLineMemory.preferredProviderFor(subject)
-            : null);
+        _playbackLineMemory.preferredProviderFor(subject);
     return playbackDiscovery.prefetchedLineForEpisode(
       subject,
       episode,
@@ -1942,7 +1968,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           candidates
               .where((item) => item.contentType == type)
               .toList(growable: true)
-            ..sort(_comparePopularCandidates);
+            ..sort(comparePopularCatalogCandidates);
       final chartWindow = values
           .take(recommendationColdStartQuotaPerType * 3)
           .toList(growable: false);
@@ -1998,7 +2024,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           unique
               .where((item) => !rankedKeys.contains(item.workKey))
               .toList(growable: false)
-            ..sort(_comparePopularCandidates);
+            ..sort(comparePopularCatalogCandidates);
       return <AnimeSubject>[
         ...ranked.map((item) => item.candidate.subject),
         ...blocked.map((item) => item.subject),
@@ -2006,68 +2032,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     }
     final sorted = unique.toList(growable: false)
       ..sort(switch (sort) {
-        CatalogSortMode.topRated => _compareTopRatedCandidates,
-        CatalogSortMode.latest => _compareLatestCandidates,
+        CatalogSortMode.topRated => compareTopRatedCatalogCandidates,
+        CatalogSortMode.latest => compareLatestCatalogCandidates,
         CatalogSortMode.recommended ||
-        CatalogSortMode.popular => _comparePopularCandidates,
+        CatalogSortMode.popular => comparePopularCatalogCandidates,
       });
     return sorted.map((item) => item.subject).toList(growable: false);
-  }
-
-  int _comparePopularCandidates(
-    CatalogCandidate first,
-    CatalogCandidate second,
-  ) {
-    final byScore = _catalogPopularityScore(
-      second,
-    ).compareTo(_catalogPopularityScore(first));
-    return byScore != 0 ? byScore : first.workKey.compareTo(second.workKey);
-  }
-
-  int _compareTopRatedCandidates(
-    CatalogCandidate first,
-    CatalogCandidate second,
-  ) {
-    final byRating = (second.subject.ratingScore ?? -1).compareTo(
-      first.subject.ratingScore ?? -1,
-    );
-    if (byRating != 0) return byRating;
-    final byVotes = (second.subject.ratingTotal ?? 0).compareTo(
-      first.subject.ratingTotal ?? 0,
-    );
-    return byVotes != 0 ? byVotes : first.workKey.compareTo(second.workKey);
-  }
-
-  int _compareLatestCandidates(
-    CatalogCandidate first,
-    CatalogCandidate second,
-  ) {
-    final firstDate = _catalogDate(first.subject);
-    final secondDate = _catalogDate(second.subject);
-    if (firstDate != null || secondDate != null) {
-      if (firstDate == null) return 1;
-      if (secondDate == null) return -1;
-      final byDate = secondDate.compareTo(firstDate);
-      if (byDate != 0) return byDate;
-    }
-    return _comparePopularCandidates(first, second);
-  }
-
-  DateTime? _catalogDate(AnimeSubject subject) {
-    final raw = subject.date?.trim() ?? '';
-    final parsed = DateTime.tryParse(raw);
-    if (parsed != null) return parsed;
-    final year = int.tryParse(subject.year);
-    return year == null ? null : DateTime.utc(year);
-  }
-
-  double _catalogPopularityScore(CatalogCandidate candidate) {
-    final chart = candidate.evidence.chartScore;
-    if (chart > 0) return chart;
-    final rating = ((candidate.subject.ratingScore ?? 0) / 10).clamp(0.0, 1.0);
-    final votes = candidate.subject.ratingTotal ?? 0;
-    final voteConfidence = votes <= 0 ? 0.0 : votes / (votes + 500);
-    return (rating * 0.8 + voteConfidence * 0.2).clamp(0.0, 1.0);
   }
 
   void _rebuildRecommendedHome({required bool recordServed}) {

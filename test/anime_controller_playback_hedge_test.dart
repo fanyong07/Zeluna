@@ -26,6 +26,49 @@ void main() {
   setUp(RulePlaybackSourceRepository.clearRuntimeCaches);
   tearDown(RulePlaybackSourceRepository.clearRuntimeCaches);
 
+  test('cold playback actually queries the remembered rule first', () async {
+    const provider = 'test:remembered-route';
+    final harness = await _PlaybackHarness.create(
+      ruleId: provider,
+      playbackResponse: (_) async => http.Response(
+        jsonEncode([
+          {
+            'url': 'https://cdn.example/other.m3u8',
+            'source': 'maccms:other',
+            'status': 'server_verified',
+            'available': true,
+          },
+        ]),
+        200,
+      ),
+    );
+    addTearDown(harness.dispose);
+    await harness.controller.rememberPlaybackProvider(
+      subject: _subject,
+      line: PlaybackLine(
+        id: 'previous',
+        episodeId: _episode.id,
+        providerId: provider,
+        providerName: 'Remembered',
+        title: 'Previous',
+        quality: '',
+        format: 'hls',
+        url: 'https://fallback.example/previous.m3u8',
+        available: true,
+        clientVerified: true,
+      ),
+      expectedAccountContextVersion: harness.controller.accountContextVersion,
+    );
+    expect(harness.controller.rememberedPlaybackProvider(_subject), provider);
+    final lines = await harness.controller.linesForEpisode(_subject, _episode);
+    expect(
+      lines.first.providerId,
+      provider,
+      reason: 'persisted preference must reach discovery, not just UI sorting',
+    );
+    expect(harness.quickPlaybackRequests, 0);
+  });
+
   test(
     'a fast empty backend starts rule fallback without wasting the hedge',
     () async {
@@ -598,6 +641,7 @@ class _ReadyRuleResolver extends RulePlaybackResolver {
         format: 'hls',
         url: 'https://fallback.example/video.m3u8',
         available: true,
+        clientVerified: true,
       ),
     ];
   }

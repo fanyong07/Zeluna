@@ -1,4 +1,6 @@
 import 'dart:async';
+
+import '../catalog/catalog_query.dart';
 import 'dart:convert';
 import 'dart:math';
 
@@ -88,6 +90,7 @@ class BangumiMetadataRepository {
     Future<void> Function(BangumiAccessCredential credential)?
     onAccessTokenRejected,
     DateTime Function()? clock,
+    String publicCatalogBaseUrl = _baseUrl,
   }) : _client =
            client ??
            createNetworkHttpClient(
@@ -95,13 +98,16 @@ class BangumiMetadataRepository {
            ),
        _accessCredentialProvider = accessCredentialProvider,
        _onAccessTokenRejected = onAccessTokenRejected,
-       _clock = clock ?? DateTime.now;
+       _clock = clock ?? DateTime.now,
+       _publicCatalogBaseUrl = publicCatalogBaseUrl;
 
   final http.Client _client;
   final Future<BangumiAccessCredential?> Function()? _accessCredentialProvider;
   final Future<void> Function(BangumiAccessCredential credential)?
   _onAccessTokenRejected;
   final DateTime Function() _clock;
+  final String _publicCatalogBaseUrl;
+  DateTime? _publicCatalogDirectRetryAt;
   bool _suppressAccessToken = false;
   int _credentialGeneration = 0;
   DateTime? _rateLimitedUntil;
@@ -322,15 +328,40 @@ class BangumiMetadataRepository {
     return _uniqueSubjects(results.expand((items) => items));
   }
 
-  Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
+  /// Public metadata only. A brief cooldown avoids repeating a failed direct
+  /// connection for every filter; rate limits are not bypassed through a relay.
+  Future<T> withPublicCatalogFallback<T>(
+    Future<T> Function() direct,
+    Future<T> Function()? fallback,
+  ) async {
+    if (fallback != null &&
+        _publicCatalogDirectRetryAt?.isAfter(_clock()) == true) {
+      return fallback();
+    }
+    try {
+      final result = await direct();
+      _publicCatalogDirectRetryAt = null;
+      return result;
+    } on BangumiRateLimitException {
+      rethrow;
+    } catch (_) {
+      if (fallback == null) rethrow;
+      _publicCatalogDirectRetryAt = _clock().add(const Duration(minutes: 2));
+      return fallback();
+    }
+  }
+
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule({
+    bool strict = false,
+  }) async {
     try {
       final response = await _sendGet(
-        Uri.parse('$_baseUrl/calendar'),
+        Uri.parse('$_publicCatalogBaseUrl/calendar'),
         headers: _headers,
       ).timeout(const Duration(seconds: 16));
-      if (response.statusCode != 200) return const {};
+      if (response.statusCode != 200) throw StateError('放送日历暂不可用');
       final decoded = jsonDecode(utf8.decode(response.bodyBytes));
-      if (decoded is! List) return const {};
+      if (decoded is! List) throw const FormatException('Invalid calendar');
 
       final schedule = {
         for (var day = 0; day < 7; day++) day: <AnimeSubject>[],
@@ -339,7 +370,9 @@ class BangumiMetadataRepository {
         final group = rawGroup.cast<String, dynamic>();
         final weekday = _intValue(_map(group['weekday'])['id']);
         final items = group['items'];
-        if (weekday == null || weekday < 1 || items is! List) continue;
+        if (weekday == null || weekday < 1 || weekday > 7 || items is! List) {
+          continue;
+        }
         final day = weekday % 7;
         schedule[day]!.addAll(
           items
@@ -348,7 +381,8 @@ class BangumiMetadataRepository {
                 (item) =>
                     _subjectFromCalendarJson(item.cast<String, dynamic>()),
               )
-              .where((item) => item.id > 0 && item.title.trim().isNotEmpty),
+              .where((item) => item.id > 0 && item.title.trim().isNotEmpty)
+              .map((item) => item.copyWith(status: '连载中')),
         );
       }
       if (schedule.values.every((items) => items.isEmpty)) return const {};
@@ -359,8 +393,179 @@ class BangumiMetadataRepository {
     } on BangumiRateLimitException {
       rethrow;
     } catch (_) {
+      if (strict) rethrow;
       return const {};
     }
+  }
+
+  /// Keeps the upstream cursor even when a page contains only movies, future
+  /// releases or another language. Filtering must never terminate pagination.
+  Future<CatalogPageResult> queryCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) async {
+    final latest = query.sort == CatalogSortMode.latest;
+    // Bangumi has no language field in search. Country tags are useful index
+    // hints, followed by an untagged scan so hints never limit completeness.
+    final languageTags = switch (query.language) {
+      '日语' => const ['日本'],
+      '国语' => const ['中国', '国产', '国创', '台湾', '香港'],
+      '英语' => const ['美国', '英国'],
+      '韩语' => const ['韩国'],
+      _ => const <String>[],
+    };
+    var mode = latest
+        ? 'date'
+        : languageTags.isNotEmpty
+        ? 'tagged'
+        : 'search';
+    final now = _clock();
+    var year = query.year ?? now.year;
+    var offset = 0;
+    if (cursor != null) {
+      final parts = cursor.split(':');
+      if (parts.length != 3 ||
+          !(latest ? const ['date'] : const ['tagged', 'search']).contains(
+            parts[0],
+          )) {
+        throw const FormatException('Invalid catalogue cursor');
+      }
+      mode = parts[0];
+      if (mode == 'tagged' && languageTags.isEmpty) {
+        throw const FormatException('Invalid catalogue cursor');
+      }
+      year = int.parse(parts[1]);
+      offset = int.parse(parts[2]);
+      if (year < 1900 || year > now.year + 1 || offset < 0 || offset > 100000) {
+        throw const FormatException('Invalid catalogue cursor');
+      }
+    }
+    final result = <AnimeSubject>[];
+    String? next;
+    final maxScans = mode == 'tagged' ? 1 : 4;
+    for (var scan = 0; scan < maxScans; scan++) {
+      final pageSize = latest ? 100 : _subjectPageSize;
+      final rawItems = <Map<String, dynamic>>[];
+      var hasMore = false;
+      // Search only accepts heat/rank/score, never a made-up "date" sort.
+      // Date ordering comes from the browse endpoint, walking years backwards.
+      final genres = query.genre == '全部' || query.genre == '动画'
+          ? <String?>[null]
+          : query.genre == '喜剧'
+          ? <String?>['喜剧', '搞笑']
+          : <String?>[query.genre];
+      final combinations = [
+        for (final genre in latest ? <String?>[null] : genres)
+          for (final languageTag
+              in mode == 'tagged' ? languageTags : <String?>[null])
+            (genre, languageTag),
+      ];
+      for (final (genre, languageTag) in combinations) {
+        final uri =
+            Uri.parse(
+              '$_publicCatalogBaseUrl/v0/${latest ? 'subjects' : 'search/subjects'}',
+            ).replace(
+              queryParameters: {
+                'limit': '$pageSize',
+                'offset': '$offset',
+                if (latest) ...{'type': '2', 'sort': 'date', 'year': '$year'},
+              },
+            );
+        final response =
+            await (latest
+                    ? _sendGet(uri, headers: _headers)
+                    : _sendPost(
+                        uri,
+                        headers: const {
+                          ..._headers,
+                          'Content-Type': 'application/json',
+                        },
+                        body: jsonEncode({
+                          'keyword': '',
+                          'sort': query.sort == CatalogSortMode.topRated
+                              ? 'score'
+                              : 'heat',
+                          'filter': {
+                            'type': [2],
+                            'nsfw': false,
+                            if (genre != null || languageTag != null)
+                              'tag': [?genre, ?languageTag],
+                            if (query.year != null)
+                              'air_date': [
+                                '>=${query.year}-01-01',
+                                '<${query.year! + 1}-01-01',
+                              ],
+                          },
+                        }),
+                      ))
+                .timeout(const Duration(seconds: 16));
+        if (response.statusCode != 200) throw StateError('片库暂不可用');
+        final json = _decodeResponse(response);
+        final data = json['data'];
+        if (data is! List) {
+          throw const FormatException('Invalid catalogue page');
+        }
+        rawItems.addAll(
+          data.whereType<Map>().map((item) => item.cast<String, dynamic>()),
+        );
+        final total = _intValue(json['total']);
+        hasMore =
+            hasMore ||
+            (data.isNotEmpty &&
+                (total == null
+                    ? data.length >= pageSize
+                    : offset + data.length < total));
+      }
+      for (final raw in rawItems) {
+        if (raw['nsfw'] == true) continue;
+        final subject = _subjectFromJson(raw);
+        if (subject.id <= 0 ||
+            subject.title.trim().isEmpty ||
+            !query.matches(subject, now: now, matchGenre: false)) {
+          continue;
+        }
+        // Search has already matched the complete tag index. For date-browse,
+        // use all raw tags, not the shortened labels shown on poster cards.
+        if (latest && query.genre != '全部' && query.genre != '动画') {
+          final labels = [
+            ..._stringList(raw['meta_tags']),
+            if (raw['tags'] is List)
+              ...(raw['tags'] as List).whereType<Map>().map(
+                (tag) => '${tag['name'] ?? ''}',
+              ),
+          ].join(' ').toLowerCase();
+          if (!catalogGenreAliases(
+            query.genre,
+          ).any((tag) => labels.contains(tag.toLowerCase()))) {
+            continue;
+          }
+        }
+        result.add(subject);
+      }
+      if (hasMore) {
+        offset += pageSize;
+        next = '$mode:$year:$offset';
+      } else if (mode == 'tagged') {
+        // Sparse/missing country tags must not turn into a false end-of-list.
+        mode = 'search';
+        offset = 0;
+        next = 'search:$year:0';
+      } else if (latest && query.year == null && year > 1900) {
+        year--;
+        offset = 0;
+        next = 'date:$year:0';
+      } else {
+        next = null;
+      }
+      if (next == null || result.length >= 20) break;
+    }
+    final unique = _uniqueSubjects(result);
+    if (latest) {
+      unique.sort((a, b) => (b.date ?? '').compareTo(a.date ?? ''));
+    } else if (query.sort == CatalogSortMode.topRated) {
+      unique.sort((a, b) => (b.ratingScore ?? 0).compareTo(a.ratingScore ?? 0));
+    }
+    return CatalogPageResult(subjects: unique, nextCursor: next);
   }
 
   Future<List<AnimeSubject>> discoverySubjects() async {
@@ -701,6 +906,13 @@ class BangumiMetadataRepository {
     final images = _map(json['images']);
     final tags = _tagsFromJson(json['tags']);
     final metaTags = _stringList(json['meta_tags']);
+    final countryTags = [
+      ...metaTags,
+      if (json['tags'] is List)
+        ...(json['tags'] as List).whereType<Map>().map(
+          (item) => '${item['name'] ?? ''}',
+        ),
+    ];
     final categories = _categoriesFrom(
       metaTags,
       tags,
@@ -725,8 +937,8 @@ class BangumiMetadataRepository {
       bannerUrl: null,
       date: date,
       platform: platform,
-      language: _languageFrom(metaTags, originalTitle),
-      region: _regionFrom(metaTags, originalTitle),
+      language: _languageFrom(countryTags, originalTitle),
+      region: _regionFrom(countryTags, originalTitle),
       status: total > 0 ? '全$total集' : '未确定',
       categories: categories,
       tags: tags,
@@ -1240,20 +1452,31 @@ class BangumiMetadataRepository {
   }
 
   String _languageFrom(List<String> tags, String originalTitle) {
-    final text = '${tags.join('/')} $originalTitle'.toLowerCase();
-    if (text.contains('国产') || text.contains('中国')) return '国语';
-    if (text.contains('欧美') || text.contains('english')) return '英语';
-    if (text.contains('韩国')) return '韩语';
-    return '日语';
+    final text = tags.join('/').toLowerCase();
+    if (['国产', '国创', '国漫', '中国', '台湾', '香港', 'chinese'].any(text.contains)) {
+      return '国语';
+    }
+    if (['美国', '英国', '英语', 'english'].any(text.contains)) return '英语';
+    if (['韩国', 'korean'].any(text.contains)) return '韩语';
+    if (['法国', 'french'].any(text.contains)) return '法语';
+    if (['德国', 'german'].any(text.contains)) return '德语';
+    if (['日本', 'japanese'].any(text.contains) ||
+        RegExp(r'[ぁ-ゟ゠-ヿ]').hasMatch(originalTitle)) {
+      return '日语';
+    }
+    return '未知';
   }
 
-  String _regionFrom(List<String> tags, String originalTitle) {
-    final text = '${tags.join('/')} $originalTitle'.toLowerCase();
-    if (text.contains('国产') || text.contains('中国')) return '中国';
-    if (text.contains('欧美') || text.contains('english')) return '欧美';
-    if (text.contains('韩国')) return '韩国';
-    return '日本';
-  }
+  String _regionFrom(List<String> tags, String originalTitle) =>
+      switch (_languageFrom(tags, originalTitle)) {
+        '国语' => '中国',
+        '英语' => '欧美',
+        '韩语' => '韩国',
+        '法语' => '法国',
+        '德语' => '德国',
+        '日语' => '日本',
+        _ => '未知',
+      };
 }
 
 const _bangumiTagTranslations = <String, String>{

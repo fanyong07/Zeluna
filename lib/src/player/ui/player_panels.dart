@@ -261,7 +261,6 @@ class _EpisodePanel extends StatelessWidget {
     required this.selected,
     required this.onSelected,
   });
-
   final AnimeSubject subject;
   final List<AnimeEpisode> episodes;
   final AnimeEpisode selected;
@@ -269,99 +268,98 @@ class _EpisodePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final availableWidth = constraints.maxWidth.isFinite
-            ? constraints.maxWidth
-            : MediaQuery.sizeOf(context).width;
-        final thumbnailWidth = (availableWidth * 0.46).clamp(160.0, 240.0);
-        final thumbnailHeight = thumbnailWidth * 0.52;
-        return ListView.separated(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 110),
-          itemCount: episodes.length,
-          separatorBuilder: (context, index) => const SizedBox(height: 10),
-          itemBuilder: (context, index) {
-            final episode = episodes[index];
-            final active = episode.id == selected.id;
-            return Material(
-              color: active ? AppColors.theaterPanelHigh : Colors.transparent,
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
+      itemCount: episodes.length + 1,
+      separatorBuilder: (context, index) => const SizedBox(height: 6),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12, top: 4),
+            child: Text(
+              '${subject.title} · 共 ${episodes.length} 集',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+            ),
+          );
+        }
+        final episode = episodes[index - 1];
+        final active = episode.id == selected.id;
+        return Semantics(
+          selected: active,
+          button: true,
+          label: episode.displayTitle,
+          child: Material(
+            color: active ? AppColors.theaterPanelHigh : Colors.transparent,
+            shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(8),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: () => onSelected(episode),
-                child: Padding(
-                  padding: const EdgeInsets.all(6),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: thumbnailWidth,
-                        height: thumbnailHeight,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(7),
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              PosterArt(
-                                coverUrl:
-                                    episode.thumbnailUrl ?? subject.coverUrl,
-                                title: episode.displayTitle,
-                              ),
-                              const Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 6,
-                                child: Align(
-                                  alignment: Alignment.bottomCenter,
-                                  child: _PanelPill('有资源'),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              episode.displayTitle,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(
-                                    color: active
-                                        ? AppColors.primary2
-                                        : AppColors.theaterInk,
-                                    fontWeight: FontWeight.w700,
-                                  ),
+              side: BorderSide(
+                color: active
+                    ? AppColors.theaterBorderBright
+                    : Colors.transparent,
+              ),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => onSelected(episode),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 34,
+                      child: Text(
+                        episode.number.toString().padLeft(2, '0'),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: active
+                                  ? AppColors.theaterInk
+                                  : AppColors.theaterMuted,
                             ),
-                            const SizedBox(height: 2),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            episode.title.trim().isEmpty
+                                ? episode.displayTitle
+                                : episode.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(color: AppColors.theaterInk),
+                          ),
+                          if (active || (episode.airdate ?? '').isNotEmpty) ...[
+                            const SizedBox(height: 5),
                             Text(
-                              episode.airdate ?? '播出日期未知',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                              active ? '当前选集' : episode.airdate!,
                               style: Theme.of(context).textTheme.bodySmall
                                   ?.copyWith(color: AppColors.theaterMuted),
                             ),
-                            if (episode.description.trim().isNotEmpty)
-                              Text(
-                                episode.description,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: AppColors.theaterMuted),
-                              ),
                           ],
-                        ),
+                        ],
+                      ),
+                    ),
+                    if (active) ...[
+                      const SizedBox(width: 12),
+                      const Icon(
+                        Icons.play_arrow_rounded,
+                        size: 22,
+                        color: AppColors.theaterInk,
                       ),
                     ],
-                  ),
+                  ],
                 ),
               ),
-            );
-          },
+            ),
+          ),
         );
       },
     );
@@ -1463,26 +1461,6 @@ class _HeaderIcon extends StatelessWidget {
       child: IconButton(
         onPressed: onPressed,
         icon: Icon(icon, color: AppColors.theaterInk),
-      ),
-    );
-  }
-}
-
-class _PanelPill extends StatelessWidget {
-  const _PanelPill(this.text);
-
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: AppOverlays.theaterBar(0.72),
-        borderRadius: BorderRadius.circular(AppRadius.xs),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-        child: Text(text, style: const TextStyle(color: AppColors.theaterInk)),
       ),
     );
   }

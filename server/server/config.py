@@ -133,6 +133,11 @@ PLAYBACK_NEGATIVE_CACHE_MINUTES = max(
     1, int(os.getenv("PLAYBACK_NEGATIVE_CACHE_MINUTES", "5"))
 )
 PLAYBACK_STALE_HOURS = max(1, int(os.getenv("PLAYBACK_STALE_HOURS", "24")))
+# Keep a full HTTP response below the app's 18-second request budget. The
+# shared scan continues after this deadline; partial results are never full cache.
+PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS = max(
+    0.1, min(10.0, float(os.getenv("PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS", "10")))
+)
 PLAYBACK_QUICK_TIMEOUT_SECONDS = max(
     0.5, min(8.0, float(os.getenv("PLAYBACK_QUICK_TIMEOUT_SECONDS", "4.5")))
 )

@@ -77,6 +77,17 @@ flutter pub get
 flutter run -d windows
 ```
 
+本机实时调试可双击仓库根目录的 `启动实时调试.cmd`，或运行
+`powershell -NoProfile -File tool/run_dev.ps1`。保持终端打开，修改 Dart
+界面后按小写 `r` 热重载；需要重新执行初始化时按大写 `R`；按 `q` 结束。
+启动脚本不会自动监视文件，也不会清理账号或应用数据。Android 连接开发设备后，
+可用 `tool/run_dev.ps1 -Device <设备ID>` 启动同样的调试会话。
+
+热重载依赖当前源码、Flutter SDK 和运行中的调试连接，独立 EXE/APK 不会自动
+同步代码。原生插件/平台代码修改需要停止后重跑。Debug 版只用于功能和界面体验，
+性能不能等同于正式 Release 版；本地调试产物不替代正式发布的 exact-HEAD 门禁。
+
+
 Web 本地预览：
 
 ```powershell

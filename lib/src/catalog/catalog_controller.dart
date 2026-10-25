@@ -8,6 +8,8 @@ import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../recommendations/recommendation_models.dart';
 import '../settings/settings_controller.dart';
+import 'catalog_query.dart';
+export 'catalog_query.dart';
 
 abstract interface class CatalogStorage {
   Object? get(String key);
@@ -31,6 +33,14 @@ final class HiveCatalogStorage implements CatalogStorage {
   @override
   Future<void> delete(String key) => _box.delete(key);
 }
+
+typedef CatalogQueryLoader =
+    Future<CatalogPageResult> Function(
+      CatalogQuery query,
+      ExternalServiceSettings services,
+      String? cursor,
+    );
+typedef CatalogScheduleLoader = Future<Map<int, List<AnimeSubject>>> Function();
 
 typedef CatalogSnapshotPublisher = void Function(CatalogSnapshot snapshot);
 typedef CatalogSearchLoader =
@@ -60,17 +70,6 @@ typedef CatalogDetailEnricher =
     );
 typedef CatalogPlaybackPrefetcher =
     void Function(AnimeSubject subject, List<AnimeEpisode> episodes);
-
-enum CatalogSortMode {
-  recommended('推荐'),
-  popular('热门'),
-  topRated('高分'),
-  latest('最新');
-
-  const CatalogSortMode(this.label);
-
-  final String label;
-}
 
 final class CatalogSnapshot {
   const CatalogSnapshot({
@@ -110,6 +109,8 @@ final class CatalogController {
     required CatalogSearchLoader search,
     required CatalogHomeLoader loadHome,
     CatalogCandidateLoader? loadCandidates,
+    CatalogQueryLoader? loadQuery,
+    CatalogScheduleLoader? loadSchedule,
     required CatalogDetailLoader loadDetail,
     required CatalogDetailEnricher enrichDetail,
     required CatalogPlaybackPrefetcher prefetchPlayback,
@@ -121,6 +122,8 @@ final class CatalogController {
        _search = search,
        _loadHome = loadHome,
        _loadCandidates = loadCandidates,
+       _loadQuery = loadQuery,
+       _loadSchedule = loadSchedule,
        _loadDetail = loadDetail,
        _enrichDetail = enrichDetail,
        _prefetchPlayback = prefetchPlayback,
@@ -134,7 +137,7 @@ final class CatalogController {
   static const homeFeedCacheKey = 'metadata.cache.home';
   static const _homeFeedCacheVersion = 5;
   static const _homeFeedCacheTtl = Duration(hours: 6);
-  static const _metadataCacheVersion = 12;
+  static const _metadataCacheVersion = 13;
   static const _metadataCacheLimit = 1200;
   static const _metadataCacheTtl = Duration(hours: 8);
   static const _sparseMetadataCacheTtl = Duration(minutes: 30);
@@ -144,6 +147,8 @@ final class CatalogController {
   final CatalogSearchLoader _search;
   final CatalogHomeLoader _loadHome;
   final CatalogCandidateLoader? _loadCandidates;
+  final CatalogQueryLoader? _loadQuery;
+  final CatalogScheduleLoader? _loadSchedule;
   final CatalogDetailLoader _loadDetail;
   final CatalogDetailEnricher _enrichDetail;
   final CatalogPlaybackPrefetcher _prefetchPlayback;
@@ -287,18 +292,31 @@ final class CatalogController {
         waitForRefresh: waitForRefresh,
       ).then(_candidateSubjects);
 
+  Future<CatalogPageResult> queryCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) async {
+    final scope = _scope();
+    final loader = _loadQuery;
+    if (loader == null) throw StateError('片库查询暂不可用');
+    final page = await loader(query, _services, cursor);
+    _ensureScope(scope);
+    return CatalogPageResult(
+      subjects: page.subjects
+          .where(
+            (subject) => subjectMatchesContentType(subject, query.contentType),
+          )
+          .toList(growable: false),
+      nextCursor: page.nextCursor,
+    );
+  }
+
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() async {
-    final subjects = await discoverSubjects(waitForRefresh: true);
-    final schedule = {for (var day = 0; day < 7; day++) day: <AnimeSubject>[]};
-    for (final subject in _uniqueSubjects(subjects)) {
-      final date = DateTime.tryParse(subject.date ?? '');
-      final day = date == null ? subject.id.abs() % 7 : date.weekday % 7;
-      schedule[day]!.add(subject);
-    }
-    return {
-      for (final entry in schedule.entries)
-        entry.key: entry.value.take(36).toList(growable: false),
-    };
+    final scope = _scope();
+    final schedule =
+        await _loadSchedule?.call() ?? const <int, List<AnimeSubject>>{};
+    _ensureScope(scope);
+    return schedule;
   }
 
   Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
@@ -461,11 +479,19 @@ final class CatalogController {
     final scope = _scope();
     final cached = _readSubjectCache(key, signature);
     final storedCandidates = cached.candidates
-        .where((item) => item.contentType == contentType)
+        .where(
+          (item) =>
+              item.contentType == contentType &&
+              subjectMatchesContentType(item.subject, contentType),
+        )
         .toList(growable: false);
-    final liveCandidates = cachedCandidates(
-      contentType,
-    ).where((item) => item.contentType == contentType).toList(growable: false);
+    final liveCandidates = cachedCandidates(contentType)
+        .where(
+          (item) =>
+              item.contentType == contentType &&
+              subjectMatchesContentType(item.subject, contentType),
+        )
+        .toList(growable: false);
     final fallbackCandidates = _subjectsOfType(
       fallback,
       contentType,
@@ -489,7 +515,11 @@ final class CatalogController {
       return initial;
     }
     final refreshed = (await refresh)
-        .where((item) => item.contentType == contentType)
+        .where(
+          (item) =>
+              item.contentType == contentType &&
+              subjectMatchesContentType(item.subject, contentType),
+        )
         .toList(growable: false);
     _ensureScope(scope);
     return refreshed.isEmpty ? initial : refreshed;
@@ -652,7 +682,11 @@ final class CatalogController {
     ExternalServiceSettings services,
   ) async {
     final loader = _loadCandidates;
-    if (loader != null) return loader(type, services);
+    if (loader != null) {
+      return (await loader(type, services))
+          .where((item) => subjectMatchesContentType(item.subject, type))
+          .toList(growable: false);
+    }
     return (await _loadHome(type, services))
         .map((subject) => CatalogCandidate(subject: subject, contentType: type))
         .toList(growable: false);

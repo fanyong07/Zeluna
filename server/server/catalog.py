@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -298,6 +300,33 @@ def _weighted_rrf(
             12,
         )
     return result
+
+
+def _bangumi_origin(raw: dict) -> tuple[str, str]:
+    tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
+    labels = [str(tag.get("name", "")) for tag in tags if isinstance(tag, dict)]
+    if isinstance(raw.get("meta_tags"), list):
+        labels.extend(str(tag) for tag in raw["meta_tags"])
+    text = " / ".join(labels).lower()
+    for values, language, country in [
+        (("国产", "国创", "国漫", "中国", "台湾", "香港", "chinese"), "zh", "中国"),
+        (("美国", "english"), "en", "美国"),
+        (("英国",), "en", "英国"),
+        (("韩国", "korean"), "ko", "韩国"),
+        (("法国", "french"), "fr", "法国"),
+        (("德国", "german"), "de", "德国"),
+        (("日本", "japanese"), "ja", "日本"),
+    ]:
+        if any(value in text for value in values):
+            return language, country
+    if re.search(r"[ぁ-ゟ゠-ヿ]", str(raw.get("name", ""))):
+        return "ja", "日本"
+    return "", ""
+
+
+def _is_animated(item: dict) -> bool:
+    return any(str(genre).lower() in {"动画", "動畫", "animation", "anime"}
+               for genre in item.get("genres", []))
 
 
 def _is_complete_detail(item: Any) -> bool:
@@ -677,6 +706,8 @@ class CatalogService:
             fresh_after=now - _HOME_RANKING_FRESH_SECONDS,
             limit=requested_limit,
         )
+        if media_type == "tv":
+            fresh = [item for item in fresh if not _is_animated(item)]
         fresh_threshold = min(requested_limit, _HOME_FRESH_MIN_ITEMS)
         if len(fresh) >= fresh_threshold:
             return fresh
@@ -685,6 +716,8 @@ class CatalogService:
             fresh_after=now - _HOME_RANKING_STALE_SECONDS,
             limit=requested_limit,
         )
+        if media_type == "tv":
+            stale = [item for item in stale if not _is_animated(item)]
         if stale:
             self._ensure_home_refresh(media_type)
             return _merge_ranked_candidates(
@@ -832,6 +865,33 @@ class CatalogService:
             for item in [self._subject_from_bangumi(raw)]
             if item is not None
         ]
+
+    async def public_bangumi_catalog(
+        self, route: str, *, params: dict | None = None, body: dict | None = None,
+    ) -> list | dict:
+        """Relay only public catalogue operations, never account credentials."""
+        paths = {"calendar": "/calendar", "subjects": "/v0/subjects",
+                 "search": "/v0/search/subjects"}
+        if route not in paths:
+            raise ValueError("unsupported public catalogue route")
+        kwargs: dict[str, Any] = {
+            "headers": {"User-Agent": _USER_AGENT, "Accept": "application/json"},
+            "params": params or {},
+        }
+        if route == "search":
+            kwargs["json"] = body
+        response = await self._provider_request(
+            "bangumi", "POST" if route == "search" else "GET",
+            f"{_BANGUMI_API}{paths[route]}", **kwargs,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if route == "calendar":
+            if not isinstance(payload, list):
+                raise ValueError("invalid public calendar")
+        elif not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            raise ValueError("invalid public catalogue page")
+        return payload
 
     async def _bangumi_calendar(self) -> list[dict]:
         response = await self._provider_request(
@@ -1010,6 +1070,7 @@ class CatalogService:
                 )
             else:
                 aliases.append(value)
+        language, region = _bangumi_origin(raw)
         return {
             "stable_id": f"bangumi:{provider_id}",
             "provider": "bangumi",
@@ -1021,9 +1082,9 @@ class CatalogService:
             "summary": _clean_text(raw.get("summary")),
             "cover_url": _clean_text(images.get("large") or images.get("common")),
             "banner_url": _clean_text(images.get("large")),
-            "date": _clean_text(raw.get("date")),
-            "language": "ja",
-            "region": "日本",
+            "date": _clean_text(raw.get("date") or raw.get("air_date")),
+            "language": language,
+            "region": region,
             "status": "aired" if raw.get("air_date") else "",
             "genres": [_clean_text(tag.get("name")) for tag in tags[:12] if isinstance(tag, dict)],
             "rating": float(rating.get("score") or 0),
@@ -1098,7 +1159,7 @@ class CatalogService:
                     if not isinstance(raw, dict) or raw.get("adult") is True:
                         continue
                     item = self._subject_from_tmdb(raw, media_type)
-                    if item is not None:
+                    if item is not None and not (media_type == "tv" and _is_animated(item)):
                         groups[index].append(item)
             merged = _interleave_unique(groups)
             if len(merged) >= limit:
@@ -1113,6 +1174,66 @@ class CatalogService:
             ranked_at=ranked_at,
             batch_id=f"tmdb:{media_type}:{int(ranked_at * 1000)}",
         )[:limit]
+
+    async def discover(
+        self, media_type: str, session: AsyncSession, *, sort: str = "recommended",
+        genre: str = "全部", language: str = "全部", year: int | None = None,
+        page: int = 1,
+    ) -> dict:
+        if media_type not in {"tv", "movie"}:
+            raise ValueError("unsupported media type")
+        if not TMDB_READ_ACCESS_TOKEN:
+            raise RuntimeError("metadata unavailable")
+        today = datetime.fromtimestamp(self._clock(), tz=timezone.utc).date().isoformat()
+        date_field = "first_air_date" if media_type == "tv" else "primary_release_date"
+        genres = {"剧情": "18", "犯罪": "80", "喜剧": "35", "冒险": "12", "奇幻": "14",
+                  "动作": "28", "科幻": "878", "动画": "16", "音乐": "10402"}
+        if media_type == "tv":
+            genres.update({"动作": "10759", "冒险": "10759", "科幻": "10765", "奇幻": "10765"})
+        languages = {"日语": "ja", "国语": "zh", "英语": "en", "韩语": "ko"}
+        countries = {"美剧": "US", "英剧": "GB", "日剧": "JP", "韩剧": "KR"}
+        params = {
+            "page": page,
+            "sort_by": {"latest": f"{date_field}.desc", "topRated": "vote_average.desc"}.get(sort, "popularity.desc"),
+        }
+        if media_type == "tv":
+            params["without_genres"] = "16"
+            params["include_null_first_air_dates"] = "false"
+        if genre in genres:
+            params["with_genres"] = genres[genre]
+        if genre in countries:
+            params["with_origin_country"] = countries[genre]
+        if language in languages:
+            params["with_original_language"] = languages[language]
+        if year is not None:
+            params[f"{date_field}.gte"] = f"{year}-01-01"
+            params[f"{date_field}.lte"] = f"{year}-12-31"
+        if sort == "latest":
+            params[f"{date_field}.lte"] = min(str(params.get(f"{date_field}.lte", today)), today)
+        if sort == "topRated":
+            params["vote_count.gte"] = 10
+        response = await self._tmdb_get(f"/discover/{media_type}", **params)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise ValueError("invalid catalogue page")
+        items = []
+        for raw in payload["results"]:
+            if not isinstance(raw, dict) or raw.get("adult") is True:
+                continue
+            item = self._subject_from_tmdb(raw, media_type)
+            if item is None or media_type == "tv" and _is_animated(item):
+                continue
+            if sort == "latest" and (not item["date"] or item["date"] > today):
+                continue
+            if year is not None and not item["date"].startswith(f"{year}-"):
+                continue
+            if language == "其他" and item["language"] in {"", "ja", "zh", "cn", "en", "ko"}:
+                continue
+            items.append(item)
+        await self._persist_many(self._repository_factory(session), items)
+        total_pages = min(500, int(payload.get("total_pages") or 1))
+        return {"subjects": items, "next_cursor": str(page + 1) if page < total_pages else None}
 
     async def _tmdb_detail(self, media_type: str, provider_id: str) -> dict | None:
         response = await self._tmdb_get(

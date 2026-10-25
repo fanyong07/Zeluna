@@ -1,7 +1,6 @@
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 import 'dart:math' as math;
-
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -249,7 +248,6 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
             tooltip: '新番时间表',
             onPressed: () => context.push('/schedule'),
           ),
-          rightRail: _HomeRightRail(feed: state.homeFeed, onOpen: _openDetail),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
             progress: _historyPlaybackProgress(state.history),
@@ -344,7 +342,12 @@ class _CatalogPageState extends ConsumerState<CatalogPage> {
       ),
     };
     return Padding(
-      padding: EdgeInsets.fromLTRB(compact ? 14 : 24, 2, compact ? 14 : 0, 24),
+      padding: EdgeInsets.fromLTRB(
+        compact ? 14 : 24,
+        12,
+        compact ? 14 : 24,
+        24,
+      ),
       child: content,
     );
   }
@@ -496,11 +499,31 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   _PlaybackFilter _playbackFilter = _PlaybackFilter.all;
   Future<List<AnimeSubject>>? _subjectsFuture;
   int _subjectsRequestVersion = 0;
+  List<AnimeSubject> _loadedSubjects = const [];
+  String? _nextCursor;
+  bool _loadingMore = false;
+  bool _loadMoreError = false;
+  bool _loadMoreCheckScheduled = false;
+  bool _pageReadyForMore = false;
+  final _scrollController = ScrollController();
+  bool get _usesFullCatalog =>
+      _sortMode != CatalogSortMode.recommended ||
+      _type != '全部' ||
+      _language != '全部' ||
+      _year != '全部';
+  CatalogQuery get _query => CatalogQuery(
+    contentType: _subjectContentTypeFor(widget.kind),
+    sort: _sortMode,
+    genre: _type,
+    language: _language,
+    year: int.tryParse(_year.replaceAll('年', '')),
+  );
   final _searchController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_scheduleLoadMoreCheck);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _refreshSubjectsInBackground();
     });
@@ -512,6 +535,12 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     if (oldWidget.kind == widget.kind) return;
     _subjectsRequestVersion++;
     _sortMode = CatalogSortMode.recommended;
+    _type = _language = _year = '全部';
+    _playbackFilter = _PlaybackFilter.all;
+    _nextCursor = null;
+    _loadedSubjects = const [];
+    _loadingMore = false;
+    _loadMoreError = false;
     _subjectsFuture = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _refreshSubjectsInBackground();
@@ -520,6 +549,7 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -537,19 +567,15 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
               builder: (context) => DetailPage(subject: subject),
             ),
           ),
-          trailing: _MetadataTopFilters(
-            selected: _type,
-            values: _typeValues,
-            onChanged: (value) => setState(() => _type = value),
-            onRefresh: _reloadSubjects,
+          trailing: AppIconButton(
+            icon: Icons.refresh_rounded,
+            tooltip: '刷新列表',
+            onPressed: _reloadSubjects,
           ),
-          showCompactTrailing: false,
-          rightRail: _MetadataRightRail(
-            state: state,
-            kind: widget.kind,
-            onCategory: _openCategory,
-            onTag: _openTag,
-            onFilter: _selectTypeFilter,
+          compactAction: AppIconButton(
+            icon: Icons.refresh_rounded,
+            tooltip: '刷新列表',
+            onPressed: _reloadSubjects,
           ),
           bottomPlayer: _MiniNowPlaying(
             subject: state.homeFeed.hero,
@@ -560,92 +586,167 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
             builder: (context, snapshot) {
               final rawSubjects = snapshot.data ?? const <AnimeSubject>[];
               final subjects = _filterSubjects(rawSubjects);
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return _MetadataLoading(kind: widget.kind);
-              }
+              final loading =
+                  snapshot.connectionState == ConnectionState.waiting &&
+                  (!_usesFullCatalog || _loadedSubjects.isEmpty);
               final compact = MediaQuery.sizeOf(context).width < 760;
-              return Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 14 : 24,
-                  compact ? 0 : 2,
-                  compact ? 14 : 0,
-                  24,
-                ),
-                child: CustomScrollView(
-                  slivers: [
-                    SliverToBoxAdapter(
-                      child: _MetadataHeader(
-                        kind: widget.kind,
-                        title: _title,
-                        subtitle: _subtitle(subjects.length),
-                        icon: _icon,
-                        subjects: subjects,
-                        state: state,
-                        onOpen: _openDetail,
-                      ),
-                    ),
-                    SliverToBoxAdapter(
-                      child: SizedBox(height: compact ? 10 : 14),
-                    ),
-                    SliverToBoxAdapter(
-                      child: _CatalogSortControl(
-                        selected: _sortMode,
-                        onChanged: _selectSortMode,
-                      ),
-                    ),
-                    SliverToBoxAdapter(
-                      child: SizedBox(height: compact ? 10 : 14),
-                    ),
-                    SliverToBoxAdapter(
-                      child: _InlineFilterPanel(
-                        type: _type,
-                        language: _language,
-                        year: _year,
-                        playbackFilter: _playbackFilter,
-                        typeValues: _typeValues,
-                        languageValues: _languageValues,
-                        onTypeChanged: (value) => setState(() => _type = value),
-                        onLanguageChanged: (value) =>
-                            setState(() => _language = value),
-                        onYearChanged: (value) => setState(() => _year = value),
-                        onPlaybackFilterChanged: (value) =>
-                            setState(() => _playbackFilter = value),
-                      ),
-                    ),
-                    SliverToBoxAdapter(
-                      child: SizedBox(height: compact ? 10 : 14),
-                    ),
-                    if (subjects.isEmpty)
-                      SliverFillRemaining(
-                        hasScrollBody: false,
-                        child: EmptyState(
+              _pageReadyForMore =
+                  snapshot.connectionState == ConnectionState.done &&
+                  !snapshot.hasError;
+              if (_pageReadyForMore) _scheduleLoadMoreCheck();
+              return NotificationListener<ScrollMetricsNotification>(
+                onNotification: (notification) {
+                  if (notification.depth == 0 &&
+                      notification.metrics.axis == Axis.vertical) {
+                    _scheduleLoadMoreCheck();
+                  }
+                  return false;
+                },
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(
+                    compact ? 14 : 24,
+                    compact ? 0 : 2,
+                    compact ? 14 : 24,
+                    24,
+                  ),
+                  child: CustomScrollView(
+                    controller: _scrollController,
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: _MetadataHeader(
+                          kind: widget.kind,
+                          title: _title,
+                          subtitle: _subtitle(subjects.length),
                           icon: _icon,
-                          title: '$_title 暂无结果',
-                          message: _emptyMessage,
+                          subjects: subjects,
+                          state: state,
+                          onOpen: _openDetail,
                         ),
-                      )
-                    else
-                      _SubjectGridSliver(
-                        subjects: subjects,
-                        onOpen: _openDetail,
-                        showPlaybackAvailability: true,
-                        trailingBuilder:
-                            _sortMode == CatalogSortMode.recommended &&
-                                state
-                                    .homePreferences
-                                    .personalizedRecommendations
-                            ? (subject) => _RecommendationCardMenu(
-                                subject: subject,
-                                onNotInterested: () =>
-                                    _markMetadataNotInterested(
-                                      subject,
-                                      rawSubjects,
-                                    ),
-                              )
-                            : null,
                       ),
-                    const SliverToBoxAdapter(child: SizedBox(height: 120)),
-                  ],
+                      SliverToBoxAdapter(
+                        child: SizedBox(height: compact ? 10 : 14),
+                      ),
+                      SliverToBoxAdapter(
+                        child: _CatalogSortControl(
+                          selected: _sortMode,
+                          onChanged: _selectSortMode,
+                        ),
+                      ),
+                      SliverToBoxAdapter(
+                        child: SizedBox(height: compact ? 10 : 14),
+                      ),
+                      SliverToBoxAdapter(
+                        child: _InlineFilterPanel(
+                          type: _type,
+                          language: _language,
+                          year: _year,
+                          playbackFilter: _playbackFilter,
+                          typeValues: _typeValues,
+                          languageValues: _languageValues,
+                          onTypeChanged: (value) =>
+                              _changeFilters(() => _type = value),
+                          onLanguageChanged: (value) =>
+                              _changeFilters(() => _language = value),
+                          onYearChanged: (value) =>
+                              _changeFilters(() => _year = value),
+                          onPlaybackFilterChanged: (value) =>
+                              setState(() => _playbackFilter = value),
+                        ),
+                      ),
+                      SliverToBoxAdapter(
+                        child: SizedBox(height: compact ? 10 : 14),
+                      ),
+                      if (loading)
+                        const SliverToBoxAdapter(
+                          child: SizedBox(
+                            height: 360,
+                            child: PosterGridSkeleton(count: 8),
+                          ),
+                        )
+                      else if (snapshot.hasError)
+                        SliverToBoxAdapter(
+                          child: Column(
+                            children: [
+                              const EmptyState(
+                                icon: Icons.cloud_off_outlined,
+                                title: '片库暂时加载失败',
+                                message: '这不代表没有作品。请检查网络后重试。',
+                              ),
+                              TextButton(
+                                onPressed: _reloadSubjects,
+                                child: const Text('重试'),
+                              ),
+                            ],
+                          ),
+                        )
+                      else if (subjects.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: EmptyState(
+                            icon: _icon,
+                            title: _nextCursor != null
+                                ? '继续查找匹配作品'
+                                : '$_title 暂无结果',
+                            message: _nextCursor != null
+                                ? '正在自动查找后面的结果，请稍候。'
+                                : _emptyMessage,
+                          ),
+                        )
+                      else
+                        _SubjectGridSliver(
+                          subjects: subjects,
+                          onOpen: _openDetail,
+                          showPlaybackAvailability: true,
+                          trailingBuilder:
+                              _sortMode == CatalogSortMode.recommended &&
+                                  state
+                                      .homePreferences
+                                      .personalizedRecommendations
+                              ? (subject) => _RecommendationCardMenu(
+                                  subject: subject,
+                                  onNotInterested: () =>
+                                      _markMetadataNotInterested(
+                                        subject,
+                                        rawSubjects,
+                                      ),
+                                )
+                              : null,
+                        ),
+                      if (!loading && !snapshot.hasError && _nextCursor != null)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Center(
+                              child: _loadMoreError
+                                  ? TextButton.icon(
+                                      key: const ValueKey('catalog-retry-more'),
+                                      onPressed: _loadMore,
+                                      icon: const Icon(Icons.refresh_rounded),
+                                      label: const Text('加载失败，点击重试'),
+                                    )
+                                  : _loadingMore
+                                  ? const Row(
+                                      key: ValueKey('catalog-loading-more'),
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        ),
+                                        SizedBox(width: 10),
+                                        Text('正在加载'),
+                                      ],
+                                    )
+                                  : const SizedBox(height: 16),
+                            ),
+                          ),
+                        ),
+                      const SliverToBoxAdapter(child: SizedBox(height: 120)),
+                    ],
+                  ),
                 ),
               );
             },
@@ -739,8 +840,18 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   Future<List<AnimeSubject>> _loadSubjects(
     WidgetRef ref, {
     bool waitForRefresh = false,
-  }) {
+  }) async {
+    _pageReadyForMore = false;
     final controller = ref.read(animeControllerProvider.notifier);
+    if (_usesFullCatalog) {
+      final version = _subjectsRequestVersion;
+      final page = await controller.queryCatalog(_query);
+      if (!mounted || version != _subjectsRequestVersion) return const [];
+      _nextCursor = page.nextCursor;
+      _loadedSubjects = page.subjects;
+      return page.subjects;
+    }
+    _nextCursor = null;
     return switch (widget.kind) {
       MetadataHubKind.anime => controller.discoverSubjects(
         waitForRefresh: waitForRefresh,
@@ -757,16 +868,80 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     };
   }
 
-  void _selectSortMode(CatalogSortMode value) {
-    if (value == _sortMode) return;
+  void _changeFilters(VoidCallback change) {
     _subjectsRequestVersion++;
     setState(() {
-      _sortMode = value;
-      _subjectsFuture = _loadSubjects(ref);
+      change();
+      _nextCursor = null;
+      _loadedSubjects = const [];
+      _loadingMore = false;
+      _loadMoreError = false;
+      _subjectsFuture = _loadSubjects(ref)..ignore();
     });
   }
 
+  void _selectSortMode(CatalogSortMode value) {
+    if (value != _sortMode) _changeFilters(() => _sortMode = value);
+  }
+
+  void _scheduleLoadMoreCheck() {
+    if (_loadMoreCheckScheduled) return;
+    _loadMoreCheckScheduled = true;
+    // Defer until layout so short pages and window resizing also load enough
+    // results, without calling setState during a scroll-metrics notification.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _loadMoreCheckScheduled = false;
+      if (!mounted ||
+          !_pageReadyForMore ||
+          !_usesFullCatalog ||
+          _nextCursor == null ||
+          _loadingMore ||
+          _loadMoreError ||
+          !_scrollController.hasClients) {
+        return;
+      }
+      final position = _scrollController.position;
+      if (position.hasContentDimensions && position.extentAfter <= 480) {
+        unawaited(_loadMore());
+      }
+    });
+  }
+
+  Future<void> _loadMore() async {
+    final cursor = _nextCursor;
+    if (cursor == null || _loadingMore) return;
+    final version = _subjectsRequestVersion;
+    final query = _query;
+    setState(() {
+      _loadingMore = true;
+      _loadMoreError = false;
+    });
+    try {
+      final page = await ref
+          .read(animeControllerProvider.notifier)
+          .queryCatalog(query, cursor: cursor);
+      if (!mounted || version != _subjectsRequestVersion) return;
+      final subjects = <String, AnimeSubject>{
+        for (final item in [..._loadedSubjects, ...page.subjects])
+          item.identityKey: item,
+      }.values.toList(growable: false);
+      setState(() {
+        _loadedSubjects = subjects;
+        _nextCursor = page.nextCursor == cursor ? null : page.nextCursor;
+        _loadingMore = false;
+        _subjectsFuture = Future.value(subjects);
+      });
+    } catch (_) {
+      if (!mounted || version != _subjectsRequestVersion) return;
+      setState(() {
+        _loadingMore = false;
+        _loadMoreError = true;
+      });
+    }
+  }
+
   Future<void> _refreshSubjectsInBackground() async {
+    if (_usesFullCatalog) return;
     final requestVersion = ++_subjectsRequestVersion;
     try {
       await ref.read(animeControllerProvider.future);
@@ -782,6 +957,10 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
   }
 
   Future<void> _reloadSubjects() async {
+    if (_usesFullCatalog) {
+      _changeFilters(() {});
+      return;
+    }
     final kind = switch (widget.kind) {
       MetadataHubKind.anime => 'anime',
       MetadataHubKind.series => 'series',
@@ -793,7 +972,10 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     if (!mounted) return;
     _subjectsRequestVersion++;
     setState(() {
-      _subjectsFuture = _loadSubjects(ref, waitForRefresh: true);
+      _nextCursor = null;
+      _loadingMore = false;
+      _loadMoreError = false;
+      _subjectsFuture = _loadSubjects(ref, waitForRefresh: true)..ignore();
     });
   }
 
@@ -828,126 +1010,20 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     }
   }
 
-  List<AnimeSubject> _filterSubjects(List<AnimeSubject> subjects) {
-    return subjects
-        .where((subject) {
-          final kindOk = subjectMatchesContentType(
-            subject,
-            _subjectContentTypeFor(widget.kind),
-          );
-          final text = _metadataText(subject);
-          final typeOk = _type == '全部' || _matchesType(subject, _type, text);
-          final languageOk =
-              _language == '全部' || _matchesLanguage(subject, _language);
-          final yearOk =
-              _year == '全部' || subject.year == _year.replaceAll('年', '');
-          final directlyPlayable = hasKnownDirectPlayback(subject);
-          final playbackOk = switch (_playbackFilter) {
-            _PlaybackFilter.all => true,
-            _PlaybackFilter.playable => directlyPlayable,
-          };
-          return kindOk && typeOk && languageOk && yearOk && playbackOk;
-        })
-        .toList(growable: false);
-  }
-
-  bool _matchesType(AnimeSubject subject, String type, String text) {
-    final normalized = type.toLowerCase();
-    if (normalized == '电影') {
-      return subjectMatchesContentType(subject, SubjectContentType.movie);
-    }
-    if (normalized == '美剧') {
-      return text.contains('united states') ||
-          text.contains('english') ||
-          text.contains('美国') ||
-          text.contains('英语');
-    }
-    if (normalized == '英剧') {
-      return text.contains('united kingdom') ||
-          text.contains('british') ||
-          text.contains('英国');
-    }
-    if (normalized == '韩剧') {
-      return text.contains('korea') ||
-          text.contains('korean') ||
-          text.contains('韩国') ||
-          text.contains('韩语');
-    }
-    if (normalized == '日剧') {
-      return text.contains('japan') ||
-          text.contains('japanese') ||
-          text.contains('日本') ||
-          text.contains('日语');
-    }
-    const aliases = {
-      '剧情': ['drama', '剧情'],
-      '犯罪': ['crime', '犯罪'],
-      '动作': ['action', '动作'],
-      '科幻': ['science fiction', 'sci-fi', '科幻'],
-      '奇幻': ['fantasy', '奇幻'],
-      '冒险': ['adventure', '冒险'],
-      '喜剧': ['comedy', '喜剧'],
-    };
-    final values = aliases[type] ?? [normalized];
-    return values.any(text.contains);
-  }
-
-  bool _matchesLanguage(AnimeSubject subject, String language) {
-    final text = '${subject.language} ${subject.region}'.toLowerCase();
-    return switch (language) {
-      '日语' =>
-        text.contains('日语') ||
-            text.contains('japanese') ||
-            text.contains('japan') ||
-            text.contains('日本'),
-      '国语' =>
-        text.contains('国语') ||
-            text.contains('中文') ||
-            text.contains('chinese') ||
-            text.contains('china') ||
-            text.contains('中国'),
-      '英语' =>
-        text.contains('英语') ||
-            text.contains('english') ||
-            text.contains('united states') ||
-            text.contains('united kingdom') ||
-            text.contains('美国') ||
-            text.contains('英国'),
-      '韩语' =>
-        text.contains('韩语') ||
-            text.contains('korean') ||
-            text.contains('korea') ||
-            text.contains('韩国'),
-      '其他' =>
-        !(_matchesLanguage(subject, '日语') ||
-            _matchesLanguage(subject, '国语') ||
-            _matchesLanguage(subject, '英语') ||
-            _matchesLanguage(subject, '韩语')),
-      _ => true,
-    };
-  }
-
-  String _metadataText(AnimeSubject subject) {
-    return [
-      subject.title,
-      subject.originalTitle,
-      subject.platform,
-      subject.language,
-      subject.region,
-      subject.status,
-      ...subject.categories.map((item) => item.name),
-      ...subject.tags.map((item) => item.name),
-    ].join(' ').toLowerCase();
-  }
-
-  void _selectTypeFilter(String value) {
-    if (!_typeValues.contains(value)) return;
-    setState(() {
-      _type = value;
-      _language = '全部';
-      _year = '全部';
-    });
-  }
+  List<AnimeSubject> _filterSubjects(List<AnimeSubject> subjects) => subjects
+      .where((subject) {
+        if (!subjectMatchesContentType(
+          subject,
+          _subjectContentTypeFor(widget.kind),
+        )) {
+          return false;
+        }
+        // Full-catalogue conditions were applied before pagination by the loader.
+        // A second approximate tag/title filter here used to discard valid results.
+        return _playbackFilter != _PlaybackFilter.playable ||
+            hasKnownDirectPlayback(subject);
+      })
+      .toList(growable: false);
 
   void _openDetail(AnimeSubject subject) {
     Navigator.of(context).push(
@@ -966,83 +1042,6 @@ class _MetadataHubPageState extends ConsumerState<MetadataHubPage> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => SearchPage(keyword: query, scope: scope),
-      ),
-    );
-  }
-
-  void _openCategory(AnimeCategory category) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => SubjectListPage(
-          title: category.name,
-          subtitle: '分类',
-          loader: (ref) => ref
-              .read(animeControllerProvider.notifier)
-              .categorySubjects(category.name),
-        ),
-      ),
-    );
-  }
-
-  void _openTag(AnimeTag tag) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (context) => SubjectListPage(
-          title: tag.name,
-          subtitle: '标签',
-          loader: (ref) =>
-              ref.read(animeControllerProvider.notifier).tagSubjects(tag.name),
-        ),
-      ),
-    );
-  }
-}
-
-class _MetadataTopFilters extends StatelessWidget {
-  const _MetadataTopFilters({
-    required this.selected,
-    required this.values,
-    required this.onChanged,
-    required this.onRefresh,
-  });
-
-  final String selected;
-  final List<String> values;
-  final ValueChanged<String> onChanged;
-  final VoidCallback onRefresh;
-
-  @override
-  Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 900;
-    if (compact) {
-      return IconButton(
-        tooltip: '刷新列表',
-        onPressed: onRefresh,
-        icon: const Icon(Icons.refresh_rounded),
-      );
-    }
-    return AppPanel(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
-      radius: 10,
-      color: AppColors.bg2,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final value in values.take(6))
-            Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: InkWell(
-                onTap: () => onChanged(value),
-                borderRadius: BorderRadius.circular(8),
-                child: SmallBadge(label: value, active: value == selected),
-              ),
-            ),
-          IconButton(
-            tooltip: '刷新列表',
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh_rounded, size: 19),
-          ),
-        ],
       ),
     );
   }
@@ -1113,21 +1112,6 @@ class _CatalogSortControl extends StatelessWidget {
   }
 }
 
-class _MetadataLoading extends StatelessWidget {
-  const _MetadataLoading({required this.kind});
-
-  final MetadataHubKind kind;
-
-  @override
-  Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    return PosterGridSkeleton(
-      count: 12,
-      padding: EdgeInsets.fromLTRB(compact ? 14 : 24, 12, compact ? 14 : 8, 24),
-    );
-  }
-}
-
 class _MetadataHeader extends StatelessWidget {
   const _MetadataHeader({
     required this.kind,
@@ -1138,7 +1122,6 @@ class _MetadataHeader extends StatelessWidget {
     required this.state,
     required this.onOpen,
   });
-
   final MetadataHubKind kind;
   final String title;
   final String subtitle;
@@ -1149,219 +1132,40 @@ class _MetadataHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    final bannerSubjects = subjects
-        .where((item) => (item.bannerUrl ?? '').isNotEmpty)
-        .toList(growable: false);
-    final imageSubjects = subjects
-        .where((item) => (item.coverUrl ?? '').isNotEmpty)
-        .toList(growable: false);
-    final leadPool = bannerSubjects.isNotEmpty
-        ? bannerSubjects
-        : imageSubjects.isNotEmpty
-        ? imageSubjects
-        : subjects;
-    final lead = leadPool.isEmpty
-        ? null
-        : leadPool[(DateTime.now().day + kind.index * 7) % leadPool.length];
-    final following = state.following.isNotEmpty
-        ? state.following
-        : state.history;
-    final continueEntry = following.firstOrNull;
-    final danmakuReady =
-        state.services.dandanplayDanmakuEnabled ||
-        state.services.bilibiliDanmakuEnabled ||
-        state.services.customDanmakuEnabled;
-    final height = compact ? 220.0 : 280.0;
-    return SizedBox(
-      height: height,
-      child: AppPanel(
-        padding: EdgeInsets.zero,
-        borderColor: AppColors.borderBright,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              if (lead != null)
-                BackdropArt(
-                  bannerUrl: lead.bannerUrl,
-                  posterUrl: lead.coverUrl,
-                  title: lead.title,
-                )
-              else
-                const ColoredBox(color: AppColors.panel),
-              const DecoratedBox(
-                decoration: BoxDecoration(gradient: AppOverlays.heroLeading),
-              ),
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                  compact ? 16 : 22,
-                  compact ? 14 : 18,
-                  compact ? 16 : 22,
-                  compact ? 14 : 18,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (!compact)
-                      CircleAvatar(
-                        radius: 21,
-                        backgroundColor: AppColors.primary.withValues(
-                          alpha: 0.22,
-                        ),
-                        child: Icon(
-                          icon,
-                          color: AppColors.theaterInk,
-                          size: 22,
-                        ),
-                      ),
-                    const Spacer(),
-                    Text(
-                      title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          (compact
-                                  ? Theme.of(context).textTheme.titleLarge
-                                  : Theme.of(context).textTheme.headlineSmall)
-                              ?.copyWith(
-                                color: AppColors.theaterInk,
-                                fontWeight: FontWeight.w900,
-                              ),
-                    ),
-                    if (subtitle.isNotEmpty) ...[
-                      SizedBox(height: compact ? 4 : 6),
-                      Text(
-                        subtitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: AppColors.theaterMuted,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                    if (kind == MetadataHubKind.anime) ...[
-                      SizedBox(height: compact ? 10 : 14),
-                      LayoutBuilder(
-                        builder: (context, constraints) {
-                          final compact = constraints.maxWidth < 700;
-                          final chips = <Widget>[
-                            _AnimekoStatusChip(
-                              icon: Icons.play_circle_outline,
-                              label: continueEntry == null
-                                  ? '还没有续看'
-                                  : '续看 ${continueEntry.subject.title}',
-                              active: continueEntry != null,
-                              onTap: continueEntry == null
-                                  ? null
-                                  : () => onOpen(continueEntry.subject),
-                            ),
-                            _AnimekoStatusChip(
-                              icon: Icons.calendar_month_outlined,
-                              label: '今日更新 ${_todayCount(subjects)} 部',
-                              active: _todayCount(subjects) > 0,
-                            ),
-                          ];
-                          if (!compact) {
-                            chips.addAll([
-                              _AnimekoStatusChip(
-                                icon: Icons.subtitles_outlined,
-                                label: danmakuReady ? '弹幕已开启' : '弹幕未开启',
-                                active: danmakuReady,
-                              ),
-                            ]);
-                          }
-                          return compact
-                              ? Wrap(spacing: 8, runSpacing: 8, children: chips)
-                              : Row(
-                                  children: [
-                                    for (var i = 0; i < chips.length; i++) ...[
-                                      Expanded(child: chips[i]),
-                                      if (i != chips.length - 1)
-                                        const SizedBox(width: 8),
-                                    ],
-                                  ],
-                                );
-                        },
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  int _todayCount(List<AnimeSubject> items) {
-    final now = DateTime.now();
-    return items.where((item) {
-      final date = DateTime.tryParse(item.date ?? '');
-      return date != null && date.month == now.month && date.day == now.day;
-    }).length;
-  }
-}
-
-class _AnimekoStatusChip extends StatelessWidget {
-  const _AnimekoStatusChip({
-    required this.icon,
-    required this.label,
-    required this.active,
-    this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final bool active;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: active
-              ? AppColors.primary.withValues(alpha: 0.18)
-              : Theme.of(context).colorScheme.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: active
-                ? AppColors.primary
-                : Theme.of(context).colorScheme.outlineVariant,
-          ),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          child: Row(
+    final entry = state.history.firstOrNull;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 24,
+        runSpacing: 10,
+        children: [
+          Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                icon,
-                size: 17,
-                color: active ? context.ink : context.inkMuted,
-              ),
-              const SizedBox(width: 7),
-              Flexible(
-                fit: FlexFit.loose,
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: active ? context.ink : context.inkMuted,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
+              Text(title, style: Theme.of(context).textTheme.headlineMedium),
+              const SizedBox(width: 14),
+              Text(
+                '${subjects.length} 部作品',
+                style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
           ),
-        ),
+          if (kind == MetadataHubKind.anime && entry != null)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 300),
+              child: TextButton.icon(
+                onPressed: () => onOpen(entry.subject),
+                icon: const Icon(Icons.play_circle_outline, size: 20),
+                label: Text(
+                  '续看 ${entry.subject.title}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -1429,249 +1233,27 @@ class _InlineFilterPanel extends StatelessWidget {
         ),
       ),
     ];
-    if (compact) {
-      return AppPanel(
-        padding: EdgeInsets.zero,
-        child: ExpansionTile(
-          key: const ValueKey('mobileMetadataFilters'),
-          tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
-          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
-          title: const Text('筛选'),
-          subtitle: Text(
-            '$type · $language · $year · ${playbackFilter.label}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          children: rows,
-        ),
-      );
-    }
     return AppPanel(
-      padding: EdgeInsets.fromLTRB(14, 10, 14, 10),
-      child: Column(children: rows),
-    );
-  }
-}
-
-class _MetadataRightRail extends StatelessWidget {
-  const _MetadataRightRail({
-    required this.state,
-    required this.kind,
-    required this.onCategory,
-    required this.onTag,
-    required this.onFilter,
-  });
-
-  final AnimeState state;
-  final MetadataHubKind kind;
-  final ValueChanged<AnimeCategory> onCategory;
-  final ValueChanged<AnimeTag> onTag;
-  final ValueChanged<String> onFilter;
-
-  @override
-  Widget build(BuildContext context) {
-    final feed = state.homeFeed;
-    final categories = _categories(feed);
-    final tags = _tags(feed);
-    final subjects = _railSubjects(feed);
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
-      children: [
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SectionTitle(title: _title, subtitle: _subtitle),
-              const SizedBox(height: 12),
-              if (subjects.isEmpty)
-                Text(
-                  _sourceMessage,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
-                )
-              else
-                for (final subject in subjects.take(5))
-                  CompactSubjectRow(
-                    subject: _publicSubjectMetadata(context, subject),
-                    onTap: () => _openSubject(context, subject),
-                  ),
-            ],
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Column(
+        children: [
+          rows.first,
+          ExpansionTile(
+            key: ValueKey(
+              compact ? 'mobileMetadataFilters' : 'desktopMetadataFilters',
+            ),
+            tilePadding: const EdgeInsets.symmetric(horizontal: 2),
+            childrenPadding: const EdgeInsets.only(bottom: 8),
+            title: const Text('更多筛选'),
+            subtitle:
+                language == '全部' &&
+                    year == '全部' &&
+                    playbackFilter == _PlaybackFilter.all
+                ? null
+                : Text('$language · $year · ${playbackFilter.label}'),
+            children: rows.skip(1).toList(growable: false),
           ),
-        ),
-        const SizedBox(height: 14),
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '分类'),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final category in categories)
-                    _FilterChipButton(
-                      label: category.count > 0
-                          ? '${category.name}(${category.count})'
-                          : category.name,
-                      onTap: () => _handleCategory(category),
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '标签'),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final tag in tags)
-                    _FilterChipButton(
-                      label: tag.count > 0
-                          ? '${tag.name}(${tag.count})'
-                          : tag.name,
-                      onTap: kind == MetadataHubKind.anime
-                          ? () => _handleTag(tag)
-                          : null,
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  String get _sourceMessage {
-    return switch (kind) {
-      MetadataHubKind.anime => '还没有可展示的番剧，稍后刷新试试。',
-      MetadataHubKind.series => '暂时没有推荐剧集。',
-      MetadataHubKind.movie => '暂时没有推荐电影。',
-    };
-  }
-
-  List<AnimeCategory> _categories(AnimeHomeFeed feed) {
-    return switch (kind) {
-      MetadataHubKind.anime =>
-        feed.categories
-            .where((item) => !_isInternalMetadataLabel(item.name))
-            .take(12)
-            .toList(),
-      MetadataHubKind.series => const [
-        AnimeCategory(name: '美剧'),
-        AnimeCategory(name: '韩剧'),
-        AnimeCategory(name: '日剧'),
-        AnimeCategory(name: '英剧'),
-        AnimeCategory(name: '剧情'),
-        AnimeCategory(name: '犯罪'),
-        AnimeCategory(name: '动作'),
-        AnimeCategory(name: '科幻'),
-      ],
-      MetadataHubKind.movie => const [
-        AnimeCategory(name: '电影'),
-        AnimeCategory(name: '剧情'),
-        AnimeCategory(name: '动作'),
-        AnimeCategory(name: '科幻'),
-        AnimeCategory(name: '奇幻'),
-        AnimeCategory(name: '冒险'),
-        AnimeCategory(name: '喜剧'),
-      ],
-    };
-  }
-
-  List<AnimeTag> _tags(AnimeHomeFeed feed) {
-    return switch (kind) {
-      MetadataHubKind.anime =>
-        feed.tags
-            .where((item) => !_isInternalMetadataLabel(item.name))
-            .take(16)
-            .toList(),
-      MetadataHubKind.series => const [
-        AnimeTag(name: '热门剧集'),
-        AnimeTag(name: '最近播出'),
-      ],
-      MetadataHubKind.movie => const [
-        AnimeTag(name: '热门电影'),
-        AnimeTag(name: '公版影片'),
-      ],
-    };
-  }
-
-  String get _title {
-    return switch (kind) {
-      MetadataHubKind.anime => '番剧推荐',
-      MetadataHubKind.series => '影视剧',
-      MetadataHubKind.movie => '电影索引',
-    };
-  }
-
-  String get _subtitle {
-    return switch (kind) {
-      MetadataHubKind.anime => '综合热度与评分',
-      MetadataHubKind.series => '电视剧 / 连续剧 / 网剧',
-      MetadataHubKind.movie => '院线电影 / 网络电影',
-    };
-  }
-
-  List<AnimeSubject> _railSubjects(AnimeHomeFeed feed) {
-    return switch (kind) {
-      MetadataHubKind.anime =>
-        feed.recommended
-            .where(
-              (subject) =>
-                  subjectMatchesContentType(subject, SubjectContentType.anime),
-            )
-            .toList(growable: false),
-      MetadataHubKind.series => const [],
-      MetadataHubKind.movie => const [],
-    };
-  }
-
-  void _openSubject(BuildContext context, AnimeSubject subject) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (context) => DetailPage(subject: subject)),
-    );
-  }
-
-  void _handleCategory(AnimeCategory category) {
-    if (kind == MetadataHubKind.anime) {
-      onCategory(category);
-      return;
-    }
-    onFilter(category.name);
-  }
-
-  void _handleTag(AnimeTag tag) {
-    if (kind == MetadataHubKind.anime) {
-      onTag(tag);
-    }
-  }
-}
-
-class _FilterChipButton extends StatelessWidget {
-  const _FilterChipButton({required this.label, this.onTap});
-
-  final String label;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Opacity(
-        opacity: enabled ? 1 : 0.72,
-        child: SmallBadge(label: label),
+        ],
       ),
     );
   }
@@ -1697,7 +1279,7 @@ class SchedulePage extends ConsumerStatefulWidget {
 class _SchedulePageState extends ConsumerState<SchedulePage>
     with SingleTickerProviderStateMixin {
   late final TabController _tabController;
-  late final Future<Map<int, List<AnimeSubject>>> _scheduleFuture;
+  late Future<Map<int, List<AnimeSubject>>> _scheduleFuture;
 
   @override
   void initState() {
@@ -1707,10 +1289,14 @@ class _SchedulePageState extends ConsumerState<SchedulePage>
       vsync: this,
       initialIndex: DateTime.now().weekday % 7,
     );
-    _scheduleFuture = ref
-        .read(animeControllerProvider.notifier)
-        .weeklySchedule();
+    _scheduleFuture =
+        ref.read(animeControllerProvider.notifier).weeklySchedule()..ignore();
   }
+
+  void _reloadSchedule() => setState(() {
+    _scheduleFuture =
+        ref.read(animeControllerProvider.notifier).weeklySchedule()..ignore();
+  });
 
   @override
   void dispose() {
@@ -1724,6 +1310,16 @@ class _SchedulePageState extends ConsumerState<SchedulePage>
       active: ChromeDestination.schedule,
       title: '新番时间表',
       showSearch: false,
+      trailing: AppIconButton(
+        icon: Icons.refresh_rounded,
+        tooltip: '刷新时间表',
+        onPressed: _reloadSchedule,
+      ),
+      compactAction: AppIconButton(
+        icon: Icons.refresh_rounded,
+        tooltip: '刷新时间表',
+        onPressed: _reloadSchedule,
+      ),
       onBack: () => safeNavigateBack(context),
       rightRail: AsyncAnimeGate(
         builder: (context, state) => _ScheduleRightRail(state: state),
@@ -1754,6 +1350,22 @@ class _SchedulePageState extends ConsumerState<SchedulePage>
                         ? const PosterGridSkeleton(
                             count: 8,
                             padding: EdgeInsets.all(16),
+                          )
+                        : snapshot.hasError ||
+                              schedule.values.every((items) => items.isEmpty)
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('暂时无法获取放送日历'),
+                                const SizedBox(height: 8),
+                                const Text('不会用历史番剧代替本周更新。'),
+                                TextButton(
+                                  onPressed: _reloadSchedule,
+                                  child: const Text('重试'),
+                                ),
+                              ],
+                            ),
                           )
                         : TabBarView(
                             controller: _tabController,
@@ -1830,27 +1442,50 @@ class SearchPage extends ConsumerStatefulWidget {
 class _SearchPageState extends ConsumerState<SearchPage> {
   late Future<_SearchPageData> _search;
   SubjectContentType? _scope;
+  late final TextEditingController _queryController;
+  late String _keyword;
 
   @override
   void initState() {
     super.initState();
     _scope = widget.scope;
+    _keyword = widget.keyword;
+    _queryController = TextEditingController(text: _keyword);
     _search = _load();
   }
 
   @override
   void didUpdateWidget(covariant SearchPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.keyword != widget.keyword) _search = _load();
+    if (oldWidget.keyword != widget.keyword) {
+      _keyword = widget.keyword;
+      _queryController.text = _keyword;
+      _search = _load();
+    }
   }
 
   Future<_SearchPageData> _load() async {
     final controller = ref.read(animeControllerProvider.notifier);
-    final subjectsFuture = controller.search(widget.keyword);
-    final torrentsFuture = controller.searchTorrentResources(widget.keyword);
+    final subjectsFuture = controller.search(_keyword);
+    final torrentsFuture = controller.searchTorrentResources(_keyword);
     final subjects = await subjectsFuture;
     final torrents = await torrentsFuture;
     return _SearchPageData(subjects: subjects, torrents: torrents);
+  }
+
+  @override
+  void dispose() {
+    _queryController.dispose();
+    super.dispose();
+  }
+
+  void _submit(String value) {
+    final query = value.trim();
+    if (query.isEmpty) return;
+    setState(() {
+      _keyword = query;
+      _search = _load();
+    });
   }
 
   void _retry() {
@@ -1861,8 +1496,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   Widget build(BuildContext context) {
     return AppChrome(
       active: ChromeDestination.anime,
-      title: '搜索：${widget.keyword}',
-      showSearch: false,
+      title: '搜索：$_keyword',
+      searchController: _queryController,
+      onSearch: _submit,
       onBack: () => safeNavigateBack(context),
       // _SearchRightRail is gone: its "热门搜索" panel was the current keyword
       // plus five hardcoded words, and its "类型筛选" chips had no onTap. Real
@@ -1878,7 +1514,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           }
           return _SearchResultBody(
             data: snapshot.data!,
-            keyword: widget.keyword,
+            keyword: _keyword,
             scope: _scope,
             onScopeChanged: (value) => setState(() => _scope = value),
             onOpenSubject: (subject) => Navigator.of(context).push(
@@ -2115,9 +1751,9 @@ class _TorrentResourceCard extends StatelessWidget {
           }
           return Row(
             children: [
-              const Icon(
+              Icon(
                 Icons.cloud_download_outlined,
-                color: AppColors.primary,
+                color: Theme.of(context).colorScheme.primary,
                 size: 30,
               ),
               const SizedBox(width: 14),
@@ -2304,28 +1940,17 @@ class _DetailPageState extends ConsumerState<DetailPage> {
             showSearch: false,
             title: bundle.subject.title,
             onBack: () => safeNavigateBack(context),
-            rightRail: _DetailRightRail(
-              bundle: bundle,
-              onOpen: (item) {
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(
-                    builder: (context) => DetailPage(subject: item.subject),
-                  ),
-                );
-              },
-            ),
             bottomPlayer: _MiniNowPlaying(
               subject: bundle.subject,
               progress: historyEntry?.playbackProgress,
             ),
             child: Stack(
               children: [
-                _BlurredBackdrop(subject: bundle.subject),
                 Padding(
                   padding: EdgeInsets.fromLTRB(
                     compact ? 14 : 24,
                     compact ? 2 : 6,
-                    compact ? 14 : 0,
+                    compact ? 14 : 24,
                     24,
                   ),
                   child: NestedScrollView(
@@ -2457,7 +2082,7 @@ class _HomeToolbar extends StatelessWidget {
           AppPanel(
             padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 5),
             radius: 10,
-            color: AppColors.bg2,
+            color: Theme.of(context).colorScheme.surface,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -2524,47 +2149,6 @@ class _ChromeIconButton extends StatelessWidget {
   }
 }
 
-class _HomeRightRail extends StatelessWidget {
-  const _HomeRightRail({required this.feed, required this.onOpen});
-
-  final AnimeHomeFeed feed;
-  final ValueChanged<AnimeSubject> onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
-      children: [
-        AppPanel(
-          child: Column(
-            children: [
-              SectionTitle(
-                title: '最近更新',
-                action: Text(
-                  '更多 ›',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: context.inkMuted,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              for (final subject in feed.recent.take(5))
-                CompactSubjectRow(
-                  subject: _publicSubjectMetadata(context, subject),
-                  // Was a hardcoded 刚刚 on every row regardless of when the
-                  // entry actually updated. Show the real date, or nothing.
-                  trailing: subject.date,
-                  onTap: () => onOpen(subject),
-                ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 /// Real playback progress of the most recent history entry, or null when no
 /// entry carries a usable position/duration pair.
 double? _historyPlaybackProgress(List<LibraryEntry> history) {
@@ -2618,7 +2202,7 @@ class _MiniNowPlaying extends StatelessWidget {
               minHeight: 4,
               borderRadius: BorderRadius.circular(4),
               backgroundColor: AppColors.border,
-              color: AppColors.primary,
+              color: Theme.of(context).colorScheme.primary,
             )
           else
             const SizedBox(height: 4),
@@ -2719,13 +2303,11 @@ class _RecommendTabState extends State<_RecommendTab> {
 
   @override
   Widget build(BuildContext context) {
-    final compact = MediaQuery.sizeOf(context).width < 760;
     final heroSubjects = _heroSubjects(widget.feed);
     _heroCount = heroSubjects.length;
     final heroIndex = heroSubjects.isEmpty
         ? 0
         : _heroIndex.clamp(0, heroSubjects.length - 1).toInt();
-    final shortcuts = _shortcuts(widget.feed);
     final recommendations = widget.feed.recommended
         .where(
           (subject) => !_dismissedRecommendationKeys.contains(
@@ -2748,36 +2330,6 @@ class _RecommendTabState extends State<_RecommendTab> {
                 onChanged: (index) => setState(() => _heroIndex = index),
                 onOpen: widget.onOpen,
                 onDotTap: _animateToHero,
-              ),
-            ),
-          ),
-        ),
-        if (compact)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
-              child: const _MobileQuickActions(),
-            ),
-          ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(0, 0, 0, 10),
-            child: SizedBox(
-              height: 74,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemBuilder: (context, index) {
-                  final item = shortcuts[index];
-                  return _CategoryShortcut(
-                    label: item.label,
-                    subtitle: item.subtitle,
-                    bannerUrl: item.subject?.bannerUrl,
-                    posterUrl: item.subject?.coverUrl,
-                    onTap: () => context.push(item.route),
-                  );
-                },
-                separatorBuilder: (context, index) => const SizedBox(width: 10),
-                itemCount: shortcuts.length,
               ),
             ),
           ),
@@ -2850,95 +2402,6 @@ class _RecommendTabState extends State<_RecommendTab> {
     }
   }
 
-  List<_HomeShortcutData> _shortcuts(AnimeHomeFeed feed) {
-    final anime = _uniqueSubjectList([
-      feed.hero,
-      ...feed.recent,
-      ...feed.recommended,
-    ]);
-    final series = _uniqueSubjectList(feed.seriesHighlights);
-    final movies = _uniqueSubjectList(feed.movieHighlights);
-    final used = <String>{};
-    AnimeSubject? pick(
-      List<AnimeSubject> candidates, {
-      bool Function(AnimeSubject subject)? where,
-    }) {
-      if (candidates.isEmpty) return null;
-      final offset = (DateTime.now().day + used.length * 5) % candidates.length;
-      final rotated = [...candidates.skip(offset), ...candidates.take(offset)];
-      for (final item in rotated) {
-        final key = '${item.source}:${item.id}';
-        if (used.contains(key) || (where != null && !where(item))) continue;
-        used.add(key);
-        return item;
-      }
-      for (final item in rotated) {
-        final key = '${item.source}:${item.id}';
-        if (used.add(key)) return item;
-      }
-      return null;
-    }
-
-    bool hasCategory(AnimeSubject item, Iterable<String> values) {
-      final text = [
-        item.title,
-        item.status,
-        ...item.categories.map((category) => category.name),
-      ].join(' ').toLowerCase();
-      return values.any((value) => text.contains(value.toLowerCase()));
-    }
-
-    return [
-      _HomeShortcutData(
-        label: '番剧',
-        subtitle: '本季热门与近期更新',
-        route: '/anime',
-        subject: pick(anime),
-      ),
-      _HomeShortcutData(
-        label: '剧集',
-        subtitle: '全球热门电视剧',
-        route: '/series',
-        subject: pick(series),
-      ),
-      _HomeShortcutData(
-        label: '电影',
-        subtitle: '热门电影与公版老片',
-        route: '/movies',
-        subject: pick(movies),
-      ),
-      _HomeShortcutData(
-        label: '动漫电影',
-        subtitle: '动画长片与剧场版',
-        route: '/movies',
-        subject: pick(
-          movies,
-          where: (item) => hasCategory(item, const ['animation', '动画']),
-        ),
-      ),
-      _HomeShortcutData(
-        label: '纪录片',
-        subtitle: '纪录片与公版影像',
-        route: '/movies',
-        subject: pick(
-          movies,
-          where: (item) =>
-              hasCategory(item, const ['documentary', '纪录', 'archive']),
-        ),
-      ),
-      _HomeShortcutData(
-        label: '综艺',
-        subtitle: '真人秀与娱乐节目',
-        route: '/series',
-        subject: pick(
-          series,
-          where: (item) =>
-              hasCategory(item, const ['reality', 'talk', 'game show', '综艺']),
-        ),
-      ),
-    ];
-  }
-
   void _animateToHero(int index) {
     if (!_heroController.hasClients) return;
     _heroController.animateToPage(
@@ -2990,177 +2453,6 @@ class _RecommendationCardMenu extends StatelessWidget {
 }
 
 enum _RecommendationCardAction { notInterested }
-
-class _CategoryShortcut extends StatelessWidget {
-  const _CategoryShortcut({
-    required this.label,
-    required this.subtitle,
-    required this.bannerUrl,
-    required this.posterUrl,
-    required this.onTap,
-  });
-
-  final String label;
-  final String subtitle;
-  final String? bannerUrl;
-  final String? posterUrl;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: 172,
-        child: AppPanel(
-          padding: EdgeInsets.zero,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                BackdropArt(
-                  bannerUrl: bannerUrl,
-                  posterUrl: posterUrl,
-                  title: label,
-                ),
-                const DecoratedBox(
-                  decoration: BoxDecoration(gradient: AppOverlays.categoryCard),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      Text(
-                        label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(
-                              color: AppColors.theaterInk,
-                              fontWeight: FontWeight.w700,
-                            ),
-                      ),
-                      const SizedBox(height: 2),
-                      Flexible(
-                        child: Text(
-                          subtitle,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: AppColors.theaterMuted),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _HomeShortcutData {
-  const _HomeShortcutData({
-    required this.label,
-    required this.subtitle,
-    required this.route,
-    required this.subject,
-  });
-
-  final String label;
-  final String subtitle;
-  final String route;
-  final AnimeSubject? subject;
-}
-
-class _MobileQuickActions extends StatelessWidget {
-  const _MobileQuickActions();
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      _MobileQuickAction(
-        icon: Icons.explore_outlined,
-        label: '番剧',
-        onTap: () => context.push('/anime'),
-      ),
-      _MobileQuickAction(
-        icon: Icons.calendar_month_outlined,
-        label: '追番',
-        onTap: () => context.push('/schedule'),
-      ),
-      _MobileQuickAction(
-        icon: Icons.history_rounded,
-        label: '历史',
-        onTap: () => context.push('/history'),
-      ),
-      _MobileQuickAction(
-        icon: Icons.movie_outlined,
-        label: '电影',
-        onTap: () => context.push('/movies'),
-      ),
-    ];
-    return SizedBox(
-      height: 76,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: items.length,
-        separatorBuilder: (context, index) => const SizedBox(width: 10),
-        itemBuilder: (context, index) => items[index],
-      ),
-    );
-  }
-}
-
-class _MobileQuickAction extends StatelessWidget {
-  const _MobileQuickAction({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: AppPanel(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: SizedBox(
-          width: 68,
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: colors.onSurface, size: 24),
-              const SizedBox(height: 6),
-              Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: colors.onSurface,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _IndexTab extends StatelessWidget {
   const _IndexTab({
@@ -3401,7 +2693,6 @@ class _HeroCarousel extends StatelessWidget {
     required this.onOpen,
     required this.onDotTap,
   });
-
   final PageController controller;
   final List<AnimeSubject> subjects;
   final int index;
@@ -3411,88 +2702,89 @@ class _HeroCarousel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final safeSubjects = subjects.isEmpty ? [_fallbackHeroSubject] : subjects;
-    final compact = MediaQuery.sizeOf(context).width < 760;
-    return SizedBox(
-      height: compact ? 336 : 300,
-      child: AppPanel(
-        padding: EdgeInsets.zero,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
+    final items = subjects.isEmpty ? [_fallbackHeroSubject] : subjects;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 600;
+        final extra = math.max(
+          0.0,
+          MediaQuery.textScalerOf(context).scale(1) - 1,
+        );
+        return AppPanel(
+          padding: EdgeInsets.zero,
+          child: Column(
             children: [
-              PageView.builder(
-                controller: controller,
-                itemCount: safeSubjects.length,
-                onPageChanged: onChanged,
-                itemBuilder: (context, page) {
-                  final subject = safeSubjects[page];
-                  return _HeroBannerSlide(
-                    subject: subject,
-                    onTap: () => onOpen(subject),
-                  );
-                },
-              ),
-              Positioned(
-                left: 24,
-                bottom: 18,
-                child: Row(
-                  children: [
-                    for (var i = 0; i < safeSubjects.length; i++)
-                      InkWell(
-                        onTap: () => onDotTap(i),
-                        borderRadius: BorderRadius.circular(6),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 180),
-                          width: i == index ? 34 : 14,
-                          height: 8,
-                          margin: const EdgeInsets.only(right: 6),
-                          alignment: Alignment.center,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              color: i == index
-                                  ? AppColors.primary
-                                  : Theme.of(context).colorScheme.outline,
-                              borderRadius: BorderRadius.circular(4),
-                            ),
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                      ),
-                  ],
+              SizedBox(
+                height: (compact ? 230 : 240) + extra * 180,
+                child: PageView.builder(
+                  controller: controller,
+                  itemCount: items.length,
+                  onPageChanged: onChanged,
+                  itemBuilder: (context, page) => _HeroBannerSlide(
+                    subject: items[page],
+                    onTap: () => onOpen(items[page]),
+                  ),
                 ),
               ),
-              // Desktop / wide layout keeps arrow controls; phones rely on
-              // swipe + dots so the poster art stays unobstructed.
-              if (!compact && safeSubjects.length > 1)
-                Positioned(
-                  right: 18,
-                  bottom: 16,
+              if (items.length > 1)
+                Padding(
+                  key: const ValueKey('homeCarouselControls'),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
                   child: Row(
                     children: [
-                      _HeroArrowButton(
-                        icon: Icons.chevron_left_rounded,
-                        tooltip: '上一张',
-                        onTap: () => onDotTap(
-                          index == 0 ? safeSubjects.length - 1 : index - 1,
+                      for (var i = 0; i < items.length; i++)
+                        Semantics(
+                          label: '第 ${i + 1} 张推荐',
+                          selected: i == index,
+                          button: true,
+                          child: InkWell(
+                            onTap: () => onDotTap(i),
+                            borderRadius: BorderRadius.circular(6),
+                            child: SizedBox(
+                              width: 28,
+                              height: 44,
+                              child: Center(
+                                child: AnimatedContainer(
+                                  duration:
+                                      MediaQuery.disableAnimationsOf(context)
+                                      ? Duration.zero
+                                      : AppMotion.quick,
+                                  height: 4,
+                                  width: i == index ? 20 : 6,
+                                  decoration: BoxDecoration(
+                                    color: i == index
+                                        ? Theme.of(context).colorScheme.primary
+                                        : Theme.of(context).colorScheme.outline,
+                                    borderRadius: BorderRadius.circular(3),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      _HeroArrowButton(
-                        icon: Icons.chevron_right_rounded,
-                        tooltip: '下一张',
-                        onTap: () => onDotTap(
-                          index == safeSubjects.length - 1 ? 0 : index + 1,
+                      const Spacer(),
+                      if (!compact) ...[
+                        _HeroArrowButton(
+                          icon: Icons.chevron_left_rounded,
+                          tooltip: '上一张',
+                          onTap: () => onDotTap(
+                            (index - 1 + items.length) % items.length,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        _HeroArrowButton(
+                          icon: Icons.chevron_right_rounded,
+                          tooltip: '下一张',
+                          onTap: () => onDotTap((index + 1) % items.length),
+                        ),
+                      ],
                     ],
                   ),
                 ),
             ],
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }
@@ -3535,152 +2827,85 @@ class _HeroArrowButton extends StatelessWidget {
 
 class _HeroBannerSlide extends StatelessWidget {
   const _HeroBannerSlide({required this.subject, required this.onTap});
-
   final AnimeSubject subject;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final displaySubject = _publicSubjectMetadata(context, subject);
-    final categoryText = displaySubject.categories
-        .map((item) => item.name)
-        .where((item) => item.trim().isNotEmpty)
-        .take(2)
-        .join('/');
-    final isMovie = subject.platform.toLowerCase().contains('movie');
-    final isAnime = subjectContentTypeOf(subject) == SubjectContentType.anime;
-    final preferChinese = _preferChineseMetadata(context);
+    final display = _publicSubjectMetadata(context, subject);
     final metadata = [
-      if (subject.year != '未知') subject.year,
-      if (displaySubject.region.isNotEmpty) displaySubject.region,
-      if (categoryText.isNotEmpty) categoryText,
-      if (isMovie)
-        '电影'
-      else if (subject.totalEpisodes > 0)
-        '全${subject.totalEpisodes}集',
+      subject.year,
+      if (display.region.isNotEmpty) display.region,
+      if (subject.totalEpisodes > 0) '全${subject.totalEpisodes}集',
     ].join(' · ');
-    final hasOriginalTitle =
-        (!isAnime || !preferChinese) &&
-        subject.originalTitle.trim().isNotEmpty &&
-        subject.originalTitle.trim() != subject.title.trim();
-    final directPlayable = hasKnownDirectPlayback(subject);
-    final summary = displaySubject.summary.trim();
-    // Placeholder blurbs ("暂无中文简介" and friends) never earn hero space;
-    // the metadata line already covers the essentials.
-    final hasSummary = summary.isNotEmpty && !isMetadataPlaceholder(summary);
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = constraints.maxWidth < 520;
-        final scheme = Theme.of(context).colorScheme;
-        final art = ClipRRect(
-          borderRadius: BorderRadius.circular(AppRadius.md),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.all(color: scheme.outlineVariant),
-              borderRadius: BorderRadius.circular(AppRadius.md),
-            ),
-            position: DecorationPosition.foreground,
-            child: BackdropArt(
-              bannerUrl: subject.bannerUrl,
-              posterUrl: subject.coverUrl,
-              title: subject.title,
-            ),
-          ),
-        );
-        final info = Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: [
-                SmallBadge(label: displaySubject.platform, active: true),
-                if (displaySubject.status.isNotEmpty)
-                  SmallBadge(label: displaySubject.status),
-                if (directPlayable)
-                  const SmallBadge(label: '可播放', active: true),
-              ],
-            ),
-            SizedBox(height: compact ? 8 : 14),
-            Text(
-              subject.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: compact
-                  ? Theme.of(context).textTheme.headlineSmall
-                  : Theme.of(context).textTheme.headlineLarge,
-            ),
-            if (!compact && hasOriginalTitle) ...[
-              const SizedBox(height: 4),
-              Text(
-                subject.originalTitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: context.inkMuted,
-                  fontWeight: FontWeight.w600,
+        final compact = constraints.maxWidth < 600;
+        return Padding(
+          padding: EdgeInsets.all(compact ? 16 : 24),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              SizedBox(
+                width: compact ? 104 : 142,
+                height: compact ? 156 : 192,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                  child: PosterArt(
+                    coverUrl: subject.coverUrl,
+                    title: subject.title,
+                  ),
+                ),
+              ),
+              SizedBox(width: compact ? 16 : 28),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '精选推荐',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: context.inkMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      subject.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: compact
+                          ? Theme.of(context).textTheme.titleMedium
+                          : Theme.of(context).textTheme.headlineLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    if (!compact &&
+                        !_preferChineseMetadata(context) &&
+                        subject.originalTitle.trim().isNotEmpty &&
+                        subject.originalTitle != subject.title)
+                      Text(
+                        subject.originalTitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    Text(
+                      metadata,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 16),
+                    AccentButton(
+                      icon: Icons.arrow_forward_rounded,
+                      label: '查看详情',
+                      onTap: onTap,
+                      compact: compact,
+                    ),
+                  ],
                 ),
               ),
             ],
-            const SizedBox(height: 8),
-            Text(
-              metadata,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: context.inkMuted,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            if (hasSummary && !compact) ...[
-              const SizedBox(height: 10),
-              Text(
-                summary,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: context.ink,
-                  height: 1.45,
-                ),
-              ),
-            ],
-            SizedBox(height: compact ? 10 : 18),
-            AccentButton(
-              icon: Icons.play_arrow_rounded,
-              label: '查看详情',
-              onTap: onTap,
-            ),
-          ],
-        );
-        if (compact) {
-          return InkWell(
-            onTap: onTap,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(child: art),
-                  const SizedBox(height: 12),
-                  info,
-                ],
-              ),
-            ),
-          );
-        }
-        return InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 20, 20, 20),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(flex: 11, child: info),
-                const SizedBox(width: 24),
-                Expanded(flex: 9, child: art),
-              ],
-            ),
           ),
         );
       },
@@ -3851,7 +3076,6 @@ class _DetailHero extends StatelessWidget {
     required this.onCollect,
     required this.onDownload,
   });
-
   final AnimeSubject subject;
   final bool following;
   final bool collected;
@@ -3862,326 +3086,175 @@ class _DetailHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final directlyPlayable = onPlay != null;
-    final displaySubject = _publicSubjectMetadata(context, subject);
+    final display = _publicSubjectMetadata(context, subject);
+    final scheme = Theme.of(context).colorScheme;
     final metadata = [
       subject.year,
-      if (displaySubject.region.isNotEmpty) displaySubject.region,
-      if (subject.totalEpisodes > 0) '${subject.totalEpisodes}集全',
-    ].join('  |  ');
-    final summary = displaySubject.summary.trim();
-    // Same rule as the home hero: placeholder blurbs never earn banner space.
-    final hasSummary = summary.isNotEmpty && !isMetadataPlaceholder(summary);
-    Widget badges({required bool compact}) => Wrap(
-      alignment: compact ? WrapAlignment.center : WrapAlignment.start,
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        // Only claim playability when the source actually carries a stream.
-        // The old backendManaged branch labelled bangumi/tmdb subjects 在线可播,
-        // but those are metadata-only sources -- exactly the ones that cannot
-        // play. subjectPlaybackLabel's own rule is: promise playback or stay
-        // quiet.
-        if (subjectPlaybackLabel(subject).isNotEmpty)
-          SmallBadge(
-            label: subjectPlaybackLabel(subject),
-            active: directlyPlayable,
-          ),
-        SmallBadge(
-          label: subject.ratingScore == null
-              ? '暂无评分'
-              : '★ ${subject.ratingScore!.toStringAsFixed(1)}',
-          active: true,
-        ),
-        SmallBadge(label: displaySubject.platform),
-        if (displaySubject.status.isNotEmpty)
-          SmallBadge(label: displaySubject.status),
-      ],
-    );
-
-    Widget actions({required bool compact}) => Wrap(
-      alignment: compact ? WrapAlignment.center : WrapAlignment.start,
-      spacing: 10,
-      runSpacing: 8,
-      children: [
-        AccentButton(
-          icon: Icons.play_arrow_rounded,
-          label: directlyPlayable ? '立即播放' : '查找线路',
-          onTap: onPlay,
-          compact: compact,
-        ),
-        AccentButton(
-          icon: following ? Icons.check_rounded : Icons.add_rounded,
-          label: following ? '已追番' : '追番',
-          filled: false,
-          onTap: onFollowing,
-          compact: compact,
-        ),
-        AccentButton(
-          icon: collected ? Icons.favorite : Icons.favorite_border,
-          label: collected ? '已收藏' : '收藏',
-          filled: false,
-          onTap: onCollect,
-          compact: compact,
-        ),
-        AccentButton(
-          icon: Icons.download_outlined,
-          label: '下载',
-          filled: false,
-          onTap: onDownload,
-          compact: compact,
-        ),
-      ],
-    );
-
-    Widget information({required bool compact}) => Column(
-      crossAxisAlignment: compact
-          ? CrossAxisAlignment.center
-          : CrossAxisAlignment.start,
-      children: [
-        badges(compact: compact),
-        const SizedBox(height: 12),
-        Text(
-          subject.title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          textAlign: compact ? TextAlign.center : TextAlign.start,
-          style:
-              (compact
-                      ? Theme.of(context).textTheme.headlineMedium
-                      : Theme.of(context).textTheme.displaySmall)
-                  ?.copyWith(
-                    color: AppColors.theaterInk,
-                    fontWeight: FontWeight.w900,
-                  ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          metadata,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          textAlign: compact ? TextAlign.center : TextAlign.start,
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-            color: AppColors.theaterMuted,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        if (hasSummary) ...[
-          const SizedBox(height: 10),
-          Text(
-            summary,
-            maxLines: compact ? 2 : 3,
-            overflow: TextOverflow.ellipsis,
-            textAlign: compact ? TextAlign.center : TextAlign.start,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: AppColors.theaterInk,
-              height: 1.45,
-            ),
-          ),
-        ],
-        const Spacer(),
-        actions(compact: compact),
-      ],
-    );
-
+      if (display.region.isNotEmpty) display.region,
+      if (subject.totalEpisodes > 0) '全${subject.totalEpisodes}集',
+    ].join(' · ');
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = constraints.maxWidth < 720;
-        final textScale = MediaQuery.textScalerOf(context).scale(1);
-        // Without a real summary the banner can sit tighter on phones.
-        final compactHeight =
-            (hasSummary
-                    ? 360 + math.max(0, textScale - 1) * 72
-                    : 300 + math.max(0, textScale - 1) * 56)
-                .toDouble();
-        return SizedBox(
-          height: compact ? compactHeight : 292,
-          child: AppPanel(
-            padding: EdgeInsets.zero,
-            borderColor: Theme.of(context).colorScheme.outlineVariant,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadius.lg),
-              child: Stack(
-                fit: StackFit.expand,
+        final compact = constraints.maxWidth < 640;
+        Widget secondaryAction(
+          IconData icon,
+          String label,
+          VoidCallback onTap,
+        ) {
+          if (compact) {
+            // Keep text and touch targets at their real size on narrow screens.
+            // Icons are redundant here; the labels also fit increased text size.
+            return OutlinedButton(
+              onPressed: onTap,
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(0, 44),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 4,
+                  vertical: 10,
+                ),
+              ),
+              child: Text(label, textAlign: TextAlign.center),
+            );
+          }
+          return AccentButton(
+            icon: icon,
+            label: label,
+            filled: false,
+            onTap: onTap,
+            compact: true,
+          );
+        }
+
+        final secondary = <Widget>[
+          secondaryAction(
+            following ? Icons.check : Icons.add,
+            following ? '已追番' : '追番',
+            onFollowing,
+          ),
+          secondaryAction(
+            collected ? Icons.favorite : Icons.favorite_border,
+            collected ? '已收藏' : '收藏',
+            onCollect,
+          ),
+          secondaryAction(Icons.download_outlined, '下载', onDownload),
+        ];
+        return AppPanel(
+          key: const ValueKey('detailSummaryHeader'),
+          padding: EdgeInsets.all(compact ? 16 : 24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Positioned.fill(
-                    child: BackdropArt(
-                      bannerUrl: subject.bannerUrl,
-                      posterUrl: subject.coverUrl,
-                      title: subject.title,
+                  SizedBox(
+                    width: compact ? 96 : 142,
+                    height: compact ? 144 : 206,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(AppRadius.sm),
+                      child: PosterArt(
+                        coverUrl: subject.coverUrl,
+                        title: subject.title,
+                      ),
                     ),
                   ),
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: compact
-                          ? AppOverlays.heroCompact
-                          : AppOverlays.heroDetailWide,
-                    ),
-                  ),
-                  Padding(
-                    padding: EdgeInsets.all(compact ? 16 : 22),
-                    child: compact
-                        ? information(compact: true)
-                        : Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              SizedBox(
-                                width: 154,
-                                height: 220,
-                                child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(
-                                    AppRadius.md,
-                                  ),
-                                  child: PosterArt(
-                                    coverUrl: subject.coverUrl,
-                                    title: subject.title,
-                                  ),
-                                ),
+                  SizedBox(width: compact ? 16 : 28),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          subject.title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: compact
+                              ? Theme.of(context).textTheme.titleLarge
+                              : Theme.of(context).textTheme.headlineLarge,
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          metadata,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            if (subject.ratingScore != null)
+                              SmallBadge(
+                                label:
+                                    '★ ${subject.ratingScore!.toStringAsFixed(1)}',
+                                active: true,
                               ),
-                              const SizedBox(width: 22),
-                              Expanded(child: information(compact: false)),
+                            if (display.platform.isNotEmpty)
+                              SmallBadge(label: display.platform),
+                            if (display.status.isNotEmpty)
+                              SmallBadge(label: display.status),
+                            if (subjectPlaybackLabel(subject).isNotEmpty)
+                              SmallBadge(label: subjectPlaybackLabel(subject)),
+                          ],
+                        ),
+                        if (!compact) ...[
+                          if (subject.ratingTotal case final total?
+                              when total > 0) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              '$total 人评分',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                          const SizedBox(height: 22),
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              AccentButton(
+                                icon: Icons.play_arrow_rounded,
+                                label: '立即播放',
+                                onTap: onPlay,
+                              ),
+                              ...secondary,
                             ],
                           ),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
+              if (compact) ...[
+                const SizedBox(height: 18),
+                FilledButton.icon(
+                  onPressed: onPlay,
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: const Text('立即播放'),
+                ),
+                const SizedBox(height: 8),
+                // Three equal actions avoid an isolated download button on a new row.
+                Row(
+                  children: [
+                    for (var i = 0; i < secondary.length; i++) ...[
+                      if (i > 0) const SizedBox(width: 8),
+                      Expanded(child: secondary[i]),
+                    ],
+                  ],
+                ),
+              ],
+              if (onPlay == null) ...[
+                const SizedBox(height: 10),
+                Text(
+                  '暂无可播放集数',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
           ),
         );
       },
-    );
-  }
-}
-
-class _DetailRightRail extends StatelessWidget {
-  const _DetailRightRail({required this.bundle, required this.onOpen});
-
-  final AnimeDetailBundle bundle;
-  final ValueChanged<AnimeRecommendation> onOpen;
-
-  @override
-  Widget build(BuildContext context) {
-    final score = bundle.subject.ratingScore;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
-      children: [
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '评分详情'),
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    score?.toStringAsFixed(1) ?? '-',
-                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                      color: AppColors.primary,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (bundle.subject.ratingTotal case final total?
-                      when total > 0)
-                    Text(
-                      '$total人评分',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
-                    ),
-                ],
-              ),
-              // The five-star breakdown used to be drawn here from hardcoded
-              // ratios (0.76 for five stars, then 0.05 steps), which invented a
-              // distribution the app has never had: AnimeSubject carries only
-              // score, rank, and total. Removed rather than kept as decoration.
-              if (bundle.subject.ratingRank case final rank? when rank > 0) ...[
-                const SizedBox(height: 10),
-                Text(
-                  '排名第 $rank',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        AppPanel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SectionTitle(title: '追番进度'),
-              const SizedBox(height: 10),
-              Text(
-                // Was 已连到第 N 集 reading episodes.first.number -- the *first*
-                // episode, so the number shown was simply wrong. The trailing
-                // "每周更新信息已自动整理。" was the app praising its own bookkeeping.
-                bundle.episodes.isEmpty
-                    ? '还没有集数信息'
-                    : '已更新至第 ${bundle.episodes.last.number} 集',
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: context.inkMuted,
-                  height: 1.45,
-                ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 14),
-        Builder(
-          builder: (context) {
-            final railSummary = _publicSubjectMetadata(
-              context,
-              bundle.subject,
-            ).summary.trim();
-            final hasRailSummary =
-                railSummary.isNotEmpty && !isMetadataPlaceholder(railSummary);
-            if (!hasRailSummary) return const SizedBox.shrink();
-            return Column(
-              children: [
-                AppPanel(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SectionTitle(title: '简介'),
-                      const SizedBox(height: 10),
-                      Text(
-                        railSummary,
-                        maxLines: 7,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: context.inkMuted,
-                          height: 1.45,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 14),
-              ],
-            );
-          },
-        ),
-        AppPanel(
-          child: Column(
-            children: [
-              const SectionTitle(title: '大家都在看'),
-              const SizedBox(height: 8),
-              for (final item in bundle.recommendations.take(5))
-                CompactSubjectRow(
-                  subject: _publicSubjectMetadata(context, item.subject),
-                  trailing:
-                      item.subject.ratingScore?.toStringAsFixed(1) ??
-                      item.relation,
-                  onTap: () => onOpen(item),
-                ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }
@@ -4287,9 +3360,9 @@ class _DetailInfo extends StatelessWidget {
           child: hasSummary
               ? Text(
                   summary,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: context.ink,
-                    height: 1.45,
+                    height: 1.7,
                   ),
                 )
               : EmptyState(
@@ -4558,49 +3631,6 @@ class _PersonTile extends StatelessWidget {
   }
 }
 
-class _BlurredBackdrop extends StatelessWidget {
-  const _BlurredBackdrop({required this.subject});
-
-  final AnimeSubject subject;
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned.fill(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (subject.bannerUrl != null || subject.coverUrl != null)
-            ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-              child: PosterArt(
-                coverUrl: subject.bannerUrl,
-                fallbackCoverUrl: subject.coverUrl,
-                title: subject.title,
-                fit: BoxFit.cover,
-                allowHtmlFallback: false,
-              ),
-            )
-          else
-            ColoredBox(color: Theme.of(context).colorScheme.surface),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Theme.of(context).colorScheme.surface.withValues(alpha: 0.5),
-                  Theme.of(context).colorScheme.surface.withValues(alpha: 0.9),
-                  Theme.of(context).colorScheme.surface,
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _BlockTitle extends StatelessWidget {
   const _BlockTitle(this.text);
 
@@ -4707,49 +3737,164 @@ extension _FirstOrNull<T> on List<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
 
-class _WeekCalendarStrip extends StatelessWidget {
+class _WeekCalendarStrip extends StatefulWidget {
   const _WeekCalendarStrip({
     required this.schedule,
     required this.selectedIndex,
     required this.onSelected,
   });
-
   final Map<int, List<AnimeSubject>> schedule;
   final int selectedIndex;
   final ValueChanged<int> onSelected;
+  @override
+  State<_WeekCalendarStrip> createState() => _WeekCalendarStripState();
+}
+
+class _WeekCalendarStripState extends State<_WeekCalendarStrip> {
+  final _scroll = ScrollController();
 
   @override
-  Widget build(BuildContext context) {
-    final days = SchedulePage._weekdays;
-    return SizedBox(
-      height: 130,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: days.length,
-        separatorBuilder: (context, index) => const SizedBox(width: 10),
-        itemBuilder: (context, index) {
-          final day = days[index];
-          return Semantics(
-            key: ValueKey('schedule-day-$index'),
-            button: true,
-            selected: index == selectedIndex,
-            child: SizedBox(
-              width: 210,
-              child: InkWell(
-                onTap: () => onSelected(index),
-                borderRadius: BorderRadius.circular(8),
-                child: _DayCard(
-                  label: day.$2,
-                  subjects: schedule[day.$1] ?? const [],
-                  active: index == selectedIndex,
+  void initState() {
+    super.initState();
+    _revealSelectedDay();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _WeekCalendarStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedIndex != widget.selectedIndex) _revealSelectedDay();
+  }
+
+  void _revealSelectedDay() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scroll.hasClients) return;
+      final start = widget.selectedIndex * 220.0;
+      final end = start + 210;
+      final view = _scroll.position.viewportDimension;
+      if (start < _scroll.offset) {
+        _moveTo(start);
+      } else if (end > _scroll.offset + view) {
+        _moveTo(end - view);
+      }
+    });
+  }
+
+  void _moveTo(double offset) {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      offset.clamp(0.0, _scroll.position.maxScrollExtent),
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final overflow = constraints.maxWidth < 1530;
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (overflow)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                const Expanded(
+                  child: Text(
+                    '拖动或滚轮查看更多日期',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  tooltip: '前面的日期',
+                  onPressed: () => _moveTo(_scroll.offset - 440),
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                IconButton(
+                  tooltip: '后面的日期',
+                  onPressed: () => _moveTo(_scroll.offset + 440),
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              ],
+            ),
+          SizedBox(
+            height: 142,
+            child: Listener(
+              onPointerSignal: (event) {
+                if (event is PointerScrollEvent &&
+                    _scroll.hasClients &&
+                    _scroll.position.maxScrollExtent > 0) {
+                  GestureBinding.instance.pointerSignalResolver.register(
+                    event,
+                    (resolved) {
+                      final delta = event.scrollDelta.dx != 0
+                          ? event.scrollDelta.dx
+                          : event.scrollDelta.dy;
+                      _scroll.jumpTo(
+                        (_scroll.offset + delta).clamp(
+                          0.0,
+                          _scroll.position.maxScrollExtent,
+                        ),
+                      );
+                    },
+                  );
+                }
+              },
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(context).copyWith(
+                  dragDevices: {
+                    PointerDeviceKind.mouse,
+                    PointerDeviceKind.touch,
+                    PointerDeviceKind.trackpad,
+                    PointerDeviceKind.stylus,
+                  },
+                ),
+                child: Scrollbar(
+                  controller: _scroll,
+                  thumbVisibility: overflow,
+                  child: ListView.separated(
+                    controller: _scroll,
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.only(bottom: 12),
+                    itemCount: SchedulePage._weekdays.length,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(width: 10),
+                    itemBuilder: (context, index) {
+                      final day = SchedulePage._weekdays[index];
+                      return Semantics(
+                        key: ValueKey('schedule-day-$index'),
+                        button: true,
+                        selected: index == widget.selectedIndex,
+                        child: SizedBox(
+                          width: 210,
+                          child: InkWell(
+                            onTap: () => widget.onSelected(index),
+                            borderRadius: BorderRadius.circular(8),
+                            child: _DayCard(
+                              label: day.$2,
+                              subjects: widget.schedule[day.$1] ?? const [],
+                              active: index == widget.selectedIndex,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
-          );
-        },
-      ),
-    );
-  }
+          ),
+        ],
+      );
+    },
+  );
 }
 
 class _DayCard extends StatelessWidget {

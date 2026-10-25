@@ -3,6 +3,27 @@ import 'package:anime/src/domain/subject_content_type.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'animated TV from mixed providers never leaks into live-action series',
+    () {
+      for (final source in ['tmdb:tv:123', 'cinemeta:series:tt123', 'tvmaze']) {
+        final subject = _subject(
+          source: source,
+          platform: 'Series',
+        ).copyWith(categories: const [AnimeCategory(name: '动画')]);
+        expect(
+          subjectContentTypeOf(subject),
+          SubjectContentType.anime,
+          reason: source,
+        );
+        expect(
+          subjectMatchesContentType(subject, SubjectContentType.series),
+          isFalse,
+        );
+      }
+    },
+  );
+
   test('movie format wins over anime provider identity', () {
     for (final source in const ['bangumi', 'anilist', 'jikan', 'kitsu']) {
       for (final platform in const ['Movie', 'Film', '电影', '剧场版']) {

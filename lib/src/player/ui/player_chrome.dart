@@ -175,18 +175,11 @@ class _PlayerHeader extends StatelessWidget {
               ],
             ),
           ),
-          _HeaderIcon(Icons.refresh, tooltip: '刷新', onPressed: onReload),
-          _HeaderIcon(
-            Icons.camera_alt_outlined,
-            tooltip: '保存截图',
-            onPressed: onScreenshot,
-          ),
           _HeaderIcon(
             theaterMode ? Icons.close_fullscreen : Icons.crop_16_9_rounded,
             tooltip: theaterMode ? '退出影院模式' : '影院模式',
             onPressed: onTheaterMode,
           ),
-          _HeaderIcon(Icons.cast, tooltip: '投屏 / 外部播放', onPressed: onCast),
           IconButton(
             key: const ValueKey('playerSubtitles'),
             tooltip: '字幕',
@@ -200,6 +193,44 @@ class _PlayerHeader extends StatelessWidget {
             tooltip: '播放设置',
             onPressed: onSettings,
             icon: const Icon(Icons.tune),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多播放操作',
+            icon: const Icon(
+              Icons.more_horiz_rounded,
+              color: AppColors.theaterInk,
+            ),
+            color: AppColors.theaterPanel,
+            onSelected: (value) async {
+              switch (value) {
+                case 'reload':
+                  await onReload();
+                case 'screenshot':
+                  await onScreenshot();
+                case 'cast':
+                  await onCast();
+              }
+            },
+            itemBuilder: (context) => [
+              for (final item in [
+                ('reload', Icons.refresh, '刷新'),
+                ('screenshot', Icons.camera_alt_outlined, '保存截图'),
+                ('cast', Icons.cast, '投屏 / 外部播放'),
+              ])
+                PopupMenuItem(
+                  value: item.$1,
+                  child: Row(
+                    children: [
+                      Icon(item.$2, size: 20, color: AppColors.theaterInk),
+                      const SizedBox(width: 12),
+                      Text(
+                        item.$3,
+                        style: const TextStyle(color: AppColors.theaterInk),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ),
         ],
       ),
@@ -557,7 +588,7 @@ class _UnifiedPlayerControls extends StatelessWidget {
                           ),
                           child: Text(
                             '发送',
-                            style: TextStyle(fontSize: dense ? 10 : 11),
+                            style: TextStyle(fontSize: dense ? 11 : 13),
                           ),
                         ),
                       ],
@@ -606,7 +637,7 @@ class _UnifiedPlayerControls extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 4),
                   foregroundColor: AppColors.theaterInk,
                 ),
-                child: Text('选集', style: TextStyle(fontSize: dense ? 10 : 12)),
+                child: Text('选集', style: TextStyle(fontSize: dense ? 11 : 14)),
               ),
             ),
             SizedBox(width: gap),
@@ -633,7 +664,7 @@ class _UnifiedPlayerControls extends StatelessWidget {
                     dense || line == null
                         ? '线路'
                         : playbackLineProviderLabel(line!),
-                    style: TextStyle(fontSize: dense ? 10 : 12),
+                    style: TextStyle(fontSize: dense ? 11 : 14),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),

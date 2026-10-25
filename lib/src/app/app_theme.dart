@@ -28,50 +28,48 @@ class AnimeTheme {
   }) {
     final dark = brightness == Brightness.dark;
     final colors = _ThemeColors(dark: dark);
-    // The accent fill stays mist blue in both themes; only the readable
-    // text-accent shifts (deep on paper, lightened on charcoal).
-    const primary = AppColors.primary;
-    const onPrimary = Colors.white;
-    final textAccent = dark ? AppColors.primary2 : AppColors.accentDeep;
-    final scheme =
-        ColorScheme.fromSeed(
-          seedColor: AppColors.primary,
-          brightness: brightness,
-          surface: colors.surface,
-        ).copyWith(
-          primary: primary,
-          onPrimary: onPrimary,
-          secondary: AppColors.cyan,
-          onSecondary: Colors.white,
-          tertiary: AppColors.rose,
-          onTertiary: Colors.white,
-          primaryContainer: dark
-              ? AppColors.primarySurface
-              : const Color(0xFFDFE9F3),
-          onPrimaryContainer: dark
-              ? const Color(0xFFC3D8EC)
-              : const Color(0xFF2C4A66),
-          secondaryContainer: dark
-              ? AppColors.secondarySurface
-              : AppColors.lightPanel,
-          onSecondaryContainer: dark
-              ? const Color(0xFFD6D3C8)
-              : const Color(0xFF3C3A33),
-          surface: colors.surface,
-          surfaceContainerLowest: colors.background,
-          surfaceContainerLow: colors.surfaceLow,
-          surfaceContainer: colors.panel,
-          surfaceContainerHigh: colors.panelHigh,
-          surfaceContainerHighest: colors.panelHighest,
-          onSurface: colors.text,
-          onSurfaceVariant: colors.muted,
-          outline: colors.borderBright,
-          outlineVariant: colors.border,
-          error: AppColors.danger,
-          onError: Colors.white,
-          shadow: const Color(0xFF141413),
-          scrim: Colors.black,
-        );
+    final primary = dark ? Colors.white : Colors.black;
+    final onPrimary = dark ? Colors.black : Colors.white;
+    final textAccent = primary;
+    // Explicit neutral slots avoid Material's seeded color tint in dialogs,
+    // chips, selections and surface elevations.
+    final scheme = ColorScheme(
+      brightness: brightness,
+      primary: primary,
+      onPrimary: onPrimary,
+      primaryContainer: colors.panelHigh,
+      onPrimaryContainer: colors.text,
+      secondary: primary,
+      onSecondary: onPrimary,
+      secondaryContainer: colors.panelHigh,
+      onSecondaryContainer: colors.text,
+      tertiary: primary,
+      onTertiary: onPrimary,
+      tertiaryContainer: colors.panelHigh,
+      onTertiaryContainer: colors.text,
+      error: primary,
+      onError: onPrimary,
+      errorContainer: colors.panelHigh,
+      onErrorContainer: colors.text,
+      surface: colors.surface,
+      onSurface: colors.text,
+      onSurfaceVariant: colors.muted,
+      surfaceContainerLowest: colors.background,
+      surfaceContainerLow: colors.surfaceLow,
+      surfaceContainer: colors.panel,
+      surfaceContainerHigh: colors.panelHigh,
+      surfaceContainerHighest: colors.panelHighest,
+      surfaceDim: colors.panelHigh,
+      surfaceBright: colors.surface,
+      outline: colors.borderBright,
+      outlineVariant: colors.border,
+      inverseSurface: colors.text,
+      onInverseSurface: colors.background,
+      inversePrimary: onPrimary,
+      shadow: Colors.black,
+      scrim: Colors.black,
+      surfaceTint: Colors.transparent,
+    );
 
     final textTheme = _textTheme(dark: dark);
     final controlHeight = compact ? 40.0 : 44.0;
@@ -101,12 +99,12 @@ class AnimeTheme {
       textTheme: textTheme,
       primaryTextTheme: textTheme,
       iconTheme: IconThemeData(color: colors.muted, size: 21),
-      primaryIconTheme: const IconThemeData(color: onPrimary, size: 21),
+      primaryIconTheme: IconThemeData(color: onPrimary, size: 21),
       cardTheme: CardThemeData(
         elevation: 0,
         color: colors.panel,
         surfaceTintColor: Colors.transparent,
-        shadowColor: const Color(0xFF141413).withValues(alpha: 0.18),
+        shadowColor: const Color(0xFF141414).withValues(alpha: 0.18),
         margin: EdgeInsets.zero,
         clipBehavior: Clip.antiAlias,
         shape: RoundedRectangleBorder(
@@ -140,7 +138,7 @@ class AnimeTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
-          borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
+          borderSide: BorderSide(color: primary, width: 1.4),
         ),
         errorBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -166,11 +164,11 @@ class AnimeTheme {
               return primary.withValues(alpha: 0.30);
             }
             if (states.contains(WidgetState.hovered)) {
-              return const Color(0xFF5B88B8);
+              return dark ? const Color(0xFFE6E6E6) : const Color(0xFF222222);
             }
             return primary;
           }),
-          foregroundColor: const WidgetStatePropertyAll(onPrimary),
+          foregroundColor: WidgetStatePropertyAll(onPrimary),
           overlayColor: WidgetStatePropertyAll(
             Colors.white.withValues(alpha: 0.10),
           ),
@@ -273,7 +271,7 @@ class AnimeTheme {
         }),
         thumbColor: WidgetStateProperty.resolveWith((states) {
           return states.contains(WidgetState.selected)
-              ? Colors.white
+              ? onPrimary
               : colors.muted;
         }),
         trackOutlineColor: WidgetStatePropertyAll(colors.border),
@@ -284,7 +282,7 @@ class AnimeTheme {
               ? primary
               : Colors.transparent;
         }),
-        checkColor: const WidgetStatePropertyAll(Colors.white),
+        checkColor: WidgetStatePropertyAll(onPrimary),
         side: BorderSide(color: colors.borderBright),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.xs),
@@ -314,7 +312,7 @@ class AnimeTheme {
         elevation: 0,
         backgroundColor: colors.panel,
         surfaceTintColor: Colors.transparent,
-        shadowColor: const Color(0xFF141413).withValues(alpha: 0.30),
+        shadowColor: const Color(0xFF141414).withValues(alpha: 0.30),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(AppRadius.xl),
           side: BorderSide(color: colors.border),
@@ -454,8 +452,8 @@ class AnimeTheme {
     }) {
       return TextStyle(
         color: color ?? text,
-        fontFamily: AppTypography.serifFamily,
-        fontFamilyFallback: AppTypography.serifFallback,
+        fontFamily: AppTypography.sansFamily,
+        fontFamilyFallback: AppTypography.sansFallback,
         fontSize: size,
         fontWeight: FontWeight.w600,
         height: height,
@@ -508,7 +506,7 @@ class _ThemeColors {
   Color get panelHover => dark ? AppColors.panelHover : AppColors.lightPanel;
   Color get border => dark ? AppColors.border : AppColors.lightBorder;
   Color get borderBright =>
-      dark ? AppColors.borderBright : const Color(0xFFCFCBBD);
+      dark ? AppColors.borderBright : const Color(0xFFC8C8C8);
   Color get text => dark ? AppColors.text : AppColors.lightText;
   Color get muted => dark ? AppColors.muted : AppColors.lightMuted;
   Color get faint => dark ? AppColors.faint : AppColors.lightFaint;

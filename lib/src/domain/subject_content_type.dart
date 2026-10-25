@@ -16,6 +16,15 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
     return SubjectContentType.movie;
   }
 
+  if (source.startsWith('cinemeta:movie:') ||
+      source.startsWith('tmdb:movie:') ||
+      source == 'wikidata' ||
+      source.startsWith('archive:') ||
+      source.startsWith('peertube:') ||
+      source.startsWith('commons:')) {
+    return SubjectContentType.movie;
+  }
+
   if (source == 'bangumi' ||
       source.startsWith('bangumi:') ||
       source == 'anilist' ||
@@ -27,21 +36,35 @@ SubjectContentType subjectContentTypeOf(AnimeSubject subject) {
     return SubjectContentType.anime;
   }
 
+  // Mixed TV providers carry animation as a genre, not a media-type ID.
+  // Check structured metadata before their generic TV/Series source labels.
+  final labels = [
+    platform,
+    ...subject.categories.map((item) => item.name.toLowerCase()),
+    ...subject.tags.map((item) => item.name.toLowerCase()),
+  ];
+  if (labels.any(
+    (label) => const {
+      'animation',
+      'anime',
+      'animated',
+      '动画',
+      '動畫',
+      '动漫',
+      '番剧',
+      '电视动画',
+      '网络动画',
+    }.contains(label.trim()),
+  )) {
+    return SubjectContentType.anime;
+  }
+
   if (source.startsWith('cinemeta:series:') ||
       source.startsWith('tmdb:series:') ||
       source == 'tmdb:tv' ||
       source.startsWith('tmdb:tv:') ||
       source.startsWith('tvmaze')) {
     return SubjectContentType.series;
-  }
-
-  if (source.startsWith('cinemeta:movie:') ||
-      source.startsWith('tmdb:movie:') ||
-      source == 'wikidata' ||
-      source.startsWith('archive:') ||
-      source.startsWith('peertube:') ||
-      source.startsWith('commons:')) {
-    return SubjectContentType.movie;
   }
 
   if (platform.contains('series') ||

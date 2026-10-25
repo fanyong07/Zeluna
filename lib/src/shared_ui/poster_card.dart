@@ -216,10 +216,14 @@ class PosterArt extends StatelessWidget {
             constraints.hasBoundedWidth ? constraints.maxWidth : null,
             pixelRatio,
           );
-          final cacheHeight = _decodeDimension(
-            constraints.hasBoundedHeight ? constraints.maxHeight : null,
-            pixelRatio,
-          );
+          // Specifying both decode dimensions stretches the bitmap before
+          // BoxFit gets a chance to crop it. One bound preserves source ratio.
+          final cacheHeight = cacheWidth == null
+              ? _decodeDimension(
+                  constraints.hasBoundedHeight ? constraints.maxHeight : null,
+                  pixelRatio,
+                )
+              : null;
           final candidates = posterImageCandidates(
             url,
             targetPixelWidth: cacheWidth,
@@ -315,7 +319,7 @@ class BackdropArt extends StatelessWidget {
             ),
           ),
         ),
-        const ColoredBox(color: Color(0x701B1A18)),
+        const ColoredBox(color: Color(0x70000000)),
         Center(
           child: FractionallySizedBox(
             widthFactor: 0.72,

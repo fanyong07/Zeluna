@@ -45,6 +45,7 @@ from .config import (
     MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE,
     PLAYBACK_ANICH_LINE_TTL_HOURS,
     PLAYBACK_CACHE_HOURS,
+    PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS,
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
     PLAYBACK_QUICK_LINE_COUNT,
@@ -255,8 +256,37 @@ class PlaybackService:
             content_type=content_type,
             year=year,
         )
-        discovered = await asyncio.shield(task)
-        return self._merge_managed_lines(managed, discovered)
+        try:
+            discovered = await asyncio.wait_for(
+                asyncio.shield(task), timeout=PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS
+            )
+            return self._merge_managed_lines(managed, discovered)
+        except TimeoutError:
+            # Shield the shared full scan: a foreground deadline/cancellation
+            # must not discard its eventual full cache or a peer's request.
+            try:
+                partial = await asyncio.wait_for(
+                    self.quick_lines(
+                        stable_id, episode, session, title=title,
+                        original_title=original_title, content_type=content_type,
+                        year=year,
+                    ),
+                    timeout=min(
+                        PLAYBACK_QUICK_TIMEOUT_SECONDS + 0.5,
+                        15.0 - PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS,
+                    ),
+                )
+            except TimeoutError:
+                partial = managed
+            if task.done() and not task.cancelled():
+                return self._merge_managed_lines(managed, task.result())
+            # This is response metadata only, never written as a full/negative
+            # cache. A subsequent lookup may collect the completed full scan.
+            return [dict(item, discovery_pending=True) for item in partial]
+
+    def full_refresh_pending(self, stable_id: str, episode: int) -> bool:
+        task = self._refresh_tasks.get((stable_id, max(1, episode)))
+        return task is not None and not task.done()
 
     async def quick_lines(
         self,

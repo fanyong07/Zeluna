@@ -154,8 +154,12 @@ class _SourceCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 720;
     return AppPanel(
-      color: source.enabled ? const Color(0xFF111922) : AppColors.panel,
-      borderColor: source.enabled ? AppColors.borderBright : AppColors.border,
+      color: source.enabled
+          ? Theme.of(context).colorScheme.surfaceContainerHigh
+          : Theme.of(context).colorScheme.surfaceContainer,
+      borderColor: source.enabled
+          ? Theme.of(context).colorScheme.outline
+          : Theme.of(context).colorScheme.outlineVariant,
       child: compact ? _compactLayout(context) : _wideLayout(context),
     );
   }
@@ -348,7 +352,7 @@ class _HealthBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = _healthColor(source);
+    final color = context.inkMuted;
     return DecoratedBox(
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.16),
@@ -570,17 +574,6 @@ class _SourceEmpty extends StatelessWidget {
       ),
     );
   }
-}
-
-Color _healthColor(VideoSource source) {
-  if (source.executableUnsupported) return const Color(0xFFFF9F6E);
-  if (source.antiCrawlerEnabled) return const Color(0xFFFFD166);
-  return switch (source.health.trim().toLowerCase()) {
-    'ok' || 'healthy' || 'pass' || 'available' => const Color(0xFF4DD7A5),
-    'warning' || 'degraded' || 'limited' => const Color(0xFFFFD166),
-    'error' || 'failed' || 'unhealthy' || 'offline' => const Color(0xFFFF7A90),
-    _ => const Color(0xFF9A968A),
-  };
 }
 
 IconData _healthIcon(VideoSource source) {

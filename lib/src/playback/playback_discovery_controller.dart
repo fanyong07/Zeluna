@@ -529,6 +529,7 @@ final class PlaybackDiscoveryController {
     required bool forceRefresh,
     required String? preferredProviderId,
     required PlaybackLookupIntent lookupIntent,
+    void Function(List<PlaybackLine>)? onVerifiedLines,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final workToken = RulePlaybackCancellationToken();
@@ -806,6 +807,7 @@ final class PlaybackDiscoveryController {
             startFallbackWork();
         }
         final lines = currentVerifiedLines();
+        if (lines.isNotEmpty) onVerifiedLines?.call(lines);
         if (shouldReturn(lines)) return finish(lines);
       }
 
@@ -964,49 +966,116 @@ final class PlaybackDiscoveryController {
     // Full backend discovery and installed rules are independent producers.
     // A slow source must not prevent already-found rule routes from appearing.
     Stream<PlaybackLineLookupUpdate> backendUpdates() async* {
-      final expandedBackendLines = await _backendLinesForEpisode(
-        scope,
-        subject,
-        episode,
-        expandAll: true,
-        cancellationToken: token,
-      );
-      if (!_isCurrent(scope) || token.isCancelled) return;
-      var checked = _mergeBackendRouteUpdates(baseLines, expandedBackendLines);
-      final candidates = _backendLinesNeedingBackgroundProbe(checked);
-      final total = candidates.isEmpty ? 1 : candidates.length;
+      var checked = baseLines;
+      final scheduled = <Object, PlaybackLine>{};
       var completed = 0;
-      yield PlaybackLineLookupUpdate(
-        lines: checked,
-        completedRules: 0,
-        totalRules: total,
-        phase: PlaybackLineLookupPhase.discovery,
-      );
-      await for (final line in probePlaybackLinesProgressively(
-        candidates,
-        maxConcurrent: 4,
-        cancellationToken: token,
-        verify: (line) => verifyPlaybackLine(
-          line,
-          enrichMetadata: false,
+      final inFlightProbes = <Future<void>>{};
+      Future<PlaybackLine> verify(PlaybackLine line) async {
+        while (inFlightProbes.length >= 4) {
+          await Future.any(inFlightProbes);
+        }
+        final done = Completer<void>();
+        inFlightProbes.add(done.future);
+        try {
+          return await verifyPlaybackLine(
+            line,
+            enrichMetadata: false,
+            cancellationToken: token,
+          );
+        } finally {
+          inFlightProbes.remove(done.future);
+          done.complete();
+        }
+      }
+
+      Stream<(List<PlaybackLine>?, PlaybackLine?)> probes(
+        List<PlaybackLine> lines,
+      ) async* {
+        final candidates = _backendLinesNeedingBackgroundProbe(lines)
+            .where((line) {
+              final key = _backendRouteRequestKey(line);
+              if (scheduled.containsKey(key)) return false;
+              scheduled[key] = line;
+              return true;
+            })
+            .toList(growable: false);
+        await for (final line in probePlaybackLinesProgressively(
+          candidates,
+          maxConcurrent: 4,
           cancellationToken: token,
-        ),
-      )) {
-        if (!_isCurrent(scope) || token.isCancelled) return;
-        checked = _replaceBackendRouteProbe(checked, line);
-        completed++;
-        yield PlaybackLineLookupUpdate(
-          lines: checked,
-          completedRules: completed,
-          totalRules: total,
-          phase: PlaybackLineLookupPhase.verification,
+          verify: verify,
+        )) {
+          yield (null, line);
+        }
+      }
+
+      Stream<(List<PlaybackLine>?, PlaybackLine?)> expandedEvents() async* {
+        final expanded = await _backendLinesForEpisode(
+          scope,
+          subject,
+          episode,
+          expandAll: true,
+          cancellationToken: token,
         );
+        if (!_isCurrent(scope) || token.isCancelled) return;
+        yield (expanded, null);
+        yield* probes(checked);
+      }
+
+      // Quick candidates can be checked immediately; neither a slow full scan
+      // nor a slow quick probe may hold the other producer's usable routes.
+      final iterators = [
+        StreamIterator(probes(baseLines)),
+        StreamIterator(expandedEvents()),
+      ];
+      final next = <int, Future<(int, bool)>>{
+        for (var i = 0; i < iterators.length; i++)
+          i: iterators[i].moveNext().then((hasNext) => (i, hasNext)),
+      };
+      try {
+        while (next.isNotEmpty) {
+          final (index, hasNext) = await Future.any(next.values);
+          next.remove(index);
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          if (!hasNext) continue;
+          final (discovered, verified) = iterators[index].current;
+          if (discovered != null) {
+            checked = _mergeBackendRouteUpdates(checked, discovered);
+          }
+          if (verified != null) {
+            final key = _backendRouteRequestKey(verified);
+            // An authoritative full response may have upgraded this request
+            // while the quick candidate was in flight. Ignore that old probe,
+            // even on success: it cannot downgrade or replace the new version.
+            if (checked.any(
+              (line) =>
+                  _backendRouteRequestKey(line) == key &&
+                  identical(line, scheduled[key]),
+            )) {
+              checked = _replaceBackendRouteProbe(checked, verified);
+            }
+            completed++;
+          }
+          yield PlaybackLineLookupUpdate(
+            lines: checked,
+            completedRules: completed,
+            totalRules: scheduled.length + (next.containsKey(1) ? 1 : 0),
+            phase: verified == null
+                ? PlaybackLineLookupPhase.discovery
+                : PlaybackLineLookupPhase.verification,
+          );
+          next[index] = iterators[index].moveNext().then(
+            (hasNext) => (index, hasNext),
+          );
+        }
+      } finally {
+        await Future.wait(iterators.map((iterator) => iterator.cancel()));
       }
       if (!_isCurrent(scope) || token.isCancelled) return;
       yield PlaybackLineLookupUpdate(
         lines: checked,
-        completedRules: total,
-        totalRules: total,
+        completedRules: scheduled.isEmpty ? 1 : scheduled.length,
+        totalRules: scheduled.isEmpty ? 1 : scheduled.length,
         phase: PlaybackLineLookupPhase.complete,
       );
     }
@@ -1220,16 +1289,42 @@ final class PlaybackDiscoveryController {
     required String? preferredProviderId,
     required bool forceRefresh,
   }) async {
-    final lines = await linesForEpisode(
-      subject,
-      episode,
-      forceRefresh: forceRefresh,
-      preferredProviderId: preferredProviderId,
-      cancellationToken: cancellationToken,
-      lookupIntent: cacheEpisode
-          ? PlaybackLookupIntent.warmup
-          : PlaybackLookupIntent.interactive,
-    );
+    // Publish a verified primary as soon as it is ready. The bounded backup
+    // lookup may continue, but must never hide a route at an early transition.
+    void publishReady(Iterable<PlaybackLine> lines) {
+      if (!cacheEpisode ||
+          !_isCurrent(scope) ||
+          cancellationToken.isCancelled) {
+        return;
+      }
+      _cacheEpisodeWarmup(
+        scope,
+        subject,
+        episode,
+        lines.where((line) => line.clientVerified),
+        preferredProviderId: preferredProviderId,
+      );
+    }
+
+    final lines = cacheEpisode
+        ? await _linesForEpisodeWithPreference(
+            scope,
+            subject,
+            episode,
+            expandAll: false,
+            forceRefresh: forceRefresh,
+            preferredProviderId: preferredProviderId?.trim(),
+            lookupIntent: PlaybackLookupIntent.warmup,
+            cancellationToken: cancellationToken,
+            onVerifiedLines: publishReady,
+          )
+        : await linesForEpisode(
+            subject,
+            episode,
+            forceRefresh: forceRefresh,
+            preferredProviderId: preferredProviderId,
+            cancellationToken: cancellationToken,
+          );
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final preferred = preferredProviderId?.trim();
     var candidates = cacheEpisode
@@ -1284,22 +1379,54 @@ final class PlaybackDiscoveryController {
     )) {
       if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
       candidates = _replaceBackendRouteProbe(candidates, verified);
+      publishReady(candidates);
     }
     if (!_isCurrent(scope) || cancellationToken.isCancelled) return;
     final ranked = rankPlaybackLinesForStartup(candidates);
     if (cacheEpisode) {
-      if (ranked.isEmpty) return;
-      _episodeWarmupCache.write(
-        _episodePrefetchKey(scope, subject, episode),
-        episodeIdentity: episode.identityKey(subjectKey: subject.identityKey),
-        primary: ranked.first,
-        fallbacks: ranked.skip(1).take(1),
+      _cacheEpisodeWarmup(
+        scope,
+        subject,
+        episode,
+        ranked,
         preferredProviderId: preferred,
-        ttl: const Duration(minutes: 45),
       );
     } else {
       _cacheBackendPlaybackLines(scope, subject, episode, ranked);
     }
+  }
+
+  void _cacheEpisodeWarmup(
+    _PlaybackDiscoveryScope scope,
+    AnimeSubject subject,
+    AnimeEpisode episode,
+    Iterable<PlaybackLine> lines, {
+    required String? preferredProviderId,
+  }) {
+    final ranked = rankPlaybackLinesForStartup(
+      lines.where(
+        (line) => _isVerifiedLookupLine(
+          line,
+          _now().add(const Duration(seconds: 15)),
+        ),
+      ),
+    );
+    if (ranked.isEmpty) return;
+    final preferred = ranked.where(
+      (line) => line.providerId == preferredProviderId,
+    );
+    final ordered = [
+      ...preferred.take(1),
+      ...ranked.where((line) => line.providerId != preferredProviderId),
+    ];
+    if (ordered.isEmpty) return;
+    _episodeWarmupCache.write(
+      _episodePrefetchKey(scope, subject, episode),
+      episodeIdentity: episode.identityKey(subjectKey: subject.identityKey),
+      primary: ordered.first,
+      fallbacks: ordered.skip(1).take(1),
+      preferredProviderId: preferredProviderId,
+    );
   }
 
   Future<List<PlaybackLine>> _backendLinesForEpisode(
@@ -1360,7 +1487,9 @@ final class PlaybackDiscoveryController {
                 if (identical(_backendLookups[lookupKey], ownedOperation)) {
                   _backendLookups.remove(lookupKey);
                   if (_isCurrent(scope) && !ownedOperation.token.isCancelled) {
-                    _backendCache.write(lookupKey, lines);
+                    if (!lines.any((line) => line.cacheState == 'partial')) {
+                      _backendCache.write(lookupKey, lines);
+                    }
                   }
                 }
                 return List<PlaybackLine>.unmodifiable(lines);

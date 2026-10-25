@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
 import 'csp_rule_support.dart';
+import 'bundled_kazumi_rules.dart';
+import 'bundled_live_action_rules.dart';
 import 'rule_models.dart';
 import 'rule_security.dart';
 
@@ -12,8 +14,10 @@ class RulePluginRepository {
 
   final List<RulePlugin> extraRules;
 
-  _RuleCollection get _collection =>
-      _collectRules(_verifiedBuiltInRules, extraRules);
+  _RuleCollection get _collection => _collectRules([
+    ..._verifiedBuiltInRules,
+    ...optionalLiveActionRules,
+  ], extraRules);
 
   List<RulePlugin> get allRules => _collection.rules;
 
@@ -397,6 +401,7 @@ const _drpy = 'drpy-js';
 /// They remain ordinary rules: users can disable them in rule management and
 /// the runtime health cache will demote a source after repeated failures.
 final _verifiedBuiltInRules = <RulePlugin>[
+  ...bundledKazumiRules,
   RulePlugin(
     id: 'zeluna:recommended:fantuan',
     name: '饭团动漫(替换)',
@@ -532,13 +537,13 @@ final _verifiedBuiltInRules = <RulePlugin>[
   RulePlugin(
     id: 'zeluna:recommended:dbku',
     name: '独播库',
-    version: '2026-07-28',
+    version: '2026-10-05',
     source: RuleSourceKind.custom,
     contentType: RuleContentType.movie,
     engine: _xbpq,
-    updatedAt: _date(2026, 7, 28),
+    updatedAt: _date(2026, 10, 5),
     qualityScore: 88,
-    tags: const ['推荐', '电影', '已验证'],
+    tags: const ['推荐', '电影', '电视剧', '原生解析'],
     baseUrl: 'https://www.dbku.tv',
     searchUrl: 'https://www.dbku.tv/vodsearch/-------------.html?wd={wd}',
     searchable: true,
@@ -547,7 +552,7 @@ final _verifiedBuiltInRules = <RulePlugin>[
     installedByDefault: true,
     priority: 3,
     xbpq: const XbpqParserConfig(
-      searchArray: '<li class="clearfix">&&</li>',
+      searchArray: '<h4 class="title">&&</h4>',
       searchTitle: '">&&</a>',
       searchLink: 'href="&&"',
       playArray: '<ul class="myui-content__list&&</ul>',
@@ -558,14 +563,14 @@ final _verifiedBuiltInRules = <RulePlugin>[
     permissionManifest: const RulePermissionManifest.official(
       id: 'zeluna:recommended:dbku',
       name: '独播库',
-      version: '2026-07-28',
+      version: '2026-10-05',
       engine: 'XBPQ',
-      contentTypes: ['movie'],
+      contentTypes: ['movie', 'series'],
       pageDomains: ['www.dbku.tv'],
-      mediaDomains: ['www.dbku.tv'],
+      mediaDomains: ['www.dbku.tv', 'vid.dbokutv.com'],
       customReferer: true,
     ),
-    note: '播放页提供经页面编码的 HLS 地址，客户端会先解码并验证清单与分片。',
+    note: '已检测真人电影及电视剧相邻集数；静态解析播放页并验证清单与分片，实际可用性随上游变化。',
   ),
   RulePlugin(
     id: 'zeluna:recommended:nivod',

@@ -100,12 +100,14 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                       if (_error != null)
                         _MessageBanner(
                           message: _error!,
-                          color: Colors.redAccent,
+                          icon: Icons.error_outline_rounded,
+                          color: context.ink,
                         ),
                       if (_message != null)
                         _MessageBanner(
                           message: _message!,
-                          color: Colors.greenAccent,
+                          icon: Icons.check_circle_outline_rounded,
+                          color: context.ink,
                         ),
                       if (_error != null || _message != null)
                         const SizedBox(height: 14),
@@ -222,21 +224,21 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
                 icon: Icons.logout_rounded,
                 title: '退出登录',
                 subtitle: '账号数据会保留，下次登录可继续使用',
-                color: Colors.orangeAccent,
+                color: context.ink,
                 onTap: _busy ? null : _signOut,
               ),
               _AccountAction(
                 icon: Icons.delete_forever_outlined,
                 title: '清除此设备的账号数据',
                 subtitle: '云端账号会保留，本机收藏与历史将被删除',
-                color: Colors.redAccent,
+                color: context.ink,
                 onTap: _busy ? null : () => _confirmDeleteAccount(account),
               ),
               _AccountAction(
                 icon: Icons.person_off_outlined,
                 title: '永久删除云端账号',
                 subtitle: '7 天内可撤销；私有数据删除，公开内容匿名保留',
-                color: Colors.redAccent,
+                color: context.ink,
                 onTap: _busy
                     ? null
                     : () => _confirmCloudAccountDeletion(account),
@@ -994,7 +996,6 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
             onPressed: () {
               if (_deletePassword.text.isNotEmpty) {
                 Navigator.of(dialogContext).pop(_deletePassword.text);
@@ -1063,7 +1064,6 @@ class _AccountSettingsPageState extends ConsumerState<AccountSettingsPage> {
             child: const Text('取消'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
             onPressed: () {
               if (_deletePassword.text.isNotEmpty) {
                 Navigator.of(dialogContext).pop(_deletePassword.text);
@@ -1292,7 +1292,7 @@ class _AccountStatusCard extends StatelessWidget {
                       color:
                           syncStatus.phase == SyncPhase.expired ||
                               syncStatus.phase == SyncPhase.error
-                          ? Colors.orangeAccent
+                          ? context.ink
                           : context.inkMuted,
                     ),
                   ),
@@ -1443,14 +1443,11 @@ class _PendingCleanupNotice extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AppPanel(
-      borderColor: Colors.orangeAccent.withValues(alpha: 0.7),
+      borderColor: context.ink.withValues(alpha: 0.7),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(
-            Icons.cleaning_services_outlined,
-            color: Colors.orangeAccent,
-          ),
+          Icon(Icons.cleaning_services_outlined, color: context.ink),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -1587,10 +1584,15 @@ class _AccountAction extends StatelessWidget {
 }
 
 class _MessageBanner extends StatelessWidget {
-  const _MessageBanner({required this.message, required this.color});
+  const _MessageBanner({
+    required this.message,
+    required this.color,
+    required this.icon,
+  });
 
   final String message;
   final Color color;
+  final IconData icon;
 
   @override
   Widget build(BuildContext context) {
@@ -1605,12 +1607,21 @@ class _MessageBanner extends StatelessWidget {
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-          child: Text(
-            message,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w800,
-            ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

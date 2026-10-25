@@ -303,7 +303,14 @@ GROUP BY ?imdb
       );
       final hasDistinctLocalizedTitle =
           candidate.title.trim() != candidate.originalTitle.trim() ||
-          candidate.language.trim() != '日语';
+          // Unknown origin is not evidence that a Han-only original is Chinese.
+          const {
+            '国语',
+            '中文',
+            'zh',
+            'zh-CN',
+            'cn',
+          }.contains(candidate.language.trim());
       final title = hasDistinctLocalizedTitle
           ? _verifiedChinese(candidate.title, title: true)
           : null;

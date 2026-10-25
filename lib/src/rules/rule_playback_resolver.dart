@@ -11,6 +11,7 @@ import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
 import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
 import 'android_csp_bridge.dart';
 import 'animeko_webview_sniffer.dart';
 import 'csp_rule_support.dart';
@@ -1612,7 +1613,11 @@ class RulePlaybackResolver {
     final searches = <Future<_RankedResult<Map<String, dynamic>>?>>[];
     var preference = 0;
     for (final keyword in _searchKeywords(subject)) {
-      for (final searchUri in _tvBoxSearchUris(endpoint, keyword)) {
+      for (final searchUri in _tvBoxSearchUris(
+        endpoint,
+        keyword,
+        action: rule.rawConfig['searchAction']?.toString(),
+      )) {
         searches.add(
           _searchTvBoxItem(
             client,
@@ -1644,7 +1649,20 @@ class RulePlaybackResolver {
               ),
             );
             if (details.isEmpty) continue;
-            item = details.first;
+            // Some feeds return several records or reveal category/year only
+            // on the detail response. Recheck identity before touching media.
+            final matched = _rankBestTvBoxItem(
+              [
+                for (final detail in details)
+                  if ((detail['vod_id']?.toString().trim() ?? '').isEmpty ||
+                      detail['vod_id'].toString().trim() == vodId)
+                    {...item!, ...detail},
+              ],
+              subject,
+              0,
+            );
+            if (matched == null) continue;
+            item = matched.value;
             if (_tvBoxPlayUrl(item).isNotEmpty) {
               break;
             }
@@ -3984,9 +4002,14 @@ bool _hasMpegTransportStreamSignature(List<int> bytes) {
   return false;
 }
 
-List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword) {
+List<Uri> _tvBoxSearchUris(Uri endpoint, String keyword, {String? action}) {
   final result = <String, Uri>{};
-  for (final action in const ['detail', 'videolist']) {
+  // Some public MacCMS APIs accept keyword search only with ac=list.
+  // A reviewed declaration avoids probing several redundant actions per title.
+  final actions = const {'list', 'detail', 'videolist'}.contains(action)
+      ? [action!]
+      : const ['detail', 'videolist'];
+  for (final action in actions) {
     final query = <String, String>{...endpoint.queryParameters}
       ..remove('ids')
       ..['ac'] = action
@@ -4076,7 +4099,7 @@ _RankedResult<Map<String, dynamic>>? _rankBestTvBoxItem(
         item['name']?.toString() ??
         item['title']?.toString() ??
         '';
-    final score = _matchScore(title, subject);
+    final score = _tvBoxMatchScore(item, title, subject);
     if (score > bestScore) {
       best = item;
       bestScore = score;
@@ -4085,6 +4108,54 @@ _RankedResult<Map<String, dynamic>>? _rankBestTvBoxItem(
   return bestScore <= 0
       ? null
       : _RankedResult(value: best, score: bestScore, preference: preference);
+}
+
+// General film/TV catalogues contain remakes, adaptations and commentary with
+// the same title. Reject explicit conflicts, but keep legacy metadata-poor
+// feeds usable. Anime ranking is unchanged by this live-action adaptation.
+int _tvBoxMatchScore(
+  Map<String, dynamic> item,
+  String title,
+  AnimeSubject subject,
+) {
+  final score = _matchScore(title, subject);
+  final targetType = subjectContentTypeOf(subject);
+  if (targetType == SubjectContentType.anime) return score;
+  if (score < 80) return 0;
+  final category = (item['type_name'] ?? item['type'] ?? '').toString();
+  if (RegExp(r'解说|预告|花絮|短视频').hasMatch(category)) return 0;
+  final candidateType = _tvBoxCategory(category);
+  if (candidateType != null && candidateType != targetType) return 0;
+  final expectedYear = _tvBoxYear(subject.date);
+  final candidateYear = _tvBoxYear(item['vod_year'] ?? item['year']);
+  if (expectedYear != null &&
+      candidateYear != null &&
+      expectedYear != candidateYear) {
+    return 0;
+  }
+  return score +
+      (candidateType == targetType ? 8 : 0) +
+      (expectedYear != null && expectedYear == candidateYear ? 10 : 0);
+}
+
+int? _tvBoxYear(Object? value) => int.tryParse(
+  RegExp(r'(?:19|20)\d{2}').firstMatch(value?.toString() ?? '')?.group(0) ?? '',
+);
+
+SubjectContentType? _tvBoxCategory(String value) {
+  if (RegExp(r'电影|片|movie|film', caseSensitive: false).hasMatch(value)) {
+    return SubjectContentType.movie;
+  }
+  if (RegExp(r'动漫|动画|anime', caseSensitive: false).hasMatch(value)) {
+    return SubjectContentType.anime;
+  }
+  if (RegExp(
+    r'电视剧|连续剧|国产剧|内地剧|大陆剧|欧美剧|香港剧|台湾剧|韩国剧|日本剧|海外剧|泰剧|陆剧|港剧|台剧|韩剧|日剧|美剧|综艺|series',
+    caseSensitive: false,
+  ).hasMatch(value)) {
+    return SubjectContentType.series;
+  }
+  return null;
 }
 
 String _tvBoxPlayUrl(Map<String, dynamic>? item) {

@@ -28,7 +28,7 @@ void main() {
       findsOneWidget,
     );
     final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
-    expect(scaffold.backgroundColor, const Color(0xFF14181D));
+    expect(scaffold.backgroundColor, Colors.black);
     await tester.pumpWidget(const SizedBox.shrink());
     initialization.complete();
     await tester.pump();

@@ -9,6 +9,205 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'quick and full producers share a four-probe concurrency limit',
+    () async {
+      final release = Completer<void>();
+      final entered = Completer<void>();
+      var active = 0;
+      var peak = 0;
+      var calls = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            for (var i = 0; i < (expandAll ? 8 : 4); i++)
+              _line(
+                'candidate-$i',
+                available: false,
+                requiresClientProbe: true,
+              ),
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              calls++;
+              active++;
+              if (active > peak) peak = active;
+              if (calls == 4) entered.complete();
+              await release.future;
+              active--;
+              return _verified(line);
+            },
+      );
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList();
+      addTearDown(() async {
+        if (!release.isCompleted) release.complete();
+        await done;
+        controller.dispose();
+      });
+      await entered.future.timeout(const Duration(seconds: 3));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(calls, 4);
+      release.complete();
+      final updates = await done;
+      expect(calls, 8);
+      expect(peak, 4);
+      expect(updates.last.lines.every((line) => line.clientVerified), isTrue);
+    },
+  );
+
+  test(
+    'partial full responses are not cached as completed discovery',
+    () async {
+      var fullCalls = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async {
+            if (!expandAll) return [];
+            fullCalls++;
+            return [
+              _line(
+                'full-$fullCalls',
+                clientVerified: true,
+                cacheState: fullCalls == 1 ? 'partial' : 'cold',
+              ),
+            ];
+          },
+        ),
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      await controller.lineUpdatesForEpisode(_subject, _episode).toList();
+      final second = await controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList();
+      expect(fullCalls, 2);
+      expect(second.last.lines.map((line) => line.id), ['full-2']);
+    },
+  );
+
+  test(
+    'next episode publishes ready preferred route while fallback is pending',
+    () async {
+      final fallback = Completer<List<PlaybackLine>>();
+      final rule = _FakePreferredPlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async => const [],
+        loadPreferred:
+            (
+              _,
+              _, {
+              required preferredProviderId,
+              required expandAll,
+              cancellationToken,
+            }) async => [
+              _line(
+                'ready-next',
+                provider: 'rule:preferred',
+                clientVerified: true,
+              ),
+            ],
+        loadFallback:
+            (_, _, {required excludedProviderId, cancellationToken}) =>
+                fallback.future,
+      );
+      final controller = _controller(
+        backend: _FakePlaybackRepository.empty(),
+        rule: rule,
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+      final warmup = controller.prefetchPlaybackForEpisode(
+        _subject,
+        _episode,
+        preferredProviderId: 'rule:preferred',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      final early = controller.prefetchedWarmupBundleForEpisode(
+        _subject,
+        _episode,
+      );
+      fallback.complete([]);
+      await warmup;
+      expect(
+        early?.primary.id,
+        'ready-next',
+        reason: 'a slow backup must not hide a ready next episode',
+      );
+    },
+  );
+
+  test(
+    'warmup preserves successful provider ahead of a faster fallback',
+    () async {
+      final rule = _FakePreferredPlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async => const [],
+        loadPreferred:
+            (
+              _,
+              _, {
+              required preferredProviderId,
+              required expandAll,
+              cancellationToken,
+            }) async => [
+              _line(
+                'preferred-next',
+                provider: 'rule:preferred',
+                clientVerified: true,
+                latency: const Duration(milliseconds: 300),
+              ),
+            ],
+        loadFallback:
+            (_, _, {required excludedProviderId, cancellationToken}) async => [
+              _line(
+                'fast-fallback',
+                provider: 'rule:other',
+                clientVerified: true,
+                latency: const Duration(milliseconds: 5),
+              ),
+            ],
+      );
+      final controller = _controller(
+        backend: _FakePlaybackRepository.empty(),
+        rule: rule,
+        activeVersion: () => 1,
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: _ruleState,
+      );
+      await controller.prefetchPlaybackForEpisode(
+        _subject,
+        _episode,
+        preferredProviderId: 'rule:preferred',
+      );
+      final bundle = controller.prefetchedWarmupBundleForEpisode(
+        _subject,
+        _episode,
+      )!;
+      expect(bundle.primary.providerId, 'rule:preferred');
+      expect(bundle.fallback?.providerId, 'rule:other');
+    },
+  );
+
   group('REVIEW-SPEC-001 rule-state retirement', () {
     for (final available in [true, false]) {
       test(
@@ -465,9 +664,9 @@ void main() {
                 ]);
                 expect(
                   probeIds,
-                  ['pending'],
+                  [if (!verifiedFirst) 'route', 'pending'],
                   reason:
-                      'superseded candidate must not be probed, even if that probe could succeed',
+                      'quick probes start immediately but a superseded probe cannot overwrite the full result',
                 );
                 expect(modes, [false, true]);
                 expect(authoritative.map((line) => line.id), [
@@ -1221,6 +1420,105 @@ void main() {
 
       verification.complete();
       await done;
+    },
+  );
+
+  test(
+    'quick candidates become playable while full discovery is pending',
+    () async {
+      final full = Completer<List<PlaybackLine>>();
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              expandAll
+              ? full.future
+              : [_line('quick', available: false, requiresClientProbe: true)],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async => _verified(line),
+      );
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .forEach(snapshots.add);
+      addTearDown(() async {
+        if (!full.isCompleted) full.complete([]);
+        await done;
+        controller.dispose();
+      });
+      await _waitUntil(
+        () => snapshots.any(
+          (update) => update.lines.any(
+            (line) => line.id == 'quick' && line.clientVerified,
+          ),
+        ),
+      );
+      expect(full.isCompleted, isFalse);
+      full.complete([]);
+      await done;
+      expect(snapshots.last.lines.single.available, isTrue);
+      expect(snapshots.last.phase, PlaybackLineLookupPhase.complete);
+    },
+  );
+
+  test(
+    'full routes publish while quick verification is pending without duplicate probes',
+    () async {
+      final quickProbe = Completer<void>();
+      final calls = <String>[];
+      final candidate = _line(
+        'quick',
+        available: false,
+        requiresClientProbe: true,
+      );
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            candidate,
+            if (expandAll) _line('full', clientVerified: true),
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              calls.add(line.id);
+              await quickProbe.future;
+              return _verified(line);
+            },
+      );
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .forEach(snapshots.add);
+      addTearDown(() async {
+        if (!quickProbe.isCompleted) quickProbe.complete();
+        await done;
+        controller.dispose();
+      });
+      await _waitUntil(
+        () => snapshots.any(
+          (update) =>
+              update.lines.any((line) => line.id == 'full' && line.available),
+        ),
+      );
+      expect(quickProbe.isCompleted, isFalse);
+      quickProbe.complete();
+      await done;
+      expect(calls, ['quick']);
+      expect(snapshots.last.lines.every((line) => line.available), isTrue);
     },
   );
 
@@ -3102,6 +3400,7 @@ PlaybackLine _line(
   String? url,
   DateTime? expiresAt,
   Duration? latency,
+  String cacheState = '',
 }) => PlaybackLine(
   id: id,
   episodeId: episodeId ?? _episode.id,
@@ -3118,6 +3417,7 @@ PlaybackLine _line(
   clientVerified: clientVerified,
   expiresAt: expiresAt,
   latency: latency,
+  cacheState: cacheState,
   available: available,
 );
 

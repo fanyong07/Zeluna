@@ -98,6 +98,15 @@ class PlaybackLineValidationDecision {
 
 bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
   if (!line.available) return false;
+  // Rule resolution and next-episode warmup already verified these requests.
+  // Do not repeat the manifest/segment probe on the first-frame critical path.
+  if (line.clientVerified &&
+      (line.expiresAt == null ||
+          line.expiresAt!.isAfter(
+            DateTime.now().add(const Duration(seconds: 15)),
+          ))) {
+    return false;
+  }
   // Zeluna's backend only returns lines after a manifest/segment probe. Doing
   // the same work again on the client delays first paint and makes cached
   // playback feel slower than the backend response itself.

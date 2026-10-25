@@ -92,7 +92,22 @@ async def stable_playback(
         content_type=content_type,
         year=year,
     )
-    return JSONResponse(complete_registered_playback_inventory(lines))
+    pending = any(item.get("discovery_pending") for item in lines) or (
+        playback_service.full_refresh_pending(stable_id, episode)
+    )
+    inventory = complete_registered_playback_inventory(lines)
+    if pending:
+        for item in inventory:
+            item["discovery_pending"] = True
+            if item.get("diagnostic_status") == "not_queried":
+                item["message"] = "完整检索仍在后台进行，已先返回当前线路"
+    return JSONResponse(
+        inventory,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Zeluna-Discovery": "pending" if pending else "complete",
+        },
+    )
 
 
 @router.get("/playlist/{token:path}")

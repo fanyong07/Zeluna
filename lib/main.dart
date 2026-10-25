@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:media_kit/media_kit.dart';
@@ -12,6 +14,11 @@ import 'src/player/video/native_video_compatibility.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  LicenseRegistry.addLicense(() async* {
+    yield LicenseEntryWithLineBreaks([
+      'KazumiRules',
+    ], await rootBundle.loadString('assets/licenses/KazumiRules-LICENSE.txt'));
+  });
   // Desktop plugins must be initialized before the first frame.
   await initializeDesktopWindow();
   runApp(const ZelunaBootstrap());

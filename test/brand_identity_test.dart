@@ -138,7 +138,7 @@ void main() {
         matching: find.byType(Scaffold),
       ),
     );
-    expect(startup.backgroundColor, const Color(0xFF14181D));
+    expect(startup.backgroundColor, Colors.black);
   });
 }
 

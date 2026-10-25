@@ -4,11 +4,13 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
+import '../catalog/catalog_query.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../recommendations/recommendation_models.dart';
 import 'zeluna_backend_playback_repository.dart';
+import 'bangumi_metadata_repository.dart';
 
 class ZelunaBackendCatalogRepository {
   ZelunaBackendCatalogRepository({
@@ -59,6 +61,62 @@ class ZelunaBackendCatalogRepository {
       query: const {'limit': '240'},
     );
     return _candidates(response, type);
+  }
+
+  BangumiMetadataRepository _publicBangumiCatalog() {
+    final base = _baseUri;
+    if (base == null) throw StateError('片库服务未连接');
+    // Borrow the existing client and do not close it. No credential provider is
+    // attached: only the calendar and public filter endpoints use this base.
+    return BangumiMetadataRepository(
+      client: _client,
+      publicCatalogBaseUrl: base
+          .replace(
+            pathSegments: [
+              ...base.pathSegments.where((part) => part.isNotEmpty),
+              'api',
+              'v3',
+              'catalog',
+              'bangumi',
+            ],
+          )
+          .toString(),
+    );
+  }
+
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule() =>
+      _publicBangumiCatalog().weeklySchedule(strict: true);
+
+  Future<CatalogPageResult> queryAnimeCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) => _publicBangumiCatalog().queryCatalog(query, cursor: cursor);
+
+  Future<CatalogPageResult> queryCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) async {
+    if (_baseUri == null) throw StateError('片库服务未连接');
+    final type = query.contentType == SubjectContentType.movie ? 'movie' : 'tv';
+    final response = await _get(
+      ['api', 'v3', 'catalog', 'discover', type],
+      query: {...query.parameters, 'page': cursor ?? '1'},
+    );
+    if (response == null) throw StateError('片库查询暂不可用');
+    final json = jsonDecode(utf8.decode(response.bodyBytes));
+    if (json is! Map || json['subjects'] is! List) {
+      throw const FormatException('Invalid catalogue page');
+    }
+    final subjects = (json['subjects'] as List)
+        .whereType<Map>()
+        .map((raw) => _subject(raw.cast<Object?, Object?>()))
+        .whereType<AnimeSubject>()
+        .where((item) => subjectMatchesContentType(item, query.contentType))
+        .toList(growable: false);
+    return CatalogPageResult(
+      subjects: subjects,
+      nextCursor: json['next_cursor']?.toString(),
+    );
   }
 
   Future<AnimeDetailBundle?> detail(AnimeSubject subject) async {
@@ -169,7 +227,9 @@ class ZelunaBackendCatalogRepository {
         if (raw is! Map) continue;
         final json = raw.cast<Object?, Object?>();
         final subject = _subject(json);
-        if (subject == null) continue;
+        if (subject == null || !subjectMatchesContentType(subject, type)) {
+          continue;
+        }
         candidates.add(
           CatalogCandidate(
             subject: subject,

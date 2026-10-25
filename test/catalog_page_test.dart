@@ -1,10 +1,17 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
+import 'package:flutter/gestures.dart';
 
 import 'package:anime/src/app/anime_app.dart';
+import 'package:anime/src/app/app_theme.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:anime/src/catalog/catalog_controller.dart';
 import 'package:anime/src/catalog/catalog_page.dart';
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/domain/subject_content_type.dart';
 import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
@@ -41,6 +48,562 @@ void _expectInternalMetadataProvidersHidden() {
 }
 
 void main() {
+  testWidgets('windowed calendar can scroll with a mouse drag', (tester) async {
+    tester.view.physicalSize = const Size(1100, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const MaterialApp(home: SchedulePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final strip = find.byWidgetPredicate(
+      (widget) =>
+          widget is ListView && widget.scrollDirection == Axis.horizontal,
+    );
+    final scrollable = find.descendant(
+      of: strip,
+      matching: find.byType(Scrollable),
+    );
+    final position = tester.state<ScrollableState>(scrollable).position;
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('schedule-day-0')).hitTestable(),
+      -220,
+      scrollable: scrollable,
+    );
+    await tester.pumpAndSettle();
+    final before = position.pixels;
+    expect(before, 0);
+    await tester.drag(
+      strip,
+      const Offset(-420, 0),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(position.pixels, greaterThan(before));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'calendar wheel and arrows expose hidden weekend on narrow windows',
+    (tester) async {
+      tester.view.physicalSize = const Size(1000, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(_FakeAnimeController.new),
+          ],
+          child: const MaterialApp(home: SchedulePage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final strip = find.byWidgetPredicate(
+        (w) => w is ListView && w.scrollDirection == Axis.horizontal,
+      );
+      final scrollable = find.descendant(
+        of: strip,
+        matching: find.byType(Scrollable),
+      );
+      final position = tester.state<ScrollableState>(scrollable).position;
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('schedule-day-0')).hitTestable(),
+        -220,
+        scrollable: scrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(position.pixels, 0);
+      await tester.sendEventToBinding(
+        PointerScrollEvent(
+          position: tester.getCenter(strip),
+          scrollDelta: const Offset(0, 320),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(position.pixels, greaterThan(0));
+      await tester.tap(find.byTooltip('后面的日期'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('后面的日期'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('schedule-day-6')).hitTestable(),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('schedule-day-6')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('schedule-result-6')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'catalogue filters automatically load more without losing criteria',
+    (tester) async {
+      _QueryTrackingController.requests.clear();
+      _QueryTrackingController.loader = (query, cursor) async =>
+          CatalogPageResult(
+            subjects: _queryPageSubjects(cursor == null ? 5000 : 6000),
+            nextCursor: cursor == null ? 'page-2' : null,
+          );
+      addTearDown(() => _QueryTrackingController.loader = null);
+      await _mountQueryHub(tester);
+      await tester.tap(find.text('更多筛选'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilterChip, '2026年'));
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests.last.$1.year, 2026);
+      await tester.tap(find.widgetWithText(FilterChip, '日语'));
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests.last.$1.language, '日语');
+      expect(find.text('加载更多'), findsNothing);
+      _catalogScrollPosition(
+        tester,
+      ).jumpTo(_catalogScrollPosition(tester).maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests.last.$2, 'page-2');
+      expect(_QueryTrackingController.requests.last.$1.year, 2026);
+      expect(_QueryTrackingController.requests.last.$1.language, '日语');
+      expect(find.byKey(const ValueKey('catalog-load-more')), findsNothing);
+      expect(_catalogGridCount(tester), 60);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final kind in MetadataHubKind.values) {
+    for (final width in [430.0, 1200.0]) {
+      testWidgets('catalogue ${kind.name} $width loads on downward scroll', (
+        tester,
+      ) async {
+        _QueryTrackingController.requests.clear();
+        _QueryTrackingController.loader = (_, cursor) async =>
+            CatalogPageResult(
+              subjects: _queryPageSubjects(
+                cursor == null ? 5000 : 6000,
+                kind: kind,
+              ),
+              nextCursor: cursor == null ? 'page-2' : null,
+            );
+        addTearDown(() => _QueryTrackingController.loader = null);
+        await _mountQueryHub(tester, kind: kind, width: width);
+        if (width < 760) {
+          await tester.tap(find.byKey(const ValueKey('catalog-sort-dropdown')));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.text('最新').last);
+        await tester.pumpAndSettle();
+        expect(_QueryTrackingController.requests, hasLength(1));
+        expect(find.text('加载更多'), findsNothing);
+
+        final position = _catalogScrollPosition(tester);
+        expect(position.maxScrollExtent, greaterThan(650));
+        position.jumpTo(position.maxScrollExtent - 650);
+        await tester.pumpAndSettle();
+        expect(_QueryTrackingController.requests, hasLength(1));
+        if (width < 760) {
+          await tester.drag(
+            find.byType(CustomScrollView),
+            const Offset(0, -450),
+          );
+        } else {
+          await tester.sendEventToBinding(
+            PointerScrollEvent(
+              position: tester.getCenter(find.byType(CustomScrollView)),
+              scrollDelta: const Offset(0, 450),
+            ),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(_QueryTrackingController.requests, hasLength(2));
+        expect(_QueryTrackingController.requests.last.$2, 'page-2');
+        expect(
+          _QueryTrackingController.requests.last.$1.sort,
+          CatalogSortMode.latest,
+        );
+        expect(_catalogGridCount(tester), 60);
+        expect(
+          position.pixels,
+          greaterThan(0),
+          reason: 'Appending must not reset scrolling',
+        );
+
+        position.jumpTo(position.maxScrollExtent);
+        await tester.pumpAndSettle();
+        expect(
+          _QueryTrackingController.requests,
+          hasLength(2),
+          reason: 'Stop at the last page',
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
+
+  testWidgets('catalogue auto loading fills short and empty pages', (
+    tester,
+  ) async {
+    _QueryTrackingController.requests.clear();
+    _QueryTrackingController.loader = (_, cursor) async => switch (cursor) {
+      null => const CatalogPageResult(subjects: [], nextCursor: 'page-2'),
+      'page-2' => CatalogPageResult(
+        subjects: [_querySubject(5000, '首个结果')],
+        nextCursor: 'page-3',
+      ),
+      _ => CatalogPageResult(subjects: _queryPageSubjects(6000)),
+    };
+    addTearDown(() => _QueryTrackingController.loader = null);
+    await _mountQueryHub(tester);
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pumpAndSettle();
+    expect(_QueryTrackingController.requests.map((request) => request.$2), [
+      null,
+      'page-2',
+      'page-3',
+    ]);
+    expect(_catalogGridCount(tester), 31);
+    expect(find.text('加载更多'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'catalogue auto loading stops a repeated cursor and deduplicates',
+    (tester) async {
+      _QueryTrackingController.requests.clear();
+      _QueryTrackingController.loader = (_, _) async => CatalogPageResult(
+        subjects: [_querySubject(5000, '同一个结果')],
+        nextCursor: 'page-2',
+      );
+      addTearDown(() => _QueryTrackingController.loader = null);
+      await _mountQueryHub(tester);
+      await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests, hasLength(2));
+      expect(_catalogGridCount(tester), 1);
+      expect(find.text('正在加载'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'catalogue auto loading keeps one request and ignores stale pages',
+    (tester) async {
+      final pending = Completer<CatalogPageResult>();
+      _QueryTrackingController.requests.clear();
+      _QueryTrackingController.loader = (query, cursor) async {
+        if (query.genre == '奇幻') {
+          return CatalogPageResult(subjects: _queryPageSubjects(7000));
+        }
+        if (cursor != null) return pending.future;
+        return CatalogPageResult(
+          subjects: _queryPageSubjects(5000),
+          nextCursor: 'page-2',
+        );
+      };
+      addTearDown(() => _QueryTrackingController.loader = null);
+      await _mountQueryHub(tester);
+      await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+      await tester.pumpAndSettle();
+      final position = _catalogScrollPosition(tester);
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('catalog-loading-more')),
+        findsOneWidget,
+      );
+      expect(_QueryTrackingController.requests, hasLength(2));
+      position.jumpTo(position.maxScrollExtent - 20);
+      await tester.pump();
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pump();
+      expect(_QueryTrackingController.requests, hasLength(2));
+
+      position.jumpTo(0);
+      await tester.pump();
+      await tester.tap(find.widgetWithText(FilterChip, '奇幻'));
+      await tester.pumpAndSettle();
+      pending.complete(
+        CatalogPageResult(
+          subjects: _queryPageSubjects(6000),
+          nextCursor: 'stale',
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(_catalogGridCount(tester), 30);
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests, hasLength(3));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'catalogue auto loading retains results and retries only on demand after failure',
+    (tester) async {
+      var fail = true;
+      _QueryTrackingController.requests.clear();
+      _QueryTrackingController.loader = (_, cursor) async {
+        if (cursor != null && fail) throw StateError('fixture page failure');
+        return CatalogPageResult(
+          subjects: _queryPageSubjects(cursor == null ? 5000 : 6000),
+          nextCursor: cursor == null ? 'page-2' : null,
+        );
+      };
+      addTearDown(() => _QueryTrackingController.loader = null);
+      await _mountQueryHub(tester);
+      await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+      await tester.pumpAndSettle();
+      final position = _catalogScrollPosition(tester);
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(_catalogGridCount(tester), 30);
+      expect(find.text('加载失败，点击重试'), findsOneWidget);
+      position.jumpTo(position.maxScrollExtent - 20);
+      await tester.pumpAndSettle();
+      position.jumpTo(position.maxScrollExtent);
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests, hasLength(2));
+      fail = false;
+      await tester.tap(find.text('加载失败，点击重试'));
+      await tester.pumpAndSettle();
+      expect(_QueryTrackingController.requests, hasLength(3));
+      expect(_catalogGridCount(tester), 60);
+      expect(find.text('加载失败，点击重试'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('catalogue auto loading fills a resized viewport', (
+    tester,
+  ) async {
+    _QueryTrackingController.requests.clear();
+    _QueryTrackingController.loader = (_, cursor) async => CatalogPageResult(
+      subjects: _queryPageSubjects(cursor == null ? 5000 : 6000),
+      nextCursor: cursor == null ? 'page-2' : null,
+    );
+    addTearDown(() => _QueryTrackingController.loader = null);
+    await _mountQueryHub(tester);
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pumpAndSettle();
+    expect(_QueryTrackingController.requests, hasLength(1));
+    tester.view.physicalSize = const Size(2000, 1800);
+    await tester.pumpAndSettle();
+    expect(_QueryTrackingController.requests, hasLength(2));
+    expect(_catalogGridCount(tester), 60);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('catalogue auto loading safely finishes after leaving the page', (
+    tester,
+  ) async {
+    final pending = Completer<CatalogPageResult>();
+    _QueryTrackingController.requests.clear();
+    _QueryTrackingController.loader = (_, cursor) async => cursor != null
+        ? pending.future
+        : CatalogPageResult(
+            subjects: _queryPageSubjects(5000),
+            nextCursor: 'page-2',
+          );
+    addTearDown(() => _QueryTrackingController.loader = null);
+    await _mountQueryHub(tester);
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pumpAndSettle();
+    final position = _catalogScrollPosition(tester);
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    expect(_QueryTrackingController.requests, hasLength(2));
+    await tester.pumpWidget(const SizedBox.shrink());
+    pending.complete(CatalogPageResult(subjects: _queryPageSubjects(6000)));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('old filter response cannot overwrite a newer selection', (
+    tester,
+  ) async {
+    final old = Completer<CatalogPageResult>();
+    final recent = Completer<CatalogPageResult>();
+    _QueryTrackingController.loader = (query, _) =>
+        query.genre == '科幻' ? old.future : recent.future;
+    addTearDown(() => _QueryTrackingController.loader = null);
+    await _mountQueryHub(tester);
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pump();
+    expect(
+      find.widgetWithText(FilterChip, '奇幻'),
+      findsOneWidget,
+      reason: 'filters must stay usable while a query is waiting',
+    );
+    await tester.tap(find.widgetWithText(FilterChip, '奇幻'));
+    await tester.pump();
+    recent.complete(
+      CatalogPageResult(subjects: [_querySubject(5002, '新条件结果')]),
+    );
+    await tester.pumpAndSettle();
+    old.complete(
+      CatalogPageResult(
+        subjects: [_querySubject(5001, '过期结果')],
+        nextCursor: 'stale',
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byWidgetPredicate((w) => w is PosterCard && w.subject.id == 5002),
+      findsOneWidget,
+    );
+    expect(find.text('过期结果'), findsNothing);
+    expect(find.byKey(const ValueKey('catalog-load-more')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('query failure shows retry rather than an empty catalogue', (
+    tester,
+  ) async {
+    _QueryTrackingController.loader = (_, _) async =>
+        throw StateError('fixture failed');
+    addTearDown(() => _QueryTrackingController.loader = null);
+    await _mountQueryHub(tester);
+    await tester.tap(find.widgetWithText(FilterChip, '科幻'));
+    await tester.pumpAndSettle();
+    expect(find.text('片库暂时加载失败'), findsOneWidget);
+    expect(find.text('番剧 暂无结果'), findsNothing);
+    _QueryTrackingController.loader = (_, _) async =>
+        CatalogPageResult(subjects: [_querySubject(5001, '重试恢复')]);
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byWidgetPredicate((w) => w is PosterCard && w.subject.id == 5001),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final width in [320.0, 430.0, 1100.0]) {
+    testWidgets('calendar $width supports larger text without overflow', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(width, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(_FakeAnimeController.new),
+          ],
+          child: MaterialApp(
+            theme: AnimeTheme.dark(),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(1.5)),
+              child: child!,
+            ),
+            home: const SchedulePage(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('后面的日期'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+    'capture actual calendar and filter regression layouts',
+    (tester) async {
+      for (final family in ['NotoSansSC', 'Microsoft YaHei UI']) {
+        final font = FontLoader(family)
+          ..addFont(rootBundle.load('assets/fonts/NotoSansSC-400.ttf'))
+          ..addFont(rootBundle.load('assets/fonts/NotoSansSC-600.ttf'));
+        await font.load();
+      }
+      final icons = FontLoader('MaterialIcons')
+        ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'));
+      await icons.load();
+      const captureKey = ValueKey('catalog-regression-capture');
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      Future<void> capture(String name) async {
+        final boundary = tester.renderObject<RenderRepaintBoundary>(
+          find.byKey(captureKey),
+        );
+        await tester.runAsync(() async {
+          final image = await boundary.toImage(pixelRatio: 1);
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          final file = File('output/catalog-regression-20261006/$name.png');
+          await file.parent.create(recursive: true);
+          await file.writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+      }
+
+      for (final width in [1100.0, 430.0]) {
+        tester.view.physicalSize = Size(width, 800);
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              animeControllerProvider.overrideWith(_FakeAnimeController.new),
+            ],
+            child: RepaintBoundary(
+              key: captureKey,
+              child: MaterialApp(
+                debugShowCheckedModeBanner: false,
+                theme: AnimeTheme.dark(),
+                home: const SchedulePage(),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await capture('calendar-${width.toInt()}');
+        await tester.tap(find.byTooltip('后面的日期'));
+        await tester.pumpAndSettle();
+        await capture('calendar-${width.toInt()}-scrolled');
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+      }
+      tester.view.physicalSize = const Size(1100, 900);
+      _QueryTrackingController.loader = (_, _) async => CatalogPageResult(
+        subjects: List.generate(
+          8,
+          (i) => _querySubject(6000 + i, '测试番剧 ${i + 1}'),
+        ),
+        nextCursor: 'next',
+      );
+      addTearDown(() => _QueryTrackingController.loader = null);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            animeControllerProvider.overrideWith(_QueryTrackingController.new),
+          ],
+          child: RepaintBoundary(
+            key: captureKey,
+            child: MaterialApp(
+              theme: AnimeTheme.dark(),
+              home: const MetadataHubPage(kind: MetadataHubKind.anime),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('更多筛选'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilterChip, '2026年'));
+      await tester.pumpAndSettle();
+      await capture('filters-2026');
+      expect(tester.takeException(), isNull);
+    },
+    skip: !const bool.fromEnvironment('CAPTURE_CATALOG_QA'),
+  );
+
   testWidgets('home shows AniCh style tabs and profile entry', (tester) async {
     tester.view.physicalSize = const Size(1200, 800);
     tester.view.devicePixelRatio = 1;
@@ -309,14 +872,28 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('新番时间表'), findsWidgets);
-    expect(find.text('周日'), findsOneWidget);
 
     final todayIndex = DateTime.now().weekday % 7;
     final targetIndex = todayIndex == 1 ? 2 : 1;
     final swipeIndex = targetIndex + 1;
     expect(find.byKey(ValueKey('schedule-result-$todayIndex')), findsOneWidget);
+    expect(
+      find.byKey(ValueKey('schedule-day-$todayIndex')).hitTestable(),
+      findsOneWidget,
+    );
 
-    await tester.tap(find.byKey(ValueKey('schedule-day-$targetIndex')));
+    final strip = find.byWidgetPredicate(
+      (widget) =>
+          widget is ListView && widget.scrollDirection == Axis.horizontal,
+    );
+    final targetDay = find.byKey(ValueKey('schedule-day-$targetIndex'));
+    // The strip starts at today, so earlier days may not be built yet.
+    await tester.scrollUntilVisible(
+      targetDay.hitTestable(),
+      targetIndex < todayIndex ? -220 : 220,
+      scrollable: find.descendant(of: strip, matching: find.byType(Scrollable)),
+    );
+    await tester.tap(targetDay);
     await tester.pumpAndSettle();
 
     expect(tester.takeException(), isNull);
@@ -344,9 +921,13 @@ void main() {
       isTrue,
     );
 
-    await tester.drag(find.text('周日'), const Offset(-720, 0));
+    await tester.drag(strip, const Offset(-720, 0));
     await tester.pumpAndSettle();
     expect(find.text('周六'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('schedule-day-6')).hitTestable(),
+      findsOneWidget,
+    );
   });
 
   testWidgets('schedule subjects still open their detail page', (tester) async {
@@ -367,7 +948,17 @@ void main() {
 
     await tester.tap(find.byTooltip('新番时间表'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('schedule-day-0')));
+    final strip = find.byWidgetPredicate(
+      (widget) =>
+          widget is ListView && widget.scrollDirection == Axis.horizontal,
+    );
+    final sunday = find.byKey(const ValueKey('schedule-day-0'));
+    await tester.scrollUntilVisible(
+      sunday.hitTestable(),
+      -220,
+      scrollable: find.descendant(of: strip, matching: find.byType(Scrollable)),
+    );
+    await tester.tap(sunday);
     await tester.pumpAndSettle();
 
     final sundayResult = find.byKey(const ValueKey('schedule-result-0'));
@@ -465,6 +1056,8 @@ void main() {
     await tester.tap(find.text('美剧').last);
     await tester.pumpAndSettle();
     expect(find.text('本地化美剧'), findsWidgets);
+    await tester.tap(find.text('更多筛选'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('英语').last);
     await tester.pumpAndSettle();
     expect(find.text('本地化美剧'), findsWidgets);
@@ -478,6 +1071,8 @@ void main() {
     expect(find.text('剧场版测试片'), findsNothing);
     expect(find.text('公版测试短片'), findsWidgets);
     expect(find.text('本地化电影'), findsWidgets);
+    await tester.tap(find.text('更多筛选'));
+    await tester.pumpAndSettle();
     expect(find.text('可播放'), findsWidgets);
     expect(find.text('规则查源'), findsNothing);
     expect(find.text('2013年'), findsOneWidget);
@@ -1252,15 +1847,91 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.byKey(const ValueKey('mobileMetadataFilters')), findsOneWidget);
-    expect(find.byType(FilterChip), findsNothing);
+    expect(find.widgetWithText(FilterChip, '电影'), findsOneWidget);
+    expect(find.byKey(const ValueKey('mobileFilter-年份')), findsNothing);
 
-    await tester.tap(find.text('筛选'));
+    await tester.tap(find.text('更多筛选'));
     await tester.pumpAndSettle();
 
     expect(find.byType(FilterChip), findsWidgets);
     expect(find.byKey(const ValueKey('mobileFilter-年份')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+}
+
+Future<void> _mountQueryHub(
+  WidgetTester tester, {
+  MetadataHubKind kind = MetadataHubKind.anime,
+  double width = 1200,
+}) async {
+  tester.view.physicalSize = Size(width, 1100);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        animeControllerProvider.overrideWith(_QueryTrackingController.new),
+      ],
+      child: MaterialApp(home: MetadataHubPage(kind: kind)),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
+ScrollPosition _catalogScrollPosition(WidgetTester tester) => tester
+    .state<ScrollableState>(
+      find
+          .descendant(
+            of: find.byType(CustomScrollView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    )
+    .position;
+
+int? _catalogGridCount(WidgetTester tester) => tester
+    .widget<SliverGrid>(find.byType(SliverGrid))
+    .delegate
+    .estimatedChildCount;
+
+List<AnimeSubject> _queryPageSubjects(
+  int start, {
+  MetadataHubKind kind = MetadataHubKind.anime,
+}) => List.generate(30, (index) {
+  final template = switch (kind) {
+    MetadataHubKind.anime => _subject,
+    MetadataHubKind.series => _seriesSubject,
+    MetadataHubKind.movie => _movieSubject,
+  };
+  return AnimeSubject.fromJson({
+    ...template.toJson(),
+    'id': start + index,
+    'stableKey': 'fixture:${kind.name}:${start + index}',
+    'title': '分页作品 ${start + index}',
+    'date': '2026-10-01',
+  });
+});
+
+AnimeSubject _querySubject(int id, String title) => AnimeSubject.fromJson({
+  ..._subject.toJson(),
+  'id': id,
+  'stableKey': 'bangumi:$id',
+  'title': title,
+  'date': '2026-10-01',
+  'coverUrl': null,
+  'bannerUrl': null,
+});
+
+class _QueryTrackingController extends _FakeAnimeController {
+  static final requests = <(CatalogQuery, String?)>[];
+  static Future<CatalogPageResult> Function(CatalogQuery, String?)? loader;
+  @override
+  Future<CatalogPageResult> queryCatalog(CatalogQuery query, {String? cursor}) {
+    requests.add((query, cursor));
+    return loader?.call(query, cursor) ??
+        super.queryCatalog(query, cursor: cursor);
+  }
 }
 
 class _FakeAnimeController extends AnimeController {
@@ -1454,6 +2125,20 @@ class _FakeAnimeController extends AnimeController {
         ),
       ],
     );
+  }
+
+  @override
+  Future<CatalogPageResult> queryCatalog(
+    CatalogQuery query, {
+    String? cursor,
+  }) async {
+    lastCatalogSort = query.sort;
+    final items = switch (query.contentType) {
+      SubjectContentType.anime => await discoverSubjects(sort: query.sort),
+      SubjectContentType.series => await seriesSubjects(sort: query.sort),
+      SubjectContentType.movie => await movieSubjects(sort: query.sort),
+    };
+    return CatalogPageResult(subjects: items.where(query.matches).toList());
   }
 
   @override

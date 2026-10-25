@@ -1280,10 +1280,12 @@ class LibraryPage extends ConsumerWidget {
     return AsyncAnimeGate(
       builder: (context, state) {
         final entries = entriesOf(state);
-        return _ProfileScaffold(
+        return AppChrome(
           title: title,
           active: active,
-          action: clearKey == null || entries.isEmpty
+          showSearch: false,
+          onBack: () => safeNavigateBack(context),
+          trailing: clearKey == null || entries.isEmpty
               ? null
               : IconButton(
                   tooltip: '清空',
@@ -1299,20 +1301,64 @@ class LibraryPage extends ConsumerWidget {
                   title: emptyTitle,
                   message: emptyMessage,
                 )
-              : ListView.separated(
-                  padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
-                  itemCount: entries.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(height: 10),
-                  itemBuilder: (context, index) => _LibraryTile(
-                    entry: entries[index],
-                    onTap: playEntries
-                        ? () => _playEntry(context, entries[index])
-                        : () => _openDetail(context, entries[index].subject),
-                    trailingIcon: playEntries
-                        ? Icons.play_arrow_rounded
-                        : Icons.chevron_right_rounded,
-                  ),
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    final columns = (constraints.maxWidth / 360).floor().clamp(
+                      1,
+                      4,
+                    );
+                    final extra =
+                        (MediaQuery.textScalerOf(context).scale(1) - 1).clamp(
+                          0.0,
+                          2.0,
+                        );
+                    return CustomScrollView(
+                      slivers: [
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
+                          sliver: SliverToBoxAdapter(
+                            child: Text(
+                              '${entries.length} 部作品',
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: context.inkMuted),
+                            ),
+                          ),
+                        ),
+                        SliverPadding(
+                          padding: EdgeInsets.fromLTRB(
+                            columns == 1 ? 14 : 24,
+                            0,
+                            columns == 1 ? 14 : 24,
+                            24,
+                          ),
+                          sliver: SliverGrid(
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: columns,
+                                  mainAxisExtent: 136 + extra * 60,
+                                  mainAxisSpacing: 14,
+                                  crossAxisSpacing: 14,
+                                ),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => _LibraryTile(
+                                entry: entries[index],
+                                onTap: playEntries
+                                    ? () => _playEntry(context, entries[index])
+                                    : () => _openDetail(
+                                        context,
+                                        entries[index].subject,
+                                      ),
+                                trailingIcon: playEntries
+                                    ? Icons.play_arrow_rounded
+                                    : Icons.chevron_right_rounded,
+                              ),
+                              childCount: entries.length,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
         );
       },
@@ -1899,13 +1945,12 @@ class _ProfileScaffold extends StatelessWidget {
   const _ProfileScaffold({
     required this.title,
     required this.child,
-    this.active = ChromeDestination.favorite,
     this.action,
   });
 
   final String title;
   final Widget child;
-  final ChromeDestination active;
+  static const active = ChromeDestination.favorite;
   final Widget? action;
 
   @override
@@ -2076,39 +2121,61 @@ class _LibraryTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(7),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(7),
-        ),
-        child: ListTile(
-          minVerticalPadding: 12,
-          leading: ClipRRect(
-            borderRadius: BorderRadius.circular(6),
-            child: SizedBox(
-              width: 54,
-              height: 54,
-              child: _PosterThumb(subject: entry.subject),
-            ),
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainer,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 70,
+                height: 106,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: _PosterThumb(subject: entry.subject),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      entry.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      entry.note.isEmpty ? entry.subject.year : entry.note,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatDateTime(entry.updatedAt).split(' ').first,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 4),
+              Icon(trailingIcon, color: scheme.onSurfaceVariant, size: 20),
+            ],
           ),
-          title: Text(
-            entry.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: context.ink, fontWeight: FontWeight.w800),
-          ),
-          subtitle: Text(
-            entry.note.isEmpty
-                ? '${entry.subject.year} · ${_formatDateTime(entry.updatedAt)}'
-                : '${entry.note} · ${_formatDateTime(entry.updatedAt)}',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: context.inkMuted),
-          ),
-          trailing: Icon(trailingIcon, color: AppColors.primary),
         ),
       ),
     );

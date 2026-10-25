@@ -2,75 +2,62 @@ import 'package:flutter/material.dart';
 
 /// Shared visual tokens for the media experience.
 ///
-/// Design language: "gallery + theater". Browsing surfaces use a warm paper
-/// palette (light) or warm charcoal (dark); the player always runs on the
-/// dedicated theater tokens. Mist blue is the single global accent, with
-/// celadon and wisteria reserved for content-type coding. Keep these values
-/// small and intentional. Business pages can import `app_chrome.dart`, which
-/// re-exports this file for backwards compatibility.
+/// Monochrome gallery + theater. Backgrounds are pure black / white; neutral
+/// grays provide hierarchy, while artwork keeps its original colors. Use the
+/// theme ColorScheme for browsing controls and theater tokens during playback.
 class AppColors {
   const AppColors._();
 
-  // Warm charcoal surfaces for the dark theme. Never pure black: the dark
-  // theme shares the paper temperature of the light theme.
-  static const bg = Color(0xFF1F1E1C);
-  static const bg2 = Color(0xFF242220);
-  static const panel = Color(0xFF282624);
-  static const panelHigh = Color(0xFF302D2A);
-  static const panelHover = Color(0xFF373431);
-  static const overlay = Color(0xE61B1A18);
+  static const bg = Color(0xFF000000);
+  static const bg2 = Color(0xFF000000);
+  static const panel = Color(0xFF101010);
+  static const panelHigh = Color(0xFF191919);
+  static const panelHover = Color(0xFF242424);
+  static const overlay = Color(0xE6000000);
 
-  static const border = Color(0xFF3B3833);
-  static const borderBright = Color(0xFF4E4A44);
+  static const border = Color(0xFF292929);
+  static const borderBright = Color(0xFF424242);
 
-  // Mist blue accent family. `primary2` doubles as the readable accent for
-  // text on dark surfaces; `accentDeep` is the readable accent on paper.
-  static const primary = Color(0xFF6A9BCC);
-  static const primary2 = Color(0xFF8FB3D9);
-  static const accentDeep = Color(0xFF46759F);
+  // Legacy fixed accents stay readable against either background; new UI uses
+  // ColorScheme.primary (white in dark mode, black in light mode).
+  static const primary = Color(0xFF767676);
+  static const primary2 = Color(0xFFFFFFFF);
+  static const accentDeep = Color(0xFF000000);
 
-  // Content-type coding colors. The legacy `cyan`/`rose` aliases now resolve
-  // to celadon (series) and wisteria (movies); anime uses the accent itself.
-  static const cyan = Color(0xFF6FA39B);
-  static const rose = Color(0xFF9C90C4);
-  static const celadonDeep = Color(0xFF4E7F77);
-  static const wisteriaDeep = Color(0xFF746699);
+  static const cyan = Color(0xFFD4D4D4);
+  static const rose = Color(0xFFBBBBBB);
+  static const celadonDeep = Color(0xFF333333);
+  static const wisteriaDeep = Color(0xFF444444);
 
-  static const primarySurface = Color(0xFF333A41);
-  static const secondarySurface = Color(0xFF35322E);
+  static const primarySurface = Color(0xFF242424);
+  static const secondarySurface = Color(0xFF191919);
 
-  static const text = Color(0xFFF0EFE9);
-  static const muted = Color(0xFFB8B5AA);
-  static const faint = Color(0xFF8A877C);
+  static const text = Color(0xFFFFFFFF);
+  static const muted = Color(0xFFB8B8B8);
+  static const faint = Color(0xFF929292);
 
-  // Semantic colors sit apart from the accent family and are tuned to stay
-  // legible on both paper and charcoal.
-  static const success = Color(0xFF7C9159);
-  static const warning = Color(0xFFC9963F);
-  static const danger = Color(0xFFC05B50);
+  static const success = Color(0xFF888888);
+  static const warning = Color(0xFF999999);
+  static const danger = Color(0xFF888888);
 
-  // Warm paper surfaces for the light theme.
-  static const lightBg = Color(0xFFFAF9F5);
-  static const lightCard = Color(0xFFFFFEFB);
-  static const lightPanel = Color(0xFFF0EEE6);
-  static const lightPanelHigh = Color(0xFFE9E6DA);
-  static const lightBorder = Color(0xFFE4E1D5);
-  static const lightText = Color(0xFF141413);
-  static const lightMuted = Color(0xFF57564F);
-  static const lightFaint = Color(0xFF8F8C80);
+  static const lightBg = Color(0xFFFFFFFF);
+  static const lightCard = Color(0xFFFFFFFF);
+  static const lightPanel = Color(0xFFF5F5F5);
+  static const lightPanelHigh = Color(0xFFEBEBEB);
+  static const lightBorder = Color(0xFFE3E3E3);
+  static const lightText = Color(0xFF000000);
+  static const lightMuted = Color(0xFF555555);
+  static const lightFaint = Color(0xFF717171);
 
-  // Theater tokens are theme-independent: playback always happens in the
-  // same warm dark room regardless of the browsing theme.
-  static const theaterBg = Color(0xFF171614);
-  static const theaterPanel = Color(0xFF211F1D);
-  static const theaterPanelHigh = Color(0xFF2A2724);
-  static const theaterInk = Color(0xFFEFEDE6);
-  static const theaterMuted = Color(0xB3EFEDE6);
-  static const theaterFaint = Color(0x66EFEDE6);
-  static const theaterBorder = Color(0xFF3B3833);
-  static const theaterBorderBright = Color(0xFF4E4A44);
-  // Scrim base matches overlay ink; prefer [AppOverlays] helpers over raw alphas.
-  static const theaterScrim = Color(0xFF1B1A18);
+  static const theaterBg = Color(0xFF000000);
+  static const theaterPanel = Color(0xFF0C0C0C);
+  static const theaterPanelHigh = Color(0xFF1C1C1C);
+  static const theaterInk = Color(0xFFFFFFFF);
+  static const theaterMuted = Color(0xBFFFFFFF);
+  static const theaterFaint = Color(0x99FFFFFF);
+  static const theaterBorder = Color(0xFF292929);
+  static const theaterBorderBright = Color(0xFF4A4A4A);
+  static const theaterScrim = Color(0xFF000000);
 }
 
 /// Shared scrims and media washes. Prefer these over page-local `0x1B1A18`
@@ -92,7 +79,7 @@ class AppOverlays {
   static const posterBottom = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x001B1A18), Color(0x661B1A18), Color(0xE61B1A18)],
+    colors: [Color(0x001A1A1A), Color(0x661A1A1A), Color(0xE61A1A1A)],
     stops: [0.35, 0.72, 1],
   );
 
@@ -100,7 +87,7 @@ class AppOverlays {
   static const mediaCaption = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x001B1A18), Color(0xEE1B1A18)],
+    colors: [Color(0x001A1A1A), Color(0xEE1A1A1A)],
   );
 
   /// Top + bottom control wash for the player (theater only).
@@ -108,10 +95,10 @@ class AppOverlays {
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
     colors: [
-      Color(0xD9171614),
-      Color(0x00171614),
-      Color(0x00171614),
-      Color(0xE6171614),
+      Color(0xD9161616),
+      Color(0x00161616),
+      Color(0x00161616),
+      Color(0xE6161616),
     ],
     stops: [0, 0.22, 0.62, 1],
   );
@@ -119,48 +106,48 @@ class AppOverlays {
   static const playerTopFade = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0xE6171614), Color(0x8F171614), Color(0x00171614)],
+    colors: [Color(0xE6161616), Color(0x8F161616), Color(0x00161616)],
   );
 
   static const playerBottomFade = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x00171614), Color(0x78171614), Color(0xD9171614)],
+    colors: [Color(0x00161616), Color(0x78161616), Color(0xD9161616)],
   );
 
   /// Left-heavy wash for wide heroes (catalog rail / profile banner).
   static const heroLeading = LinearGradient(
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
-    colors: [Color(0xF01B1A18), Color(0xCC1B1A18), Color(0x551B1A18)],
+    colors: [Color(0xF01A1A1A), Color(0xCC1A1A1A), Color(0x551A1A1A)],
   );
 
   /// Softer left wash used on profile hero cards.
   static const heroLeadingSoft = LinearGradient(
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
-    colors: [Color(0xEE1B1A18), Color(0x661B1A18)],
+    colors: [Color(0xEE1A1A1A), Color(0x661A1A1A)],
   );
 
   /// Compact detail hero (bottom-up).
   static const heroCompact = LinearGradient(
     begin: Alignment.bottomCenter,
     end: Alignment.topCenter,
-    colors: [Color(0xE61B1A18), Color(0xB81B1A18)],
+    colors: [Color(0xE61A1A1A), Color(0xB81A1A1A)],
   );
 
   /// Wide detail hero (leading edge).
   static const heroDetailWide = LinearGradient(
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
-    colors: [Color(0xF21B1A18), Color(0xAA1B1A18), Color(0x441B1A18)],
+    colors: [Color(0xF21A1A1A), Color(0xAA1A1A1A), Color(0x441A1A1A)],
   );
 
   /// Category card overlay (top → bottom).
   static const categoryCard = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x661B1A18), Color(0xCC1B1A18)],
+    colors: [Color(0x661A1A1A), Color(0xCC1A1A1A)],
   );
 
   /// Solid-ish label plate on small posters.
@@ -252,7 +239,11 @@ class AppLayout {
   static const maxContentWidth = 1680.0;
   static const sideNavigationWidth = 148.0;
   static const topBarHeight = 72.0;
-  static const mobileNavigationHeight = 72.0;
+  static const mobileNavigationHeight = 64.0;
+
+  static double mobileNavigationHeightFor(BuildContext context) =>
+      mobileNavigationHeight +
+      (MediaQuery.textScalerOf(context).scale(12) - 12).clamp(0.0, 36.0);
 
   static EdgeInsets pagePaddingForWidth(double width) {
     if (width < AppBreakpoints.mobile) {
@@ -282,21 +273,19 @@ class AppMotion {
 class AppShadows {
   const AppShadows._();
 
-  // Warm ink shadows: a tight contact layer plus a soft diffuse layer, kept
+  // Neutral ink shadows: a tight contact layer plus a soft diffuse layer, kept
   // faint so cards read as paper resting on paper rather than floating.
   static const panel = <BoxShadow>[
-    BoxShadow(color: Color(0x0A141413), blurRadius: 2, offset: Offset(0, 1)),
-    BoxShadow(color: Color(0x0F141413), blurRadius: 16, offset: Offset(0, 4)),
+    BoxShadow(color: Color(0x0A141414), blurRadius: 2, offset: Offset(0, 1)),
+    BoxShadow(color: Color(0x0F141414), blurRadius: 16, offset: Offset(0, 4)),
   ];
 
   static const elevated = <BoxShadow>[
-    BoxShadow(color: Color(0x0F141413), blurRadius: 4, offset: Offset(0, 2)),
-    BoxShadow(color: Color(0x1F141413), blurRadius: 32, offset: Offset(0, 12)),
+    BoxShadow(color: Color(0x0F141414), blurRadius: 4, offset: Offset(0, 2)),
+    BoxShadow(color: Color(0x1F141414), blurRadius: 32, offset: Offset(0, 12)),
   ];
 
-  static const primaryGlow = <BoxShadow>[
-    BoxShadow(color: Color(0x2E6A9BCC), blurRadius: 24, offset: Offset(0, 8)),
-  ];
+  static const primaryGlow = <BoxShadow>[];
 }
 
 class AppGradients {
@@ -308,17 +297,12 @@ class AppGradients {
     colors: [AppColors.primary, AppColors.primary2, AppColors.cyan],
   );
 
-  static const page = LinearGradient(
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-    colors: [Color(0xFF232120), AppColors.bg, Color(0xFF1A1918)],
-    stops: [0, 0.52, 1],
-  );
+  static const page = LinearGradient(colors: [AppColors.bg, AppColors.bg]);
 
   static const accent = LinearGradient(
     begin: Alignment.centerLeft,
     end: Alignment.centerRight,
-    colors: [AppColors.primary, Color(0xFF5B88B8)],
+    colors: [AppColors.primary, Color(0xFF898989)],
   );
 
   static const coolAccent = LinearGradient(
@@ -330,7 +314,7 @@ class AppGradients {
   static const mediaScrim = LinearGradient(
     begin: Alignment.topCenter,
     end: Alignment.bottomCenter,
-    colors: [Color(0x08000000), Color(0x24151412), Color(0xE6171614)],
+    colors: [Color(0x08000000), Color(0x24141414), Color(0xE6161616)],
     stops: [0, 0.58, 1],
   );
 }

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const verifiedMediaHosts = {
+    'zeluna:recommended:dbku': ['vid.dbokutv.com'],
     'zeluna:recommended:fantuan': ['play.modujx10.com'],
     'zeluna:recommended:sorani': ['www.sorani-vids.xyz'],
     'zeluna:recommended:aikanbot': [

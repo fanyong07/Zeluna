@@ -36,6 +36,45 @@ void main() {
   );
 
   test(
+    'partial full response retains routes and explicit non-final cache state',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient(
+          (_) async => _jsonResponse([
+            {
+              'url': 'https://cdn.example/quick.m3u8',
+              'source': 'maccms:iKun',
+              'available': true,
+              'status': 'server_verified',
+              'discovery_pending': true,
+              'cache_state': 'fresh',
+            },
+            {
+              'url': '',
+              'source': 'maccms:pending',
+              'available': false,
+              'diagnostic_status': 'not_queried',
+              'discovery_pending': true,
+              'message': '完整检索仍在后台进行',
+            },
+          ]),
+        ),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(2));
+      expect(lines.first.available, isTrue);
+      expect(lines.every((line) => line.cacheState == 'partial'), isTrue);
+      expect(lines.last.available, isFalse);
+      expect(lines.last.message, contains('后台'));
+    },
+  );
+
+  test(
     'full AniCh inventory preserves all 58 distinct routes before probing',
     () async {
       final repository = ZelunaBackendPlaybackRepository(

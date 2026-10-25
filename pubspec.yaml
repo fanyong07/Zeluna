@@ -14,7 +14,7 @@ publish_to: 'none'
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.2.0+71
+version: 1.2.3+74
 
 environment:
   sdk: ^3.11.1
@@ -88,6 +88,7 @@ flutter:
     - assets/brand/anime_logo_app_icon.png
     - assets/shaders/anime4k/
     - assets/data/sources_catalog.json
+    - assets/licenses/KazumiRules-LICENSE.txt
     - assets/fonts/OFL-NotoSerifSC.txt
     # Deferred fonts: injected via FontLoader after first frame so the web
     # engine's blocking font download stays at the single 400-weight sans.

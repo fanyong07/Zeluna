@@ -462,7 +462,10 @@ class RulePlaybackSourceRepository
       rules,
       subject,
       episode,
-      verifyPlayable: true,
+      // The quick resolver still probes manifest + media; `true` additionally
+      // scans every road and enriches metadata. A remembered provider/backup
+      // only needs its first genuinely verified playable road.
+      verifyPlayable: false,
       forceRefreshGeneration: forceRefreshGeneration,
       cancellationToken: cancellationToken,
     );
@@ -504,7 +507,10 @@ class RulePlaybackSourceRepository
       rules,
       subject,
       episode,
-      verifyPlayable: true,
+      // The quick resolver still probes manifest + media; `true` additionally
+      // scans every road and enriches metadata. A remembered provider/backup
+      // only needs its first genuinely verified playable road.
+      verifyPlayable: false,
       forceRefreshGeneration: forceRefreshGeneration,
       cancellationToken: cancellationToken,
     );

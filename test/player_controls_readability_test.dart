@@ -128,7 +128,7 @@ void main() {
       );
       expect(
         tester.widget<Text>(find.text('线路')).style!.fontSize,
-        lessThanOrEqualTo(12),
+        inInclusiveRange(12, 14),
       );
       final send = tester.getRect(find.widgetWithText(TextButton, '发送'));
       expect(send.width, greaterThanOrEqualTo(40));

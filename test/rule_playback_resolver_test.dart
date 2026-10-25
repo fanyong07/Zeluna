@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/data/playback_source_repository.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:anime/src/rules/rule_importer.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/animeko_webview_sniffer.dart';
@@ -626,73 +628,110 @@ void main() {
     },
   );
 
-  test(
-    'quick lookup returns the first playback road without waiting',
-    () async {
-      final slowProbe = Completer<http.Response>();
-      final secondSlowProbe = Completer<http.Response>();
-      var fourthRoadRequests = 0;
-      final client = MockClient((request) async {
-        switch (request.url.path) {
-          case '/vod/search.html':
-            return _html('''
+  for (final mode in ['quick', 'preferred', 'fallback']) {
+    test(
+      '$mode lookup returns the first playback road without waiting',
+      () async {
+        final slowProbe = Completer<http.Response>();
+        final secondSlowProbe = Completer<http.Response>();
+        var fourthRoadRequests = 0;
+        final client = MockClient((request) async {
+          switch (request.url.path) {
+            case '/vod/search.html':
+              return _html('''
             <div class="item">
               <strong>测试番剧</strong>
               <a class="detail" href="/detail/race.html">详情</a>
             </div>
           ''');
-          case '/detail/race.html':
-            return _html('''
+            case '/detail/race.html':
+              return _html('''
             <ul class="line"><li><a href="/play/slow.html">第1集</a></li></ul>
             <ul class="line"><li><a href="/play/fast.html">第1集</a></li></ul>
             <ul class="line"><li><a href="/play/slow-two.html">第1集</a></li></ul>
             <ul class="line"><li><a href="/play/not-started.html">第1集</a></li></ul>
           ''');
-          case '/play/slow.html':
-            return _html('''
+            case '/play/slow.html':
+              return _html('''
             <script>var player={"url":"https://cdn.example.com/slow-stream?id=1"};</script>
           ''');
-          case '/play/fast.html':
-            return _html('''
+            case '/play/fast.html':
+              return _html('''
             <script>var player={"url":"https://cdn.example.com/fast.m3u8"};</script>
           ''');
-          case '/fast.m3u8':
-            return _playableHls();
-          case '/segment-1.ts':
-            return _playableSegment();
-          case '/play/slow-two.html':
-            return _html('''
+            case '/fast.m3u8':
+              return _playableHls();
+            case '/segment-1.ts':
+              return _playableSegment();
+            case '/play/slow-two.html':
+              return _html('''
             <script>var player={"url":"https://cdn.example.com/slow-stream-two?id=1"};</script>
           ''');
-          case '/play/not-started.html':
-            fourthRoadRequests++;
-            return _html('''
+            case '/play/not-started.html':
+              fourthRoadRequests++;
+              return _html('''
             <script>var player={"url":"https://cdn.example.com/fourth.m3u8"};</script>
           ''');
-          case '/slow-stream':
-            return slowProbe.future;
-          case '/slow-stream-two':
-            return secondSlowProbe.future;
-        }
-        return http.Response('not found', 404);
-      });
+            case '/slow-stream':
+              return slowProbe.future;
+            case '/slow-stream-two':
+              return secondSlowProbe.future;
+          }
+          return http.Response('not found', 404);
+        });
 
-      final lines = await RulePlaybackResolver(client: client)
-          .resolveRule(
+        addTearDown(() {
+          if (!slowProbe.isCompleted) {
+            slowProbe.complete(http.Response('cancelled', 503));
+          }
+          if (!secondSlowProbe.isCompleted) {
+            secondSlowProbe.complete(http.Response('cancelled', 503));
+          }
+          RulePlaybackSourceRepository.clearRuntimeCaches();
+          client.close();
+        });
+        final resolver = RulePlaybackResolver(client: client);
+        final repository = RulePlaybackSourceRepository(
+          repository: RulePluginRepository(extraRules: [_kazumiRule]),
+          ruleState: RulePluginState(
+            installedIds: {_kazumiRule.id},
+            enabledIds: {_kazumiRule.id},
+            approvedPermissionDigests: {
+              _kazumiRule.id: _kazumiRule.effectiveManifest.permissionDigest,
+            },
+            customRules: [_kazumiRule],
+          ),
+          resolver: resolver,
+          cacheNamespace: 'startup-race-$mode',
+        );
+        final lookup = switch (mode) {
+          'preferred' => repository.verifiedLinesForProvider(
+            _animeSubject,
+            _episode,
+            providerId: _kazumiRule.id,
+          ),
+          'fallback' => repository.verifiedFallbackLinesExcludingProvider(
+            _animeSubject,
+            _episode,
+            excludedProviderId: 'other',
+          ),
+          _ => resolver.resolveRule(
             rule: _kazumiRule,
             subject: _animeSubject,
             episode: _episode,
             verifyPlayable: false,
-          )
-          .timeout(const Duration(milliseconds: 500));
+          ),
+        };
+        final lines = await lookup.timeout(const Duration(milliseconds: 500));
 
-      expect(lines, hasLength(1));
-      expect(lines.single.url, 'https://cdn.example.com/fast.m3u8');
-      expect(fourthRoadRequests, 0);
-      slowProbe.complete(http.Response('cancelled', 503));
-      secondSlowProbe.complete(http.Response('cancelled', 503));
-    },
-  );
+        expect(lines, hasLength(1));
+        expect(lines.single.url, 'https://cdn.example.com/fast.m3u8');
+        expect(fourthRoadRequests, 0);
+        slowProbe.complete(http.Response('cancelled', 503));
+        secondSlowProbe.complete(http.Response('cancelled', 503));
+      },
+    );
+  }
 
   test(
     'quick lookup does not let a dead road beat a playable sibling',

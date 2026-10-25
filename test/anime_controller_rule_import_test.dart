@@ -1999,8 +1999,9 @@ class _ContentBangumiMetadataRepository extends BangumiMetadataRepository {
   Future<AnimeHomeFeed> homeFeed() async => fixtureHomeFeed;
 
   @override
-  Future<Map<int, List<AnimeSubject>>> weeklySchedule() async =>
-      scheduleResults;
+  Future<Map<int, List<AnimeSubject>>> weeklySchedule({
+    bool strict = false,
+  }) async => scheduleResults;
 
   @override
   Future<List<AnimeSubject>> searchSubjects({

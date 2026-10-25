@@ -11,6 +11,94 @@ import 'package:anime/src/sources/source_rule_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final id in ['zeluna:recommended:youzhi', 'zeluna:recommended:sina']) {
+    test(
+      '$id only installs explicitly and preserves disable/uninstall choices',
+      () async {
+        final storage = _MemorySourceStorage({
+          'account.account-a.rulePlugins': const RulePluginState(
+            installedIds: {'zeluna:recommended:dbku'},
+            enabledIds: {},
+          ).toJson(),
+        });
+        final controller = SourceController(
+          storage: storage,
+          catalogRepository: const _EmptyCatalogRepository(),
+          sourceRuleBridge: const SourceRuleBridge(),
+          publishSnapshot: (_) {},
+        );
+        final first = await controller.loadForAccount(
+          accountId: 'account-a',
+          contextVersion: 1,
+        );
+        expect(first.rulePlugins.installedIds, isNot(contains(id)));
+        expect(first.rulePlugins.enabledIds, isNot(contains(id)));
+        await controller.installRulePlugin(id);
+        expect(controller.snapshot.rulePlugins.enabledIds, contains(id));
+        await controller.toggleRulePlugin(id, false);
+        final disabled = await controller.loadForAccount(
+          accountId: 'account-a',
+          contextVersion: 2,
+        );
+        expect(disabled.rulePlugins.installedIds, contains(id));
+        expect(disabled.rulePlugins.enabledIds, isNot(contains(id)));
+        expect(
+          disabled.rulePlugins.enabledIds,
+          isNot(contains('zeluna:recommended:dbku')),
+        );
+        await controller.uninstallRulePlugin(id);
+        final removed = await controller.loadForAccount(
+          accountId: 'account-a',
+          contextVersion: 3,
+        );
+        expect(removed.rulePlugins.installedIds, isNot(contains(id)));
+        expect(removed.rulePlugins.enabledIds, isNot(contains(id)));
+        final other = await controller.loadForAccount(
+          accountId: 'account-b',
+          contextVersion: 4,
+        );
+        expect(other.rulePlugins.enabledIds, isNot(contains(id)));
+      },
+    );
+  }
+
+  test(
+    'new Kazumi rules migrate once and preserve disable and uninstall choices',
+    () async {
+      final storage = _MemorySourceStorage({
+        'account.account-a.rulePlugins': const RulePluginState(
+          installedIds: {'zeluna:recommended:dbku'},
+          enabledIds: {},
+        ).toJson(),
+      });
+      final controller = SourceController(
+        storage: storage,
+        catalogRepository: const _EmptyCatalogRepository(),
+        sourceRuleBridge: const SourceRuleBridge(),
+        publishSnapshot: (_) {},
+      );
+      final migrated = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      const id = 'kazumi:xfdmneo';
+      expect(migrated.rulePlugins.installedIds, contains(id));
+      expect(migrated.rulePlugins.enabledIds, isNot(contains(id)));
+      expect(migrated.rulePlugins.enabledIds, contains('kazumi:mxdm'));
+      await controller.uninstallRulePlugin(id);
+      final restored = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 2,
+      );
+      expect(restored.rulePlugins.installedIds, isNot(contains(id)));
+      expect(
+        restored.rulePlugins.enabledIds,
+        isNot(contains('zeluna:recommended:dbku')),
+      );
+      expect(restored.rulePlugins.enabledIds, contains('kazumi:mxdm'));
+    },
+  );
+
   test(
     'uninstalled recommended rules stay uninstalled after account reload',
     () async {

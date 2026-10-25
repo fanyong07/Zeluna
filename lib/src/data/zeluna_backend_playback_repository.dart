@@ -278,7 +278,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         final cached = json['cached'] == true;
         final stale = json['stale'] == true;
         final rawCacheState = json['cache_state']?.toString().trim() ?? '';
-        final cacheState = rawCacheState.isNotEmpty
+        final cacheState = json['discovery_pending'] == true
+            ? 'partial'
+            : rawCacheState.isNotEmpty
             ? rawCacheState
             : stale
             ? 'stale'

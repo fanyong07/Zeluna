@@ -380,9 +380,9 @@ void main() {
       final seriesLines = await source.linesForEpisode(_seriesSubject, episode);
       final movieLines = await source.linesForEpisode(_movieSubject, episode);
 
-      expect(repository.rulesFor(RuleContentType.anime), hasLength(3));
-      expect(repository.rulesFor(RuleContentType.series), hasLength(2));
-      expect(repository.rulesFor(RuleContentType.movie), hasLength(5));
+      expect(repository.rulesFor(RuleContentType.anime), hasLength(6));
+      expect(repository.rulesFor(RuleContentType.series), hasLength(5));
+      expect(repository.rulesFor(RuleContentType.movie), hasLength(7));
       expect(state.installedIds, contains('zeluna:recommended:fantuan'));
       expect(state.installedIds, contains('zeluna:recommended:aikanbot'));
       expect(state.installedIds, contains('zeluna:recommended:sorani'));
@@ -393,8 +393,15 @@ void main() {
       expect(state.enabledIds, contains('zeluna:recommended:sorani'));
       expect(state.enabledIds, contains('zeluna:recommended:dbku'));
       expect(state.enabledIds, contains('zeluna:recommended:nivod'));
+      for (final id in [
+        'zeluna:recommended:youzhi',
+        'zeluna:recommended:sina',
+      ]) {
+        expect(state.installedIds, isNot(contains(id)));
+        expect(state.enabledIds, isNot(contains(id)));
+      }
       expect(animeLines, isNotEmpty);
-      expect(seriesLines, hasLength(2));
+      expect(seriesLines, hasLength(3));
       expect(movieLines, isNotEmpty);
     },
   );
@@ -646,7 +653,8 @@ void main() {
       expect(resolver.maxFallbackActive, lessThanOrEqualTo(4));
       expect(resolver.callCounts[preferred.id], 1);
       expect(resolver.callCounts.values, everyElement(lessThanOrEqualTo(1)));
-      expect(resolver.verifyPlayableCalls, everyElement(isTrue));
+      // Startup still verifies media, but does not expand every road for metadata.
+      expect(resolver.verifyPlayableCalls, everyElement(isFalse));
     },
   );
 
@@ -2044,7 +2052,8 @@ class _ProviderAwareRulePlaybackResolver extends RulePlaybackResolver {
           url: available
               ? 'https://media.example/${Uri.encodeComponent(rule.id)}.m3u8'
               : null,
-          clientVerified: available && verifyPlayable,
+          // The real quick resolver also verifies manifest/segment availability.
+          clientVerified: available,
           expiresAt: available
               ? DateTime.now().add(const Duration(minutes: 10))
               : null,

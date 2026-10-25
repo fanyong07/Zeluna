@@ -7,6 +7,32 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'fresh client verified rule is not probed again before first frame',
+    () async {
+      final line = _line(
+        'ready-rule',
+        providerId: 'kazumi:ready',
+        clientVerified: true,
+      );
+      var probes = 0;
+      final result = await verifyPlaybackLinesBeforeDisplay(
+        [line],
+        verify: (line) async {
+          probes++;
+          return line;
+        },
+      );
+      expect(
+        probes,
+        0,
+        reason: 'duplicate manifest/segment reads delay every episode',
+      );
+      expect(initialPlaybackLinesForDisplay(line), [line]);
+      expect(result, [line]);
+    },
+  );
+
+  test(
     'diagnostic cards preserve distinct routes from the same named source',
     () {
       final lines = List.generate(
