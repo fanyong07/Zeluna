@@ -607,15 +607,17 @@ String? _stableSubjectId(AnimeSubject subject) {
     return stableSubjectKey(source: source, identifier: subject.id);
   }
   final parts = source.split(':');
-  if (parts.length == 3 && parts.first == 'tmdb') {
+  if ((parts.length == 2 || parts.length == 3) && parts.first == 'tmdb') {
     final mediaType = parts[1] == 'series' ? 'tv' : parts[1];
-    if ((mediaType == 'tv' || mediaType == 'movie') &&
-        int.tryParse(parts[2]) != null) {
-      return stableSubjectKey(
-        source: source,
-        identifier: subject.id,
-        mediaType: mediaType,
-      );
+    if (mediaType == 'tv' || mediaType == 'movie') {
+      // Both short source labels and full provider labels are valid domain
+      // representations. Prefer the canonical key: internal subject IDs may
+      // be synthetic and must never replace an explicit TMDB provider ID.
+      final canonical = subject.identityKey;
+      final match = RegExp('^tmdb:$mediaType:([0-9]+)\$').firstMatch(canonical);
+      if (match != null && (int.tryParse(match.group(1)!) ?? 0) > 0) {
+        return canonical;
+      }
     }
   }
   return null;

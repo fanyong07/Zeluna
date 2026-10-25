@@ -35,6 +35,47 @@ void main() {
     description: '',
   );
 
+  for (final type in ['movie', 'tv']) {
+    for (final explicitKey in [false, true]) {
+      test(
+        'TMDB $type short source uses canonical identity explicit=$explicitKey',
+        () async {
+          const providerId = 535167;
+          var calls = 0;
+          final repository = ZelunaBackendPlaybackRepository(
+            baseUrl: 'https://backend.example.com',
+            client: MockClient((request) async {
+              calls++;
+              expect(
+                request.url.path,
+                '/api/v3/quick-playback/tmdb:$type:$providerId',
+              );
+              return _jsonResponse([
+                {
+                  'url': 'https://cdn.example/media.m3u8',
+                  'status': 'server_verified',
+                  'available': true,
+                  'source': 'maccms:fixture',
+                },
+              ]);
+            }),
+          );
+          final item = AnimeSubject.fromJson({
+            ...subject.toJson(),
+            'id': explicitKey ? -42 : providerId,
+            'source': 'tmdb:$type',
+            'stableKey': explicitKey ? 'tmdb:$type:$providerId' : null,
+            'platform': type == 'movie' ? 'Movie' : 'TV',
+            'categories': const [],
+          });
+          final lines = await repository.linesForEpisode(item, episode);
+          expect(calls, 1);
+          expect(lines.single.available, isTrue);
+        },
+      );
+    }
+  }
+
   test(
     'partial full response retains routes and explicit non-final cache state',
     () async {
