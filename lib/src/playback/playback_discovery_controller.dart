@@ -1669,7 +1669,12 @@ final class PlaybackDiscoveryController {
     Iterable<PlaybackLine> lines, {
     bool expandAll = false,
   }) {
-    if (!_isCurrent(scope)) return;
+    // A verified playable route is not proof that every source was scanned.
+    // Keep this guard at both raw and verified-result cache write boundaries.
+    if (!_isCurrent(scope) ||
+        lines.any((line) => line.cacheState == 'partial')) {
+      return;
+    }
     final lookupKey = _backendPlaybackLookupKey(
       scope,
       _services,

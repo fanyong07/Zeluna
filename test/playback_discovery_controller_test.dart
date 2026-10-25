@@ -9,6 +9,55 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final preferred in [false, true]) {
+    test(
+      'verified partial response is not cached as a full scan preferred=$preferred',
+      () async {
+        var fullCalls = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async {
+              if (!expandAll) return [];
+              fullCalls++;
+              return [
+                _line(
+                  'full-$fullCalls',
+                  available: false,
+                  requiresClientProbe: true,
+                  cacheState: fullCalls == 1 ? 'partial' : 'cold',
+                ),
+              ];
+            },
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async => _verified(line),
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        Future<List<PlaybackLine>> lookup() => controller.linesForEpisodeMode(
+          _subject,
+          _episode,
+          expandAll: true,
+          preferredProviderId: preferred ? 'rule:missing' : null,
+        );
+        final first = await lookup();
+        expect(first.any((line) => line.available), isTrue);
+        await lookup();
+        expect(
+          fullCalls,
+          2,
+          reason: 'a usable route does not make a partial source scan complete',
+        );
+      },
+    );
+  }
+
   test(
     'quick and full producers share a four-probe concurrency limit',
     () async {
@@ -3441,6 +3490,7 @@ PlaybackLine _verified(PlaybackLine line) => PlaybackLine(
   format: line.format,
   url: line.url,
   serverVerified: line.serverVerified,
+  cacheState: line.cacheState,
   clientVerified: true,
   latency: const Duration(milliseconds: 5),
   available: true,
