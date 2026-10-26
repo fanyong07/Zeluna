@@ -220,13 +220,24 @@ String playbackUnavailableMessage(List<PlaybackLine> lines, {int? count}) {
   final unavailableLines = lines.where((line) => !line.available).toList();
   final total = count ?? unavailableLines.length;
   final backendLines = unavailableLines
-      .where((line) => line.providerId.startsWith('zeluna:'))
+      .where(
+        (line) =>
+            line.sourceInventoryId.isNotEmpty ||
+            line.providerId.startsWith('zeluna:') ||
+            line.providerId.startsWith('aggregate.'),
+      )
       .toList();
   final backendMediaCount = backendLines
       .where((line) => line.url?.trim().isNotEmpty == true)
       .length;
   if (backendMediaCount > 0) {
     return '找到了 $backendMediaCount 条视频线路，但当前网络下无法打开。请检查网络或代理后重试。';
+  }
+  if (backendLines.any((line) => line.sourceInventoryId.isNotEmpty)) {
+    final summary = summarizePlaybackSourceDiagnostics(backendLines);
+    final unqueried = summary.totalSources - summary.queriedSources;
+    final pending = unqueried > 0 ? '；其余 $unqueried 项未查询或未接入' : '';
+    return '来源库共 ${summary.totalSources} 项，本次实际查询 ${summary.queriedSources} 项$pending。暂未找到这集的可播放地址。';
   }
   if (backendLines.isNotEmpty) {
     return '已经找过 ${backendLines.length} 个在线来源，都没有找到能播的地址。这部作品可能在这些来源里用了别的名字，或者暂时没有资源。';

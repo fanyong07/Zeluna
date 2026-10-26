@@ -2235,9 +2235,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         url,
         windows: !kIsWeb && defaultTargetPlatform == TargetPlatform.windows,
       );
-      final media = line.headers.isEmpty
-          ? Media(resource)
-          : Media(resource, httpHeaders: line.headers);
+      final media = await _nativeVideo.prepareMedia(
+        resource,
+        headers: line.headers,
+        format: line.format,
+        publicHttpOnly: line.publicHttpOnly,
+      );
+      if (!mounted || serial != _openLineSerial) return;
       _nativeMediaEvents.beginOpen(openSerial: serial, mediaUri: media.uri);
       _ignoreNativeErrorsUntil = DateTime.now().add(
         const Duration(milliseconds: 750),

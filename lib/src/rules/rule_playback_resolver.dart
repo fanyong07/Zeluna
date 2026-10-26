@@ -9,6 +9,7 @@ import 'package:xml/xml.dart';
 import 'package:xpath_selector_html_parser/xpath_selector_html_parser.dart';
 
 import '../core/identity/stable_identity.dart';
+import '../core/network/media_request_headers.dart';
 import '../core/network/network_http_client.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
@@ -70,9 +71,7 @@ class RulePlaybackResolver {
        _animekoWebViewSniffer =
            animekoWebViewSniffer ?? createAnimekoWebViewSniffer();
 
-  static const _desktopUserAgent =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  static const _desktopUserAgent = defaultMediaUserAgent;
 
   final http.Client? _client;
   final http.Client? _rulePublicClient;
@@ -143,10 +142,7 @@ class RulePlaybackResolver {
               ? _drpyRuntime.createPublicHttpClient()
               : createTrustedMediaProbeHttpClient());
       try {
-        final headers = <String, String>{
-          'User-Agent': _desktopUserAgent,
-          ...line.headers,
-        };
+        final headers = effectiveMediaRequestHeaders(line.headers);
         if (line.publicHttpOnly) {
           await _drpyRuntime.ensurePublicUri(target);
         }

@@ -39,7 +39,7 @@ from .aggregator import (
     aggregator,
     _is_inventory_candidate_url,
 )
-from .catalog import catalog_service, parse_stable_id
+from .catalog import _is_animated, catalog_service, parse_stable_id
 from .config import (
     MANAGED_PLAYBACK_LINES_ENABLED,
     MANAGED_PLAYBACK_LINES_MAX_PER_EPISODE,
@@ -816,6 +816,10 @@ class PlaybackService:
                 metadata.get("original_title") or original_title
             ).strip()
             content_type = str(metadata.get("media_type") or content_type).strip()
+            # TMDB TV is an identity namespace, not a live-action genre. Use
+            # the same structured animation evidence as the catalogue filters.
+            if content_type == "tv" and _is_animated(metadata):
+                content_type = "anime"
             date = str(metadata.get("date") or "")
             if not year and len(date) >= 4 and date[:4].isdigit():
                 year = int(date[:4])

@@ -6,6 +6,8 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import '../playback_line_display.dart';
 import 'native_video_compatibility.dart';
+import 'native_media_transport_stub.dart'
+    if (dart.library.io) 'native_media_transport_io.dart';
 
 /// Rejects shared media-kit stream events while a media open is being
 /// replaced, and after a newer open has taken ownership of the player.
@@ -396,6 +398,19 @@ final class NativeVideoController {
   }
 
   final Player player;
+  final NativeMediaTransport _mediaTransport = NativeMediaTransport();
+
+  Future<Media> prepareMedia(
+    String resource, {
+    required Map<String, String> headers,
+    String format = '',
+    bool publicHttpOnly = false,
+  }) => _mediaTransport.prepare(
+    resource,
+    headers: headers,
+    format: format,
+    publicHttpOnly: publicHttpOnly,
+  );
   late final VideoController surfaceController;
   late final NativeResumeSeekController resumeSeek;
   final NativeFirstFrameWatchdog _firstFrameWatchdog =
@@ -451,6 +466,7 @@ final class NativeVideoController {
     final subscriptions = List.of(_subscriptions);
     _subscriptions.clear();
     await Future.wait(subscriptions.map((item) => item.cancel()));
+    await _mediaTransport.dispose();
     await player.dispose();
   }
 }

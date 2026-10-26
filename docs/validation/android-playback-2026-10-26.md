@@ -1,0 +1,46 @@
+# Android 播放故障回归说明（2026-10-26）
+
+## 背景与目标
+
+用户在 Android 播放《败犬女主太多了！》第 1 集时看到百余来源但没有视频。
+目标是修复真实的目录查找、地址验证、原生播放链路，而不是把来源库存数当作可播放数。
+
+## 已定位的问题
+
+1. `tmdb:tv:241535` 的 TV 是目录身份，不代表真人电视剧。后端忽略动画分类，导致动画搜索被普通电视剧过滤。`bangumi:464376` 同片身份没有此分类错误。
+2. Android 原生 FFmpeg 的 HTTPS 读取出现 `mbedtls_ssl_read -0x7180`，而应用的 Dart 验线可以读取同地址。仅替换 User-Agent 不能解决此故障。
+3. 不可用提示只识别 `zeluna:*`，漏掉 `aggregate.*`，并将未查询、未接入的库存混同为已失败线路。
+4. 验线补了浏览器默认 User-Agent，原生播放却未补，两个阶段的请求身份不一致。
+
+## 范围与实现
+
+- 后端复用目录模块的结构化动画判定，只将动画 TV 的播放匹配类型转换为 anime；电影和真人剧不受影响。
+- Android HLS / 渐进媒体使用应用内 Dart HTTPS 读取，再把字节流交给原生解码器。不会通过额外云服务中转，也不会缓存整集到磁盘。
+- HLS 主清单、子清单、音轨、字幕、AES key、初始化段和媒体段使用固定映射的本机地址；相对链接以实际重定向后的清单地址解析。
+- Windows 和其他平台保持原传输方式。DASH 有不同的 URL 模板语义，明确保留原生传输，不假称本修复覆盖 DASH。
+- 请求头只在读取时计算，不修改 PlaybackLine 身份、缓存键或账号线路记忆。
+
+## 安全与生命周期约束
+
+- HTTPS 证书校验、公共地址 / DNS 检查保持开启；不修改系统代理和 Android 全局明文策略。
+- 监听器只绑定 `127.0.0.1`，路径使用每次打开随机生成的 256 位能力令牌。不存在接受任意 URL 的代理接口。
+- 只接受已有映射的 GET/HEAD；拒绝额外 query、网页 Origin、错误 Host 和其他方法。
+- 来源凭据不会交给本机 HTTP 播放地址；跨站子资源与重定向剥离凭据，跳转回原站也不恢复已剥离的凭据。
+- 流式传输保留 Range/206；清单上限 4 MiB、映射上限 16384、并发上限 12、网络空闲超时 30 秒。
+- 换线路和退出页面撤销旧映射、取消上游读取并关闭监听器；不使用跨账号或全局桥接缓存。
+
+## 可重复回归
+
+- `flutter test test/native_media_transport_test.dart`：真实 loopback listener + 受网络策略约束的假上游，覆盖 HLS、重定向、凭据、Range、大媒体流、资源限制和取消。
+- `flutter test test/player_unavailable_message_test.dart`：库存数量和实际查询数量分开显示。
+- 后端 `tests/test_playback_content_type.py`：动画 TV、动画电影、真人 TV 和 Bangumi 身份。
+- 可选真实 Android 验证：`flutter test integration_test/production_player_live_test.dart -d <device> --dart-define=PRODUCTION_PLAYER_LIVE=true`。
+- 真实验证使用生产目录、AnimeController、PlayerPage、原生解码器；仅隔离账号凭据和本地数据。必须拿到图像并持续推进至少 5 秒，两种作品身份都通过。默认 CI 不访问不稳定的外部视频来源。
+
+## 验收与未验证边界
+
+- 服务测试、客户端测试和 API 候选不代表画面已解码；单独的时间轴前进也不算视频通过。
+- API 35 模拟器的 EGL 图形上下文故障必须与 HTTPS 读取故障分开记录，不能通过放宽图像断言掩盖。
+- 测试不证明所有库存源、所有地区网络、所有手机和所有集数长期可用。
+- 真机兼容性、DASH 原生 TLS，以及第三方来源的长期稳定性仍需按设备/来源单独验收。
+- 发布必须使用新版本、精确 HEAD 的 Quality Gates 和不可覆盖的安装包/manifest；测试入口不能作为正式安装包入口。
