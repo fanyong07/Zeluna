@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:anime/src/core/network/network_http_client.dart';
@@ -154,6 +155,37 @@ void main() {
         client.get(Uri.parse('https://metadata.example.test/item')),
         throwsA(isA<NetworkSecurityException>()),
       );
+    });
+
+    test('unknown-length overflow stops and cancels the upstream', () async {
+      final upstream = StreamController<List<int>>();
+      final cancelled = Completer<void>();
+      upstream.onCancel = cancelled.complete;
+      final client = PolicyHttpClient(
+        inner: MockClient.streaming((request, _) async {
+          return http.StreamedResponse(upstream.stream, 200, request: request);
+        }),
+        policy: const NetworkRequestPolicy(
+          service: NetworkServiceKind.mediaResource,
+          httpsOnly: true,
+          allowPrivateNetwork: false,
+          maxResponseBytes: 4,
+          requestTimeout: Duration(seconds: 1),
+        ),
+      );
+      addTearDown(client.close);
+      addTearDown(upstream.close);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://media.example.test/stream')),
+      );
+      final checked = expectLater(
+        response.stream.toBytes(),
+        throwsA(isA<NetworkSecurityException>()),
+      );
+      upstream.add([1, 2, 3]);
+      upstream.add([4, 5]);
+      await checked;
+      await cancelled.future.timeout(const Duration(seconds: 2));
     });
 
     test('removes sensitive headers on a cross-origin redirect', () {

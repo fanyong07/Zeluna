@@ -324,20 +324,27 @@ Future<void> _cancelResponse(http.StreamedResponse response) async {
   await subscription.cancel();
 }
 
-Stream<List<int>> _boundedStream(
-  Stream<List<int>> source,
-  int maxBytes,
-) async* {
+Stream<List<int>> _boundedStream(Stream<List<int>> source, int maxBytes) {
   var total = 0;
-  await for (final chunk in source) {
-    total += chunk.length;
-    if (total > maxBytes) {
-      throw const NetworkSecurityException(
-        'Decompressed network response exceeds the configured safety limit.',
-      );
-    }
-    yield chunk;
-  }
+  // Forward cancellation directly. An async* wrapper suspended in await-for
+  // can otherwise wait for a silent upstream before it notices cancellation.
+  return source.transform(
+    StreamTransformer<List<int>, List<int>>.fromHandlers(
+      handleData: (chunk, sink) {
+        total += chunk.length;
+        if (total > maxBytes) {
+          sink.addError(
+            const NetworkSecurityException(
+              'Decompressed network response exceeds the configured safety limit.',
+            ),
+          );
+          sink.close();
+          return;
+        }
+        sink.add(chunk);
+      },
+    ),
+  );
 }
 
 bool _isBlockedLiteralHost(String host, {required bool allowBenchmarkAddress}) {

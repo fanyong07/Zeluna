@@ -345,7 +345,11 @@ void main() {
     () async {
       final bytes = StreamController<List<int>>();
       final cancelled = Completer<void>();
+      final waitingForNextChunk = Completer<void>();
       bytes.onCancel = () => cancelled.complete();
+      bytes.onResume = () {
+        if (!waitingForNextChunk.isCompleted) waitingForNextChunk.complete();
+      };
       final b = await NativeMediaBridge.start(
         Uri.parse('https://media.example.test/video.mp4'),
         clientFactory: () => _StreamingClient(bytes.stream),
@@ -355,6 +359,9 @@ void main() {
       bytes.add(List.filled(64, 1));
       final response = await opening;
       final reading = response.stream.listen((_) {}, onError: (Object _) {});
+      // Cancel after the relay asks for more data from a silent upstream,
+      // not while its first chunk is still paused in the output buffer.
+      await waitingForNextChunk.future.timeout(const Duration(seconds: 2));
       await b.dispose().timeout(const Duration(seconds: 2));
       await cancelled.future.timeout(const Duration(seconds: 2));
       await reading.cancel();
