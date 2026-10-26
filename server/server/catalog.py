@@ -45,6 +45,8 @@ _HOME_RANKING_FRESH_SECONDS = 6 * 3600
 _HOME_RANKING_STALE_SECONDS = 72 * 3600
 _RRF_K = 60.0
 _PROVIDER_MAX_CONCURRENCY = 2
+# Leave room for network/serialization inside the mobile client's 8s budget.
+_SEARCH_PROVIDER_TIMEOUT_SECONDS = 4.0
 _PROVIDER_DEFAULT_COOLDOWN_SECONDS = 30.0
 _PROVIDER_MAX_COOLDOWN_SECONDS = 5 * 60.0
 _BANGUMI_HOME_MAX_PAGES = 2
@@ -513,19 +515,24 @@ class CatalogService:
             tasks.append(self._bangumi_search(query, min(limit, 30)))
         if TMDB_READ_ACCESS_TOKEN and requested.intersection({"tv", "movie"}):
             tasks.append(self._tmdb_search(query, requested, min(limit, 40)))
-        groups = await asyncio.gather(*tasks, return_exceptions=True)
+        groups = await asyncio.gather(
+            *(asyncio.wait_for(task, _SEARCH_PROVIDER_TIMEOUT_SECONDS) for task in tasks),
+            return_exceptions=True,
+        )
         items: list[dict] = []
         for group in groups:
             if isinstance(group, Exception):
                 logger.warning("Metadata search provider failed: %s", type(group).__name__)
                 continue
             items.extend(group)
-        unique: dict[str, dict] = {}
+        # A small cache is still usable when a provider is slow, empty or down.
+        # Persist only newly fetched metadata: a fallback must not extend the
+        # freshness of old cache entries every time someone searches.
+        await self._persist_many(repository, items)
+        unique: dict[str, dict] = {item["stable_id"]: item for item in cached}
         for item in items:
             unique[item["stable_id"]] = item
-        result = list(unique.values())[: max(1, min(limit, 100))]
-        await self._persist_many(repository, result)
-        return result
+        return list(unique.values())[: max(1, min(limit, 100))]
 
     async def playback_aliases(self, metadata: dict) -> list[str]:
         """Return source-search aliases, enriching untranslated anime via TMDB.

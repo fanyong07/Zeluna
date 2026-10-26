@@ -11,9 +11,11 @@
 2. Android 原生 FFmpeg 的 HTTPS 读取出现 `mbedtls_ssl_read -0x7180`，而应用的 Dart 验线可以读取同地址。仅替换 User-Agent 不能解决此故障。
 3. 不可用提示只识别 `zeluna:*`，漏掉 `aggregate.*`，并将未查询、未接入的库存混同为已失败线路。
 4. 验线补了浏览器默认 User-Agent，原生播放却未补，两个阶段的请求身份不一致。
+5. 片库缓存不足 5 条时被丢弃，搜索继续等待外部服务；实测请求耗时约 15.7 秒，超过客户端 8 秒上限，导致已有作品也呈现为空。
 
 ## 范围与实现
 
+- 片库搜索保留小缓存，并将外部补充查询限制在 4 秒内；只持久化新取得的数据，回退不能把旧缓存的有效期不断延长。
 - 后端复用目录模块的结构化动画判定，只将动画 TV 的播放匹配类型转换为 anime；电影和真人剧不受影响。
 - Android HLS / 渐进媒体使用应用内 Dart HTTPS 读取，再把字节流交给原生解码器。不会通过额外云服务中转，也不会缓存整集到磁盘。
 - HLS 主清单、子清单、音轨、字幕、AES key、初始化段和媒体段使用固定映射的本机地址；相对链接以实际重定向后的清单地址解析。
@@ -33,9 +35,18 @@
 
 - `flutter test test/native_media_transport_test.dart`：真实 loopback listener + 受网络策略约束的假上游，覆盖 HLS、重定向、凭据、Range、大媒体流、资源限制和取消。
 - `flutter test test/player_unavailable_message_test.dart`：库存数量和实际查询数量分开显示。
+- 后端 `tests/test_catalog_search_resilience.py`：上游超时、空结果、局部失败、缓存合并去重和超时任务取消，先红后绿。
 - 后端 `tests/test_playback_content_type.py`：动画 TV、动画电影、真人 TV 和 Bangumi 身份。
 - 可选真实 Android 验证：`flutter test integration_test/production_player_live_test.dart -d <device> --dart-define=PRODUCTION_PLAYER_LIVE=true`。
+- 两种身份的独立页面/容器生命周期位于同一个设备测试内：原生帧回调会保留最早测试的 error zone，分成两个 testWidgets 会让连接 Future 跨 error-zone 运行。修复测试结构，不吞异常、不加等待绕过。可用 `PRODUCTION_PLAYER_SAVE_FRAMES=true` 将解码图存到测试应用的缓存目录，供独立提取检查。
 - 真实验证使用生产目录、AnimeController、PlayerPage、原生解码器；仅隔离账号凭据和本地数据。必须拿到图像并持续推进至少 5 秒，两种作品身份都通过。默认 CI 不访问不稳定的外部视频来源。
+
+## 2026-10-27 设备与部署复测
+
+- 独立 API 33 Android 模拟器，真实生产页面两个身份同一测试运行：首帧分别约 6.2 秒 / 3.5 秒，取得 1920×1080 解码帧，位置分别推进至约 5.9 秒 / 5.6 秒；完整测试退出为 0，无未处理异步错误。
+- 同机同地址（红牛）原生传输和正式 Dart transport 对照：本轮两种传输均成功解码并持续播放。此前 API 35 的原生 TLS 失败不是所有设备/所有请求必现；不能把此对照写成 API 33 原生必失败，也不能把模拟器更换独自当成 transport 修复的证明。
+- 片库补丁部署前该查询约 15.7 秒且丢失 Bangumi 结果；部署后一次实测约 1.8 秒返回 7 项，包含第一季的两个稳定身份。此延时是一次观测，不是性能保证。
+- 后端分别备份并部署 playback/catalog 两个文件，数据库完整性正常，环境及提供方权限不变，新服务进程无启动错误。部署前是已测试补丁，最终发布须用文件哈希复核绑定提交，不伪造整台服务的版本。
 
 ## 验收与未验证边界
 

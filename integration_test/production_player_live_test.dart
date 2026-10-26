@@ -27,10 +27,13 @@ void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   const enabled = bool.fromEnvironment('PRODUCTION_PLAYER_LIVE');
   final reports = <String, Object?>{};
-  for (final identity in ['bangumi:464376', 'tmdb:tv:241535']) {
-    testWidgets('production PlayerPage decodes reported title $identity', (
-      tester,
-    ) async {
+  // Native/frame callbacks can retain the first test's error zone. Keep both
+  // app lifecycles in one test zone so shared HttpClient connection futures do
+  // not cross error-zone boundaries. Do not suppress errors or delay teardown.
+  testWidgets('production PlayerPage decodes both reported title identities', (
+    tester,
+  ) async {
+    for (final identity in ['bangumi:464376', 'tmdb:tv:241535']) {
       MediaKit.ensureInitialized();
       await NativeVideoCompatibility.instance.initialize();
       await initializeDesktopWindow();
@@ -57,14 +60,19 @@ void main() {
           ),
         ],
       );
-      addTearDown(() async {
+      var cleanedUp = false;
+      Future<void> cleanUp() async {
+        if (cleanedUp) return;
+        cleanedUp = true;
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 500));
         container.dispose();
         await Hive.close();
         // This directory was created by this test, not the user's profile.
         if (await directory.exists()) await directory.delete(recursive: true);
-      });
+      }
+
+      addTearDown(cleanUp);
       final state = await container
           .read(animeControllerProvider.future)
           .timeout(const Duration(seconds: 45));
@@ -131,6 +139,13 @@ void main() {
         final image = await player.screenshot(format: 'image/png');
         frameBytes = image?.length ?? 0;
         decoded = frameBytes > 1000;
+        if (decoded &&
+            image != null &&
+            const bool.fromEnvironment('PRODUCTION_PLAYER_SAVE_FRAMES')) {
+          await File(
+            '${Directory.systemTemp.path}/qa-frame-${identity.replaceAll(':', '-')}.png',
+          ).writeAsBytes(image);
+        }
       }
       final firstFramePosition = positionMs;
       var sustainedPlayback = false;
@@ -179,13 +194,14 @@ void main() {
       binding.reportData = reports;
       // ignore: avoid_print
       print('PRODUCTION_PLAYER_QA ${jsonEncode(report)}');
+      await cleanUp();
       expect(
         decoded && sustainedPlayback,
         isTrue,
         reason: 'the real PlayerPage must decode the reported title',
       );
-    }, skip: !enabled);
-  }
+    }
+  }, skip: !enabled);
 }
 
 class _MemoryCredentials
