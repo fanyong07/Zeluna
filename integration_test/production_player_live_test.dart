@@ -109,6 +109,7 @@ void main() {
       final nativeErrors = <String>[];
       addTearDown(() async => nativeLogs?.cancel());
       var decoded = false;
+      int? firstDecodedFrameMs;
       var frameBytes = 0;
       var positionMs = 0;
       final deadline = DateTime.now().add(const Duration(seconds: 90));
@@ -139,6 +140,7 @@ void main() {
         final image = await player.screenshot(format: 'image/png');
         frameBytes = image?.length ?? 0;
         decoded = frameBytes > 1000;
+        if (decoded) firstDecodedFrameMs = stopwatch.elapsedMilliseconds;
         if (decoded &&
             image != null &&
             const bool.fromEnvironment('PRODUCTION_PLAYER_SAVE_FRAMES')) {
@@ -174,6 +176,7 @@ void main() {
         'backend_enabled': state.services.playbackBackendEnabled,
         'default_enabled_rules': state.rulePlugins.enabledIds.length,
         'lookup_and_decode_ms': stopwatch.elapsedMilliseconds,
+        'first_decoded_frame_ms': firstDecodedFrameMs,
         'decoded_frame': decoded,
         'sustained_playback': sustainedPlayback,
         'first_frame_position_ms': firstFramePosition,

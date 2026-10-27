@@ -3,6 +3,15 @@ import 'dart:async';
 import '../data/playback_prefetch_cache.dart';
 import '../domain/anime_models.dart';
 
+/// Current playback owns the network until it has both progressed and built
+/// a small reserve. Route-only warmup must not compete with the first segments.
+bool canSpendBandwidthOnNextEpisode({
+  required Duration position,
+  required Duration buffer,
+}) =>
+    position >= const Duration(seconds: 12) &&
+    buffer - position >= const Duration(seconds: 12);
+
 typedef NextEpisodeWarmupTimerFactory =
     Timer Function(Duration delay, void Function() callback);
 

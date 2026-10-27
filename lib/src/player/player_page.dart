@@ -477,6 +477,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _pendingRecoveryLineId == null &&
           !_nativeVideo.resumeSeek.isPending &&
           !_nativeVideo.resumeSeek.isSeeking &&
+          canSpendBandwidthOnNextEpisode(
+            position: _position,
+            buffer: _buffer,
+          ) &&
           _nextEpisode != null,
       onStart: _startNextEpisodePrefetch,
     );
@@ -1611,6 +1615,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void _notePlaybackProgress(Duration value) {
     _recoveryController.notePlaybackProgress(value);
     _trackRecommendationWatchTime(value);
+    _scheduleNextEpisodePrefetch();
     unawaited(_persistPlaybackProgress());
   }
 

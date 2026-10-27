@@ -7,6 +7,51 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'fresh aggregate and crawler backend routes skip duplicate startup probes',
+    () async {
+      final lines = [
+        _line(
+          'aggregate-ready',
+          providerId: 'aggregate.maccms',
+          serverVerified: true,
+          cacheState: 'fresh',
+        ),
+        _line(
+          'crawler-ready',
+          providerId: 'crawler.xifan',
+          serverVerified: true,
+          cacheState: 'cold',
+        ),
+      ];
+      var calls = 0;
+      final result = await verifyPlaybackLinesBeforeDisplay(
+        lines,
+        verify: (line) async {
+          calls++;
+          return line;
+        },
+      );
+      expect(
+        calls,
+        0,
+        reason: 'a verified first route must not wait for all candidate probes',
+      );
+      expect(result, lines);
+      expect(initialPlaybackLinesForDisplay(lines.first), [lines.first]);
+    },
+  );
+
+  test('stale backend evidence still needs local validation', () {
+    final line = _line(
+      'stale',
+      providerId: 'aggregate.maccms',
+      serverVerified: true,
+      cacheState: 'stale',
+    );
+    expect(playbackLineNeedsPreDisplayVerification(line), isTrue);
+  });
+
+  test(
     'fresh client verified rule is not probed again before first frame',
     () async {
       final line = _line(

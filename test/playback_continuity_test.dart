@@ -6,6 +6,37 @@ import 'package:anime/src/player/playback_continuity.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('next-episode lookup yields bandwidth until current buffer is safe', () {
+    expect(
+      canSpendBandwidthOnNextEpisode(
+        position: const Duration(seconds: 3),
+        buffer: const Duration(seconds: 5),
+      ),
+      isFalse,
+    );
+    expect(
+      canSpendBandwidthOnNextEpisode(
+        position: const Duration(seconds: 3),
+        buffer: const Duration(seconds: 30),
+      ),
+      isFalse,
+    );
+    expect(
+      canSpendBandwidthOnNextEpisode(
+        position: const Duration(seconds: 20),
+        buffer: const Duration(seconds: 25),
+      ),
+      isFalse,
+    );
+    expect(
+      canSpendBandwidthOnNextEpisode(
+        position: const Duration(seconds: 20),
+        buffer: const Duration(seconds: 32),
+      ),
+      isTrue,
+    );
+  });
+
   final preparedAt = DateTime.utc(2026, 8, 9, 12);
 
   PlaybackLine line({

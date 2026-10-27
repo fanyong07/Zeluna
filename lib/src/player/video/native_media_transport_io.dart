@@ -85,6 +85,9 @@ class NativeMediaBridge {
   final _resources = <String, _Resource>{};
   final _resourceIds = <String, String>{};
   final _transfers = <_Transfer>{};
+  // One lease per active transfer; only completely consumed responses return
+  // to this per-open pool. A cancelled request never closes a peer's socket.
+  final _idleClients = <http.Client>[];
   bool _disposed = false;
   late final Uri uri;
 
@@ -169,12 +172,8 @@ class NativeMediaBridge {
       await _reject(request, 503);
       return;
     }
-    final wire = _clientFactory?.call();
-    final transfer = _Transfer(
-      wire == null
-          ? createNetworkHttpClient(_policy)
-          : PolicyHttpClient(inner: wire, policy: _policy),
-    );
+    final transfer = _Transfer(_leaseClient(), _releaseClient);
+    var upstreamComplete = false;
     _transfers.add(transfer);
     unawaited(
       request.response.done.then<void>(
@@ -207,7 +206,10 @@ class NativeMediaBridge {
           http.Request(request.method, target)..headers.addAll(headers),
         );
         transfer.reader = StreamIterator(response.stream);
-        if (transfer.cancelled) return;
+        if (transfer.cancelled) {
+          await transfer.reader!.cancel();
+          return;
+        }
         if (!const {301, 302, 303, 307, 308}.contains(response.statusCode)) {
           break;
         }
@@ -231,6 +233,8 @@ class NativeMediaBridge {
       if (request.method == 'HEAD') {
         request.response.statusCode = response.statusCode;
         _copyMediaHeaders(response, request.response);
+        // HEAD has no body. Do not reuse a connection with unexpected bytes.
+        upstreamComplete = !await reader.moveNext().timeout(_idleTimeout);
         return;
       }
       final prefix = <int>[];
@@ -275,17 +279,34 @@ class NativeMediaBridge {
           await request.response.flush();
         }
       }
+      upstreamComplete = true;
     } catch (_) {
       // Runtime exceptions may contain signed URLs. Return a generic status only.
       try {
         request.response.statusCode = 502;
       } catch (_) {}
     } finally {
-      await transfer.cancel();
+      await transfer.finish(reusable: upstreamComplete);
       _transfers.remove(transfer);
       try {
         await request.response.close();
       } catch (_) {}
+    }
+  }
+
+  http.Client _leaseClient() {
+    if (_idleClients.isNotEmpty) return _idleClients.removeLast();
+    final wire = _clientFactory?.call();
+    return wire == null
+        ? createNetworkHttpClient(_policy)
+        : PolicyHttpClient(inner: wire, policy: _policy);
+  }
+
+  void _releaseClient(http.Client client, bool reusable) {
+    if (!_disposed && reusable && _idleClients.length < maxConcurrentRequests) {
+      _idleClients.add(client);
+    } else {
+      client.close();
     }
   }
 
@@ -359,6 +380,10 @@ class NativeMediaBridge {
     _disposed = true;
     _resources.clear();
     _resourceIds.clear();
+    for (final client in _idleClients) {
+      client.close();
+    }
+    _idleClients.clear();
     await Future.wait(_transfers.toList().map((transfer) => transfer.cancel()));
     await _server.close(force: true);
   }
@@ -372,15 +397,29 @@ class _Resource {
 }
 
 class _Transfer {
-  _Transfer(this.client);
+  _Transfer(this.client, this._release);
   final http.Client client;
+  final void Function(http.Client, bool) _release;
   StreamIterator<List<int>>? reader;
   bool cancelled = false;
+  bool _finished = false;
+
   Future<void> cancel() async {
+    // response.done can arrive after a successful lease was handed back. It
+    // must not close that lease once a later transfer has acquired it.
+    if (_finished) return;
     cancelled = true;
+    await finish(reusable: false);
+  }
+
+  Future<void> finish({required bool reusable}) async {
+    if (_finished) return;
+    _finished = true;
     try {
       await reader?.cancel();
-    } catch (_) {}
-    client.close();
+    } catch (_) {
+      reusable = false;
+    }
+    _release(client, reusable && !cancelled);
   }
 }

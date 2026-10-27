@@ -2028,8 +2028,16 @@ class RulePlaybackResolver {
     _throwIfLookupCancelled(target);
     _ensureSandboxedRuleUri(target, RuleUrlPurpose.media);
     final requestUri = ruleRequestUri(target);
+    // A known playlist needs its bounded manifest, not a 2 KB binary sniff
+    // followed by the same request again. Opaque URLs retain the fallback path.
+    final path = target.path.toLowerCase();
     final sourceHeaders = _videoProbeHeaders(headers);
-    final requestHeaders = ruleRequestHeaders(target, sourceHeaders);
+    final requestHeaders = ruleRequestHeaders(
+      target,
+      path.endsWith('.m3u8') || path.endsWith('.mpd')
+          ? _manifestProbeHeaders(sourceHeaders)
+          : sourceHeaders,
+    );
     final key = ruleRequestCacheKey(
       '${enrichMetadata ? 'PROBE' : 'PROBE_QUICK'}'
       '${_requiresDrpyPublicMediaProbe ? '_DRPY_PUBLIC' : ''}',

@@ -9,6 +9,94 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'detail prefetch and foreground share the same in-flight candidate probe',
+    () async {
+      final probe = Completer<void>();
+      var probes = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            _line(
+              'shared-candidate',
+              provider: 'aggregate.maccms',
+              available: false,
+              requiresClientProbe: true,
+            ),
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              probes++;
+              await probe.future;
+              return _verified(line);
+            },
+      );
+      addTearDown(() {
+        if (!probe.isCompleted) probe.complete();
+        controller.dispose();
+      });
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      controller.prefetchPlayback(_subject, const [_episode]);
+      await _waitUntil(() => probes == 1);
+      final foreground = controller.linesForEpisodeMode(_subject, _episode);
+      await Future<void>.delayed(Duration.zero);
+      probe.complete();
+      final lines = await foreground;
+      expect(lines.any((line) => line.clientVerified), isTrue);
+      expect(
+        probes,
+        1,
+        reason:
+            'detail warmup and Play must not compete for the same probe slots',
+      );
+    },
+  );
+
+  for (final provider in ['aggregate.maccms', 'crawler.xifan']) {
+    test(
+      'detail prefetch client-verifies current backend namespace $provider',
+      () async {
+        var probes = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async => [
+              _line('modern-backend', provider: provider, serverVerified: true),
+            ],
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                probes++;
+                return _verified(line);
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        controller.prefetchPlayback(_subject, const [_episode]);
+        await _waitUntil(
+          () =>
+              controller
+                  .prefetchedLineForEpisode(_subject, _episode)
+                  ?.clientVerified ==
+              true,
+        );
+        expect(probes, 1);
+      },
+    );
+  }
+
   for (final preferred in [false, true]) {
     test(
       'verified partial response is not cached as a full scan preferred=$preferred',

@@ -107,6 +107,17 @@ bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
           ))) {
     return false;
   }
+  // Modern backend namespaces also carry explicit server evidence. Fresh
+  // evidence can start playback; stale or client-probe-only routes cannot.
+  if (line.serverVerified &&
+      !line.requiresClientProbe &&
+      line.cacheState != 'stale' &&
+      (line.expiresAt == null ||
+          line.expiresAt!.isAfter(
+            DateTime.now().add(const Duration(seconds: 15)),
+          ))) {
+    return false;
+  }
   // Zeluna's backend only returns lines after a manifest/segment probe. Doing
   // the same work again on the client delays first paint and makes cached
   // playback feel slower than the backend response itself.

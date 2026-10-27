@@ -165,8 +165,11 @@ final class PlaybackDiscoveryController {
   final Duration _interactivePreferredHeadStart;
   final PlaybackPrefetchCache _backendCache;
   final NextEpisodeWarmupCache _episodeWarmupCache;
-  final Map<String, _BackendLookupOperation> _backendLookups =
-      <String, _BackendLookupOperation>{};
+  final Map<String, _PlaybackLookupOperation> _backendLookups =
+      <String, _PlaybackLookupOperation>{};
+  // In-flight only (not another cache): detail warmup and the Play action
+  // share discovery/probes, while each caller retains independent cancellation.
+  final Map<String, _PlaybackLookupOperation> _quickLookups = {};
   final Map<String, Future<void>> _prefetches = <String, Future<void>>{};
   final Map<String, RulePlaybackCancellationToken> _prefetchTokens =
       <String, RulePlaybackCancellationToken>{};
@@ -326,27 +329,55 @@ final class PlaybackDiscoveryController {
     final scope = _scope();
     if (cancellationToken?.isCancelled ?? false) return const [];
     final preferred = preferredProviderId?.trim();
-    // Full discovery is an inventory, not the two-route startup shortlist.
-    if (expandAll ||
-        ((preferred == null || preferred.isEmpty) &&
-            lookupIntent == PlaybackLookupIntent.interactive)) {
-      return _linesForEpisodeWithoutPreference(
+    Future<List<PlaybackLine>> discover(RulePlaybackCancellationToken? token) {
+      // Full discovery is an inventory, not the two-route startup shortlist.
+      if (expandAll ||
+          ((preferred == null || preferred.isEmpty) &&
+              lookupIntent == PlaybackLookupIntent.interactive)) {
+        return _linesForEpisodeWithoutPreference(
+          scope,
+          subject,
+          episode,
+          expandAll: expandAll,
+          forceRefresh: forceRefresh,
+          cancellationToken: token,
+        );
+      }
+      return _linesForEpisodeWithPreference(
         scope,
         subject,
         episode,
         expandAll: expandAll,
         forceRefresh: forceRefresh,
-        cancellationToken: cancellationToken,
+        preferredProviderId: preferred,
+        lookupIntent: lookupIntent,
+        cancellationToken: token,
       );
     }
-    return _linesForEpisodeWithPreference(
-      scope,
-      subject,
-      episode,
-      expandAll: expandAll,
-      forceRefresh: forceRefresh,
-      preferredProviderId: preferred,
-      lookupIntent: lookupIntent,
+
+    if (expandAll || lookupIntent != PlaybackLookupIntent.interactive) {
+      return discover(cancellationToken);
+    }
+    final key =
+        '${_episodePrefetchKey(scope, subject, episode)}|${preferred ?? ''}';
+    if (forceRefresh) _quickLookups.remove(key)?.cancel();
+    var operation = _quickLookups[key];
+    if (operation == null) {
+      operation = _PlaybackLookupOperation();
+      _quickLookups[key] = operation;
+      final owned = operation;
+      owned.future =
+          Future<List<PlaybackLine>>.sync(
+            () => discover(owned.token),
+          ).whenComplete(() {
+            owned.settled = true;
+            if (identical(_quickLookups[key], owned)) _quickLookups.remove(key);
+          });
+    }
+    return _subscribeToLookup(
+      key,
+      operation,
+      lookups: _quickLookups,
       cancellationToken: cancellationToken,
     );
   }
@@ -1330,7 +1361,13 @@ final class PlaybackDiscoveryController {
     var candidates = cacheEpisode
         ? lines.toList(growable: true)
         : lines
-              .where((line) => line.providerId.startsWith('zeluna:'))
+              .where(
+                (line) =>
+                    line.providerId.startsWith('zeluna:') ||
+                    line.providerId.startsWith('aggregate.') ||
+                    line.providerId.startsWith('crawler.') ||
+                    line.sourceInventoryId.isNotEmpty,
+              )
               .toList(growable: true);
     if (candidates.isEmpty) return;
     if (preferred != null && preferred.isNotEmpty) {
@@ -1460,7 +1497,7 @@ final class PlaybackDiscoveryController {
       if (cached != null) return Future.value(cached);
     }
     if (operation == null) {
-      operation = _BackendLookupOperation();
+      operation = _PlaybackLookupOperation();
       _backendLookups[lookupKey] = operation;
       final ownedOperation = operation;
       ownedOperation.future =
@@ -1496,16 +1533,18 @@ final class PlaybackDiscoveryController {
               });
     }
 
-    return _subscribeToBackendOperation(
+    return _subscribeToLookup(
       lookupKey,
       operation,
+      lookups: _backendLookups,
       cancellationToken: cancellationToken,
     );
   }
 
-  Future<List<PlaybackLine>> _subscribeToBackendOperation(
+  Future<List<PlaybackLine>> _subscribeToLookup(
     String lookupKey,
-    _BackendLookupOperation operation, {
+    _PlaybackLookupOperation operation, {
+    required Map<String, _PlaybackLookupOperation> lookups,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     if (cancellationToken?.isCancelled == true) {
@@ -1516,8 +1555,8 @@ final class PlaybackDiscoveryController {
     final unlinkCaller = cancellationToken?.register(() {
       if (operation.subscribers == 1 &&
           !operation.settled &&
-          identical(_backendLookups[lookupKey], operation)) {
-        _backendLookups.remove(lookupKey);
+          identical(lookups[lookupKey], operation)) {
+        lookups.remove(lookupKey);
         operation.cancel();
       }
       if (!callerCancelled.isCompleted) {
@@ -1534,8 +1573,8 @@ final class PlaybackDiscoveryController {
       unlinkCaller?.call();
       operation.subscribers--;
       if (operation.subscribers == 0 && !operation.settled) {
-        if (identical(_backendLookups[lookupKey], operation)) {
-          _backendLookups.remove(lookupKey);
+        if (identical(lookups[lookupKey], operation)) {
+          lookups.remove(lookupKey);
         }
         operation.cancel();
       }
@@ -1755,6 +1794,10 @@ final class PlaybackDiscoveryController {
     }
     _prefetchTokens.clear();
     _prefetches.clear();
+    for (final operation in _quickLookups.values.toList(growable: false)) {
+      operation.cancel();
+    }
+    _quickLookups.clear();
     for (final token in _activeLookupTokens.toList(growable: false)) {
       token.cancel();
     }
@@ -1893,7 +1936,7 @@ List<PlaybackLine> replacePlaybackLine(
   return List<PlaybackLine>.unmodifiable(result);
 }
 
-final class _BackendLookupOperation {
+final class _PlaybackLookupOperation {
   final RulePlaybackCancellationToken token = RulePlaybackCancellationToken();
   final Completer<void> stopped = Completer<void>();
   late Future<List<PlaybackLine>> future;

@@ -295,6 +295,90 @@ void main() {
   });
 
   test(
+    'completed playlist and segment reads reuse an upstream connection lease',
+    () async {
+      final wires = <_TrackedClient>[];
+      final b = await NativeMediaBridge.start(
+        root,
+        playlist: true,
+        clientFactory: () {
+          final wire = _TrackedClient(
+            (request) async => request.url.path.endsWith('.m3u8')
+                ? http.Response(
+                    '#EXTM3U\n#EXTINF:2,\none.ts\n#EXTINF:2,\ntwo.ts\n',
+                    200,
+                  )
+                : http.Response.bytes(List.filled(32, 7), 200),
+          );
+          wires.add(wire);
+          return wire;
+        },
+      );
+      addTearDown(b.dispose);
+      final playlist = await local.get(b.uri);
+      for (final uri in mediaUris(playlist.body)) {
+        expect((await local.get(uri)).bodyBytes, List.filled(32, 7));
+      }
+      expect(
+        wires,
+        hasLength(1),
+        reason: 'do not repeat DNS/TCP/TLS for every segment',
+      );
+      expect(wires.single.closed, isFalse);
+      await b.dispose();
+      expect(wires.single.closed, isTrue);
+    },
+  );
+
+  test(
+    'active transfers have separate leases and errors are never pooled',
+    () async {
+      final wires = <_TrackedClient>[];
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      var active = 0;
+      final b = await NativeMediaBridge.start(
+        root,
+        clientFactory: () {
+          final wire = _TrackedClient((request) async {
+            if (request.url.path.endsWith('.m3u8')) {
+              return http.Response(
+                '#EXTM3U\n#EXTINF:2,\none.ts\n#EXTINF:2,\ntwo.ts\n#EXTINF:2,\nbad.ts\n',
+                200,
+              );
+            }
+            if (request.url.path == '/bad.ts') {
+              return http.Response('failed', 503);
+            }
+            if (++active == 2) entered.complete();
+            await release.future;
+            return http.Response.bytes(List.filled(32, 8), 200);
+          });
+          wires.add(wire);
+          return wire;
+        },
+      );
+      addTearDown(b.dispose);
+      final children = mediaUris((await local.get(b.uri)).body);
+      final reads = [local.get(children[0]), local.get(children[1])];
+      await entered.future.timeout(const Duration(seconds: 2));
+      expect(wires, hasLength(2));
+      release.complete();
+      expect(
+        (await Future.wait(reads)).every((r) => r.statusCode == 200),
+        isTrue,
+      );
+      expect((await local.get(children[2])).statusCode, 502);
+      await Future.any(
+        wires.map((w) => w.onClosed.future),
+      ).timeout(const Duration(seconds: 2));
+      expect(wires.where((w) => w.closed), hasLength(1));
+      await b.dispose();
+      expect(wires.every((w) => w.closed), isTrue);
+    },
+  );
+
+  test(
     'HEAD, suffix byte range and unsatisfiable ranges preserve semantics',
     () async {
       final b = await bridge((request) {
@@ -381,4 +465,24 @@ class _StreamingClient extends http.BaseClient {
         request: request,
         headers: {'content-type': 'video/mp4'},
       );
+}
+
+class _TrackedClient extends http.BaseClient {
+  _TrackedClient(Future<http.Response> Function(http.Request) handler)
+    : inner = MockClient(handler);
+  final http.Client inner;
+  bool closed = false;
+  final onClosed = Completer<void>();
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    if (closed) throw StateError('a retired connection lease was reused');
+    return inner.send(request);
+  }
+
+  @override
+  void close() {
+    closed = true;
+    if (!onClosed.isCompleted) onClosed.complete();
+    inner.close();
+  }
 }

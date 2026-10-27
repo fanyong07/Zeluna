@@ -16,6 +16,47 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'known HLS playlist is fetched once while key and segment are still checked',
+    () async {
+      final calls = <String>[];
+      final manifest =
+          '#EXTM3U\n${List.filled(180, '# padding padding').join('\n')}\n#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXTINF:10,\nsegment.ts\n#EXT-X-ENDLIST\n';
+      final resolver = RulePlaybackResolver(
+        client: MockClient((request) async {
+          calls.add(request.url.path);
+          if (request.url.path == '/known.m3u8') {
+            final bytes = utf8.encode(manifest);
+            final short = request.headers['Range'] == 'bytes=0-2048';
+            final end = short ? 2048 : bytes.length - 1;
+            return http.Response.bytes(
+              bytes.take(end + 1).toList(),
+              206,
+              headers: {
+                'content-type': 'application/vnd.apple.mpegurl',
+                'content-range': 'bytes 0-$end/${bytes.length}',
+              },
+            );
+          }
+          if (request.url.path == '/key.bin') {
+            return http.Response.bytes(List.filled(16, 1), 200);
+          }
+          return http.Response.bytes(
+            List.generate(512, (i) => (i * 73) & 255),
+            206,
+            headers: {'content-type': 'application/octet-stream'},
+          );
+        }),
+      );
+      final checked = await resolver.verifyPlaybackLine(
+        line: _networkLine('https://cdn.example.com/known.m3u8'),
+        enrichMetadata: false,
+      );
+      expect(checked.available, isTrue);
+      expect(calls, ['/known.m3u8', '/key.bin', '/segment.ts']);
+    },
+  );
+
   group('page request contract', () {
     for (final redirect in <int, String>{
       301: 'GET',
@@ -363,7 +404,7 @@ void main() {
       expect(request.headers, isNot(contains('Authorization')));
       switch (request.url.path) {
         case '/test/01.m3u8':
-          expect(request.headers['Range'], 'bytes=0-2048');
+          expect(request.headers['Range'], 'bytes=0-524287');
           probeRequests++;
           return _playableHls();
         case '/test/segment-1.ts':
@@ -1083,7 +1124,7 @@ void main() {
 
       expect(lines, hasLength(1));
       expect(lines.single.available, isTrue);
-      expect(client.probeRange, 'bytes=0-2048');
+      expect(client.probeRange, 'bytes=0-524287');
       expect(client.probeStreamCancelled, isTrue);
     },
   );
@@ -1311,7 +1352,7 @@ http://[
           case 'cdn.example.com':
             expect(request.headers['Cookie'], 'session=user-value');
             expect(request.headers, isNot(contains('Authorization')));
-            expect(request.headers['Range'], 'bytes=0-2048');
+            expect(request.headers['Range'], 'bytes=0-524287');
             return http.Response(
               '''
 #EXTM3U
@@ -1435,7 +1476,7 @@ segment-2.ts
     expect(line.isLive, isFalse);
     expect(line.sizeEstimated, isTrue);
     expect(line.sizeBytes, 10 * 1024 * 1024);
-    expect(manifestRequests, 2);
+    expect(manifestRequests, 1);
   });
 
   test('HLS media playlist estimates size from one segment', () async {
@@ -1867,9 +1908,9 @@ segment-1.ts
       final bytes = utf8.encode(manifest);
       var manifestRequests = 0;
       final line = await _resolveSinglePlayableLine(
-        'https://cdn.example.com/padded-before-segment.m3u8',
+        'https://cdn.example.com/padded-before-segment',
         probe: (request) {
-          if (request.url.path == '/padded-before-segment.m3u8') {
+          if (request.url.path == '/padded-before-segment') {
             manifestRequests++;
             if (request.headers['Range'] == 'bytes=0-2048') {
               return http.Response.bytes(
