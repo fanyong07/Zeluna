@@ -551,8 +551,9 @@ final class NativeVideoController {
     final uri = index >= 0 && index < playlist.medias.length
         ? playlist.medias[index].uri
         : null;
-    if (!events.isCurrent(currentOpenSerial: serial, playerMediaUri: uri))
+    if (!events.isCurrent(currentOpenSerial: serial, playerMediaUri: uri)) {
       return false;
+    }
     if (_disposed ||
         _softwareDecodeTried ||
         _decodedFrame ||
