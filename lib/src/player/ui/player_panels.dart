@@ -394,6 +394,7 @@ class PlaybackSourcePanel extends StatefulWidget {
     required this.onSearch,
     this.onQueryLocally,
     this.localLookupInProgress = false,
+    this.onCopyDiagnostics,
   });
 
   final PlaybackLine? selected;
@@ -409,6 +410,7 @@ class PlaybackSourcePanel extends StatefulWidget {
   final Future<void> Function() onSearch;
   final Future<void> Function(PlaybackLine source)? onQueryLocally;
   final bool localLookupInProgress;
+  final Future<void> Function()? onCopyDiagnostics;
 
   @override
   State<PlaybackSourcePanel> createState() => _LinePanelState();
@@ -443,6 +445,15 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
             }),
           ),
         ),
+        if (widget.onCopyDiagnostics != null)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: widget.onCopyDiagnostics,
+              icon: const Icon(Icons.copy_rounded, size: 16),
+              label: const Text('复制播放诊断'),
+            ),
+          ),
         Expanded(child: _modeBody(context)),
       ],
     );

@@ -10,6 +10,7 @@ import '../../core/network/media_request_headers.dart';
 import '../../core/network/network_http_client.dart';
 import '../../core/network/network_security.dart';
 import '../../rules/rule_http_policy.dart';
+import 'media_transport_failure.dart';
 
 /// Android's bundled FFmpeg TLS stack can reject streams that Dart's verified
 /// TLS stack can read. Relay HLS/progressive bytes locally, not through a server.
@@ -24,6 +25,7 @@ class NativeMediaTransport {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    void Function(MediaTransportFailure)? onFailure,
   }) async {
     if (_disposed) throw StateError('Media transport is disposed.');
     final generation = ++_generation;
@@ -48,6 +50,7 @@ class NativeMediaTransport {
       headers: effectiveHeaders,
       playlist: const {'HLS', 'M3U8'}.contains(format.toUpperCase()),
       publicHttpOnly: publicHttpOnly,
+      onFailure: onFailure,
     );
     if (_disposed || generation != _generation) {
       await bridge.dispose();
@@ -70,13 +73,28 @@ class NativeMediaTransport {
 /// A fixed-capability, loopback-only relay. No arbitrary URL query parameter,
 /// directory, cache, account endpoint or public listener is exposed.
 class NativeMediaBridge {
-  NativeMediaBridge._(this._server, this._policy, this._clientFactory);
+  NativeMediaBridge._(
+    this._server,
+    this._policy,
+    this._clientFactory,
+    this._onFailure,
+  );
 
   static const maxPlaylistBytes = 4 * 1024 * 1024;
   static const maxResources = 16384;
   static const maxConcurrentRequests = 12;
   static const _idleTimeout = Duration(seconds: 30);
   final HttpServer _server;
+  final void Function(MediaTransportFailure)? _onFailure;
+  void _reportFailure(MediaTransportFailure failure) {
+    if (_disposed) return;
+    try {
+      _onFailure?.call(failure);
+    } catch (_) {
+      /* Observation cannot break playback. */
+    }
+  }
+
   final NetworkRequestPolicy _policy;
   final http.Client Function()? _clientFactory;
   final String _token = base64UrlEncode(
@@ -99,6 +117,7 @@ class NativeMediaBridge {
     bool playlist = false,
     bool publicHttpOnly = false,
     http.Client Function()? clientFactory,
+    void Function(MediaTransportFailure)? onFailure,
   }) async {
     final policy = NetworkRequestPolicy(
       service: NetworkServiceKind.mediaResource,
@@ -114,7 +133,12 @@ class NativeMediaBridge {
     policy.ensureHeadersAllowed(source, headers);
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.idleTimeout = _idleTimeout;
-    final bridge = NativeMediaBridge._(server, policy, clientFactory);
+    final bridge = NativeMediaBridge._(
+      server,
+      policy,
+      clientFactory,
+      onFailure,
+    );
     bridge.uri = bridge._register(source, headers, playlist: playlist);
     server.listen(bridge._handle, onError: (Object _) {});
     return bridge;
@@ -227,6 +251,13 @@ class NativeMediaBridge {
       final reader = transfer.reader!;
       request.response.headers.set('cache-control', 'no-store');
       if (response.statusCode != 200 && response.statusCode != 206) {
+        _reportFailure(
+          MediaTransportFailure(
+            MediaTransportFailureKind.http,
+            manifest: resource.playlist || resource.uri.path.endsWith('.m3u8'),
+            status: response.statusCode,
+          ),
+        );
         await _reject(request, response.statusCode == 416 ? 416 : 502);
         return;
       }
@@ -280,7 +311,23 @@ class NativeMediaBridge {
         }
       }
       upstreamComplete = true;
-    } catch (_) {
+    } catch (error) {
+      if (!transfer.cancelled) {
+        final kind = switch (error) {
+          TimeoutException() => MediaTransportFailureKind.timeout,
+          HandshakeException() => MediaTransportFailureKind.tls,
+          SocketException() => MediaTransportFailureKind.connection,
+          NetworkSecurityException() => MediaTransportFailureKind.policy,
+          FormatException() => MediaTransportFailureKind.manifest,
+          _ => MediaTransportFailureKind.unknown,
+        };
+        _reportFailure(
+          MediaTransportFailure(
+            kind,
+            manifest: resource.playlist || resource.uri.path.endsWith('.m3u8'),
+          ),
+        );
+      }
       // Runtime exceptions may contain signed URLs. Return a generic status only.
       try {
         request.response.statusCode = 502;

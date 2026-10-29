@@ -18,6 +18,7 @@ import 'animeko_webview_sniffer.dart';
 import 'csp_rule_support.dart';
 import 'drpy_runtime.dart';
 import 'rule_models.dart';
+import 'rule_media_resolver.dart';
 import 'rule_http_policy.dart';
 import 'rule_page_client.dart';
 import 'rule_playback_cancellation.dart';
@@ -163,7 +164,11 @@ class RulePlaybackResolver {
         if (cancellationToken?.isCancelled ?? false) return line;
         return _copyPlaybackLineWithProbe(
           line,
-          _PlayableProbeResult(false, _friendlyError(error)),
+          _PlayableProbeResult(
+            false,
+            _friendlyError(error),
+            errorCategory: _probeFailureCategory(error),
+          ),
         );
       } finally {
         if (ownedClient) client.close();
@@ -1258,6 +1263,42 @@ class RulePlaybackResolver {
     return lines;
   }
 
+  Future<ResolvedRuleMedia?> _resolveRuleMedia(
+    http.Client client,
+    RulePlugin rule,
+    String body,
+    String page, {
+    String userAgent = '',
+    String? initialCandidate,
+  }) =>
+      RuleMediaResolver(
+        readPage: (uri, headers) => _get(client, uri, headers),
+        extract: (value, base) {
+          final raw =
+              (value == body ? initialCandidate : null) ??
+              _extractPlayableUrl(value, base);
+          if (raw != null && _looksPlayable(raw)) {
+            return _normalizePlayableUrl(raw, base);
+          }
+          return _looksPlayable(value)
+              ? _normalizePlayableUrl(value, base)
+              : null;
+        },
+        headersFor: (referer) => _headers(
+          rule: rule,
+          referer: referer.toString(),
+          userAgent: userAgent,
+        ),
+        sniffer: _animekoWebViewSniffer,
+      ).resolve(
+        page: Uri.parse(page),
+        body: body,
+        manifest: rule.effectiveManifest,
+        allowSniffing: !rule.requiresCaptcha,
+        cancellationToken: _activeRulePlaybackResolveContext?.cancellationToken,
+        budget: timeout,
+      );
+
   Future<PlaybackLine?> _resolveKazumiLine(
     http.Client client,
     RulePlugin rule,
@@ -1284,9 +1325,16 @@ class RulePlaybackResolver {
         Uri.parse(playPageUrl),
         _headers(rule: rule, referer: detailUrl.toString()),
       );
-      final playableUrl = _extractPlayableUrl(playHtml, playPageUrl);
-      if (playableUrl == null || !_looksPlayable(playableUrl)) return null;
-      final headers = _headers(rule: rule, referer: playPageUrl);
+      final resolved = await _resolveRuleMedia(
+        client,
+        rule,
+        playHtml,
+        playPageUrl,
+        userAgent: config.userAgent,
+      );
+      if (resolved == null) return null;
+      final playableUrl = resolved.url;
+      final headers = resolved.headers;
       final probe = await _playableCandidateStatus(
         client,
         playableUrl,
@@ -1302,7 +1350,7 @@ class RulePlaybackResolver {
               url: playableUrl,
               title: title,
               probe: probe,
-              referer: playPageUrl,
+              referer: resolved.referer.toString(),
               headers: headers,
               routeKey: '$roadIndex',
             )
@@ -1449,19 +1497,20 @@ class RulePlaybackResolver {
         Uri.parse(playPageUrl),
         _headers(rule: rule, referer: detailUrl.toString()),
       );
-      final playableUrl =
-          _extractByWildcardRule(playHtml, config.jumpPlayLink) ??
-          _extractPlayableUrl(playHtml, playPageUrl);
-      if (playableUrl == null || !_looksPlayable(playableUrl)) return null;
+      final resolved = await _resolveRuleMedia(
+        client,
+        rule,
+        playHtml,
+        playPageUrl,
+        initialCandidate: _extractByWildcardRule(playHtml, config.jumpPlayLink),
+      );
+      if (resolved == null) return null;
 
       final lineTitle = _cleanText(
         _cutByRule(episodeSegment, config.playTitle),
       );
-      final normalizedPlayableUrl = _normalizePlayableUrl(
-        playableUrl,
-        playPageUrl,
-      );
-      final headers = _headers(rule: rule, referer: playPageUrl);
+      final normalizedPlayableUrl = resolved.url;
+      final headers = resolved.headers;
       final probe = await _playableCandidateStatus(
         client,
         normalizedPlayableUrl,
@@ -1477,7 +1526,7 @@ class RulePlaybackResolver {
               url: normalizedPlayableUrl,
               title: title,
               probe: probe,
-              referer: playPageUrl,
+              referer: resolved.referer.toString(),
               headers: headers,
               routeKey: '$groupIndex',
             )
@@ -2234,6 +2283,7 @@ class RulePlaybackResolver {
         return _PlayableProbeResult(
           false,
           '视频服务器拒绝了访问，可能限制了地区或来源。',
+          errorCategory: 'http_403',
           latency: totalLatency(),
         );
       }
@@ -2241,24 +2291,28 @@ class RulePlaybackResolver {
         return _PlayableProbeResult(
           false,
           '视频 CDN 返回 404，这条播放地址已经失效。',
+          errorCategory: 'http_404',
           latency: totalLatency(),
         );
       }
       return _PlayableProbeResult(
         false,
         '视频 CDN 返回 HTTP ${response.statusCode}。',
+        errorCategory: 'http_${response.statusCode}',
         latency: totalLatency(),
       );
     } on TimeoutException {
       return _PlayableProbeResult(
         false,
         '视频 CDN 连接超时。',
+        errorCategory: 'timeout',
         latency: totalLatency(),
       );
     } catch (error) {
       return _PlayableProbeResult(
         false,
         '视频 CDN 无法访问：${_shortError(error)}',
+        errorCategory: _probeFailureCategory(error),
         latency: totalLatency(),
       );
     }
@@ -3692,6 +3746,7 @@ class _PlayableProbeResult {
     this.available,
     this.message, {
     this.latency,
+    this.errorCategory = '',
     this.format,
     this.startupProfile = PlaybackStartupProfile.unknown,
     this.sizeBytes,
@@ -3704,6 +3759,7 @@ class _PlayableProbeResult {
     this.adaptive = false,
   });
 
+  final String errorCategory;
   final bool available;
   final String message;
   final Duration? latency;
@@ -3756,7 +3812,11 @@ PlaybackLine _copyPlaybackLineWithProbe(
         ? probe.startupProfile
         : line.startupProfile,
     cacheState: line.cacheState,
-    sourceErrorCategory: line.sourceErrorCategory,
+    sourceErrorCategory: probe.available
+        ? line.sourceErrorCategory
+        : (probe.errorCategory.isEmpty
+              ? 'media_unreachable'
+              : probe.errorCategory),
     sourceName: line.sourceName,
     sourceInventoryId: line.sourceInventoryId,
     clientQuerySupported: line.clientQuerySupported,
@@ -5345,6 +5405,17 @@ String _cleanText(String value) {
 /// prefixes ("Bad state:", "SocketException:") and, for the drpy runtime,
 /// English internal messages -- all of which used to reach Chinese UI verbatim.
 /// StateError messages are written for users, so those pass through directly.
+String _probeFailureCategory(Object error) {
+  if (error is TimeoutException) return 'timeout';
+  if (error is FormatException) return 'invalid_media';
+  // Do not export exception text, which may embed signed URLs/credentials.
+  final type = error.runtimeType.toString().toLowerCase();
+  if (type.contains('handshake') || type.contains('tls')) return 'tls';
+  if (type.contains('security')) return 'policy';
+  if (type.contains('socket') || type.contains('client')) return 'connection';
+  return 'probe_failed';
+}
+
 String _friendlyError(Object error) {
   if (error is StateError) return error.message;
   final text = error.toString();

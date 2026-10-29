@@ -2,6 +2,35 @@ import 'package:anime/src/player/playback_performance_trace.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'user diagnostic export is bounded and excludes credentials and addresses',
+    () {
+      final trace = PlaybackPerformanceTrace(sink: (_) {}, maxEvents: 2);
+      trace.record(
+        'media_request_failed',
+        fields: {
+          'reason_code': 'tls',
+          'url': 'https://private.test/?token=secret',
+          'Cookie': 'session=secret',
+        },
+      );
+      trace.record('runtime_failure');
+      trace.record('ignored');
+      final report = trace.diagnosticReport(
+        summary: {
+          'platform': 'android',
+          'authorization': 'Bearer secret',
+          'source': 'https://private.test',
+        },
+      );
+      expect(report, contains('tls'));
+      expect(report, contains('android'));
+      expect(report, isNot(contains('secret')));
+      expect(report, isNot(contains('private.test')));
+      expect(report, isNot(contains('ignored')));
+    },
+  );
+
   test('playback trace emits an anonymous monotonic attempt timeline', () {
     var now = DateTime.utc(2026, 8, 1, 12);
     final events = <Map<String, Object?>>[];

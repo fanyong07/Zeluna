@@ -524,17 +524,20 @@ bool shouldSwitchAfterPlaybackInterruption({
 bool nativePlaybackHasFirstFrame({
   required bool playing,
   required Duration position,
+  required bool decodedVideo,
 }) {
-  // media_kit may publish playing=true as soon as the play command is accepted,
-  // before a frame has decoded. Position progress is the startup signal.
-  return position > Duration.zero;
+  // Command acceptance and audio timestamps are not decoded video evidence.
+  return decodedVideo && position > Duration.zero;
 }
 
 bool nativePlaybackReachedFirstFrame({
   required Duration previousPosition,
   required Duration currentPosition,
+  required bool decodedVideo,
 }) {
-  return previousPosition <= Duration.zero && currentPosition > Duration.zero;
+  return decodedVideo &&
+      previousPosition <= Duration.zero &&
+      currentPosition > Duration.zero;
 }
 
 bool nativePlaybackShouldSwitchAtSoftTimeout({

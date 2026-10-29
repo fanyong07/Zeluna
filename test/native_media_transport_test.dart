@@ -8,6 +8,34 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'transport reports HTTP failure without media URLs or headers',
+    () async {
+      final failures = <Map<String, Object?>>[];
+      final b = await NativeMediaBridge.start(
+        Uri.parse('https://media.test/secret.m3u8?token=secret'),
+        headers: {'Cookie': 'secret'},
+        playlist: true,
+        clientFactory: () =>
+            MockClient((_) async => http.Response('denied', 403)),
+        onFailure: (failure) => failures.add(failure.safeFields),
+      );
+      addTearDown(b.dispose);
+      final client = http.Client();
+      addTearDown(client.close);
+      final response = await client.get(b.uri);
+      expect(response.statusCode, 502);
+      expect(failures, [
+        {
+          'reason_code': 'http',
+          'resource_type': 'manifest',
+          'http_status': 403,
+        },
+      ]);
+      expect(failures.toString(), isNot(contains('secret')));
+    },
+  );
+
   final root = Uri.parse('https://media.example.test/start.m3u8');
   late http.Client local;
   setUp(() => local = http.Client());

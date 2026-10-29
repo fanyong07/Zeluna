@@ -6,6 +6,17 @@ import 'package:anime/src/player/playback_line_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('audio timestamps alone never confirm a native video frame', () {
+    expect(
+      nativePlaybackHasFirstFrame(
+        playing: true,
+        position: const Duration(seconds: 4),
+        decodedVideo: false,
+      ),
+      isFalse,
+    );
+  });
+
   test(
     'fresh aggregate and crawler backend routes skip duplicate startup probes',
     () async {
@@ -729,13 +740,18 @@ void main() {
     'native playing state alone does not count as a decoded first frame',
     () {
       expect(
-        nativePlaybackHasFirstFrame(playing: true, position: Duration.zero),
+        nativePlaybackHasFirstFrame(
+          playing: true,
+          position: Duration.zero,
+          decodedVideo: false,
+        ),
         isFalse,
       );
       expect(
         nativePlaybackHasFirstFrame(
           playing: false,
           position: const Duration(milliseconds: 1),
+          decodedVideo: true,
         ),
         isTrue,
       );
@@ -746,6 +762,7 @@ void main() {
     expect(
       nativePlaybackReachedFirstFrame(
         previousPosition: Duration.zero,
+        decodedVideo: true,
         currentPosition: const Duration(milliseconds: 1),
       ),
       isTrue,
@@ -753,6 +770,7 @@ void main() {
     expect(
       nativePlaybackReachedFirstFrame(
         previousPosition: const Duration(milliseconds: 1),
+        decodedVideo: true,
         currentPosition: const Duration(milliseconds: 200),
       ),
       isFalse,

@@ -168,6 +168,15 @@ void main() {
           }
         }
       }
+      if (decoded &&
+          sustainedPlayback &&
+          const bool.fromEnvironment('PRODUCTION_PLAYER_SAVE_FRAMES')) {
+        await tester.pump(const Duration(milliseconds: 300));
+        // A local harness may capture the already-painted Android surface.
+        // ignore: avoid_print
+        print('PRODUCTION_PLAYER_SCREEN_READY $identity');
+        await tester.pump(const Duration(seconds: 2));
+      }
       final report = <String, Object?>{
         'platform': Platform.operatingSystem,
         'requested_identity': identity,

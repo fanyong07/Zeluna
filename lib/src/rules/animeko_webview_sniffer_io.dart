@@ -38,10 +38,14 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
   Future<AnimekoWebViewSniffResult?> _sniffSerial(
     AnimekoWebViewSniffRequest request,
   ) async {
+    if (request.cancellationToken?.isCancelled == true) return null;
     final controller = await _ensureController(request);
     if (controller == null) return null;
 
     final session = _WindowsSniffSession(request, controller);
+    final unlink = request.cancellationToken?.register(() {
+      if (!session.result.isCompleted) session.result.complete(null);
+    });
     try {
       if (!await session.network.allows(
         request.pageUrl.toString(),
@@ -75,6 +79,7 @@ class _WindowsAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
     } catch (_) {
       return null;
     } finally {
+      unlink?.call();
       session.cancel();
       if (identical(_activeSession, session)) _activeSession = null;
       await _resetToBlank(controller);
@@ -384,7 +389,11 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
   Future<AnimekoWebViewSniffResult?> sniff(
     AnimekoWebViewSniffRequest request,
   ) async {
-    if (!supported || !request.manifest.webViewSniffing) return null;
+    if (!supported ||
+        !request.manifest.webViewSniffing ||
+        request.cancellationToken?.isCancelled == true) {
+      return null;
+    }
     final network = _SniffNetworkPolicy(request);
     if (!await network.allows(
       request.pageUrl.toString(),
@@ -394,6 +403,9 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
     }
 
     final result = Completer<AnimekoWebViewSniffResult?>();
+    final unlink = request.cancellationToken?.register(() {
+      if (!result.isCompleted) result.complete(null);
+    });
     HeadlessInAppWebView? webView;
     Timer? timeoutTimer;
     Timer? nestedSettleTimer;
@@ -608,6 +620,7 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
     } catch (_) {
       return null;
     } finally {
+      unlink?.call();
       timeoutTimer?.cancel();
       nestedSettleTimer?.cancel();
       try {

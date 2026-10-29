@@ -1,8 +1,65 @@
+import 'dart:async';
 import 'package:media_kit/media_kit.dart';
 import 'package:anime/src/player/video/native_video_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'decoded-frame sample from a replaced open cannot confirm the new open',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      addTearDown(monitor.dispose);
+      final old = Completer<bool>();
+      var frames = 0;
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () => old.future,
+        onFrame: () => frames += 10,
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () async => true,
+        onFrame: () => frames++,
+      );
+      old.complete(true);
+      await tester.pump();
+      expect(frames, 0);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(frames, 1);
+    },
+  );
+
+  testWidgets(
+    'advancing audio clock without decoded video is not a first frame',
+    (tester) async {
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      var frames = 0;
+      var timeouts = 0;
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => const NativePlaybackStartupSnapshot(
+          playing: true,
+          position: Duration(seconds: 3),
+          buffer: Duration(seconds: 10),
+          buffering: false,
+          hasAlternative: true,
+        ),
+        onFirstFrame: (_) => frames++,
+        onTimeout: (_) => timeouts++,
+        softTimeout: const Duration(seconds: 1),
+        hardTimeout: const Duration(seconds: 2),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(frames, 0);
+      await tester.pump(const Duration(seconds: 1));
+      expect(timeouts, 1);
+    },
+  );
+
   test('native media events stay blocked across stop and open transitions', () {
     final guard = NativeMediaEventGuard();
     guard.beginOpen(openSerial: 4, mediaUri: 'https://media.test/ep2.mp4');
@@ -105,6 +162,7 @@ void main() {
           currentOpenSerial: 2,
           playerState: backend,
           hasAlternative: true,
+          decodedFrame: true,
         ),
         onTimeout: events.add,
         softTimeout: const Duration(seconds: 7),
@@ -176,6 +234,7 @@ void main() {
           currentOpenSerial: 2,
           playerState: backend,
           hasAlternative: true,
+          decodedFrame: true,
         ),
         onFirstFrame: frames.add,
         onTimeout: errors.add,
@@ -236,7 +295,7 @@ void main() {
   }
 
   testWidgets(
-    'native position progress confirms first frame and cancels timeout',
+    'decoded video with progress confirms first frame and cancels timeout',
     (tester) async {
       final watchdog = NativeFirstFrameWatchdog();
       addTearDown(watchdog.dispose);
@@ -254,6 +313,7 @@ void main() {
         watchdog.handleProgress(
           previousPosition: Duration.zero,
           currentPosition: const Duration(milliseconds: 1),
+          decodedFrame: true,
         ),
         isTrue,
       );
@@ -339,5 +399,6 @@ NativePlaybackStartupSnapshot _snapshot({
     buffer: buffer,
     buffering: false,
     hasAlternative: hasAlternative,
+    decodedFrame: position > Duration.zero,
   );
 }

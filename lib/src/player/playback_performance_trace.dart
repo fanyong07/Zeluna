@@ -75,6 +75,16 @@ class PlaybackPerformanceTrace {
   late final DateTime _startedAt;
   DateTime? _bufferingStartedAt;
   var _eventCount = 0;
+  final List<Map<String, Object?>> _events = [];
+
+  /// User-initiated local export only. Reuse the same redaction for live traces
+  /// and the export so secrets cannot take a different path through the UI.
+  String diagnosticReport({Map<String, Object?> summary = const {}}) =>
+      const JsonEncoder.withIndent('  ').convert({
+        'schema': 1,
+        'summary': _safeFields(summary),
+        'events': _events,
+      });
 
   void record(String event, {Map<String, Object?> fields = const {}}) {
     final now = _clock();
@@ -119,12 +129,14 @@ class PlaybackPerformanceTrace {
   void _emit(String event, DateTime now, Map<String, Object?> fields) {
     if (!enabled || _eventCount >= maxEvents) return;
     _eventCount++;
-    _sink(<String, Object?>{
+    final safe = <String, Object?>{
       ..._safeFields(fields),
       'attempt_id': attemptId,
       'event': event,
       'elapsed_ms': now.difference(_startedAt).inMilliseconds,
-    });
+    };
+    _events.add(Map.unmodifiable(safe));
+    _sink(safe);
   }
 
   static Map<String, Object?> _safeFields(Map<String, Object?> fields) {

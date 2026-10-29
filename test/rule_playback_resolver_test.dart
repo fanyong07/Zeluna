@@ -16,6 +16,19 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test('a rejected probe preserves a safe HTTP diagnostic category', () async {
+    final result =
+        await RulePlaybackResolver(
+          client: MockClient((_) async => http.Response('denied', 403)),
+        ).verifyPlaybackLine(
+          line: _networkLine('https://cdn.example.com/ep1.m3u8'),
+          enrichMetadata: false,
+        );
+    expect(result.available, isFalse);
+    expect(result.sourceErrorCategory, 'http_403');
+    expect(result.sourceErrorCategory, isNot(contains('https')));
+  });
+
   test(
     'known HLS playlist is fetched once while key and segment are still checked',
     () async {
@@ -395,6 +408,74 @@ void main() {
       releaseSearch.complete();
     },
   );
+
+  test(
+    'Kazumi resolves an allowed iframe before declaring no playable source',
+    () async {
+      final client = MockClient((request) async {
+        return switch (request.url.path) {
+          '/vod/search.html' => _html(
+            '<div class="item"><strong>测试番剧</strong><a class="detail" href="/detail/test.html">详情</a></div>',
+          ),
+          '/detail/test.html' => _html(
+            '<ul class="line"><li><a href="/play/1.html">第1集</a></li></ul>',
+          ),
+          '/play/1.html' => _html('<iframe src="/embed/1.html"></iframe>'),
+          '/embed/1.html' => _html(
+            '<video src="https://cdn.example.com/test/01.m3u8"></video>',
+          ),
+          '/test/01.m3u8' => _playableHls(),
+          '/test/segment-1.ts' => _playableSegment(),
+          _ => http.Response('not found', 404),
+        };
+      });
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: _kazumiRule,
+        subject: _animeSubject,
+        episode: _episode,
+      );
+      expect(
+        lines.any((line) => line.available && line.clientVerified),
+        isTrue,
+      );
+      expect(
+        lines.first.headers['Referer'],
+        'https://example.com/embed/1.html',
+      );
+    },
+  );
+
+  test('Kazumi uses permitted WebView discovery for script-only media', () async {
+    final sniffer = _FakeAnimekoWebViewSniffer(
+      observedUrl: 'https://cdn.example.com/test/01.m3u8',
+    );
+    final client = MockClient(
+      (request) async => switch (request.url.path) {
+        '/vod/search.html' => _html(
+          '<div class="item"><strong>测试番剧</strong><a class="detail" href="/detail/test.html">详情</a></div>',
+        ),
+        '/detail/test.html' => _html(
+          '<ul class="line"><li><a href="/play/1.html">第1集</a></li></ul>',
+        ),
+        '/play/1.html' => _html('<script src="/player.js"></script>'),
+        '/test/01.m3u8' => _playableHls(),
+        '/test/segment-1.ts' => _playableSegment(),
+        _ => http.Response('not found', 404),
+      },
+    );
+    final rule = _kazumiRule.copyWith(
+      permissionManifest: _kazumiRule.effectiveManifest.copyWith(
+        javascript: true,
+        webViewSniffing: true,
+      ),
+    );
+    final lines = await RulePlaybackResolver(
+      client: client,
+      animekoWebViewSniffer: sniffer,
+    ).resolveRule(rule: rule, subject: _animeSubject, episode: _episode);
+    expect(sniffer.calls, 1);
+    expect(lines.any((line) => line.available && line.clientVerified), isTrue);
+  });
 
   test('Kazumi resolver extracts current episode playable url', () async {
     var playPageRequests = 0;

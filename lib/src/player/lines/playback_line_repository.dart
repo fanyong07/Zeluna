@@ -4,6 +4,7 @@ import '../../data/playback_source_repository.dart';
 import '../../domain/anime_models.dart';
 import '../../rules/rule_playback_resolver.dart';
 import '../playback_line_display.dart';
+import 'playback_route_selector.dart';
 
 typedef QuickPlaybackLineLoader =
     Future<List<PlaybackLine>> Function(
@@ -159,9 +160,10 @@ final class PlaybackLineRepository {
     try {
       final discovered = await _loadQuickLines(subject, episode, token);
       if (!_isCurrentLookup(serial, episodeId, token)) return null;
-      final verified = await verifyPlaybackLinesBeforeDisplay(
+      final verified = await selectFirstReadyPlaybackRoute(
         discovered,
-        verify: (line) => _verifyLine(line, token),
+        parent: token,
+        verify: _verifyLine,
       );
       if (!_isCurrentLookup(serial, episodeId, token)) return null;
       final published = hasActivePlayableLine && preserveLoadedLine != null

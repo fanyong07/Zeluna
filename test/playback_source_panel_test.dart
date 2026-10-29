@@ -5,6 +5,39 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   testWidgets(
+    'diagnostics export is opt-in and accessible in the source panel',
+    (tester) async {
+      var copies = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: PlaybackSourcePanel(
+              selected: null,
+              lines: const [],
+              failedLineIds: const {},
+              scanning: false,
+              completedRules: 0,
+              totalRules: 0,
+              onSelected: (_) {},
+              onPickLocal: () async {},
+              onOpenNetwork: (_, _) async {},
+              onSearch: () async {},
+              onCopyDiagnostics: () async {
+                copies++;
+              },
+            ),
+          ),
+        ),
+      );
+      expect(copies, 0);
+      await tester.tap(find.text('复制播放诊断'));
+      await tester.pump();
+      expect(copies, 1);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'portrait inventory includes routes beyond four and unavailable rows',
     (tester) async {
       tester.view.physicalSize = const Size(360, 760);

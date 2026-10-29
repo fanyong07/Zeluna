@@ -10,6 +10,42 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'quick discovery reaches a working fifth route after four rejected routes',
+    () async {
+      final checked = <String>[];
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            for (var i = 0; i < 6; i++)
+              _line(
+                'candidate-$i',
+                provider: 'aggregate.maccms',
+                available: false,
+                requiresClientProbe: true,
+              ),
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              checked.add(line.id);
+              return line.id == 'candidate-4' ? _verified(line) : line;
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final lines = await controller.linesForEpisodeMode(_subject, _episode);
+      expect(checked, contains('candidate-4'));
+      expect(lines.any((l) => l.available && l.id == 'candidate-4'), isTrue);
+    },
+  );
+
+  test(
     'detail prefetch and foreground share the same in-flight candidate probe',
     () async {
       final probe = Completer<void>();

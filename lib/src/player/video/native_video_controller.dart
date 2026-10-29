@@ -5,7 +5,11 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../playback_line_display.dart';
+import '../local_media.dart';
+import 'native_playback_gate_stub.dart'
+    if (dart.library.io) 'native_playback_gate_io.dart';
 import 'native_video_compatibility.dart';
+import 'media_transport_failure.dart';
 import 'native_media_transport_stub.dart'
     if (dart.library.io) 'native_media_transport_io.dart';
 
@@ -48,6 +52,7 @@ final class NativeMediaEventGuard {
     required int currentOpenSerial,
     required PlayerState playerState,
     required bool hasAlternative,
+    bool decodedFrame = false,
   }) {
     final playlist = playerState.playlist;
     final index = playlist.index;
@@ -68,6 +73,7 @@ final class NativeMediaEventGuard {
       buffer: current ? playerState.buffer : Duration.zero,
       buffering: !current || playerState.buffering,
       hasAlternative: hasAlternative,
+      decodedFrame: current && decodedFrame,
     );
   }
 
@@ -252,8 +258,10 @@ final class NativePlaybackStartupSnapshot {
     required this.buffer,
     required this.buffering,
     required this.hasAlternative,
+    this.decodedFrame = false,
   });
 
+  final bool decodedFrame;
   final bool playing;
   final Duration position;
   final Duration buffer;
@@ -306,6 +314,7 @@ final class NativeFirstFrameWatchdog {
         if (nativePlaybackHasFirstFrame(
           playing: snapshot.playing,
           position: snapshot.position,
+          decodedVideo: snapshot.decodedFrame,
         )) {
           // Early stream events can be rejected before media ownership is
           // known. A sampled first frame must complete the same UI lifecycle.
@@ -341,12 +350,15 @@ final class NativeFirstFrameWatchdog {
   bool handleProgress({
     required Duration previousPosition,
     required Duration currentPosition,
+    bool decodedFrame = false,
   }) {
-    if (_disposed ||
+    if (!decodedFrame ||
+        _disposed ||
         _timer == null ||
         !nativePlaybackReachedFirstFrame(
           previousPosition: previousPosition,
           currentPosition: currentPosition,
+          decodedVideo: decodedFrame,
         )) {
       return false;
     }
@@ -365,6 +377,75 @@ final class NativeFirstFrameWatchdog {
     _disposed = true;
     cancel();
   }
+}
+
+/// A native screenshot is decoded video evidence; timestamps and dimensions
+/// alone can describe audio-only progress or an undecodable video track.
+/// Captured bytes stay in memory and are neither saved nor uploaded.
+final class NativeDecodedFrameMonitor {
+  Timer? _timer;
+  int _generation = 0;
+  bool _disposed = false;
+  bool _reading = false;
+
+  void start({
+    required bool Function() isCurrent,
+    required bool Function() canRead,
+    required Future<bool> Function() readFrame,
+    required void Function() onFrame,
+    Duration interval = const Duration(milliseconds: 400),
+  }) {
+    cancel();
+    if (_disposed) return;
+    final generation = _generation;
+    _timer = Timer.periodic(interval, (_) async {
+      if (_disposed || generation != _generation || !isCurrent()) {
+        if (generation == _generation) cancel();
+        return;
+      }
+      if (_reading || !canRead()) return;
+      _reading = true;
+      try {
+        final decoded = await readFrame();
+        if (decoded && !_disposed && generation == _generation && isCurrent()) {
+          cancel();
+          onFrame();
+        }
+      } catch (_) {
+        // No frame yet. The startup deadline remains authoritative.
+      } finally {
+        _reading = false;
+      }
+    });
+  }
+
+  void cancel() {
+    _generation++;
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  void dispose() {
+    _disposed = true;
+    cancel();
+  }
+}
+
+/// Immutable input to one native open. A media URL never travels without its
+/// request headers and trust requirements.
+final class NativePlaybackRequest {
+  NativePlaybackRequest({
+    required this.url,
+    required Map<String, String> headers,
+    required this.format,
+    required this.publicHttpOnly,
+    this.resumePosition = Duration.zero,
+  }) : headers = Map.unmodifiable(headers);
+  final String url;
+  final Map<String, String> headers;
+  final String format;
+  final bool publicHttpOnly;
+  final Duration resumePosition;
 }
 
 /// Owns the native media-kit objects and every subscription/timer tied to
@@ -389,7 +470,8 @@ final class NativeVideoController {
     required this.player,
     required this.surfaceController,
     required int Function() readOpenSerial,
-  }) {
+    Future<bool> Function()? readDecodedFrame,
+  }) : _readDecodedFrame = readDecodedFrame {
     assert(identical(surfaceController.player, player));
     resumeSeek = NativeResumeSeekController(
       readOpenSerial: readOpenSerial,
@@ -398,6 +480,13 @@ final class NativeVideoController {
   }
 
   final Player player;
+  void Function(MediaTransportFailure)? onTransportFailure;
+  final NativeMediaEventGuard events = NativeMediaEventGuard();
+  bool _softwareDecodeTried = false;
+  Future<bool> Function()? _readDecodedFrame;
+  final NativeDecodedFrameMonitor _decodedFrames = NativeDecodedFrameMonitor();
+  bool _decodedFrame = false;
+  bool get hasDecodedFrame => _decodedFrame;
   final NativeMediaTransport _mediaTransport = NativeMediaTransport();
 
   Future<Media> prepareMedia(
@@ -405,12 +494,82 @@ final class NativeVideoController {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    void Function(MediaTransportFailure)? onFailure,
   }) => _mediaTransport.prepare(
     resource,
     headers: headers,
     format: format,
     publicHttpOnly: publicHttpOnly,
+    onFailure: onFailure,
   );
+
+  /// The page requests an open; transport, ownership, play permission and
+  /// resume seek form one operation here rather than independent UI futures.
+  Future<bool> openRequest(
+    NativePlaybackRequest request, {
+    required int serial,
+    required bool Function() isCurrent,
+    required bool Function() canPlay,
+    required void Function() onDispatched,
+  }) async {
+    if (_disposed || !isCurrent()) return false;
+    final resource = nativeMediaPlaybackResource(
+      request.url,
+      windows: !kIsWeb && defaultTargetPlatform == TargetPlatform.windows,
+    );
+    final media = await prepareMedia(
+      resource,
+      headers: request.headers,
+      format: request.format,
+      publicHttpOnly: request.publicHttpOnly,
+      onFailure: (failure) {
+        if (!_disposed && isCurrent()) onTransportFailure?.call(failure);
+      },
+    );
+    if (_disposed || !isCurrent()) return false;
+    events.beginOpen(openSerial: serial, mediaUri: media.uri);
+    onDispatched();
+    await player.open(media, play: false);
+    if (_disposed || !isCurrent() || !canPlay()) return false;
+    await playNativeIfCurrent(
+      player,
+      isCurrent: () => !_disposed && isCurrent() && canPlay(),
+    );
+    if (_disposed || !isCurrent() || !canPlay()) return false;
+    events.finishOpen(openSerial: serial);
+    if (request.resumePosition > Duration.zero) {
+      resumeSeek.arm(openSerial: serial, position: request.resumePosition);
+    }
+    return true;
+  }
+
+  /// Only decoded-video failure warrants changing the decoder. A missing URL,
+  /// DNS failure or inaccessible CDN is not fixed by software decoding.
+  Future<bool> trySoftwareDecoding({required int serial}) async {
+    final playlist = player.state.playlist;
+    final index = playlist.index;
+    final uri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    if (!events.isCurrent(currentOpenSerial: serial, playerMediaUri: uri))
+      return false;
+    if (_disposed ||
+        _softwareDecodeTried ||
+        _decodedFrame ||
+        player.state.position <= Duration.zero ||
+        player.platform is! NativePlayer) {
+      return false;
+    }
+    _softwareDecodeTried = true;
+    try {
+      final native = player.platform as dynamic;
+      await native.setProperty('hwdec', 'no');
+      return !_disposed;
+    } catch (_) {
+      return false;
+    }
+  }
+
   late final VideoController surfaceController;
   late final NativeResumeSeekController resumeSeek;
   final NativeFirstFrameWatchdog _firstFrameWatchdog =
@@ -436,10 +595,29 @@ final class NativeVideoController {
     required void Function(NativePlaybackStartupSnapshot snapshot) onFirstFrame,
   }) {
     if (_disposed) return;
+    _decodedFrame = false;
+    _decodedFrames.start(
+      isCurrent: isCurrent,
+      canRead: () => readSnapshot().position > Duration.zero,
+      readFrame:
+          _readDecodedFrame ??
+          () async {
+            final bytes = await player.screenshot(format: 'image/jpeg');
+            return bytes != null && bytes.length > 64;
+          },
+      onFrame: () {
+        _decodedFrame = true;
+        _firstFrameWatchdog.cancel();
+        onFirstFrame(readSnapshot());
+      },
+    );
     _firstFrameWatchdog.start(
       isCurrent: isCurrent,
       readSnapshot: readSnapshot,
-      onTimeout: onTimeout,
+      onTimeout: (event) {
+        _decodedFrames.cancel();
+        onTimeout(event);
+      },
       onFirstFrame: onFirstFrame,
     );
   }
@@ -451,10 +629,12 @@ final class NativeVideoController {
     return _firstFrameWatchdog.handleProgress(
       previousPosition: previousPosition,
       currentPosition: currentPosition,
+      decodedFrame: _decodedFrame,
     );
   }
 
   void cancelFirstFrameWatchdog() {
+    _decodedFrames.cancel();
     _firstFrameWatchdog.cancel();
   }
 
@@ -462,6 +642,7 @@ final class NativeVideoController {
     if (_disposed) return;
     _disposed = true;
     _firstFrameWatchdog.dispose();
+    _decodedFrames.dispose();
     resumeSeek.dispose();
     final subscriptions = List.of(_subscriptions);
     _subscriptions.clear();

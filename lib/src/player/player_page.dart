@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 
 import '../app/anime_app.dart';
@@ -38,6 +39,7 @@ import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
 import 'session/playback_session_state.dart';
 import 'video/native_video_controller.dart';
+import 'video/native_video_compatibility.dart';
 import 'video/native_playback_gate_stub.dart'
     if (dart.library.io) 'video/native_playback_gate_io.dart';
 import 'video/web_video_controller.dart';
@@ -95,7 +97,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final DanmakuController _danmakuController;
   late final Anime4KController _anime4kController;
   late PlaybackPerformanceTrace _playbackTrace;
-  final _nativeMediaEvents = NativeMediaEventGuard();
+  NativeMediaEventGuard get _nativeMediaEvents => _nativeVideo.events;
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   int? _handledFailureOpenSerial;
@@ -253,6 +255,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       setProperty: _writeMpvProperty,
     )..addListener(_handleAnime4KChanged);
     _startPlaybackTrace();
+    _nativeVideo.onTransportFailure = (failure) => _playbackTrace.record(
+      'media_request_failed',
+      fields: failure.safeFields,
+    );
     _pendingInitialResumePosition = widget.request.resumePosition;
     _resetPlaybackStallWatchdog(
       position: widget.request.resumePosition,
@@ -952,6 +958,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onPickLocal: _pickLocalPlaybackFile,
                           onOpenNetwork: _openNetworkPlayback,
                           onSearch: _searchPlaybackLines,
+                          onCopyDiagnostics: _copyPlaybackDiagnostics,
                           onQueryLocally: _querySourceLocally,
                           localLookupInProgress: _localSourceLookupInProgress,
                         ),
@@ -2216,6 +2223,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           currentOpenSerial: serial,
           playerState: _player.state,
           hasAlternative: _nextPlayableLine() != null,
+          decodedFrame: _nativeVideo.hasDecodedFrame,
         ),
         onFirstFrame: (snapshot) =>
             _confirmNativeFirstFrame(snapshot: snapshot),
@@ -2230,64 +2238,46 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                     hasAlternative: event.hasAlternative,
                   ),
           );
-          _handleRuntimeLineFailure(
-            line,
-            message: hardTimedOut ? '长时间未能开始播放。' : '暂时没有出画面。',
+          unawaited(
+            _handleNativeStartupFailure(
+              line,
+              serial,
+              recoveryEpoch,
+              hardTimedOut: hardTimedOut,
+            ),
           );
         },
       );
-      final resource = nativeMediaPlaybackResource(
-        url,
-        windows: !kIsWeb && defaultTargetPlatform == TargetPlatform.windows,
-      );
-      final media = await _nativeVideo.prepareMedia(
-        resource,
-        headers: line.headers,
-        format: line.format,
-        publicHttpOnly: line.publicHttpOnly,
-      );
-      if (!mounted || serial != _openLineSerial) return;
-      _nativeMediaEvents.beginOpen(openSerial: serial, mediaUri: media.uri);
-      _ignoreNativeErrorsUntil = DateTime.now().add(
-        const Duration(milliseconds: 750),
-      );
-      _playbackTrace.record(
-        'player_open_dispatched',
-        fields: <String, Object?>{
-          ..._lineTraceFields(line),
-          'player': 'native',
+      final opened = await _nativeVideo.openRequest(
+        NativePlaybackRequest(
+          url: url,
+          headers: line.headers,
+          format: line.format,
+          publicHttpOnly: line.publicHttpOnly,
+          resumePosition: requestedResumePosition,
+        ),
+        serial: serial,
+        isCurrent: () => mounted && serial == _openLineSerial,
+        canPlay: () => _canRecoverAutomatically(recoveryEpoch),
+        onDispatched: () {
+          _ignoreNativeErrorsUntil = DateTime.now().add(
+            const Duration(milliseconds: 750),
+          );
+          _playbackTrace.record(
+            'player_open_dispatched',
+            fields: {..._lineTraceFields(line), 'player': 'native'},
+          );
         },
       );
-      // Never hand an irrevocable play permission to an asynchronous native open.
-      await _player.open(media, play: false);
-      if (!mounted || serial != _openLineSerial) return;
-      if (!_canRecoverAutomatically(recoveryEpoch)) return;
-      await playNativeIfCurrent(
-        _player,
-        isCurrent: () =>
-            serial == _openLineSerial &&
-            _canRecoverAutomatically(recoveryEpoch),
-      );
-      if (!mounted ||
-          serial != _openLineSerial ||
-          !_canRecoverAutomatically(recoveryEpoch)) {
-        return;
-      }
-      _nativeMediaEvents.finishOpen(openSerial: serial);
+      if (!opened || !mounted || serial != _openLineSerial) return;
       final openedState = _player.state;
-      if (requestedResumePosition > Duration.zero) {
-        _nativeVideo.resumeSeek.arm(
-          openSerial: serial,
-          position: requestedResumePosition,
-        );
-      }
       _refreshSuperResolutionShader();
       setState(() {
         _playing = openedState.playing;
         _duration = openedState.duration;
         _buffer = openedState.buffer;
         _buffering = openedState.buffering;
-        _loadingLine = false;
+        _loadingLine = !_nativeVideo.hasDecodedFrame;
         _playbackFailed = false;
         _playerMessage = null;
       });
@@ -2307,6 +2297,39 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         message: '当前线路无法播放：${_friendlyPlaybackError(error)}',
       );
     }
+  }
+
+  Future<void> _handleNativeStartupFailure(
+    PlaybackLine line,
+    int serial,
+    int recoveryEpoch, {
+    required bool hardTimedOut,
+  }) async {
+    if (!mounted || serial != _openLineSerial) return;
+    if (_canRecoverAutomatically(recoveryEpoch) &&
+        await _nativeVideo.trySoftwareDecoding(serial: serial)) {
+      if (!mounted ||
+          serial != _openLineSerial ||
+          !_canRecoverAutomatically(recoveryEpoch)) {
+        return;
+      }
+      _playbackTrace.record(
+        'decoder_fallback',
+        fields: {'reason_code': 'no_decoded_video', 'decoder': 'software'},
+      );
+      await _openLine(
+        line,
+        force: true,
+        automatic: true,
+        resumePosition: _currentRecoveryPosition,
+      );
+      return;
+    }
+    if (!mounted || serial != _openLineSerial) return;
+    _handleRuntimeLineFailure(
+      line,
+      message: hardTimedOut ? '未能解码出画面，正在检查其他线路。' : '暂时没有出画面。',
+    );
   }
 
   void _clearLineFailure(String lineId) {
@@ -3289,6 +3312,41 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _danmakuPanel = false;
       _settingsPanel = false;
     });
+  }
+
+  Future<void> _copyPlaybackDiagnostics() async {
+    final environment = await NativeVideoCompatibility.instance
+        .diagnosticEnvironment();
+    PackageInfo? version;
+    try {
+      version = await PackageInfo.fromPlatform().timeout(
+        const Duration(seconds: 1),
+      );
+    } catch (_) {}
+    if (!mounted) return;
+    final report = _playbackTrace.diagnosticReport(
+      summary: {
+        ...environment,
+        if (version != null)
+          'app_version': '${version.version}+${version.buildNumber}',
+        'platform': defaultTargetPlatform.name,
+        'playback_phase': _sessionController.state.phase.name,
+        'decoded_video': _nativeVideo.hasDecodedFrame,
+        'line_count': _lines.length,
+        'verified_count': _lines
+            .where((l) => l.available && (l.clientVerified || l.serverVerified))
+            .length,
+        'position_ms': _position.inMilliseconds,
+        'probe_failures': _lines
+            .where((l) => !l.available && l.sourceErrorCategory.isNotEmpty)
+            .map((l) => l.sourceErrorCategory)
+            .toSet()
+            .take(12)
+            .join(','),
+      },
+    );
+    await Clipboard.setData(ClipboardData(text: report));
+    if (mounted) _showPlayerToast('已复制脱敏诊断，不含账号、播放地址或请求凭据');
   }
 
   Future<void> _captureScreenshot() async {

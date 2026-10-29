@@ -64,6 +64,7 @@ void main() {
         reason: 'A safe paused open must still actually start playing',
       );
       fixture.engine.progress(const Duration(seconds: 2));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
       await tester.pump();
@@ -75,6 +76,7 @@ void main() {
       expect(fixture.engine.opens, hasLength(3));
       expect(fixture.engine.state.playing, isTrue);
       fixture.engine.progress(const Duration(seconds: 3));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
       await tester.pump();
@@ -84,6 +86,7 @@ void main() {
       expect(fixture.engine.opens, hasLength(4));
       expect(fixture.engine.state.playing, isTrue);
       fixture.engine.progress(const Duration(seconds: 4));
+      await tester.pump(const Duration(milliseconds: 500));
       await tester.pump();
       fixture.engine.fail('manual reload restores playing recovery intent');
       await tester.pump();
@@ -130,10 +133,7 @@ void main() {
   testWidgets(
     'automatic verification completed after Pause does not open backup',
     (tester) async {
-      final account = _PauseAccount(
-        online: true,
-        quick: [_primary, _unverifiedBackup],
-      );
+      final account = _PauseAccount(online: true, quick: [_unverifiedBackup]);
       final fixture = await _mount(tester, account: account);
       final pause = _pauseCommand(tester);
       account.verification = Completer<PlaybackLine>();
@@ -203,10 +203,7 @@ void main() {
   testWidgets('R1 manual Play takes over pending automatic verification', (
     tester,
   ) async {
-    final account = _PauseAccount(
-      online: true,
-      quick: [_primary, _unverifiedBackup],
-    );
+    final account = _PauseAccount(online: true, quick: [_unverifiedBackup]);
     final fixture = await _mount(tester, account: account);
     account.verification = Completer<PlaybackLine>();
     fixture.engine.fail('automatic backup verification');
@@ -635,6 +632,7 @@ Future<_Fixture> _mount(
                 player: player,
                 surfaceController: surface,
                 readOpenSerial: readSerial,
+                readDecodedFrame: () async => true,
               ),
           request: PlaySessionRequest(
             subject: account.online
@@ -655,16 +653,19 @@ Future<_Fixture> _mount(
   engine.progress(const Duration(seconds: 15));
   await tester.pump();
   await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
+  await tester.pump();
   expect(account.firstFrames, greaterThan(0));
   return _Fixture(engine, account);
 }
 
 Future<void> _expectReadyPlayback(WidgetTester tester, _Fixture fixture) async {
   expect(fixture.engine.state.playing, isTrue);
-  fixture.engine.progress(const Duration(seconds: 7));
+  fixture.engine.progress(const Duration(seconds: 20));
+  await tester.pump(const Duration(milliseconds: 500));
   await tester.pump();
   expect(
-    find.text('0:07 / 3:00'),
+    find.text('0:20 / 3:00'),
     findsWidgets,
     reason: 'Current engine progress must reach the real page event guard',
   );
@@ -674,7 +675,7 @@ Future<void> _expectReadyPlayback(WidgetTester tester, _Fixture fixture) async {
     reason: 'The current open must finish loading',
   );
   final opens = fixture.engine.opens.length;
-  for (var second = 8; second <= 38; second++) {
+  for (var second = 21; second <= 51; second++) {
     fixture.engine.progress(Duration(seconds: second));
     await tester.pump(const Duration(seconds: 1));
   }

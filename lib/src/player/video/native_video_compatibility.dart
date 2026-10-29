@@ -12,6 +12,28 @@ final class NativeVideoCompatibility {
   VideoControllerConfiguration get configuration =>
       VideoControllerConfiguration(hwdec: _softwareDecode ? 'no' : null);
 
+  /// Called only when the user copies diagnostics; never queried or uploaded
+  /// as an identifier. Explicit allowlist prevents additional native fields.
+  Future<Map<String, Object?>> diagnosticEnvironment() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      return const {};
+    }
+    try {
+      final raw = await _channel
+          .invokeMapMethod<String, dynamic>('playbackDiagnostics')
+          .timeout(const Duration(seconds: 1), onTimeout: () => null);
+      return {
+        if (raw?['android_api'] is int) 'android_api': raw!['android_api'],
+        if (raw?['primary_abi'] is String) 'primary_abi': raw!['primary_abi'],
+        'software_decoder': _softwareDecode,
+      };
+    } on MissingPluginException {
+      return const {};
+    } on PlatformException {
+      return const {};
+    }
+  }
+
   Future<void> initialize() async {
     _softwareDecode = false;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;

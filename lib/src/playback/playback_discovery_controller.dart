@@ -1629,7 +1629,7 @@ final class PlaybackDiscoveryController {
   Future<List<PlaybackLine>> _probeBackendClientCandidates(
     _PlaybackDiscoveryScope scope,
     List<PlaybackLine> lines, {
-    int maxCandidates = 4,
+    int maxCandidates = 12,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final now = DateTime.now();
@@ -1651,7 +1651,7 @@ final class PlaybackDiscoveryController {
     final checked = <PlaybackLine>[];
     await for (final line in probePlaybackLinesProgressively(
       candidates,
-      maxConcurrent: maxCandidates,
+      maxConcurrent: 4,
       cancellationToken: cancellationToken,
       verify: (line) => verifyPlaybackLine(
         line,

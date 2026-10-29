@@ -16,6 +16,24 @@ void main() {
   });
 
   test(
+    'user-requested diagnostic environment excludes device identifiers',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'playbackDiagnostics');
+        return {
+          'android_api': 34,
+          'primary_abi': 'arm64-v8a',
+          'serial': 'private-identifier',
+        };
+      });
+      final data = await NativeVideoCompatibility().diagnosticEnvironment();
+      expect(data['android_api'], 34);
+      expect(data['primary_abi'], 'arm64-v8a');
+      expect(data, isNot(contains('serial')));
+    },
+  );
+
+  test(
     'affected Android runtime selects software decoding before video open',
     () async {
       messenger.setMockMethodCallHandler(channel, (call) async {

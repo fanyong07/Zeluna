@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'connection_race.dart';
+
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
@@ -22,48 +24,44 @@ http.Client createNetworkHttpClient(NetworkRequestPolicy policy) {
           : uri.scheme.toLowerCase() == 'https'
           ? 443
           : 80;
-      var cancelled = false;
-      ConnectionTask<Socket>? activeTask;
-      Socket? activeSocket;
-      Future<Socket> connect() async {
-        Object? lastError;
-        StackTrace? lastStackTrace;
-        for (final address in addresses) {
-          if (cancelled) throw const SocketException('Connection cancelled.');
-          try {
-            final task = await Socket.startConnect(address, port);
-            activeTask = task;
-            final socket = await task.socket;
-            activeTask = null;
-            if (cancelled) {
-              socket.destroy();
-              throw const SocketException('Connection cancelled.');
-            }
-            activeSocket = socket;
-            if (uri.scheme.toLowerCase() != 'https') return socket;
-            final secure = await SecureSocket.secure(socket, host: uri.host);
-            activeSocket = secure;
-            return secure;
-          } catch (error, stackTrace) {
-            activeTask = null;
-            activeSocket?.destroy();
-            activeSocket = null;
-            if (cancelled) rethrow;
-            lastError = error;
-            lastStackTrace = stackTrace;
-          }
-        }
-        if (lastError != null && lastStackTrace != null) {
-          Error.throwWithStackTrace(lastError, lastStackTrace);
-        }
-        throw const SocketException('No usable public address was found.');
-      }
-
-      return ConnectionTask.fromSocket(connect(), () {
-        cancelled = true;
-        activeTask?.cancel();
-        activeSocket?.destroy();
-      });
+      final race = raceConnections<Socket>(
+        timeout: policy.requestTimeout,
+        close: (socket) => socket.destroy(),
+        candidates: [
+          for (final address in addresses)
+            () async {
+              final task = await Socket.startConnect(address, port);
+              var cancelled = false;
+              Socket? connected;
+              final value = () async {
+                final socket = await task.socket;
+                connected = socket;
+                if (cancelled) {
+                  socket.destroy();
+                  throw const SocketException('Connection cancelled.');
+                }
+                if (uri.scheme.toLowerCase() != 'https') return socket;
+                // Preserve the original hostname for SNI and certificate checks.
+                final secure = await SecureSocket.secure(
+                  socket,
+                  host: uri.host,
+                );
+                connected = secure;
+                if (cancelled) {
+                  secure.destroy();
+                  throw const SocketException('Connection cancelled.');
+                }
+                return secure;
+              }();
+              return ConnectionAttempt<Socket>(value, () {
+                cancelled = true;
+                task.cancel();
+                connected?.destroy();
+              });
+            },
+        ],
+      );
+      return ConnectionTask.fromSocket(race.value, race.cancel);
     };
   }
   return PolicyHttpClient(inner: IOClient(ioClient), policy: policy);
@@ -91,11 +89,19 @@ Future<List<InternetAddress>> _publicAddresses(
       'DNS resolved to a private or special-purpose address.',
     );
   }
-  return addresses.toList(growable: false)..sort((a, b) {
-    final first = a.type == InternetAddressType.IPv4 ? 0 : 1;
-    final second = b.type == InternetAddressType.IPv4 ? 0 : 1;
-    return first.compareTo(second);
-  });
+  final v4 = addresses
+      .where((a) => a.type == InternetAddressType.IPv4)
+      .toList();
+  final v6 = addresses
+      .where((a) => a.type == InternetAddressType.IPv6)
+      .toList();
+  // Interleave families; retain every validated address, not just the first A.
+  return [
+    for (var i = 0; i < v4.length || i < v6.length; i++) ...[
+      if (i < v4.length) v4[i],
+      if (i < v6.length) v6[i],
+    ],
+  ];
 }
 
 bool _isBlockedAddress(

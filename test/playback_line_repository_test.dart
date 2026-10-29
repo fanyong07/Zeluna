@@ -8,6 +8,46 @@ import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('a thrown probe cannot discard a different working candidate', () async {
+    final repository = _repository(
+      loadQuickLines: (_, _, _) async => [_line('error'), _line('ready')],
+      verifyLine: (line, _) async {
+        if (line.id == 'error') throw StateError('probe');
+        return _line('ready', clientVerified: true);
+      },
+    );
+    addTearDown(repository.dispose);
+    final inventory = await repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+    );
+    expect(inventory?.playableLines.single.id, 'ready');
+  });
+
+  test('one silent probe cannot hide a ready playback route', () async {
+    final silent = Completer<PlaybackLine>();
+    RulePlaybackCancellationToken? owned;
+    final repository = _repository(
+      loadQuickLines: (_, _, _) async => [_line('silent'), _line('ready')],
+      verifyLine: (line, token) {
+        owned = token;
+        return line.id == 'silent'
+            ? silent.future
+            : Future.value(_line('ready', clientVerified: true));
+      },
+    );
+    addTearDown(repository.dispose);
+    final inventory = await repository
+        .lookupQuick(subject: _subject, episode: _episode, progressive: true)
+        .timeout(const Duration(milliseconds: 500));
+    expect(inventory?.playableLines.map((l) => l.id), ['ready']);
+    expect(owned?.isCancelled, isTrue);
+    silent.complete(_line('silent', clientVerified: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.lines.map((l) => l.id), ['ready']);
+  });
+
   test('quick lookup verifies media before publishing its inventory', () async {
     final candidate = _line('candidate', requiresClientProbe: true);
     final verified = _line('candidate', clientVerified: true);

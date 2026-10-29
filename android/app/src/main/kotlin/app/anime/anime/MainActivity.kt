@@ -41,6 +41,12 @@ open class MainActivity : FlutterActivity() {
                     result.success(VideoDecodeCompatibility.requiresSoftwareDecode(
                         Build.SUPPORTED_ABIS.firstOrNull(),
                     ))
+                } else if (call.method == "playbackDiagnostics") {
+                    // Local, user-requested diagnostics only. No device identifier.
+                    result.success(mapOf(
+                        "android_api" to Build.VERSION.SDK_INT,
+                        "primary_abi" to (Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"),
+                    ))
                 } else {
                     result.notImplemented()
                 }
