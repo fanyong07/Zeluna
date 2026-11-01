@@ -48,10 +48,22 @@ jobs:
 
   android:
     name: Android build and emulator smoke
-    runs-on: ubuntu-latest
+    # Pin the Android host to avoid ubuntu-latest image drift.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Reserve disk space for Android native libraries and emulator
+        shell: bash
+        run: |
+          # Only disposable GitHub-hosted images; never touch workspace data,
+          # Android SDKs, Java, Flutter, or any self-hosted runner installation.
+          test "${RUNNER_ENVIRONMENT}" = "github-hosted"
+          df -h /
+          for unused in /usr/share/dotnet /usr/local/share/boost /opt/ghc /opt/hostedtoolcache/CodeQL; do
+            if [ -d "$unused" ]; then sudo rm -rf -- "$unused"; fi
+          done
+          df -h /
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
