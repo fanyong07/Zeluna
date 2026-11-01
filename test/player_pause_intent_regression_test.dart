@@ -22,6 +22,35 @@ import '../integration_test/support/isolated_player_environment.dart';
 // paths. Only the platform engine/video texture and account persistence are
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
+  testWidgets('first online failure searches a backup during current retry', (
+    tester,
+  ) async {
+    final account = _PauseAccount(online: true);
+    final fixture = await _mount(tester, account: account);
+    fixture.engine.fail('current source stalls without a ready backup');
+    await tester.pump();
+    expect(
+      account.expanded.hasListener,
+      isTrue,
+      reason:
+          'A single failed route must not block discovery until retry fails',
+    );
+    account.expanded.add(
+      const PlaybackLineLookupUpdate(
+        lines: [_backup],
+        completedRules: 1,
+        totalRules: 1,
+        phase: PlaybackLineLookupPhase.complete,
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pump();
+    expect(fixture.engine.opens.last.uri, _backup.url);
+    expect(fixture.engine.opens, hasLength(2));
+    await _expectReadyPlayback(tester, fixture);
+  });
+
   testWidgets('paused page ignores late current-media error retry', (
     tester,
   ) async {

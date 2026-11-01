@@ -2432,6 +2432,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
     }
     if (!shouldSwitch) {
+      // A slow single route can never accumulate the buffer needed for idle
+      // backup prefetch. Discover alternatives on its first failure while the
+      // one permitted retry runs; a verified result still obeys pause/ownership.
+      if (_currentSettings.autoSwitchLine && !hasAlternative) {
+        _startExpandedLineLookup(autoplay: true);
+      }
       _recoveryController.scheduleCurrentLineRetry(
         const Duration(milliseconds: 500),
         () async {
