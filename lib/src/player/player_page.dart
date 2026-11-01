@@ -1989,6 +1989,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             owner.openSerial == _openLineSerial &&
             !_loadingLine &&
             target != null &&
+            // Discovery can echo the failed current route before a backup is
+            // verified. Only the retry controller may reopen that same route.
+            (!currentFailed || target.id != selected?.id) &&
             !_failedLineIds.contains(target.id) &&
             ((autoplay && (!_isPlayableLine(_line) || _loadedUrl == null)) ||
                 (currentFailed && _currentSettings.autoSwitchLine));

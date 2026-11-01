@@ -37,6 +37,20 @@ void main() {
     );
     account.expanded.add(
       const PlaybackLineLookupUpdate(
+        lines: [_primary],
+        completedRules: 0,
+        totalRules: 1,
+        phase: PlaybackLineLookupPhase.discovery,
+      ),
+    );
+    await tester.pump();
+    expect(
+      fixture.engine.opens,
+      hasLength(1),
+      reason: 'Inventory echo is not a backup and must not restart the failure',
+    );
+    account.expanded.add(
+      const PlaybackLineLookupUpdate(
         lines: [_backup],
         completedRules: 1,
         totalRules: 1,
