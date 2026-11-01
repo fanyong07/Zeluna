@@ -25,6 +25,8 @@ typedef PlaybackContextGuard = bool Function(int contextVersion);
 
 enum PlaybackLookupIntent { interactive, warmup }
 
+const _maxBackendClientProbeCandidates = 12;
+
 /// Runs every supplied playback probe with a small concurrency window and
 /// emits each result as soon as it finishes. This keeps a large route
 /// inventory responsive without creating a request burst.
@@ -729,7 +731,8 @@ final class PlaybackDiscoveryController {
         _probeBackendClientCandidates(
           scope,
           backendLines,
-          maxCandidates: 2,
+          // The two-line limit applies only to verified warmup results.
+          // A remembered provider must not hide later usable candidates.
           cancellationToken: workToken,
         ).onError((_, _) => const <PlaybackLine>[]),
       );
@@ -1629,7 +1632,6 @@ final class PlaybackDiscoveryController {
   Future<List<PlaybackLine>> _probeBackendClientCandidates(
     _PlaybackDiscoveryScope scope,
     List<PlaybackLine> lines, {
-    int maxCandidates = 12,
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final now = DateTime.now();
@@ -1643,7 +1645,7 @@ final class PlaybackDiscoveryController {
                     now.add(const Duration(seconds: 15)),
                   )),
         )
-        .take(maxCandidates)
+        .take(_maxBackendClientProbeCandidates)
         .toList(growable: false);
     if (candidates.isEmpty || cancellationToken?.isCancelled == true) {
       return const <PlaybackLine>[];

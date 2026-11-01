@@ -9,6 +9,52 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final intent in PlaybackLookupIntent.values) {
+    test(
+      '${intent.name} with a remembered provider reaches the third candidate',
+      () async {
+        final checked = <String>[];
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async => [
+              for (var i = 0; i < 6; i++)
+                _line(
+                  'remembered-candidate-$i',
+                  provider: 'aggregate.maccms',
+                  available: false,
+                  requiresClientProbe: true,
+                ),
+            ],
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                checked.add(line.id);
+                return line.id == 'remembered-candidate-2'
+                    ? _verified(line)
+                    : line;
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        final lines = await controller.linesForEpisodeMode(
+          _subject,
+          _episode,
+          preferredProviderId: 'aggregate.maccms',
+          lookupIntent: intent,
+        );
+        expect(checked, contains('remembered-candidate-2'));
+        expect(lines.single.id, 'remembered-candidate-2');
+        expect(lines.single.available, isTrue);
+      },
+    );
+  }
+
   test(
     'quick discovery reaches a working fifth route after four rejected routes',
     () async {
