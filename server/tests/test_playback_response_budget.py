@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -74,11 +74,18 @@ class PlaybackResponseBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_partial_inventory_is_explicit_and_keeps_all_sources(self):
         app = create_app()
         async def override_session():
-            async with self.sessions() as session:
-                yield session
+            # This HTTP contract has no repository assertions. Exclude SQLite
+            # thread/rollback latency; the adjacent service test covers storage.
+            yield object()
         app.dependency_overrides[get_session] = override_session
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            with patch("server.routers.playback.playback_service", self.service), patch("server.playback.PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS", 0.02, create=True):
+            with (
+                patch("server.routers.playback.playback_service", self.service),
+                patch("server.playback.PLAYBACK_FULL_RESPONSE_TIMEOUT_SECONDS", 0.02),
+                patch.object(self.service, "_managed_playback_lines", new=AsyncMock(return_value=[])),
+                patch.object(self.service, "_cache_lookup", new=AsyncMock(return_value=("miss", []))),
+                patch.object(self.service, "quick_lines", new=AsyncMock(return_value=[route("quick")])),
+            ):
                 response = await asyncio.wait_for(client.get("/api/v3/playback/bangumi:400602"), 0.5)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["X-Zeluna-Discovery"], "pending")

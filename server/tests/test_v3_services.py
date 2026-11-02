@@ -2453,6 +2453,12 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
                 "server.playback.catalog_service.playback_aliases",
                 new=AsyncMock(return_value=["Deadline Anime"]),
             ),
+            # This deadline checks discovery cancellation, not SQLite scheduling.
+            patch.object(
+                self.service,
+                "_load_source_health",
+                new=AsyncMock(return_value={}),
+            ),
             patch.object(
                 self.service,
                 "_load_bindings",
