@@ -22,7 +22,7 @@ def test_empty_work_results_still_show_every_registered_source(route, method, co
     items = response.json()
     assert len(items) == 118
     assert len({item["inventory_source_id"] for item in items}) == 118
-    assert sum(item["diagnostic_status"] == "candidate_unadmitted" for item in items) == 80
+    assert sum(item["diagnostic_status"] == "candidate_unadmitted" for item in items) == 74
     assert all(item["url"] == "" and item["available"] is False for item in items)
     assert all(item["queried"] is False for item in items)
     lookup.assert_awaited_once()

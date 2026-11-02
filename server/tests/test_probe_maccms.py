@@ -14,6 +14,7 @@ from tools.probe_maccms import (
     CANDIDATE_ORIGIN,
     CONFIGURED_SITES,
     _redacted_url,
+    _fetch_json,
     build_report,
     load_candidate_sites,
     main,
@@ -24,6 +25,23 @@ from tools.probe_maccms import (
 
 
 class MacCmsProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_accepts_xml_and_reports_disabled_search(self):
+        responses = [
+            httpx.Response(200, text='<rss><list><video><id>1</id><name>目标</name></video></list></rss>'),
+            httpx.Response(200, text='暂不支持搜索'),
+        ]
+        client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: responses.pop(0)))
+        try:
+            with patch("tools.probe_maccms._is_public_http_url", new=AsyncMock(return_value=True)):
+                catalog, error = await _fetch_json(client, "https://catalog.example/api", params={"wd": "目标"})
+                self.assertEqual(catalog["list"][0]["vod_name"], "目标")
+                self.assertEqual(error, "")
+                catalog, error = await _fetch_json(client, "https://catalog.example/api", params={"wd": "目标"})
+                self.assertIsNone(catalog)
+                self.assertEqual(error, "search_unsupported")
+        finally:
+            await client.aclose()
+
     def test_report_url_redaction_removes_query_fragment_and_userinfo(self):
         self.assertEqual(
             _redacted_url(
@@ -214,7 +232,7 @@ class MacCmsProbeTests(unittest.IsolatedAsyncioTestCase):
         )
         sites = load_candidate_sites(DEFAULT_CANDIDATE_REGISTRY_PATH)
 
-        self.assertGreaterEqual(len(sites), 80)
+        self.assertEqual(len(sites), 74)  # Six explicit admissions transferred to production.
         self.assertLessEqual(len(sites), 150)
         self.assertEqual(payload["policy"]["logical_candidate_count"], len(sites))
         self.assertEqual(payload["policy"]["excluded_mirror_alias_count"], 20)

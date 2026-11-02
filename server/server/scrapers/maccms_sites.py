@@ -1,12 +1,12 @@
 """
 MacCMS / 苹果CMS provide/vod 采集站清单
 
-每一项是一个资源站点，同一作品可以返回多条播放线路。这些是公开的资源采集接口,返回标准 MacCMS JSON。
+每一项是一个资源站点，同一作品可以返回多条播放线路。这些是公开的资源采集接口,返回 MacCMS JSON 或 XML。
 覆盖: 电影 / 国产剧 / 欧美剧 / 韩剧 / 日剧 / 动漫 / 综艺。
 
 字段说明:
   name           展示名
-  api            provide/vod 接口地址 (JSON)
+  api            provide/vod 接口地址 (JSON/XML)
   enabled        是否允许进入运行时来源库存
   tier           core / fallback / specialist / client_probe / quarantine / retired
   quick          是否进入前台快速发现第一波
@@ -49,11 +49,8 @@ MACCMS_SITES: list[dict] = [
     {"name": "光速", "api": "https://api.guangsuapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 99, "content_types": ["anime", "tv", "movie"]},
     {"name": "如意", "api": "https://cj.rycjapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 98, "content_types": ["anime", "tv", "movie"]},
     {"name": "豪华", "api": "https://hhzyapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 96, "content_types": ["anime", "tv", "movie"]},
-    # 目标出口复测未达到生产可播门槛，保留记录但完全禁用。
-    # 2026-08-28 复检:API 仍活(搜索命中 6 条 / 1.3s)，但媒体全部 ConnectError；
-    # 同族候选域(www./cj./jisuzy.com/api.jisuzyapi.com)也拿不到可播线路。
-    # 属"解析通、货源没了"，不是站点关停 —— 货源恢复即可重新启用。
-    {"name": "极速", "api": "https://jszyapi.com/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 94, "content_types": ["anime", "tv", "movie"]},
+    # 2026-11-02 LA多轮重新验证首集/第3集清单与媒体；恢复查询，仍不预爬。
+    {"name": "极速", "api": "https://jszyapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 94, "content_types": ["anime", "tv", "movie"]},
     {"name": "猫眼", "api": "https://api.maoyanapi.top/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 92, "content_types": ["anime", "tv", "movie"]},
     {"name": "魔都2", "api": "https://www.mdzyapi.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": True, "weight": 90, "content_types": ["anime", "tv", "movie"]},
     {"name": "速博", "api": "https://subocaiji.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 88, "content_types": ["anime", "tv", "movie"]},
@@ -63,7 +60,7 @@ MACCMS_SITES: list[dict] = [
     # 保留来源身份用于诊断，但不再进入任何用户查询入口。
     # 2026-08-28 复检:原域仍 HTTP 444(nginx 主动断连)，三个同族候选域
     # (dongmandaquan.com / fcvod.com / api.fengchezy.com)均 ConnectError。
-    # 与极速/暴风不同，这个站是真的关停了，不是货源问题。
+    # 2026-11-02仍为连接/协议异常；没有可靠新域名，不将旧观察当永久关停证明。
     {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
     # —— 第二梯队：综合站保留其真实三类资源范围，单集健康由验线决定。
     # 2026-09-13 修复历史按一轮成功样本收窄类型造成的影视漏查：
@@ -87,6 +84,14 @@ MACCMS_SITES: list[dict] = [
     {"name": "360", "api": "https://360zy.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 64, "content_types": ["anime", "tv", "movie"]},
     # 洛杉矶 VPS 三类实播均通过，但国内客户端直连明显较慢；只作末位地区备用。
     {"name": "虎牙", "api": "https://www.huyaapi.com/api.php/provide/vod", "enabled": True, "tier": "fallback", "quick": False, "precache": False, "weight": 62, "content_types": ["anime", "tv", "movie"]},
+
+    # 2026-11-02经明确批准从候选表转入；client_probe不代表手机已验证。
+    {"name": "金鹰资源", "api": "https://jyzyapi.com/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 95, "content_types": ["anime", "tv", "movie"]},
+    {"name": "新浪资源", "api": "https://api.xinlangapi.com/xinlangapi.php/provide/vod", "enabled": True, "tier": "fallback", "quick": False, "precache": False, "weight": 82, "content_types": ["anime", "tv", "movie"]},
+    {"name": "HG资源", "api": "https://hong.hgyx.vip/api.php/provide/vod/", "enabled": True, "tier": "fallback", "quick": False, "precache": False, "weight": 80, "content_types": ["anime", "tv", "movie"]},
+    {"name": "U酷资源", "api": "https://api.ukuapi88.com/api.php/provide/vod/", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 60, "content_types": ["anime", "tv", "movie"]},
+    {"name": "非凡资源", "api": "https://api.ffzyapi.com/api.php/provide/vod", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 58, "content_types": ["anime", "tv", "movie"]},
+    {"name": "1080zyk优质资源库", "api": "https://api.1080zyku.com/inc/api.php/provide/vod/", "api_format": "xml", "enabled": True, "tier": "client_probe", "quick": False, "precache": False, "weight": 56, "content_types": ["anime", "tv", "movie"]},
 
 ]
 

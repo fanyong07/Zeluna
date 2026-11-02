@@ -739,7 +739,7 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
     def test_known_isolated_sources_do_not_enter_quick_or_precache(self):
         configured = {site["name"]: site for site in MACCMS_SITES}
 
-        for name in {"极速", "暴风", "风车"}:
+        for name in {"暴风", "风车"}:
             with self.subTest(source=name):
                 self.assertFalse(configured[name]["quick"])
                 self.assertFalse(configured[name]["precache"])

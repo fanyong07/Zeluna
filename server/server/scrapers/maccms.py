@@ -31,6 +31,7 @@ from .base import (
     DIRECT_MEDIA_URL, INVALID_MEDIA_URL, PLAYER_PAGE_URL, UNKNOWN_MEDIA_URL,
     EpisodeInfo, VideoLine, classify_media_url, media_format_from_url,
 )
+from .maccms_payload import parse_catalog_response, catalog_error_category
 from .maccms_sites import (
     MACCMS_SITES,
     enabled_sites,
@@ -296,23 +297,15 @@ class MacCmsScraper(BaseScraper):
                         int((time.monotonic() - started_at) * 1000),
                     ),
                 )
-            data = resp.json()
+            data = parse_catalog_response(resp)
         except Exception as e:
             self._failures[site["name"]] = self._failures.get(site["name"], 0) + 1
-            logger.debug(f"MacCMS search fail [{site['name']}]: {e}")
+            logger.debug("MacCMS search fail [%s]: %s", site["name"], type(e).__name__)
             timed_out = isinstance(
                 e,
                 (asyncio.TimeoutError, httpx.TimeoutException, TimeoutError),
             )
-            category = (
-                "connect_timeout"
-                if isinstance(e, httpx.ConnectTimeout)
-                else "read_timeout"
-                if timed_out
-                else "parser_mismatch"
-                if isinstance(e, (ValueError, KeyError, TypeError))
-                else "unknown_exception"
-            )
+            category = catalog_error_category(e)
             return MacCmsSearchOutcome(
                 site_name=site["name"],
                 results=[],
@@ -474,11 +467,11 @@ class MacCmsScraper(BaseScraper):
         try:
             resp = await self._client.get(
                 site["api"],
-                params={"ac": "detail", "ids": vod_id},
+                params={"ac": "videolist" if site.get("api_format") == "xml" else "detail", "ids": vod_id},
             )
             if resp.status_code != 200:
                 return None
-            data = resp.json()
+            data = parse_catalog_response(resp)
         except Exception:
             return None
 
@@ -545,11 +538,11 @@ class MacCmsScraper(BaseScraper):
         try:
             resp = await self._client.get(
                 site["api"],
-                params={"ac": "detail", "ids": vod_id},
+                params={"ac": "videolist" if site.get("api_format") == "xml" else "detail", "ids": vod_id},
             )
             if resp.status_code != 200:
                 return []
-            data = resp.json()
+            data = parse_catalog_response(resp)
         except Exception:
             return []
 
@@ -620,7 +613,7 @@ class MacCmsScraper(BaseScraper):
             )
             if resp.status_code != 200:
                 return []
-            data = resp.json()
+            data = parse_catalog_response(resp)
         except Exception:
             return []
         items = data.get("list", []) if isinstance(data, dict) else []

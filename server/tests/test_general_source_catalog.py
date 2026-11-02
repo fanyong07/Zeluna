@@ -36,16 +36,16 @@ BASELINE_SITES = {
 }
 BASELINE_ACTIVE = BASELINE_SITES - {"极速", "暴风", "风车"}
 CURRENT_ORIGIN_APIS = {
-    "非凡资源": "http://api.ffzyapi.com/api.php/provide/vod/",
-    "新浪资源": "https://api.xinlangapi.com/xinlangapi.php/provide/vod/josn",
+    "非凡资源": "https://api.ffzyapi.com/api.php/provide/vod",
+    "新浪资源": "https://api.xinlangapi.com/xinlangapi.php/provide/vod",
     "U酷资源": "https://api.ukuapi88.com/api.php/provide/vod/",
 }
 
 
-def origin_candidates():
+def reviewed_origins():
     return [
         site
-        for site in load_candidate_sites(DEFAULT_CANDIDATE_REGISTRY_PATH)
+        for site in MACCMS_SITES
         if site["name"] in CURRENT_ORIGIN_APIS
     ]
 
@@ -55,16 +55,18 @@ def test_comprehensive_origins_preserve_existing_sites_and_candidate_review_gate
     active = {site["name"] for site in enabled_sites()}
     assert BASELINE_SITES <= registered.keys()
     assert BASELINE_ACTIVE <= active
-    candidates = origin_candidates()
-    assert {site["name"]: site["api"] for site in candidates} == CURRENT_ORIGIN_APIS
+    reviewed = reviewed_origins()
+    assert {site["name"]: site["api"] for site in reviewed} == CURRENT_ORIGIN_APIS
+    assert all(site["enabled"] and not site["precache"] for site in reviewed)
+    # Explicit reviewed transfers do not open the remaining candidate registry.
+    candidates = load_candidate_sites(DEFAULT_CANDIDATE_REGISTRY_PATH)
+    assert len(candidates) == 74
     assert all(site["review_status"] == "candidate" for site in candidates)
-    pending_hosts = {urlsplit(site["api"]).hostname for site in candidates}
-    assert pending_hosts.isdisjoint(
-        urlsplit(site["api"]).hostname for site in MACCMS_SITES
-    )
-    # The existing source count is unchanged, including older isolated records.
-    for name in BASELINE_SITES - BASELINE_ACTIVE:
+    assert {site["name"] for site in candidates}.isdisjoint(registered)
+    assert registered["极速"]["enabled"] is True
+    for name in {"暴风", "风车"}:
         assert registered[name]["enabled"] is False
+
 
 
 @pytest.mark.parametrize(
@@ -84,12 +86,12 @@ def test_origin_search_detail_episode_and_api_identity_in_all_sections(
             enabled_provider_ids=frozenset({"aggregate.maccms"}),
             resolver_search_enabled=False,
         )
-        # Candidates are injected only in this isolated audit, never by enabling
-        # aggregate.maccms in the runtime. Formal promotion remains a separate gate.
-        assert set(CURRENT_ORIGIN_APIS).isdisjoint(
+        # These three reviewed origins are now admitted; unrevised candidates
+        # remain outside the runtime. Isolate the subset with mocked responses.
+        assert set(CURRENT_ORIGIN_APIS) <= {
             source.name for source in aggregator._maccms.discovery_sources
-        )
-        sites = origin_candidates()
+        }
+        sites = reviewed_origins()
         aggregator._maccms._sites = sites
         host_sites = {urlsplit(site["api"]).hostname: site["name"] for site in sites}
         calls = []

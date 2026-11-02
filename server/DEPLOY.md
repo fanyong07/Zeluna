@@ -356,7 +356,7 @@ curl 'https://你的后端域名/api/v3/playback/tmdb:movie:535167?episode=1&tit
 python tools/probe_all_routes.py --output /安全的证据目录/routes.json --egress production-vps --include-candidates
 ```
 
-- 默认覆盖正式20条、全部13个爬虫和5个旧TVBox兼容接口；选项补上80条候选。
+- 默认覆盖正式26条、全部13个爬虫和5个旧TVBox兼容接口；选项补上74条候选。
 - 真人剧、真人电影、番剧和动画电影四种真实作品样本；剧集检查第1/3集。所有返回线路都检查，不因为先前成功就提前结束。
 - 测试临时实例可以查询隔离项，但不改动生产配置、数据库、权重、启用状态或候选晋级状态。
 - 结果区分搜索/匹配、取流、服务器通过、客户端出口待确认、失败；报告不写媒体完整地址/签名参数或请求头。
@@ -370,3 +370,11 @@ python tools/probe_all_routes.py --output /安全的证据目录/routes.json --e
 普通 API 启动不初始化字幕数据库；运营 `tools/subtitle_library.py import` 默认只检查，显式 `--apply` 才入库。
 只有确认用户 OAuth 和应用专用私有文件夹后，才允许启用 `google_drive`；不配置共享链接，不上传个人本地导入文件。
 这部分代码存在不代表生产已部署、字幕已收录或 Google 账号已连接；先检查目标机器 `storage-check`，再安排受控上线。
+
+
+## 2026-11-02 来源恢复
+
+修复与逐项准入依据见 `docs/research/source-recovery-2026-11-02.md`。
+部署时只在既有 `PLAYBACK_PROVIDER_IDS` 上追加 `crawler.jibi,crawler.yinghua2,crawler.wedm`，不得覆盖原有ID。
+wedm和client_probe来源仅提供待客户端验证候选，不能标成已播放。
+候选登记与正式来源之间明确转移，禁止重复计数或在请求过程中自动晋级。

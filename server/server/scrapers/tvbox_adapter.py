@@ -5,13 +5,10 @@ TVBox 社区源适配器
 自动检测可用源，过滤掉失效的。
 """
 
-import re
-import json
 import logging
 import asyncio
 import time
 from typing import Optional
-from urllib.parse import urljoin, quote
 
 import httpx
 
@@ -19,6 +16,12 @@ from .base import (
     BaseScraper, SubjectResult, SubjectDetail,
     EpisodeInfo, VideoLine,
 )
+
+from .maccms import (media_type_from_name, year_from_value, parse_vod_play_url,
+                     episode_from_group, episode_number_from_label,
+                     _is_special_episode_label)
+from .maccms_payload import parse_catalog_response
+from .base import media_format_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ KNOWN_TVBOX_APIS = [
     },
     {
         "name": "非凡",
-        "base": "http://cj.ffzyapi.com/api.php/provide/vod",
+        "base": "https://api.ffzyapi.com/api.php/provide/vod",
         "content_types": ["series", "movie"],
     },
     {
@@ -86,14 +89,14 @@ class TvBoxAdapterScraper(BaseScraper):
             return
         self._last_health_check = now
         healthy = []
-        for cfg in KNOWN_TVBOX_APIS:
+        for cfg in self._source_configs.values():
             try:
                 resp = await self._client.get(
                     cfg["base"],
                     params={"ac": "detail", "t": "1"},
                 )
                 if resp.status_code == 200 and len(resp.content) > 50:
-                    data = resp.json()
+                    data = parse_catalog_response(resp)
                     if data:
                         healthy.append(cfg["name"])
             except Exception:
@@ -105,7 +108,7 @@ class TvBoxAdapterScraper(BaseScraper):
 
     async def search(self, keyword: str) -> list[SubjectResult]:
         await self._check_health()
-        sources = self._healthy_sources or [s["name"] for s in KNOWN_TVBOX_APIS]
+        sources = self._healthy_sources or list(self._source_configs)
 
         all_results: list[SubjectResult] = []
         seen = set()
@@ -121,18 +124,19 @@ class TvBoxAdapterScraper(BaseScraper):
                 )
                 if resp.status_code != 200:
                     return
-                data = resp.json()
+                data = parse_catalog_response(resp)
                 items = data.get("list", []) if isinstance(data, dict) else data
                 if not isinstance(items, list):
                     return
                 for item in items:
                     title = item.get("vod_name", "")
-                    if not title or title in seen:
-                        continue
-                    seen.add(title)
                     vid = str(item.get("vod_id", ""))
+                    identity = (name, vid)
+                    if not title or not vid or identity in seen:
+                        continue
+                    seen.add(identity)
                     type_name = item.get("type_name", "")
-                    content_type = "movie" if "电影" in (type_name or "") else "tv"
+                    content_type = media_type_from_name(type_name)
 
                     all_results.append(SubjectResult(
                         source_id=f"tvbox:{name}:{vid}",
@@ -141,11 +145,11 @@ class TvBoxAdapterScraper(BaseScraper):
                         summary=(item.get("vod_content", "") or "")[:500],
                         type=content_type,
                         lang="zh",
-                        year=int(item["vod_year"]) if item.get("vod_year", "").isdigit() else 2024,
+                        year=year_from_value(item.get("vod_year")),
                         extra={"tvbox_source": name, "vod_id": vid},
                     ))
             except Exception as e:
-                logger.warning(f"TVBox search [{name}]: {e}")
+                logger.warning("TVBox search [%s]: %s", name, type(e).__name__)
 
         await asyncio.gather(*[_search(n) for n in sources])
         return all_results
@@ -173,7 +177,7 @@ class TvBoxAdapterScraper(BaseScraper):
             if resp.status_code != 200:
                 return None
 
-            data = resp.json()
+            data = parse_catalog_response(resp)
             items = data.get("list", []) if isinstance(data, dict) else data
             if not items:
                 return None
@@ -184,42 +188,33 @@ class TvBoxAdapterScraper(BaseScraper):
             play_from = item.get("vod_play_from", "")
             type_name = item.get("type_name", "")
 
-            # Parse episodes
-            episodes = []
-            if play_url:
-                sources = play_from.split("$$$") if play_from else ["默认"]
-                groups = play_url.split("$$$")
-                for gi, group in enumerate(groups):
-                    src_label = sources[gi] if gi < len(sources) else f"线路{gi+1}"
-                    for ei, ep_str in enumerate(group.split("#")):
-                        ep_str = ep_str.strip()
-                        if not ep_str:
+            # Share normal episode semantics with MacCMS: specials are not
+            # missing numbered episodes, and every playback group contributes.
+            episodes_by_number = {}
+            for gi, group in enumerate(play_url.split("$$$")):
+                parsed = next(iter(parse_vod_play_url(group)), [])
+                numbered = [episode_number_from_label(ep["name"]) for ep in parsed]
+                explicit = any(number is not None for number in numbered)
+                fallback = 0
+                for ei, (ep, number) in enumerate(zip(parsed, numbered)):
+                    if number is None:
+                        if explicit or _is_special_episode_label(ep["name"]):
                             continue
-                        sep = ep_str.find("$")
-                        if sep > 0:
-                            ep_title = ep_str[:sep].strip()
-                            ep_url = ep_str[sep + 1:].strip()
-                        else:
-                            ep_title = f"第{ei+1}集"
-                            ep_url = ep_str
-
-                        ep_num = ei + 1
-                        m = re.search(r'(\d+)', ep_title)
-                        if m:
-                            ep_num = int(m.group(1))
-
-                        episodes.append(EpisodeInfo(
-                            number=ep_num,
-                            title=f"[{src_label}] {ep_title}",
-                            source_episode_id=f"{source_id}/ep/{gi}/{ei}",
-                        ))
+                        fallback += 1
+                        number = fallback
+                    episodes_by_number.setdefault(number, EpisodeInfo(
+                        number=number, title=ep["name"],
+                        source_episode_id=f"{source_id}/ep/{gi}/{ei}",
+                    ))
+            episodes = [episodes_by_number[n] for n in sorted(episodes_by_number)]
 
             return SubjectDetail(
                 source_id=source_id,
                 title=title,
                 cover_url=item.get("vod_pic", ""),
                 summary=(item.get("vod_content", "") or "")[:2000],
-                type="movie" if "电影" in (type_name or "") else "tv",
+                type=media_type_from_name(type_name),
+                year=year_from_value(item.get("vod_year")),
                 lang="zh",
                 episodes=episodes,
                 extra={
@@ -230,7 +225,7 @@ class TvBoxAdapterScraper(BaseScraper):
                 },
             )
         except Exception as e:
-            logger.error(f"TVBox detail [{source_name}/{vod_id}]: {e}")
+            logger.warning("TVBox detail [%s]: %s", source_name, type(e).__name__)
             return None
 
     async def get_video_urls(
@@ -251,24 +246,14 @@ class TvBoxAdapterScraper(BaseScraper):
 
         for gi, group in enumerate(groups):
             src_label = sources[gi] if gi < len(sources) else f"线路{gi+1}"
-            for ei, ep_str in enumerate(group.split("#")):
-                sep = ep_str.find("$")
-                if sep <= 0:
-                    continue
-                ep_title = ep_str[:sep].strip()
-                ep_url = ep_str[sep + 1:].strip()
-                if not ep_url:
-                    continue
-
-                m = re.search(r'(\d+)', ep_title)
-                this_ep = int(m.group(1)) if m else (ei + 1)
-
-                if this_ep == episode:
-                    lines.append(VideoLine(
-                        url=ep_url,
-                        title=f"[{src_label}] {ep_title}",
-                        format="hls" if "m3u8" in ep_url.lower() else "mp4",
-                        source_name=f"tvbox_{detail.extra.get('tvbox_source', '')}",
-                    ))
+            parsed = next(iter(parse_vod_play_url(group)), [])
+            ep = episode_from_group(parsed, episode)
+            if ep is None:
+                continue
+            lines.append(VideoLine(
+                url=ep["url"], title=f"[{src_label}] {ep['name']}",
+                format=media_format_from_url(ep["url"]),
+                source_name=f"tvbox_{detail.extra.get('tvbox_source', '')}",
+            ))
 
         return lines

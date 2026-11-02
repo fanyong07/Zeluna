@@ -144,7 +144,9 @@ def local_query_descriptor(
     if source is None or source.family != "maccms" or source.status != "not_queried":
         return None
     site = next((item for item in MACCMS_SITES if item["name"] == source.name), None)
-    if site is None or not site.get("enabled", True):
+    if (site is None or not site.get("enabled", True)
+            or site.get("api_format", "json") != "json"):
+        # Android local requery currently speaks JSON only; XML is server-side.
         return None
     endpoint = str(site.get("api") or "")
     try:

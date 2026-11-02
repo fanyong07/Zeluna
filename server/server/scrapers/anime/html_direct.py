@@ -89,7 +89,7 @@ HTML_DIRECT_ANIME_SITES: tuple[HtmlDirectSite, ...] = (
         key="yinghua2",
         display_name="樱花动漫",
         search_url=(
-            "https://www.yinghua2.com/index.php/vod/search.html?wd={keyword}"
+            "https://www.yinghuabb.com/index.php/vod/search.html?wd={keyword}"
         ),
         search_link_selector=".title > a",
         episode_list_selector=".stui-content__playlist",

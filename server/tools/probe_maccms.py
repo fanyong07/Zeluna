@@ -61,6 +61,9 @@ from server.scrapers.maccms import (  # noqa: E402
     parse_vod_play_url,
     year_from_value,
 )
+from server.scrapers.maccms_payload import (
+    CatalogSearchUnsupported, parse_catalog_response,
+)
 from server.scrapers.maccms_sites import MACCMS_SITES  # noqa: E402
 from server.title_matching import SourceMatchAnalysis, analyze_source_match  # noqa: E402
 from tools.maccms_coverage import (  # noqa: E402
@@ -118,6 +121,7 @@ CONFIGURED_SITES = [
                 "precache",
                 "weight",
                 "content_types",
+                "api_format",
             }
         },
         "origin": CONFIGURED_ORIGIN,
@@ -368,7 +372,7 @@ async def _fetch_json(
     *,
     params: dict[str, object],
 ) -> tuple[dict | None, str]:
-    """Fetch source JSON with the same public-target boundary on each hop."""
+    """Fetch JSON/XML catalog with the same public-target boundary on each hop."""
     current = str(client.build_request("GET", url, params=params).url)
     for _ in range(6):
         if not await _is_public_http_url(current):
@@ -388,8 +392,10 @@ async def _fetch_json(
         if response.status_code != 200:
             return None, f"http_{response.status_code}"
         try:
-            data = response.json()
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            data = parse_catalog_response(response)
+        except CatalogSearchUnsupported:
+            return None, "search_unsupported"
+        except ValueError:
             return None, "invalid_json"
         return (data, "") if isinstance(data, dict) else (None, "invalid_json_shape")
     return None, "too_many_redirects"
@@ -589,7 +595,7 @@ async def probe_coverage_case(
     detail, detail_error = await _fetch_json(
         client,
         site["api"],
-        params={"ac": "detail", "ids": vod_id},
+        params={"ac": "videolist" if site.get("api_format") == "xml" else "detail", "ids": vod_id},
     )
     if detail is None:
         result["error_category"] = detail_error or "detail_error"
@@ -821,7 +827,7 @@ async def probe_site(
                     detail, detail_error = await _fetch_json(
                         client,
                         site["api"],
-                        params={"ac": "detail", "ids": vod_id},
+                        params={"ac": "videolist" if site.get("api_format") == "xml" else "detail", "ids": vod_id},
                     )
                     if detail is None:
                         result["note"] = detail_error
