@@ -6,6 +6,7 @@ from enum import StrEnum
 
 class SourceDiscoveryStatus(StrEnum):
     NOT_QUERIED = "not_queried"
+    UNSUPPORTED_CONTENT_TYPE = "unsupported_content_type"
     SEARCHING = "searching"
     SEARCH_TIMEOUT = "search_timeout"
     SEARCH_ERROR = "search_error"

@@ -216,3 +216,84 @@ def test_tvbox_does_not_collapse_same_title_across_independent_sources():
             await scraper.aclose()
 
     asyncio.run(run())
+
+
+def test_unsupported_provider_does_not_invalidate_anime_full_cache():
+    from unittest.mock import patch
+    from server.aggregator import ContentAggregator, AggregatedVideoLine
+    from server.playback import PlaybackService
+    from server.scrapers.direct_stream import PpnixScraper
+    from server.playback_discovery.models import SourceDiscoveryStatus
+
+    async def run():
+        movies = PpnixScraper()
+        movies.search = AsyncMock(side_effect=AssertionError("unsupported search"))
+        aggregator = ContentAggregator(
+            crawler_scrapers={"ppnix": movies},
+            enabled_provider_ids=frozenset({"aggregate.maccms", "crawler.ppnix"}),
+            resolver_search_enabled=False,
+        )
+        aggregator._maccms._sites = [
+            {"name": "fixture", "api": "https://catalog.example/api"},
+            {
+                "name": "movie_catalog",
+                "api": "https://movies.example/api",
+                "content_types": ["movie"],
+            },
+        ]
+        aggregator._maccms._client.get = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "list": [
+                        {
+                            "vod_id": "1",
+                            "vod_name": "目标",
+                            "type_name": "日韩动漫",
+                            "vod_year": 2024,
+                        }
+                    ]
+                },
+            )
+        )
+        try:
+            matches, diagnostics = await aggregator.discover_source_matches(
+                ["目标"],
+                content_type="anime",
+                year=2024,
+                include_diagnostics=True,
+            )
+            assert len(matches) == 1
+            assert diagnostics["ppnix"].status.value == "unsupported_content_type"
+            assert not diagnostics["ppnix"].queried
+            assert (
+                diagnostics["movie_catalog"].status.value == "unsupported_content_type"
+            )
+            assert not diagnostics["movie_catalog"].queried
+            aggregator._maccms._client.get.assert_awaited_once()
+            movies.search.assert_not_awaited()
+            service = PlaybackService()
+            line = AggregatedVideoLine(
+                url="https://media.example/1.m3u8",
+                source="maccms:fixture",
+                verification_status="server_verified",
+            )
+            with patch("server.playback.aggregator", aggregator):
+                items = service._complete_site_inventory(
+                    [service._line_dict(line)], discovery_diagnostics=diagnostics
+                )
+                assert service._should_store_full_result(items)
+                assert any(
+                    x.get("diagnostic_status") == "unsupported_content_type"
+                    for x in items
+                )
+                # A genuinely unqueried compatible source must still block full caching.
+                diagnostics["ppnix"].status = SourceDiscoveryStatus.NOT_QUERIED
+                items = service._complete_site_inventory(
+                    [service._line_dict(line)], discovery_diagnostics=diagnostics
+                )
+                assert not service._should_store_full_result(items)
+        finally:
+            await aggregator.aclose()
+
+    asyncio.run(run())

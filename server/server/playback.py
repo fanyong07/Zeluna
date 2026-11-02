@@ -1791,6 +1791,7 @@ class PlaybackService:
     def _discovery_message(status: str) -> str:
         return {
             SourceDiscoveryStatus.NOT_QUERIED.value: "本轮未查询该来源",
+            SourceDiscoveryStatus.UNSUPPORTED_CONTENT_TYPE.value: "该来源不支持此内容类型",
             SourceDiscoveryStatus.SEARCHING.value: "正在搜索该来源",
             SourceDiscoveryStatus.SEARCH_TIMEOUT.value: "来源搜索超时",
             SourceDiscoveryStatus.SEARCH_ERROR.value: "来源暂时无法访问",

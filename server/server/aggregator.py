@@ -574,6 +574,11 @@ class ContentAggregator:
             expected_type in {"anime", "series", "movie"}
             and expected_type not in scraper.content_types
         ):
+            # Deliberately inapplicable is terminal, not an incomplete scan.
+            # Otherwise movie-only providers prevent every anime full cache.
+            diagnostic = diagnostics.get(provider) if diagnostics is not None else None
+            if diagnostic is not None:
+                diagnostic.status = SourceDiscoveryStatus.UNSUPPORTED_CONTENT_TYPE
             return []
         if provider == "maccms":
             raise ValueError(
@@ -835,6 +840,13 @@ class ContentAggregator:
             and expected_type not in self._maccms.content_types
         ):
             return
+        eligible = self._maccms.discovery_sources_for(content_type)
+        if diagnostics is not None:
+            eligible_names = {source.name for source in eligible}
+            for source in self._maccms.discovery_sources:
+                diagnostic = diagnostics.get(source.name)
+                if diagnostic is not None and source.name not in eligible_names:
+                    diagnostic.status = SourceDiscoveryStatus.UNSUPPORTED_CONTENT_TYPE
         sources = [
             DiscoverySource(
                 key=source.name,
@@ -842,7 +854,7 @@ class ContentAggregator:
                 priority_group=source.priority_group,
                 weight=source.weight,
             )
-            for source in self._maccms.discovery_sources_for(content_type)
+            for source in eligible
         ]
         scored_outcomes: dict[int, list[SourceMatch]] = {}
 
