@@ -1,3 +1,8 @@
+> 2026-11-03 来源清理更新：用户要求删除未接入候选及停用/重复登记，
+> `data/maccms_candidates.json` 已移除，当前保留 35 个登记项。下文旧候选表数量属于历史说明，
+> 不得重建或自动恢复；新来源审查使用显式提供的临时输入。详见
+> `docs/research/source-pruning-and-admission-2026-11-03.md`。
+
 # Zeluna 统一后端部署说明
 
 ## 目标

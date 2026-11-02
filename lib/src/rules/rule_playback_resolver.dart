@@ -18,6 +18,7 @@ import 'animeko_webview_sniffer.dart';
 import 'csp_rule_support.dart';
 import 'drpy_runtime.dart';
 import 'rule_models.dart';
+import 'kazumi_api.dart';
 import 'rule_media_resolver.dart';
 import 'rule_http_policy.dart';
 import 'rule_page_client.dart';
@@ -186,7 +187,7 @@ class RulePlaybackResolver {
     if (cancellationToken?.isCancelled ?? false) return const [];
     final resolveContext = RulePageRequestScope(cancellationToken, rule: rule);
     return runZoned(() async {
-      if (rule.requiresCaptcha || rule.unsupportedReason != null) {
+      if (rule.requiresManualVerification || rule.unsupportedReason != null) {
         if (rule.engine.toLowerCase() == 'android-csp') return const [];
         return [
           _unavailableLine(
@@ -1221,6 +1222,17 @@ class RulePlaybackResolver {
       return [_unavailableLine(rule, subject, episode, '没有匹配到当前条目的详情页。')];
     }
 
+    if (config.chapterMode.toLowerCase() == 'api') {
+      return _resolveKazumiApiChapters(
+        client,
+        rule,
+        config,
+        episode,
+        detailUrl.toString(),
+        verifyPlayable: verifyPlayable,
+      );
+    }
+
     final detailHtml = await _get(
       client,
       detailUrl,
@@ -1261,6 +1273,169 @@ class RulePlaybackResolver {
       return [_unavailableLine(rule, subject, episode, '找到详情页，但当前集没有解析到直链。')];
     }
     return lines;
+  }
+
+  Future<List<PlaybackLine>> _resolveKazumiApiChapters(
+    http.Client client,
+    RulePlugin rule,
+    KazumiParserConfig config,
+    AnimeEpisode episode,
+    String source, {
+    required bool verifyPlayable,
+  }) async {
+    final api = config.chapterApiConfig;
+    final uri = kazumiApiUri(api, {'source': source});
+    final decoded = jsonDecode(
+      await _get(
+        client,
+        uri,
+        _headers(
+          rule: rule,
+          referer: rule.baseUrl,
+          userAgent: config.userAgent,
+        ),
+      ),
+    );
+    final groups = <_TvBoxPlayGroup>[];
+    if (api['format'] == 'delimited') {
+      final roadSeparator = api['roadSeparator']?.toString() ?? r'$$$';
+      final episodeSeparator = api['episodeSeparator']?.toString() ?? '#';
+      final fieldSeparator = api['fieldSeparator']?.toString() ?? r'$';
+      if ([
+        roadSeparator,
+        episodeSeparator,
+        fieldSeparator,
+      ].any((s) => s.isEmpty)) {
+        return const [];
+      }
+      final names = kazumiJsonValue(
+        decoded,
+        api['roadNamesPath'],
+      ).split(roadSeparator);
+      final roads = kazumiJsonValue(
+        decoded,
+        api['roadEpisodesPath'],
+      ).split(roadSeparator);
+      for (var i = 0; i < roads.length && i < 100; i++) {
+        final episodes = <_TvBoxEpisode>[];
+        for (final text in roads[i].split(episodeSeparator).take(2000)) {
+          final split = text.indexOf(fieldSeparator);
+          if (split < 1) continue;
+          episodes.add(
+            _TvBoxEpisode(
+              title: text.substring(0, split),
+              url: text.substring(split + fieldSeparator.length),
+            ),
+          );
+        }
+        groups.add(
+          _TvBoxPlayGroup(
+            name: i < names.length ? names[i] : '',
+            episodes: episodes,
+            index: i,
+          ),
+        );
+      }
+    } else if (api['format'] == 'nested') {
+      for (final road in kazumiJsonNodes(
+        decoded,
+        api['roadsPath']?.toString() ?? '',
+      ).take(100)) {
+        final episodes = <_TvBoxEpisode>[];
+        for (final item in kazumiJsonNodes(
+          road,
+          api['episodesPath']?.toString() ?? '',
+        )) {
+          final name = kazumiJsonValue(item, api['episodeNamePath']);
+          final id = kazumiJsonValue(item, api['episodeUrlPath']);
+          if (id.isEmpty) continue;
+          final page = api['episodePage'];
+          final url = page is Map
+              ? kazumiApiTemplate(page['url']?.toString() ?? '', {
+                  'source': source,
+                  'episodeUrl': id,
+                })
+              : id;
+          if (url.isNotEmpty) {
+            episodes.add(_TvBoxEpisode(title: name, url: url));
+          }
+        }
+        groups.add(
+          _TvBoxPlayGroup(
+            name: kazumiJsonValue(road, api['roadNamePath']),
+            episodes: episodes,
+            index: groups.length,
+          ),
+        );
+      }
+    }
+    return _collectPlaybackCandidates(
+      [
+        for (final group in groups)
+          () async {
+            // No fallback to the first episode when the requested episode is absent.
+            if (episode.number < 1 || episode.number > group.episodes.length) {
+              return null;
+            }
+            final selected = group.episodes[episode.number - 1];
+            final target = Uri.parse(_absoluteUrl(selected.url, rule.baseUrl));
+            ResolvedRuleMedia? resolved;
+            if (_isExplicitPlayableUrl(target.toString())) {
+              if (!RuleUrlPolicy(
+                rule.effectiveManifest,
+              ).allows(target, RuleUrlPurpose.media)) {
+                return null;
+              }
+              resolved = ResolvedRuleMedia(
+                target.toString(),
+                Uri.parse(rule.baseUrl),
+                _headers(
+                  rule: rule,
+                  referer: rule.baseUrl,
+                  userAgent: config.userAgent,
+                ),
+              );
+            } else {
+              final body = await _get(
+                client,
+                target,
+                _headers(
+                  rule: rule,
+                  referer: rule.baseUrl,
+                  userAgent: config.userAgent,
+                ),
+              );
+              resolved = await _resolveRuleMedia(
+                client,
+                rule,
+                body,
+                target.toString(),
+                userAgent: config.userAgent,
+              );
+            }
+            if (resolved == null) return null;
+            final probe = await _playableCandidateStatus(
+              client,
+              resolved.url,
+              resolved.headers,
+              verifyPlayable: verifyPlayable,
+            );
+            if (!probe.available) return null;
+            return _availableLine(
+              rule,
+              episode,
+              url: resolved.url,
+              title: '${episode.displayTitle} · ${group.name}',
+              probe: probe,
+              referer: resolved.referer.toString(),
+              headers: resolved.headers,
+              routeKey: '${group.index}',
+            );
+          },
+      ],
+      verifyPlayable: verifyPlayable,
+      candidateTimeout: timeout,
+    );
   }
 
   Future<ResolvedRuleMedia?> _resolveRuleMedia(
@@ -1398,6 +1573,43 @@ class RulePlaybackResolver {
     String keyword,
     int preference,
   ) async {
+    if (config.searchMode.toLowerCase() == 'api') {
+      final api = config.searchApiConfig;
+      final uri = kazumiApiUri(api, {'keyword': keyword});
+      final decoded = jsonDecode(
+        await _get(
+          client,
+          uri,
+          _headers(
+            rule: rule,
+            referer: rule.baseUrl,
+            userAgent: config.userAgent,
+          ),
+        ),
+      );
+      final hits = <_SearchHit>[];
+      for (final item in kazumiJsonNodes(
+        decoded,
+        api['listPath']?.toString() ?? '',
+      )) {
+        final name = kazumiJsonValue(item, api['namePath']);
+        final source = kazumiJsonValue(item, api['sourcePath']);
+        if (name.isEmpty || source.isEmpty) continue;
+        final template = api['sourceTemplate']?.toString().trim() ?? '';
+        final detail = template.isEmpty
+            ? source
+            : kazumiApiTemplate(template, {'source': source});
+        hits.add(
+          _SearchHit(
+            title: name,
+            url: config.chapterMode.toLowerCase() == 'api'
+                ? source
+                : _absoluteUrl(detail, rule.baseUrl),
+          ),
+        );
+      }
+      return _rankBestHit(hits, subject, preference);
+    }
     final searchUrl = _searchUrl(rule.searchUrl, keyword);
     final searchHtml = await _get(
       client,

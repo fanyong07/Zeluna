@@ -118,7 +118,7 @@ class KazumiRuleRepository {
 
   static KazumiRuleCatalog get bundledCatalog => KazumiRuleCatalog(
     entries: _bundledEntries,
-    refreshedAt: DateTime.fromMillisecondsSinceEpoch(1783910492000),
+    refreshedAt: DateTime.fromMillisecondsSinceEpoch(1793442148000),
   );
 
   static String rawRuleUrl(String name) {
@@ -284,113 +284,27 @@ class KazumiRuleRepository {
   }
 }
 
+// Official index snapshot: 2967d7babafffa92dbf35fbcb69d0fd964139e63. Unindexed files are not active rules.
 const _bundledEntries = <KazumiRuleCatalogEntry>[
   KazumiRuleCatalogEntry(
-    name: 'sorani',
-    version: '1.0',
-    lastUpdateMilliseconds: 1783910492000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'dalvdm',
-    version: '1.0',
-    lastUpdateMilliseconds: 1783855961000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'TvTFun',
-    version: '1.0',
-    lastUpdateMilliseconds: 1783604536000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'giriGiriLove',
-    version: '2.3',
-    lastUpdateMilliseconds: 1783528394000,
-    antiCrawlerEnabled: true,
+    name: '7sefun',
+    version: '1.3',
+    lastUpdateMilliseconds: 1786362131000,
   ),
   KazumiRuleCatalogEntry(
     name: 'aafun',
-    version: '1.1',
-    lastUpdateMilliseconds: 1782702566000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'qifun',
-    version: '2.1',
-    lastUpdateMilliseconds: 1781413737000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'ciyuancheng',
-    version: '2.0',
-    lastUpdateMilliseconds: 1781270758000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'fcdm',
-    version: '1.0',
-    lastUpdateMilliseconds: 1781096923000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'mgnacg',
-    version: '1.0',
-    lastUpdateMilliseconds: 1780897282000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'mutefun',
-    version: '1.1',
-    lastUpdateMilliseconds: 1780637024000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'gugu3',
-    version: '1.3',
-    lastUpdateMilliseconds: 1780292876000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'xfdm',
-    version: '2.1',
-    lastUpdateMilliseconds: 1780065540000,
-    antiCrawlerEnabled: true,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'omofun03',
-    version: '1.1',
-    lastUpdateMilliseconds: 1777179683000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'enlie',
-    version: '1.0',
-    lastUpdateMilliseconds: 1773203174000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'xfdmneo',
-    version: '1.1',
-    lastUpdateMilliseconds: 1772964002000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'MXdm',
-    version: '2.3',
-    lastUpdateMilliseconds: 1771938941000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'gpjda',
-    version: '1.0',
-    lastUpdateMilliseconds: 1771771049000,
-  ),
-  KazumiRuleCatalogEntry(
-    name: 'mwcy',
     version: '1.2',
-    lastUpdateMilliseconds: 1771294191000,
+    lastUpdateMilliseconds: 1787289623000,
   ),
   KazumiRuleCatalogEntry(
-    name: '7sefun',
-    version: '1.2',
-    lastUpdateMilliseconds: 1770510516000,
+    name: 'AGE',
+    version: '1.6',
+    lastUpdateMilliseconds: 1793200411000,
   ),
   KazumiRuleCatalogEntry(
-    name: 'DM84',
+    name: 'akianime',
     version: '1.4',
-    lastUpdateMilliseconds: 1770015775000,
+    lastUpdateMilliseconds: 1786942825000,
   ),
   KazumiRuleCatalogEntry(
     name: 'baimao',
@@ -398,9 +312,70 @@ const _bundledEntries = <KazumiRuleCatalogEntry>[
     lastUpdateMilliseconds: 1769573721000,
   ),
   KazumiRuleCatalogEntry(
-    name: 'AGE',
-    version: '1.5',
-    lastUpdateMilliseconds: 1758092260000,
+    name: 'dalvdm',
+    version: '1.2',
+    lastUpdateMilliseconds: 1792049112000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'DM84',
+    version: '1.4',
+    lastUpdateMilliseconds: 1770015775000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'ezdmw',
+    version: '1.2',
+    lastUpdateMilliseconds: 1786883419000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'giriGiriLove',
+    version: '2.6',
+    lastUpdateMilliseconds: 1792645277000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'LMM',
+    version: '2.3',
+    lastUpdateMilliseconds: 1792049112000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'mgnacg',
+    version: '1.2',
+    lastUpdateMilliseconds: 1792059072000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'moonci',
+    version: '1.1',
+    lastUpdateMilliseconds: 1792401354000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'mutefun',
+    version: '1.6',
+    lastUpdateMilliseconds: 1793442148000,
+    antiCrawlerEnabled: true,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'MXdm',
+    version: '2.4',
+    lastUpdateMilliseconds: 1790853597000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'sorani',
+    version: '1.0',
+    lastUpdateMilliseconds: 1783910492000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'TvTFun',
+    version: '1.3',
+    lastUpdateMilliseconds: 1793182395000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'xfdmneo',
+    version: '1.1',
+    lastUpdateMilliseconds: 1772964002000,
+  ),
+  KazumiRuleCatalogEntry(
+    name: 'xfdmnext',
+    version: '1.1',
+    lastUpdateMilliseconds: 1790868808000,
   ),
 ];
 

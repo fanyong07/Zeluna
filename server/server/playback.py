@@ -617,6 +617,23 @@ class PlaybackService:
             return "miss", []
         if not isinstance(items, list):
             return "miss", []
+        # A healthy route from another provider must not freeze a transient
+        # provider failure for the six-hour positive-cache TTL. Serve good
+        # routes immediately, then use the existing coalesced stale refresh.
+        # Confirmed misses and unsupported types retain the normal TTL.
+        transient = {
+            SourceDiscoveryStatus.SEARCH_ERROR.value,
+            SourceDiscoveryStatus.SEARCH_TIMEOUT.value,
+            SourceDiscoveryStatus.CIRCUIT_SUPPRESSED.value,
+        }
+        if any(
+            isinstance(item, dict) and (
+                item.get("diagnostic_status") in transient
+                or (item.get("diagnostic_status") == SourceDiscoveryStatus.ROUTE_UNAVAILABLE.value
+                    and item.get("error_category") not in _DETERMINISTIC_SOURCE_FAILURES)
+            ) for item in items
+        ):
+            ttl = min(ttl, 60.0)
         now = time.time()
         fresh_items: list[dict] = []
         for item in items:

@@ -736,16 +736,9 @@ class MacCmsScraperTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def test_known_isolated_sources_do_not_enter_quick_or_precache(self):
-        configured = {site["name"]: site for site in MACCMS_SITES}
-
-        for name in {"暴风", "风车"}:
-            with self.subTest(source=name):
-                self.assertFalse(configured[name]["quick"])
-                self.assertFalse(configured[name]["precache"])
-                self.assertEqual(configured[name]["tier"], "quarantine")
-                self.assertFalse(configured[name]["enabled"])
-        self.assertEqual(configured["风车"]["content_types"], ["anime"])
+    def test_removed_sources_are_not_registered_or_counted(self):
+        configured = {site["name"] for site in MACCMS_SITES}
+        self.assertTrue({"暴风", "风车"}.isdisjoint(configured))
 
 if __name__ == "__main__":
     unittest.main()

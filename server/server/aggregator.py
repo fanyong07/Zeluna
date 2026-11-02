@@ -34,11 +34,10 @@ from .scrapers.maccms import MacCmsScraper, MacCmsSearchOutcome
 from .scrapers.maccms_sites import site_priority
 from .scrapers.content_identity import content_matches_request, needs_content_detail
 from .scrapers.tvbox_adapter import TvBoxAdapterScraper
-from .scrapers.direct_stream import DbkuScraper, NivodScraper, PpnixScraper
+from .scrapers.direct_stream import NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
 from .scrapers.anime.age import AgeScraper
 from .scrapers.anime.anich import AniChScraper
-from .scrapers.anime.dm706 import Dm706Scraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import (
     OriginSearchThrottledError,
@@ -449,7 +448,6 @@ class ContentAggregator:
         self._crawler_scrapers = (
             {
                 "age": AgeScraper(),
-                "dm706": Dm706Scraper(),
                 "girigiri": GiriGiriScraper(),
                 "anich": AniChScraper(),
                 "xgcartoon": XgCartoonScraper(),
@@ -459,7 +457,6 @@ class ContentAggregator:
                 **create_html_direct_anime_scrapers(),
                 "nivod": NivodScraper(),
                 "ppnix": PpnixScraper(),
-                "dbku": DbkuScraper(),
             }
             if crawler_scrapers is None
             else dict(crawler_scrapers)

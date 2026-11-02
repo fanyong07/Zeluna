@@ -250,6 +250,7 @@ void main() {
       version: '1.0',
       updatedAt: DateTime(2026, 7, 18),
       requiresWebView: true,
+      requiresCaptcha: true,
     );
     final privateAuth = _rule(
       id: 'blocked:auth',
@@ -317,6 +318,7 @@ void main() {
         baseUrl: 'https://webview.example/',
         searchUrl: 'https://webview.example/search?wd=@keyword',
         requiresWebView: true,
+        requiresCaptcha: true,
       ),
       _rule(
         id: 'blocked:auth-installed',
@@ -378,6 +380,7 @@ RulePlugin _rule({
   RuleContentType contentType = RuleContentType.anime,
   bool searchable = true,
   bool requiresWebView = false,
+  bool requiresCaptcha = false,
   bool requiresPrivateAuth = false,
   bool includeKazumi = true,
   String? unsupportedReason,
@@ -399,6 +402,7 @@ RulePlugin _rule({
     quickSearch: true,
     filterable: false,
     requiresWebView: requiresWebView,
+    requiresCaptcha: requiresCaptcha,
     requiresPrivateAuth: requiresPrivateAuth,
     kazumi: includeKazumi
         ? const KazumiParserConfig(

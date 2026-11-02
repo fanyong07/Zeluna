@@ -184,7 +184,7 @@ void main() {
           isTrue,
           reason: 'API success is not a decoded native frame',
         );
-        expect(latest.length, greaterThanOrEqualTo(118));
+        expect(latest.any((line) => line.available), isTrue);
         expect(firstPlayableMs, lessThan(18000));
       },
       skip: !enabled,

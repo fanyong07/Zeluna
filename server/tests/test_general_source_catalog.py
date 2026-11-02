@@ -10,7 +10,6 @@ from server.aggregator import ContentAggregator
 from server.playback import PlaybackService
 from server.scrapers.maccms_sites import MACCMS_SITES, enabled_sites
 from tools.maccms_coverage import DEFAULT_CANDIDATE_REGISTRY_PATH
-from tools.probe_maccms import load_candidate_sites
 
 BASELINE_SITES = {
     "iKun",
@@ -23,11 +22,9 @@ BASELINE_SITES = {
     "速博",
     "魔都",
     "红牛",
-    "风车",
     "爱奇艺",
     "量子",
     "电影天堂",
-    "暴风",
     "百度",
     "无尽",
     "最大",
@@ -58,14 +55,10 @@ def test_comprehensive_origins_preserve_existing_sites_and_candidate_review_gate
     reviewed = reviewed_origins()
     assert {site["name"]: site["api"] for site in reviewed} == CURRENT_ORIGIN_APIS
     assert all(site["enabled"] and not site["precache"] for site in reviewed)
-    # Explicit reviewed transfers do not open the remaining candidate registry.
-    candidates = load_candidate_sites(DEFAULT_CANDIDATE_REGISTRY_PATH)
-    assert len(candidates) == 74
-    assert all(site["review_status"] == "candidate" for site in candidates)
-    assert {site["name"] for site in candidates}.isdisjoint(registered)
+    assert not DEFAULT_CANDIDATE_REGISTRY_PATH.exists()
     assert registered["极速"]["enabled"] is True
-    for name in {"暴风", "风车"}:
-        assert registered[name]["enabled"] is False
+    assert {"暴风", "风车"}.isdisjoint(registered)
+
 
 
 

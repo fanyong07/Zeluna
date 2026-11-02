@@ -148,7 +148,6 @@ def test_dns_and_certificate_failures_remain_distinguishable():
 
 
 def test_admission_transfers_candidates_without_duplicates_or_precache():
-    import json
     from pathlib import Path
     from server.scrapers.maccms_sites import MACCMS_SITES
     from server.playback_inventory import (
@@ -157,11 +156,7 @@ def test_admission_transfers_candidates_without_duplicates_or_precache():
     )
 
     sites = {x["name"]: x for x in MACCMS_SITES}
-    candidates = json.loads(
-        (Path(__file__).resolve().parents[1] / "data/maccms_candidates.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    assert not (Path(__file__).resolve().parents[1] / "data/maccms_candidates.json").exists()
     admitted = {
         "金鹰资源",
         "新浪资源",
@@ -170,7 +165,6 @@ def test_admission_transfers_candidates_without_duplicates_or_precache():
         "非凡资源",
         "1080zyk优质资源库",
     }
-    assert not admitted.intersection(x["name"] for x in candidates["sites"])
     assert all(
         sites[name]["enabled"] and not sites[name]["precache"]
         for name in admitted | {"极速"}

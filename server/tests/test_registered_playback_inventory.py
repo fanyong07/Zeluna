@@ -20,9 +20,9 @@ def test_empty_work_results_still_show_every_registered_source(route, method, co
         response = TestClient(app).get(f"/api/v3/{route}/bangumi:123", params={"content_type": content_type})
     assert response.status_code == 200
     items = response.json()
-    assert len(items) == 118
-    assert len({item["inventory_source_id"] for item in items}) == 118
-    assert sum(item["diagnostic_status"] == "candidate_unadmitted" for item in items) == 74
+    assert len(items) == 35
+    assert len({item["inventory_source_id"] for item in items}) == 35
+    assert sum(item["diagnostic_status"] == "candidate_unadmitted" for item in items) == 0
     assert all(item["url"] == "" and item["available"] is False for item in items)
     assert all(item["queried"] is False for item in items)
     lookup.assert_awaited_once()
@@ -78,7 +78,7 @@ def test_visibility_completion_never_changes_provider_admission_or_queries():
     discovery.assert_not_awaited()
     assert tuple(aggregator.provider_metadata) == before
     assert tuple(aggregator.source_inventory) == inventory
-    assert len(result) == 118
+    assert len(result) == 35
     assert all(item["headers"] == {} and item["url"] == "" for item in result)
     assert all("api" not in item and "source_address" not in item for item in result)
 
@@ -146,7 +146,7 @@ def test_descriptor_route_is_metadata_only_and_unsupported_returns_404(active_ma
     from server.playback_inventory import registered_playback_sources, local_query_descriptor
     sources = registered_playback_sources()
     supported = next(s for s in sources if local_query_descriptor(s.inventory_id))
-    candidate = next(s for s in sources if s.family == "candidate")
+    candidate = next(s for s in sources if s.family == "crawler")
     with patch("server.routers.playback.playback_service.lines", new=AsyncMock()) as lookup:
         client = TestClient(create_app())
         response = client.get(f"/api/v3/playback-source/{supported.inventory_id}")
@@ -187,3 +187,12 @@ def test_disabled_aggregator_never_offers_local_query():
     with patch("server.playback_inventory.aggregator", SimpleNamespace(provider_metadata=metadata)):
         result = complete_registered_playback_inventory([])
     assert not any(item["client_query_supported"] for item in result)
+
+
+def test_removed_origins_cannot_reappear_from_old_positive_cache():
+    from server.playback_inventory import complete_registered_playback_inventory
+    old = [{"source": source, "url": "https://cdn.example/old.mp4", "available": True}
+           for source in ["crawler:dm706", "crawler:dbku", "maccms:风车", "tvbox:暴风"]]
+    result = complete_registered_playback_inventory(old)
+    assert not any(item.get("url") for item in result)
+    assert len(result) == 35

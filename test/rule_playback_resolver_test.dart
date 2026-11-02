@@ -16,6 +16,176 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  for (final format in ['delimited', 'nested']) {
+    test(
+      'Kazumi API chapter $format preserves requested episode and probes media',
+      () async {
+        final config = {
+          ..._kazumiRule.kazumi!.toJson(),
+          'searchMode': 'api',
+          'chapterMode': 'api',
+          'searchApiConfig': {
+            'request': {'url': 'https://example.com/search'},
+            'listPath': r'$.list[*]',
+            'namePath': r'$.name',
+            'sourcePath': r'$.id',
+          },
+          'chapterApiConfig': {
+            'request': {
+              'url': 'https://example.com/detail',
+              'query': {'id': '@source'},
+            },
+            'format': format,
+            'roadNamesPath': r'$.names',
+            'roadEpisodesPath': r'$.urls',
+            'roadSeparator': r'$$$',
+            'episodeSeparator': '#',
+            'fieldSeparator': r'$',
+            'roadsPath': r'$.roads[*]',
+            'roadNamePath': r'$.name',
+            'episodesPath': r'$.episodes[*]',
+            'episodeNamePath': r'$.name',
+            'episodeUrlPath': r'$.id',
+            'episodePage': {
+              'url': 'https://example.com/play/@source/@episodeUrl',
+            },
+          },
+        };
+        final rule = _kazumiRule.copyWith(
+          kazumi: KazumiParserConfig.fromJson(config),
+        );
+        expect(rule.canResolveNatively, isTrue);
+        final client = MockClient((request) async {
+          switch (request.url.path) {
+            case '/search':
+              return http.Response(
+                jsonEncode({
+                  'list': [
+                    {'name': '测试番剧', 'id': 7},
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            case '/detail':
+              expect(request.url.queryParameters['id'], '7');
+              return http.Response(
+                jsonEncode({
+                  'names': 'fixture',
+                  'urls': r'第1集$https://cdn.example.com/test/01.m3u8',
+                  'roads': [
+                    {
+                      'name': 'fixture',
+                      'episodes': [
+                        {'name': '第1集', 'id': 1},
+                      ],
+                    },
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            case '/play/7/1':
+              return _html(
+                '<video src="https://cdn.example.com/test/01.m3u8"></video>',
+              );
+            case '/test/01.m3u8':
+              return _playableHls();
+            case '/test/segment-1.ts':
+              return _playableSegment();
+            default:
+              return http.Response('not found', 404);
+          }
+        });
+        final resolver = RulePlaybackResolver(client: client);
+        final lines = await resolver.resolveRule(
+          rule: rule,
+          subject: _animeSubject,
+          episode: _episode,
+        );
+        expect(lines.any((l) => l.available && l.clientVerified), isTrue);
+        final missing = await resolver.resolveRule(
+          rule: rule,
+          subject: _animeSubject,
+          episode: _episode2,
+        );
+        expect(
+          missing.any((l) => l.available),
+          isFalse,
+          reason: 'Never substitute episode one for a missing episode',
+        );
+      },
+    );
+  }
+  test(
+    'Kazumi API9 public search reaches XPath chapters and real media probe',
+    () async {
+      final rule = _kazumiRule.copyWith(
+        searchUrl: '',
+        requestHeaders: const {},
+        kazumi: KazumiParserConfig.fromJson({
+          ..._kazumiRule.kazumi!.toJson(),
+          'searchMode': 'api',
+          'searchApiConfig': {
+            'request': {
+              'method': 'GET',
+              'url': 'https://example.com/api/search',
+              'query': {'wd': '@keyword'},
+            },
+            'listPath': r'$.list[*]',
+            'namePath': r'$.name',
+            'sourcePath': r'$.id',
+            'sourceTemplate': 'https://example.com/detail/@source.html',
+          },
+          'antiCrawlerConfig': {'enabled': false},
+        }),
+      );
+      expect(rule.canResolveNatively, isTrue);
+      var apiRequests = 0;
+      final resolver = RulePlaybackResolver(
+        client: MockClient((request) async {
+          switch (request.url.path) {
+            case '/api/search':
+              apiRequests++;
+              expect(
+                request.url.queryParameters['wd'],
+                isNot(contains('@keyword')),
+              );
+              return http.Response(
+                jsonEncode({
+                  'list': [
+                    {'name': '测试番剧', 'id': 7},
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            case '/detail/7.html':
+              return _html(
+                '<ul class="line"><li><a href="/play/1.html">第1集</a></li></ul>',
+              );
+            case '/play/1.html':
+              return _html(
+                '<video src="https://cdn.example.com/test/01.m3u8"></video>',
+              );
+            case '/test/01.m3u8':
+              return _playableHls();
+            case '/test/segment-1.ts':
+              return _playableSegment();
+            default:
+              return http.Response('not found', 404);
+          }
+        }),
+      );
+      final lines = await resolver.resolveRule(
+        rule: rule,
+        subject: _animeSubject,
+        episode: _episode,
+      );
+      expect(apiRequests, greaterThan(0));
+      expect(lines.any((l) => l.available && l.clientVerified), isTrue);
+    },
+  );
   test('a rejected probe preserves a safe HTTP diagnostic category', () async {
     final result =
         await RulePlaybackResolver(

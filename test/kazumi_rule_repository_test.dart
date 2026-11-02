@@ -10,7 +10,7 @@ void main() {
   test('bundled Kazumi catalog is immediate, current and duplicate free', () {
     final catalog = KazumiRuleRepository.bundledCatalog;
 
-    expect(catalog.entries, hasLength(22));
+    expect(catalog.entries, hasLength(18));
     expect(catalog.remote, isFalse);
     expect(
       catalog.entries.map((entry) => entry.id).toSet(),
@@ -18,7 +18,7 @@ void main() {
     );
     expect(
       catalog.entries.map((entry) => entry.name),
-      containsAll(['sorani', 'aafun', 'omofun03', 'MXdm']),
+      containsAll(['sorani', 'moonci', 'TvTFun', 'MXdm']),
     );
     expect(RuleImporter.kazumiRuleId('MXdm'), 'kazumi:mxdm');
     expect(RuleImporter.kazumiRuleId('mxdm'), 'kazumi:mxdm');

@@ -168,7 +168,7 @@ async def audit(args):
     crawler_names = tuple(inventory._crawler_scrapers)
     await inventory.aclose()
     sites = [("configured", dict(site)) for site in MACCMS_SITES]
-    if args.include_candidates:
+    if args.include_candidates and (ROOT / "data/maccms_candidates.json").exists():
         sites.extend(("candidate", site) for site in load_candidate_sites(
             ROOT / "data/maccms_candidates.json"
         ))

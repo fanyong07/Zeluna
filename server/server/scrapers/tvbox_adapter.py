@@ -26,34 +26,9 @@ from .base import media_format_from_url
 logger = logging.getLogger(__name__)
 
 
-# 已知可用的 TVBox API 端点
-KNOWN_TVBOX_APIS = [
-    {
-        "name": "暴风",
-        "base": "https://bfzyapi.com/api.php/provide/vod",
-        "content_types": ["series", "movie", "anime"],
-    },
-    {
-        "name": "量子",
-        "base": "https://cj.lziapi.com/api.php/provide/vod",
-        "content_types": ["series", "movie", "anime"],
-    },
-    {
-        "name": "非凡",
-        "base": "https://api.ffzyapi.com/api.php/provide/vod",
-        "content_types": ["series", "movie"],
-    },
-    {
-        "name": "索尼",
-        "base": "https://suoniapi.com/api.php/provide/vod",
-        "content_types": ["series", "movie", "anime"],
-    },
-    {
-        "name": "海外看",
-        "base": "https://haiwaikan.com/api.php/provide/vod",
-        "content_types": ["series", "movie", "anime"],
-    },
-]
+# Legacy duplicate/failed endpoints were removed at the user's request.
+# Keep the adapter for explicitly supplied sources, not a second source list.
+KNOWN_TVBOX_APIS: list[dict] = []
 
 
 class TvBoxAdapterScraper(BaseScraper):

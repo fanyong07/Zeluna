@@ -179,7 +179,7 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             ["maccms:correct:2"],
         )
 
-    async def test_default_crawlers_preserve_existing_candidates_and_add_xifan(self):
+    async def test_default_crawlers_keep_supported_sources_without_retired_entries(self):
         self.aggregator = ContentAggregator()
 
         self.assertEqual(
@@ -187,8 +187,6 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
             {
                 "age",
                 "anich",
-                "dm706",
-                "dbku",
                 "girigiri",
                 "jibi",
                 "nivod",

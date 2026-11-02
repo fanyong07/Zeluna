@@ -90,7 +90,7 @@ class PlaybackResponseBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["X-Zeluna-Discovery"], "pending")
         items = response.json()
-        self.assertGreaterEqual(len(items), 118)
+        self.assertGreaterEqual(len(items), 35)
         self.assertTrue(all(item["discovery_pending"] for item in items))
         self.assertTrue(any(item["url"] for item in items))
 

@@ -976,7 +976,7 @@ class PlaybackServiceTests(unittest.IsolatedAsyncioTestCase):
             {item["source"].split(":", 1)[1] for item in first},
             {public_source_label(name) for name in expected_source_names},
         )
-        self.assertIn("crawler:dm706", {item["source"] for item in first})
+        self.assertNotIn("crawler:dm706", {item["source"] for item in first})
         self.assertEqual(sum(item["available"] for item in first), 1)
         first_by_source = {
             item["source"].split(":", 1)[1]: item

@@ -117,7 +117,6 @@ def test_registering_direct_source_does_not_change_existing_explicit_allowlist()
             assert await aggregator.get_video_urls("crawler:xifan:44", 1) == []
             assert {
                 "age",
-                "dm706",
                 "girigiri",
                 "anich",
                 "xgcartoon",
@@ -127,7 +126,6 @@ def test_registering_direct_source_does_not_change_existing_explicit_allowlist()
                 "wedm",
                 "nivod",
                 "ppnix",
-                "dbku",
                 "xifan",
             } <= set(aggregator._crawler_scrapers)
         finally:

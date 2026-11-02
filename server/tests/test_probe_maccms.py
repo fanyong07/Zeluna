@@ -226,58 +226,8 @@ class MacCmsProbeTests(unittest.IsolatedAsyncioTestCase):
             }],
         )
 
-    def test_default_candidate_registry_has_independent_review_only_leads(self):
-        payload = json.loads(
-            DEFAULT_CANDIDATE_REGISTRY_PATH.read_text(encoding="utf-8")
-        )
-        sites = load_candidate_sites(DEFAULT_CANDIDATE_REGISTRY_PATH)
-
-        self.assertEqual(len(sites), 74)  # Six explicit admissions transferred to production.
-        self.assertLessEqual(len(sites), 150)
-        self.assertEqual(payload["policy"]["logical_candidate_count"], len(sites))
-        self.assertEqual(payload["policy"]["excluded_mirror_alias_count"], 20)
-        self.assertIs(payload["policy"]["automatic_promotion"], False)
-        self.assertIs(payload["policy"]["production_table_separate"], True)
-        self.assertEqual(len({site["name"].casefold() for site in sites}), len(sites))
-        self.assertEqual(
-            len({site["api"].rstrip("/").casefold() for site in sites}),
-            len(sites),
-        )
-        hosts = {urlparse(site["api"]).hostname.casefold() for site in sites}
-        configured_hosts = {
-            urlparse(site["api"]).hostname.casefold()
-            for site in CONFIGURED_SITES
-        }
-        self.assertEqual(len(hosts), len(sites))
-        self.assertTrue(hosts.isdisjoint(configured_hosts))
-        for site in sites:
-            parsed = urlparse(site["api"])
-            # Candidate review allows public HTTP APIs but never auto-enables them.
-            # Only this origin's verified published endpoint currently uses HTTP.
-            self.assertEqual(
-                parsed.scheme, "http" if site["name"] == "非凡资源" else "https"
-            )
-            self.assertFalse(parsed.query)
-            self.assertFalse(parsed.fragment)
-            self.assertEqual(site["review_status"], "candidate")
-            self.assertTrue(site["notes"])
-            self.assertRegex(
-                site["discovered_from"],
-                re.compile(r"^https://github\.com/.+/blob/[0-9a-f]{40}/"),
-            )
-
-        forbidden_keys = {"authorization", "cookie", "token", "password", "secret"}
-
-        def visit(value: object) -> None:
-            if isinstance(value, dict):
-                for key, nested in value.items():
-                    self.assertNotIn(str(key).casefold(), forbidden_keys)
-                    visit(nested)
-            elif isinstance(value, list):
-                for nested in value:
-                    visit(nested)
-
-        visit(payload)
+    def test_unused_candidate_registry_was_removed_without_auto_admission(self):
+        self.assertFalse(DEFAULT_CANDIDATE_REGISTRY_PATH.exists())
 
     def test_candidate_loader_rejects_unusable_and_duplicate_entries(self):
         already_configured = CONFIGURED_SITES[0]["api"]

@@ -56,12 +56,6 @@ MACCMS_SITES: list[dict] = [
     {"name": "速博", "api": "https://subocaiji.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 88, "content_types": ["anime", "tv", "movie"]},
     {"name": "魔都", "api": "https://caiji.moduapi.cc/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 86, "content_types": ["anime", "tv", "movie"]},
     {"name": "红牛", "api": "https://www.hongniuzy2.com/api.php/provide/vod", "enabled": True, "tier": "core", "quick": True, "precache": False, "weight": 84, "content_types": ["anime", "tv", "movie"]},
-    # 2026-08-24 目标 VPS Smoke 与平衡 Coverage 均为 API http_444；
-    # 保留来源身份用于诊断，但不再进入任何用户查询入口。
-    # 2026-08-28 复检:原域仍 HTTP 444(nginx 主动断连)，三个同族候选域
-    # (dongmandaquan.com / fcvod.com / api.fengchezy.com)均 ConnectError。
-    # 2026-11-02仍为连接/协议异常；没有可靠新域名，不将旧观察当永久关停证明。
-    {"name": "风车", "api": "https://www.dongmandaquan.vip/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 80, "content_types": ["anime"]},
     # —— 第二梯队：综合站保留其真实三类资源范围，单集健康由验线决定。
     # 2026-09-13 修复历史按一轮成功样本收窄类型造成的影视漏查：
     # 爱奇艺/量子有国产剧，电影天堂含电影；不因此提升 quick/precache。
@@ -69,12 +63,6 @@ MACCMS_SITES: list[dict] = [
     {"name": "爱奇艺", "api": "https://iqiyizyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 78, "content_types": ["anime", "tv", "movie"]},
     {"name": "量子", "api": "https://cj.lziapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 76, "content_types": ["anime", "tv", "movie"]},
     {"name": "电影天堂", "api": "http://caiji.dyttzyapi.com/api.php/provide/vod", "enabled": True, "tier": "specialist", "quick": False, "precache": False, "weight": 74, "content_types": ["anime", "tv", "movie"]},
-    # 2026-08-24 目标 VPS 能搜索详情，但 Smoke 18/18、Coverage 6/6
-    # 媒体线路均为 stale_route；不是单纯机房受限，直接隔离。
-    # 2026-08-28 复检:API 仍活(搜索命中 6 条)，但媒体地址返回 HTML 而非媒体；
-    # 同族候选域(www./api.bfzy.tv/bfzy.tv/cj.)分别 ConnectError 或 403。
-    # 同属"解析通、货源没了"，货源恢复即可重新启用。
-    {"name": "暴风", "api": "https://bfzyapi.com/api.php/provide/vod", "enabled": False, "tier": "quarantine", "quick": False, "precache": False, "weight": 72, "content_types": ["anime", "tv", "movie"]},
     # —— 第三梯队：三类内容均能完成搜索、详情和媒体候选解析；当前本机
     #    Fake-IP 出口无法做服务端首分片定论，因此只作为客户端复验候选，
     #    不参与预爬，且始终排在 VPS 已实播来源之后。 ——

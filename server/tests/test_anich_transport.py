@@ -167,3 +167,36 @@ class AniChTransportTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AniChSearchIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bad_search_query_does_not_quarantine_working_origin(self):
+        calls = []
+        def handler(request):
+            calls.append((request.url.host, request.url.params.get('keyword')))
+            if request.url.host != 'unit-a.example':
+                raise httpx.ConnectError('offline mirror', request=request)
+            if request.url.params.get('keyword') == 'no-match':
+                return httpx.Response(500, json={'error': 'search failed'})
+            return httpx.Response(200, content=_BODY)
+        subject = _transport(handler)
+        try:
+            with self.assertRaises(AniChUpstreamError):
+                await subject.request(anich_search_path('no-match'))
+            self.assertEqual(await subject.request(anich_search_path('known-title')), _BODY)
+            self.assertEqual(await subject.request('/vod/33339/1'), _BODY)
+            self.assertEqual([host for host, _ in calls], ['unit-a.example'] * 3)
+        finally:
+            await subject.aclose()
+
+    async def test_empty_protobuf_search_is_a_miss_not_an_origin_failure(self):
+        calls = []
+        def handler(request):
+            calls.append(request.url.host)
+            return httpx.Response(200, content=b'')
+        subject = _transport(handler)
+        try:
+            self.assertEqual(await subject.request(anich_search_path('missing')), b'')
+            self.assertEqual(await subject.request(anich_search_path('other')), b'')
+            self.assertEqual(calls, ['unit-a.example', 'unit-a.example'])
+        finally:
+            await subject.aclose()

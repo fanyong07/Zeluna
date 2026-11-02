@@ -150,9 +150,17 @@ class AniChTransport:
                     )
                     self._note_failure(candidate)
                     break
-                if status == 200 and body:
+                if status == 200 and (body or path.startswith("/bangumi/search?")):
                     self._note_success(candidate)
                     return body
+                # AniCh returns HTTP 500 for some unmatched title spellings.
+                # This is a query failure, not evidence that the entire origin
+                # (including known-good searches and /vod) is down. Fail fast
+                # so discovery can try its next alias within the same budget.
+                if path.startswith("/bangumi/search?") and status in (400, 404, 422, 500):
+                    raise AniChUpstreamError(
+                        f"anich search query failed ({status})", status=status,
+                    )
                 if status in (403, 429) and not retried_rate_limit:
                     retried_rate_limit = True
                     await self._sleep(min(self._backoff_max, 5.0))

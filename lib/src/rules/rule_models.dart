@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'csp_rule_support.dart';
+import 'kazumi_api.dart';
 import 'rule_security.dart';
 
 enum RuleContentType {
@@ -141,7 +142,13 @@ class RulePlugin {
 
   RulePermissionManifest get effectiveManifest {
     final declared = permissionManifest;
-    final fallbackDomains = ruleDomainsFromUrls([baseUrl, searchUrl]);
+    final fallbackDomains = ruleDomainsFromUrls([
+      baseUrl,
+      searchUrl,
+      for (final api in [kazumi?.searchApiConfig, kazumi?.chapterApiConfig])
+        if (api?['request'] is Map)
+          (api!['request'] as Map)['url']?.toString() ?? '',
+    ]);
     bool hasHeader(String name) =>
         requestHeaders.keys.any((key) => key.toLowerCase() == name);
     final contentHash = ruleSecurityContentHash({
@@ -205,15 +212,26 @@ class RulePlugin {
     );
   }
 
+  /// JavaScript playback is not a CAPTCHA. Only an explicit challenge needs
+  /// human verification; antiCrawlerConfig may exist with enabled=false.
+  bool get requiresManualVerification =>
+      requiresCaptcha ||
+      _boolFromJson(kazumi?.antiCrawlerConfig['enabled']) ||
+      _reasonNeedsWebView(unsupportedReason);
+
   RuleExecutionStatus get executionStatus {
     if (requiresPrivateAuth || _reasonNeedsPrivateAuth(unsupportedReason)) {
       return RuleExecutionStatus.needsPrivateAuth;
     }
-    if (requiresWebView ||
-        requiresCaptcha ||
-        kazumi?.useWebView == true ||
-        (kazumi?.antiCrawlerConfig.isNotEmpty ?? false) ||
-        _reasonNeedsWebView(unsupportedReason)) {
+    if (requiresManualVerification) return RuleExecutionStatus.needsWebView;
+    final usesWebView = requiresWebView || kazumi?.useWebView == true;
+    final hasWebViewRuntime =
+        !kIsWeb &&
+        const {
+          TargetPlatform.android,
+          TargetPlatform.windows,
+        }.contains(defaultTargetPlatform);
+    if (usesWebView && !hasWebViewRuntime) {
       return RuleExecutionStatus.needsWebView;
     }
 
@@ -444,18 +462,28 @@ class RulePlugin {
 
 bool _hasCompleteKazumiConfig(RulePlugin rule) {
   final config = rule.kazumi;
-  if (config == null ||
-      !_hasHttpEndpoint(rule.baseUrl) ||
-      !_hasHttpEndpoint(rule.searchUrl)) {
-    return false;
-  }
-  return _allPresent([
-    config.searchList,
-    config.searchName,
-    config.searchResult,
-    config.chapterRoads,
-    config.chapterResult,
-  ]);
+  if (config == null || !_hasHttpEndpoint(rule.baseUrl)) return false;
+  final searchReady = config.searchMode.toLowerCase() == 'api'
+      ? supportsKazumiApi(config.searchApiConfig) &&
+            _allPresent([
+              config.searchApiConfig['listPath']?.toString() ?? '',
+              config.searchApiConfig['namePath']?.toString() ?? '',
+              config.searchApiConfig['sourcePath']?.toString() ?? '',
+            ])
+      : _hasHttpEndpoint(rule.searchUrl) &&
+            _allPresent([
+              config.searchList,
+              config.searchName,
+              config.searchResult,
+            ]);
+  final chapterReady = config.chapterMode.toLowerCase() == 'api'
+      ? supportsKazumiApi(config.chapterApiConfig) &&
+            const {
+              'nested',
+              'delimited',
+            }.contains(config.chapterApiConfig['format'])
+      : _allPresent([config.chapterRoads, config.chapterResult]);
+  return searchReady && chapterReady;
 }
 
 bool _hasCompleteXbpqConfig(RulePlugin rule) {

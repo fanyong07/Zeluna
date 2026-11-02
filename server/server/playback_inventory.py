@@ -6,12 +6,8 @@ The playback service retains its bounded active-source discovery and cache scope
 from __future__ import annotations
 
 import hashlib
-import json
-import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
 from urllib.parse import urlsplit
 import ipaddress
 
@@ -19,10 +15,6 @@ from .aggregator import aggregator
 from .playback import public_source_label
 from .scrapers.maccms_sites import MACCMS_SITES
 from .scrapers.tvbox_adapter import KNOWN_TVBOX_APIS
-
-logger = logging.getLogger(__name__)
-_CANDIDATE_PATH = Path(__file__).resolve().parents[1] / "data" / "maccms_candidates.json"
-
 
 @dataclass(frozen=True)
 class RegisteredPlaybackSource:
@@ -63,35 +55,6 @@ class RegisteredPlaybackSource:
         }
 
 
-@lru_cache(maxsize=1)
-def _candidate_names() -> tuple[str, ...]:
-    # Candidates are display data only: never parse/use their api, headers,
-    # discovered_from, or executable rule fields in a user playback request.
-    try:
-        if _CANDIDATE_PATH.stat().st_size > 1024 * 1024:
-            raise ValueError("oversized_candidate_inventory")
-        document = json.loads(_CANDIDATE_PATH.read_text(encoding="utf-8"))
-        sites = document.get("sites", [])
-        if not isinstance(sites, list) or len(sites) > 512:
-            raise ValueError("invalid_candidate_inventory")
-        names = []
-        for site in sites:
-            if not isinstance(site, dict):
-                continue
-            raw_name = site.get("name")
-            if not isinstance(raw_name, str):
-                continue
-            name = raw_name.strip()
-            if (not name or len(name) > 80 or "://" in name
-                    or any(ord(char) < 32 for char in name)):
-                continue
-            names.append(name)
-        return tuple(dict.fromkeys(names))
-    except (OSError, ValueError, AttributeError) as error:
-        logger.warning("Candidate display inventory unavailable (%s)", type(error).__name__)
-        return ()
-
-
 def registered_playback_sources() -> tuple[RegisteredPlaybackSource, ...]:
     providers = {item.provider_id: item for item in aggregator.provider_metadata}
     result = []
@@ -124,11 +87,6 @@ def registered_playback_sources() -> tuple[RegisteredPlaybackSource, ...]:
             "tvbox", site["name"], "tvbox_compatibility",
             "not_queried" if enabled else "compatibility_inactive",
             "本集尚未查询。" if enabled else "旧兼容接口未启用；仅保留登记信息。",
-        ))
-    for name in _candidate_names():
-        result.append(RegisteredPlaybackSource(
-            "candidate", name, "candidate", "candidate_unadmitted",
-            "候选源尚未接入生产查询；没有本集播放验证结果。",
         ))
     return tuple(result)
 
@@ -195,6 +153,7 @@ def complete_registered_playback_inventory(
         if not isinstance(original, dict):
             continue
         item = dict(original)
+        family = str(item.get("source") or "").partition(":")[0]
         source = by_id.get(str(item.get("inventory_source_id") or ""))
         if source is None:
             label = str(item.get("source") or "")
@@ -206,7 +165,8 @@ def complete_registered_playback_inventory(
             source = by_origin.get((family, origin))
             if source is None and len(by_name.get(origin, [])) == 1:
                 source = by_name[origin][0]
-        if source is None and item.get("source_inventory_entry") is True:
+        if source is None and (item.get("source_inventory_entry") is True
+                               or family in {"crawler", "maccms", "tvbox", "candidate"}):
             # Unregistered visibility data cannot become an extra playable source.
             continue
         if source is not None:
