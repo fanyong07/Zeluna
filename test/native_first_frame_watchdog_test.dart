@@ -4,6 +4,29 @@ import 'package:anime/src/player/video/native_video_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('delayed polling does not extend the native startup deadline', () async {
+    final watchdog = NativeFirstFrameWatchdog();
+    addTearDown(watchdog.dispose);
+    final events = <NativeStartupTimeoutEvent>[];
+    watchdog.start(
+      isCurrent: () => true,
+      readSnapshot: () =>
+          _snapshot(buffer: const Duration(seconds: 2), hasAlternative: true),
+      onTimeout: events.add,
+      softTimeout: const Duration(milliseconds: 5),
+      hardTimeout: const Duration(milliseconds: 20),
+      pollInterval: const Duration(milliseconds: 5),
+    );
+    // Reproduce a busy UI isolate: the first poll cannot run until after the
+    // hard deadline. It must not start a fresh series of relative waits.
+    final busy = Stopwatch()..start();
+    while (busy.elapsed < const Duration(milliseconds: 50)) {}
+    await Future<void>.delayed(Duration.zero);
+    expect(events, hasLength(1));
+    expect(events.single.phase, NativeStartupTimeoutPhase.hard);
+    expect(watchdog.isActive, isFalse);
+  });
+
   testWidgets(
     'decoded-frame sample from a replaced open cannot confirm the new open',
     (tester) async {

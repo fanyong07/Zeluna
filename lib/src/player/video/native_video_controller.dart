@@ -282,10 +282,11 @@ final class NativeStartupTimeoutEvent {
 /// Owns native first-frame timeout polling independently from page state.
 final class NativeFirstFrameWatchdog {
   Timer? _timer;
+  Timer? _hardDeadline;
   var _generation = 0;
   var _disposed = false;
 
-  bool get isActive => _timer != null;
+  bool get isActive => _timer != null || _hardDeadline != null;
   bool get isDisposed => _disposed;
 
   void start({
@@ -304,47 +305,49 @@ final class NativeFirstFrameWatchdog {
     assert(pollInterval > Duration.zero);
     final generation = _generation;
 
-    late void Function(Duration delay, Duration elapsed) schedule;
-    schedule = (delay, elapsed) {
+    void check({required bool hardTimedOut}) {
       if (_disposed || generation != _generation) return;
-      _timer = Timer(delay, () {
-        _timer = null;
-        if (_disposed || generation != _generation || !isCurrent()) return;
-        final snapshot = readSnapshot();
-        if (nativePlaybackHasFirstFrame(
-          playing: snapshot.playing,
-          position: snapshot.position,
-          decodedVideo: snapshot.decodedFrame,
-        )) {
-          // Early stream events can be rejected before media ownership is
-          // known. A sampled first frame must complete the same UI lifecycle.
-          onFirstFrame?.call(snapshot);
-          return;
-        }
-        final hardTimedOut = elapsed >= hardTimeout;
-        if (!hardTimedOut &&
-            !nativePlaybackShouldSwitchAtSoftTimeout(
-              position: snapshot.position,
-              buffer: snapshot.buffer,
-              buffering: snapshot.buffering,
-              hasAlternative: snapshot.hasAlternative,
-            )) {
-          final remaining = hardTimeout - elapsed;
-          final nextDelay = remaining < pollInterval ? remaining : pollInterval;
-          schedule(nextDelay, elapsed + nextDelay);
-          return;
-        }
-        onTimeout(
-          NativeStartupTimeoutEvent(
-            phase: hardTimedOut
-                ? NativeStartupTimeoutPhase.hard
-                : NativeStartupTimeoutPhase.soft,
+      if (!isCurrent()) {
+        cancel();
+        return;
+      }
+      final snapshot = readSnapshot();
+      if (nativePlaybackHasFirstFrame(
+        playing: snapshot.playing,
+        position: snapshot.position,
+        decodedVideo: snapshot.decodedFrame,
+      )) {
+        // Early stream events can be rejected before media ownership is
+        // known. A sampled first frame must complete the same UI lifecycle.
+        cancel();
+        onFirstFrame?.call(snapshot);
+        return;
+      }
+      if (!hardTimedOut &&
+          !nativePlaybackShouldSwitchAtSoftTimeout(
+            position: snapshot.position,
+            buffer: snapshot.buffer,
+            buffering: snapshot.buffering,
             hasAlternative: snapshot.hasAlternative,
-          ),
-        );
-      });
-    };
-    schedule(softTimeout, softTimeout);
+          )) {
+        _timer = Timer(pollInterval, () => check(hardTimedOut: false));
+        return;
+      }
+      cancel();
+      onTimeout(
+        NativeStartupTimeoutEvent(
+          phase: hardTimedOut
+              ? NativeStartupTimeoutPhase.hard
+              : NativeStartupTimeoutPhase.soft,
+          hasAlternative: snapshot.hasAlternative,
+        ),
+      );
+    }
+
+    // A busy UI isolate can delay polls. A deadline scheduled once at startup
+    // must remain due even when relative poll callbacks are running late.
+    _hardDeadline = Timer(hardTimeout, () => check(hardTimedOut: true));
+    _timer = Timer(softTimeout, () => check(hardTimedOut: false));
   }
 
   bool handleProgress({
@@ -354,7 +357,7 @@ final class NativeFirstFrameWatchdog {
   }) {
     if (!decodedFrame ||
         _disposed ||
-        _timer == null ||
+        !isActive ||
         !nativePlaybackReachedFirstFrame(
           previousPosition: previousPosition,
           currentPosition: currentPosition,
@@ -370,6 +373,8 @@ final class NativeFirstFrameWatchdog {
     _generation++;
     _timer?.cancel();
     _timer = null;
+    _hardDeadline?.cancel();
+    _hardDeadline = null;
   }
 
   void dispose() {

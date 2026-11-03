@@ -154,6 +154,7 @@ void main() {
             ? 0
             : values[((values.length - 1) * fraction).round()] / 1000;
         report['scroll'] = {
+          'semantics_enabled': binding.semanticsEnabled,
           'sample_frames': timings.length,
           'display_hz': refreshRate,
           'frame_budget_ms': budgetUs / 1000,
@@ -360,6 +361,9 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
       }
     },
+    // Do not force accessibility semantics on solely for a performance test.
+    // The platform's real accessibility state still applies, as in the app.
+    semanticsEnabled: false,
     skip: !const bool.fromEnvironment('DEVICE_PLAYBACK_QA'),
   );
 }
