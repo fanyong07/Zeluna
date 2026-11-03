@@ -1871,7 +1871,35 @@ class _DetailPageState extends ConsumerState<DetailPage> {
     return FutureBuilder<AnimeDetailBundle>(
       future: _detailFuture,
       builder: (context, snapshot) {
-        final detail = snapshot.data;
+        final cacheKey = Object.hash(
+          widget.subject.source,
+          widget.subject.platform,
+          widget.subject.id,
+        );
+        final selected = ref.watch(
+          animeControllerProvider.select((async) {
+            final state = async.value;
+            return (
+              detail: state?.selectedSubjects[cacheKey],
+              following:
+                  state?.following.any(
+                    (item) => sameSubjectIdentity(item.subject, widget.subject),
+                  ) ??
+                  false,
+              collected:
+                  state?.favorites.any(
+                    (item) => sameSubjectIdentity(item.subject, widget.subject),
+                  ) ??
+                  false,
+              history: state?.history
+                  .where(
+                    (item) => sameSubjectIdentity(item.subject, widget.subject),
+                  )
+                  .firstOrNull,
+            );
+          }),
+        );
+        final detail = selected.detail ?? snapshot.data;
         final bundle =
             detail ??
             AnimeDetailBundle(
@@ -1881,20 +1909,9 @@ class _DetailPageState extends ConsumerState<DetailPage> {
               staff: const [],
               recommendations: const [],
             );
-        final animeState = ref.watch(animeControllerProvider).value;
-        final following =
-            animeState?.following.any(
-              (item) => sameSubjectIdentity(item.subject, bundle.subject),
-            ) ??
-            false;
-        final collected =
-            animeState?.favorites.any(
-              (item) => sameSubjectIdentity(item.subject, bundle.subject),
-            ) ??
-            false;
-        final historyEntry = animeState?.history
-            .where((item) => sameSubjectIdentity(item.subject, bundle.subject))
-            .firstOrNull;
+        final following = selected.following;
+        final collected = selected.collected;
+        final historyEntry = selected.history;
         final compact = MediaQuery.sizeOf(context).width < 760;
 
         void play(AnimeEpisode episode) {

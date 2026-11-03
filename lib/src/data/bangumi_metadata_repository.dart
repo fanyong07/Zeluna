@@ -332,8 +332,18 @@ class BangumiMetadataRepository {
   /// connection for every filter; rate limits are not bypassed through a relay.
   Future<T> withPublicCatalogFallback<T>(
     Future<T> Function() direct,
-    Future<T> Function()? fallback,
-  ) async {
+    Future<T> Function()? fallback, {
+    bool preferRelay = false,
+  }) async {
+    if (preferRelay && fallback != null) {
+      try {
+        return await fallback();
+      } on BangumiRateLimitException {
+        rethrow;
+      } catch (_) {
+        return direct();
+      }
+    }
     if (fallback != null &&
         _publicCatalogDirectRetryAt?.isAfter(_clock()) == true) {
       return fallback();
@@ -649,6 +659,51 @@ class BangumiMetadataRepository {
         ).onError(_emptySubjectsOnRecoverableError),
     ]);
     return _uniqueSubjects(batches.expand((items) => items));
+  }
+
+  Future<AnimeDetailBundle> enrichPublicDetail(AnimeDetailBundle base) async {
+    Future<List<dynamic>> extras(String section) async {
+      try {
+        final uri = Uri.parse(
+          '$_publicCatalogBaseUrl/v0/subjects/${base.subject.id}/$section',
+        );
+        // Public relay requests never carry the user's Bangumi credential.
+        final response = await _sendGet(
+          uri,
+          headers: _headers,
+        ).timeout(const Duration(seconds: 8));
+        if (response.statusCode != 200) return const [];
+        final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+        return decoded is List ? decoded : const [];
+      } on Exception {
+        return const [];
+      }
+    }
+
+    final parts = await Future.wait([
+      extras('characters'),
+      extras('persons'),
+      extras('subjects'),
+    ]);
+    if (parts.every((part) => part.isEmpty)) return base;
+    return AnimeDetailBundle(
+      subject: base.subject,
+      episodes: base.episodes,
+      characters: parts[0]
+          .whereType<Map>()
+          .map((raw) => _characterFromJson(raw.cast<String, dynamic>()))
+          .toList(),
+      staff: parts[1]
+          .whereType<Map>()
+          .map((raw) => _staffFromJson(raw.cast<String, dynamic>()))
+          .toList(),
+      recommendations: parts[2]
+          .whereType<Map>()
+          .map((raw) => _recommendationFromJson(raw.cast<String, dynamic>()))
+          .whereType<AnimeRecommendation>()
+          .toList(),
+      watchLinks: base.watchLinks,
+    );
   }
 
   Future<AnimeDetailBundle> detail(

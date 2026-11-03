@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from .aggregator import aggregator
 from .app import create_app
 from .catalog import catalog_service
+from .catalog_artwork import catalog_artwork
 from .database import async_session, init_db
 from .email_outbox import EmailOutboxWorker
 from .m3u8_resolver import resolver as m3u8_resolver
@@ -30,6 +31,7 @@ async def lifespan(_app):
         await playback_service.aclose()
         await aggregator.aclose()
         await catalog_service.aclose()
+        await catalog_artwork.aclose()
         await m3u8_resolver.aclose()
 
 

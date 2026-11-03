@@ -184,6 +184,22 @@ class _PosterCardState extends State<PosterCard> {
   }
 }
 
+/// Artwork uses the selected catalog backend; video traffic is never relayed.
+class PosterNetworkScope extends InheritedWidget {
+  const PosterNetworkScope({
+    super.key,
+    required this.catalogBase,
+    required super.child,
+  });
+  final Uri? catalogBase;
+  static Uri? catalogBaseOf(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<PosterNetworkScope>()
+      ?.catalogBase;
+  @override
+  bool updateShouldNotify(PosterNetworkScope oldWidget) =>
+      catalogBase != oldWidget.catalogBase;
+}
+
 class PosterArt extends StatelessWidget {
   const PosterArt({
     super.key,
@@ -228,6 +244,7 @@ class PosterArt extends StatelessWidget {
             url,
             targetPixelWidth: cacheWidth,
             webProxyBase: kIsWeb ? Uri.base : null,
+            catalogProxyBase: PosterNetworkScope.catalogBaseOf(context),
             fallbackValues:
                 _isNetworkUrl(primaryUrl) &&
                     _isNetworkUrl(secondaryUrl) &&
@@ -609,6 +626,7 @@ List<String> posterImageCandidates(
   String value, {
   int? targetPixelWidth,
   Uri? webProxyBase,
+  Uri? catalogProxyBase,
   Iterable<String> fallbackValues = const [],
 }) {
   final source = value.trim();
@@ -620,11 +638,29 @@ List<String> posterImageCandidates(
     upstream.addAll(_sizedPosterCandidates(candidate, targetPixelWidth));
   }
   final upstreamList = upstream.toList(growable: false);
-  if (webProxyBase == null) return upstreamList;
-
   final candidates = <String>{};
-  for (final url in upstreamList) {
-    candidates.add(_imageProxyUrl(url, webProxyBase));
+  if (catalogProxyBase != null) {
+    for (final url in upstreamList) {
+      final parsed = Uri.parse(url);
+      if (parsed.scheme == 'https' &&
+          parsed.userInfo.isEmpty &&
+          const {'lain.bgm.tv', 'api.bgm.tv'}.contains(parsed.host)) {
+        candidates.add(
+          catalogProxyBase
+              .replace(
+                path:
+                    '${catalogProxyBase.path.replaceFirst(RegExp(r'/+$'), '')}/api/v3/catalog/image',
+                queryParameters: {'url': url},
+              )
+              .toString(),
+        );
+      }
+    }
+  }
+  if (webProxyBase != null) {
+    for (final url in upstreamList) {
+      candidates.add(_imageProxyUrl(url, webProxyBase));
+    }
   }
   for (final url in upstreamList) {
     candidates.add(url);

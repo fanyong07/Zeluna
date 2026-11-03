@@ -10,6 +10,33 @@ import 'package:http/testing.dart';
 
 void main() {
   test(
+    'relay-first catalog never waits for a blocked direct connection',
+    () async {
+      final repository = BangumiMetadataRepository();
+      addTearDown(repository.close);
+      var directCalls = 0;
+      final result = await repository.withPublicCatalogFallback(
+        () async {
+          directCalls++;
+          throw StateError('blocked direct');
+        },
+        () async => 42,
+        preferRelay: true,
+      );
+      expect(result, 42);
+      expect(directCalls, 0);
+      expect(
+        await repository.withPublicCatalogFallback(
+          () async => 7,
+          () async => throw StateError('relay down'),
+          preferRelay: true,
+        ),
+        7,
+      );
+    },
+  );
+
+  test(
     'failed direct metadata is relayed with a bounded retry cooldown',
     () async {
       var now = DateTime.utc(2026, 10, 6);

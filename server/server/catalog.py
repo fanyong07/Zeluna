@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from email.utils import parsedate_to_datetime
@@ -362,6 +363,9 @@ class CatalogService:
         self._provider_cooldown_until: dict[str, float] = {}
         self._home_refreshes: dict[str, asyncio.Task[list[dict]]] = {}
         self._playback_alias_cache: dict[str, tuple[str, ...]] = {}
+        self._public_catalog_cache: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+        self._public_catalog_cache_bytes = 0
+        self._public_catalog_pending: dict[str, asyncio.Task] = {}
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(12, connect=6),
             follow_redirects=True,
@@ -370,7 +374,10 @@ class CatalogService:
         )
 
     async def aclose(self) -> None:
-        refreshes = list(self._home_refreshes.values())
+        refreshes = [*self._home_refreshes.values(), *self._public_catalog_pending.values()]
+        self._public_catalog_pending.clear()
+        self._public_catalog_cache.clear()
+        self._public_catalog_cache_bytes = 0
         self._home_refreshes.clear()
         for task in refreshes:
             if not task.done():
@@ -875,10 +882,53 @@ class CatalogService:
 
     async def public_bangumi_catalog(
         self, route: str, *, params: dict | None = None, body: dict | None = None,
+        subject_id: int | None = None,
+    ) -> list | dict:
+        key = json.dumps([route, params, body, subject_id], sort_keys=True)
+        cached = self._public_catalog_cache.get(key)
+        if cached is not None:
+            if cached[0] > self._clock():
+                self._public_catalog_cache.move_to_end(key)
+                return json.loads(cached[1])
+            self._public_catalog_cache_bytes -= len(self._public_catalog_cache.pop(key)[1])
+        task = self._public_catalog_pending.get(key)
+        if task is None:
+            if len(self._public_catalog_pending) >= 24:
+                raise RuntimeError("public catalog queue full")
+            async def load():
+                try:
+                    async with asyncio.timeout(10):
+                        result = await self._fetch_public_bangumi_catalog(
+                            route, params=params, body=body, subject_id=subject_id)
+                    raw = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                    if len(raw) <= 2 * 1024 * 1024:
+                        self._public_catalog_cache[key] = (self._clock() + 300, raw)
+                        self._public_catalog_cache_bytes += len(raw)
+                        while (len(self._public_catalog_cache) > 128
+                               or self._public_catalog_cache_bytes > 8 * 1024 * 1024):
+                            _, (_, old) = self._public_catalog_cache.popitem(last=False)
+                            self._public_catalog_cache_bytes -= len(old)
+                    return result
+                finally:
+                    self._public_catalog_pending.pop(key, None)
+            task = asyncio.create_task(load())
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            self._public_catalog_pending[key] = task
+        return await asyncio.shield(task)
+
+    async def _fetch_public_bangumi_catalog(
+        self, route: str, *, params: dict | None = None, body: dict | None = None,
+        subject_id: int | None = None,
     ) -> list | dict:
         """Relay only public catalogue operations, never account credentials."""
         paths = {"calendar": "/calendar", "subjects": "/v0/subjects",
                  "search": "/v0/search/subjects"}
+        extras = {"characters", "persons", "subjects"}
+        is_extras = subject_id is not None and route in extras
+        if is_extras:
+            if not 0 < subject_id < 1000000000:
+                raise ValueError("invalid public subject ID")
+            paths[route] = f"/v0/subjects/{subject_id}/{route}"
         if route not in paths:
             raise ValueError("unsupported public catalogue route")
         kwargs: dict[str, Any] = {
@@ -893,7 +943,7 @@ class CatalogService:
         )
         response.raise_for_status()
         payload = response.json()
-        if route == "calendar":
+        if route == "calendar" or is_extras:
             if not isinstance(payload, list):
                 raise ValueError("invalid public calendar")
         elif not isinstance(payload, dict) or not isinstance(payload.get("data"), list):

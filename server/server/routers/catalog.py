@@ -4,15 +4,31 @@ from typing import Annotated, Literal
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..catalog import catalog_service, parse_stable_id
 from ..dependencies import get_session
+from ..catalog_artwork import ArtworkUnavailable, catalog_artwork
 
 router = APIRouter(prefix="/api/v3/catalog", tags=["catalog"])
+
+
+@router.get("/image")
+async def catalog_image(request: Request, url: str = Query(..., max_length=1024)) -> Response:
+    try:
+        image = await catalog_artwork.get(url)
+    except ValueError as error:
+        raise HTTPException(400, "仅支持公开番剧封面") from error
+    except ArtworkUnavailable as error:
+        raise HTTPException(502, "封面暂时不可用", headers={"Retry-After": "30"}) from error
+    headers = {"Cache-Control": "public, max-age=86400", "ETag": image.etag,
+               "X-Content-Type-Options": "nosniff"}
+    if request.headers.get("if-none-match") == image.etag:
+        return Response(status_code=304, headers=headers)
+    return Response(image.body, media_type=image.content_type, headers=headers)
 
 
 @router.get("/search")
@@ -82,7 +98,14 @@ class _PublicBangumiSearch(BaseModel):
 async def _public_bangumi_response(route: str, **kwargs) -> JSONResponse:
     try:
         return JSONResponse(await catalog_service.public_bangumi_catalog(route, **kwargs))
-    except (httpx.HTTPError, ValueError, RuntimeError) as error:
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 429:
+            raw = error.response.headers.get("retry-after", "30")
+            seconds = min(300, max(1, int(raw))) if raw.isdigit() else 30
+            raise HTTPException(429, "番剧资料请求过于频繁，请稍后重试",
+                                headers={"Retry-After": str(seconds)}) from error
+        raise HTTPException(503, "番剧片库暂时无法查询，请稍后重试") from error
+    except (httpx.HTTPError, ValueError, RuntimeError, TimeoutError) as error:
         raise HTTPException(503, "番剧片库暂时无法查询，请稍后重试") from error
 
 
@@ -111,6 +134,16 @@ async def public_bangumi_search(
 ) -> JSONResponse:
     return await _public_bangumi_response("search", params={"limit": limit, "offset": offset},
                                          body=body.model_dump(exclude_none=True))
+
+
+@router.get("/bangumi/v0/subjects/{subject_id}/{section}")
+async def public_bangumi_extras(
+    subject_id: int,
+    section: Literal["characters", "persons", "subjects"],
+) -> JSONResponse:
+    if not 0 < subject_id < 1000000000:
+        raise HTTPException(400, "作品 ID 格式不正确")
+    return await _public_bangumi_response(section, subject_id=subject_id)
 
 
 @router.get("/subject/{stable_id:path}")

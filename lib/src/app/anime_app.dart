@@ -9,6 +9,9 @@ import 'package:go_router/go_router.dart';
 import '../accounts/account_page.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
+import '../data/zeluna_backend_playback_repository.dart';
+import '../core/network/network_security.dart';
+import '../shared_ui/poster_card.dart';
 import '../domain/anime_models.dart';
 import '../player/player_page.dart';
 import '../player/open_media_page.dart';
@@ -169,7 +172,23 @@ class AnimeApp extends ConsumerWidget {
           animeControllerProvider.select((state) => state.value?.appearance),
         ) ??
         const AppearanceSettings();
+    final services = ref.watch(
+      animeControllerProvider.select((state) => state.value?.services),
+    );
+    final catalogBase = services?.playbackBackendEnabled == true
+        ? ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+            services!.playbackBackendEndpoint,
+            service: services.playbackBackendSelfHosted
+                ? NetworkServiceKind.selfHostedPlaybackBackend
+                : NetworkServiceKind.officialPlaybackBackend,
+            allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
+          )
+        : null;
     return MaterialApp.router(
+      builder: (context, child) => PosterNetworkScope(
+        catalogBase: catalogBase,
+        child: child ?? const SizedBox.shrink(),
+      ),
       title: 'Zeluna',
       debugShowCheckedModeBanner: false,
       theme: AnimeTheme.light(

@@ -167,6 +167,8 @@ final class CatalogController {
   var _homeFresh = false;
   final _metadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
   final _latestMetadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
+  final _detailLoads = <int, Future<AnimeDetailBundle>>{};
+  var _detailGeneration = 0;
   Future<void> _writeQueue = Future<void>.value();
 
   CatalogSnapshot get snapshot => _snapshot;
@@ -191,6 +193,8 @@ final class CatalogController {
     _services = services;
     _loaded = false;
     _homeRefreshVersion++;
+    _detailGeneration++;
+    _detailLoads.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
     await _writeQueue;
@@ -319,26 +323,63 @@ final class CatalogController {
     return schedule;
   }
 
-  Future<AnimeDetailBundle> detail(AnimeSubject subject) async {
+  Future<AnimeDetailBundle> detail(AnimeSubject subject) {
     final scope = _scope();
     final cacheKey = Object.hash(subject.source, subject.platform, subject.id);
     final cached = _snapshot.selectedSubjects[cacheKey];
-    if (cached != null) {
-      _prefetchPlayback(cached.subject, cached.episodes);
-      return cached;
-    }
-    final base = await _loadDetail(subject, _services);
-    _ensureScope(scope);
-    final detail = await _enrichDetail(base, _services);
-    _ensureScope(scope);
-    _publish(
-      scope,
-      _snapshot.copyWith(
-        selectedSubjects: {..._snapshot.selectedSubjects, cacheKey: detail},
-      ),
-    );
-    _prefetchPlayback(detail.subject, detail.episodes);
-    return detail;
+    if (cached != null) return Future.value(cached);
+    return _detailLoads.putIfAbsent(cacheKey, () {
+      final services = _services;
+      final generation = _detailGeneration;
+      return _loadDetail(subject, services)
+          .then((base) {
+            _ensureScope(scope);
+            if (generation != _detailGeneration) {
+              throw const AccountException('目录设置已更新，请重新打开详情');
+            }
+            _publish(
+              scope,
+              _snapshot.copyWith(
+                selectedSubjects: {
+                  ..._snapshot.selectedSubjects,
+                  cacheKey: base,
+                },
+              ),
+            );
+            _prefetchPlayback(base.subject, base.episodes);
+            // Optional cast/staff metadata must not hold up the poster or episodes.
+            unawaited(
+              _enrichDetail(base, services)
+                  .then((enriched) {
+                    if (!_isCurrent(scope) ||
+                        generation != _detailGeneration ||
+                        !identical(
+                          _snapshot.selectedSubjects[cacheKey],
+                          base,
+                        ) ||
+                        identical(enriched, base)) {
+                      return;
+                    }
+                    _publish(
+                      scope,
+                      _snapshot.copyWith(
+                        selectedSubjects: {
+                          ..._snapshot.selectedSubjects,
+                          cacheKey: enriched,
+                        },
+                      ),
+                    );
+                  })
+                  .onError((_, _) {}),
+            );
+            return base;
+          })
+          .whenComplete(() {
+            if (_isCurrent(scope) && generation == _detailGeneration) {
+              _detailLoads.remove(cacheKey);
+            }
+          });
+    });
   }
 
   Future<void> refreshHome() async {
@@ -408,6 +449,8 @@ final class CatalogController {
     _services = services;
     if (!changed) return;
     _homeRefreshVersion++;
+    _detailGeneration++;
+    _detailLoads.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
     _publish(scope, _snapshot.copyWith(selectedSubjects: const {}));
@@ -425,12 +468,16 @@ final class CatalogController {
 
   void clearDetailCache() {
     final scope = _scope();
+    _detailGeneration++;
+    _detailLoads.clear();
     if (_snapshot.selectedSubjects.isEmpty) return;
     _publish(scope, _snapshot.copyWith(selectedSubjects: const {}));
   }
 
   Future<void> invalidateTmdbCredential() async {
     final scope = _scope();
+    _detailGeneration++;
+    _detailLoads.clear();
     _homeRefreshVersion++;
     _latestMetadataRefreshes.remove(seriesMetadataCacheKey);
     _latestMetadataRefreshes.remove(movieMetadataCacheKey);
@@ -465,6 +512,8 @@ final class CatalogController {
     _loaded = false;
     _scopeEpoch++;
     _homeRefreshVersion++;
+    _detailGeneration++;
+    _detailLoads.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
   }
@@ -949,10 +998,12 @@ final class CatalogController {
       snapshot.selectedSubjects,
     ),
     homeCandidates:
-        Map<SubjectContentType, List<CatalogCandidate>>.unmodifiable({
-          for (final entry in snapshot.homeCandidates.entries)
-            entry.key: List<CatalogCandidate>.unmodifiable(entry.value),
-        }),
+        _loaded && identical(snapshot.homeCandidates, _snapshot.homeCandidates)
+        ? _snapshot.homeCandidates
+        : Map<SubjectContentType, List<CatalogCandidate>>.unmodifiable({
+            for (final entry in snapshot.homeCandidates.entries)
+              entry.key: List<CatalogCandidate>.unmodifiable(entry.value),
+          }),
   );
 
   _CatalogScope _scope() {

@@ -415,6 +415,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   SyncController? _syncController;
   var _recommendationNonce = 0;
   String? _lastServedRecommendationFingerprint;
+  CatalogSnapshot? _lastCatalogPublication;
 
   AccountController get _accounts {
     final controller = _accountController;
@@ -679,6 +680,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
         _backendCatalogRepositoryFor(
           _settingsDomain.snapshot.services,
         )?.weeklySchedule,
+        preferRelay: true,
       ),
       loadQuery: (query, settings, cursor) async {
         if (query.contentType == SubjectContentType.anime) {
@@ -688,6 +690,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             backend == null
                 ? null
                 : () => backend.queryAnimeCatalog(query, cursor: cursor),
+            preferRelay: true,
           );
         }
         final repository = _backendCatalogRepositoryFor(settings);
@@ -855,17 +858,21 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     try {
       AnimeDetailBundle? rich;
       if (subject.source == 'bangumi' && subject.id > 0) {
-        rich = await ref
-            .read(bangumiMetadataRepositoryProvider)
-            .detail(subject.id, fallbackSubject: subject)
-            .timeout(const Duration(seconds: 14));
+        final backend = _backendCatalogRepositoryFor(
+          _settingsDomain.snapshot.services,
+        );
+        rich =
+            await (backend?.enrichAnimeDetail(bundle) ??
+                ref
+                    .read(bangumiMetadataRepositoryProvider)
+                    .enrichPublicDetail(bundle));
       } else if (subject.source.startsWith('tmdb')) {
         rich = await ref
             .read(externalServiceRepositoryProvider)
             .tmdbDetail(subject)
             .timeout(const Duration(seconds: 14));
       }
-      if (rich == null) return bundle;
+      if (rich == null || identical(rich, bundle)) return bundle;
       final baseSummary = subject.summary.trim();
       final richSummary = rich.subject.summary.trim();
       return AnimeDetailBundle(
@@ -1714,18 +1721,28 @@ class AnimeController extends AsyncNotifier<AnimeState> {
   void _publishCatalogSnapshot(CatalogSnapshot snapshot) {
     final current = state.value;
     if (current == null) return;
-    final feed = _composeRecommendedHomeFeed(
-      snapshot,
-      librarySnapshot: _libraryDomain.snapshot,
-      preferences: current.homePreferences,
-    );
+    final previous = _lastCatalogPublication;
+    final homeChanged =
+        previous == null ||
+        !identical(previous.homeFeed, snapshot.homeFeed) ||
+        !identical(previous.homeCandidates, snapshot.homeCandidates);
+    _lastCatalogPublication = snapshot;
+    final feed = homeChanged
+        ? _composeRecommendedHomeFeed(
+            snapshot,
+            librarySnapshot: _libraryDomain.snapshot,
+            preferences: current.homePreferences,
+          )
+        : current.homeFeed;
     state = AsyncData(
       current.copyWith(
         homeFeed: feed,
         selectedSubjects: snapshot.selectedSubjects,
       ),
     );
-    unawaited(_recordCurrentHomeRecommendationsServed().onError((_, _) {}));
+    if (homeChanged) {
+      unawaited(_recordCurrentHomeRecommendationsServed().onError((_, _) {}));
+    }
   }
 
   bool get _personalizedRecommendationsEnabled =>

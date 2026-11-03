@@ -84,6 +84,9 @@ class ZelunaBackendCatalogRepository {
     );
   }
 
+  Future<AnimeDetailBundle> enrichAnimeDetail(AnimeDetailBundle base) =>
+      _publicBangumiCatalog().enrichPublicDetail(base);
+
   Future<Map<int, List<AnimeSubject>>> weeklySchedule() =>
       _publicBangumiCatalog().weeklySchedule(strict: true);
 

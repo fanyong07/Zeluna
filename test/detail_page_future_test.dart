@@ -34,14 +34,30 @@ void main() {
           container.read(animeControllerProvider.notifier) as _DetailController;
       expect(controller.requestedSubjectIds, [1]);
 
+      final heroBeforeProgress = tester.widget(
+        find.byKey(const ValueKey('detailHero')),
+      );
       controller.publishDownloadProgress(25);
       await tester.pump();
       controller.publishDownloadProgress(50);
       await tester.pump();
       expect(controller.requestedSubjectIds, [1]);
+      expect(
+        identical(
+          tester.widget(find.byKey(const ValueKey('detailHero'))),
+          heroBeforeProgress,
+        ),
+        isTrue,
+        reason: 'download progress must not rebuild the entire detail hero',
+      );
 
       harnessKey.currentState!.show(_sameIdentitySubject);
       await tester.pump();
+      expect(controller.requestedSubjectIds, [1]);
+
+      controller.publishEnrichedDetail();
+      await tester.pump();
+      expect(find.text('补充资料已到达'), findsWidgets);
       expect(controller.requestedSubjectIds, [1]);
 
       harnessKey.currentState!.show(_subjectB);
@@ -96,6 +112,24 @@ class _DetailController extends AnimeController {
       characters: const [],
       staff: const [],
       recommendations: const [],
+    );
+  }
+
+  void publishEnrichedDetail() {
+    final current = state.value!;
+    final key = Object.hash(_subjectA.source, _subjectA.platform, _subjectA.id);
+    state = AsyncData(
+      current.copyWith(
+        selectedSubjects: {
+          key: AnimeDetailBundle(
+            subject: _subjectA.copyWith(summary: '补充资料已到达'),
+            episodes: const [_episodeA],
+            characters: const [],
+            staff: const [],
+            recommendations: const [],
+          ),
+        },
+      ),
     );
   }
 

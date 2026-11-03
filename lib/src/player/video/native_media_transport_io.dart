@@ -125,7 +125,9 @@ class NativeMediaBridge {
       allowPrivateNetwork: false,
       maxResponseBytes: mediaDownloadMaxResponseBytes,
       requestTimeout: _idleTimeout,
-      allowSyntheticDns: !publicHttpOnly,
+      // A validated HTTPS hostname may resolve through a device VPN. This
+      // does not relax publicHttpOnly's literal-IP or cleartext restrictions.
+      allowSyntheticDns: true,
       allowLiteralBenchmarkAddress: !publicHttpOnly,
       rejectRedirects: false,
     );

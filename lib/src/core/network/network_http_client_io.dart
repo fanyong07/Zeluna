@@ -76,14 +76,9 @@ Future<List<InternetAddress>> _publicAddresses(
   final addresses = literal == null
       ? await InternetAddress.lookup(host).timeout(const Duration(seconds: 3))
       : [literal];
-  final allowSyntheticDns =
-      literal == null &&
-      uri.scheme.toLowerCase() == 'https' &&
-      policy.allowSyntheticDns;
   if (addresses.isEmpty ||
       addresses.any(
-        (address) =>
-            _isBlockedAddress(address, allowSyntheticDns: allowSyntheticDns),
+        (address) => !isResolvedNetworkAddressAllowed(uri, policy, address),
       )) {
     throw const NetworkSecurityException(
       'DNS resolved to a private or special-purpose address.',
@@ -102,6 +97,25 @@ Future<List<InternetAddress>> _publicAddresses(
       if (i < v6.length) v6[i],
     ],
   ];
+}
+
+/// A VPN's synthetic answer is accepted only for a TLS-checked hostname.
+/// URL literals, LAN destinations and cleartext synthetic DNS remain blocked.
+bool isResolvedNetworkAddressAllowed(
+  Uri uri,
+  NetworkRequestPolicy policy,
+  InternetAddress address,
+) {
+  try {
+    policy.ensureUriAllowed(uri);
+  } on NetworkSecurityException {
+    return false;
+  }
+  final synthetic =
+      policy.allowSyntheticDns &&
+      uri.scheme.toLowerCase() == 'https' &&
+      InternetAddress.tryParse(uri.host) == null;
+  return !_isBlockedAddress(address, allowSyntheticDns: synthetic);
 }
 
 bool _isBlockedAddress(

@@ -18,6 +18,9 @@ http.Client createUntrustedSourceHttpClient({
     allowPrivateNetwork: false,
     maxResponseBytes: maxResponseBytes,
     requestTimeout: timeout,
+    // Only hostname HTTPS connections can use VPN synthetic DNS. The IO
+    // transport still verifies TLS/SNI and rejects literal or LAN targets.
+    allowSyntheticDns: true,
     rejectRedirects: false,
   ),
 );

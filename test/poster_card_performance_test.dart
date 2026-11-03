@@ -4,6 +4,66 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'native Bangumi artwork uses catalog relay without moving video or other images',
+    () {
+      final base = Uri.parse('https://catalog.example/prefix');
+      final images = posterImageCandidates(
+        'https://lain.bgm.tv/pic/cover/l/27/ff/demo.jpg',
+        targetPixelWidth: 350,
+        catalogProxyBase: base,
+      );
+      final first = Uri.parse(images.first);
+      expect(first.host, 'catalog.example');
+      expect(first.path, '/prefix/api/v3/catalog/image');
+      expect(
+        first.queryParameters['url'],
+        'https://lain.bgm.tv/r/400/pic/cover/l/27/ff/demo.jpg',
+      );
+      expect(images.last, startsWith('https://lain.bgm.tv/'));
+      expect(
+        posterImageCandidates(
+          'https://image.tmdb.org/t/p/w300/a.jpg',
+          catalogProxyBase: base,
+        ).single,
+        'https://image.tmdb.org/t/p/w300/a.jpg',
+      );
+      expect(
+        posterImageCandidates(
+          'https://private.example/a.jpg',
+          catalogProxyBase: base,
+        ).single,
+        'https://private.example/a.jpg',
+      );
+    },
+  );
+
+  testWidgets('native artwork scope is applied at the actual image widget', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: PosterNetworkScope(
+          catalogBase: Uri.parse('https://catalog.example'),
+          child: const SizedBox(
+            width: 120,
+            height: 180,
+            child: PosterArt(
+              coverUrl: 'https://lain.bgm.tv/pic/cover/l/27/ff/demo.jpg',
+              title: '封面',
+            ),
+          ),
+        ),
+      ),
+    );
+    final provider =
+        tester.widget<Image>(find.byType(Image)).image as ResizeImage;
+    expect(
+      (provider.imageProvider as NetworkImage).url,
+      startsWith('https://catalog.example/api/v3/catalog/image?'),
+    );
+  });
+
   testWidgets('bounded poster decodes near its physical display size', (
     tester,
   ) async {

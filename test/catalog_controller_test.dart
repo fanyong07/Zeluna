@@ -9,6 +9,118 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'clearing details revokes in-flight entries instead of resurrecting cache',
+    () async {
+      final pending = Completer<AnimeDetailBundle>();
+      final controller = _controller(
+        _MemoryCatalogStorage(),
+        loadDetail: (_, _) => pending.future,
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'one',
+        contextVersion: 1,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      final request = controller.detail(_subject);
+      controller.clearDetailCache();
+      final assertion = expectLater(request, throwsA(isA<AccountException>()));
+      pending.complete(_detailBundle);
+      await assertion;
+      expect(controller.snapshot.selectedSubjects, isEmpty);
+    },
+  );
+
+  test('late optional metadata cannot leak across account scopes', () async {
+    final extra = Completer<AnimeDetailBundle>();
+    final published = <CatalogSnapshot>[];
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      publish: published.add,
+      enrichDetail: (_, _) => extra.future,
+    );
+    addTearDown(controller.dispose);
+    await controller.loadForAccount(
+      accountId: 'a',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    final before = controller.snapshot.homeCandidates;
+    await controller.detail(_subject);
+    expect(identical(controller.snapshot.homeCandidates, before), isTrue);
+    await controller.loadForAccount(
+      accountId: 'b',
+      contextVersion: 2,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _otherFeed,
+    );
+    extra.complete(_detailBundle);
+    await _flushAsync();
+    expect(controller.snapshot.selectedSubjects, isEmpty);
+    expect(published, hasLength(1));
+  });
+
+  test('ready detail and playback do not wait for optional metadata', () async {
+    final enrichment = Completer<AnimeDetailBundle>();
+    final prefetched = <AnimeSubject>[];
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      enrichDetail: (_, _) => enrichment.future,
+      prefetchPlayback: (subject, _) => prefetched.add(subject),
+    );
+    addTearDown(() {
+      if (!enrichment.isCompleted) enrichment.complete(_detailBundle);
+      controller.dispose();
+    });
+    await controller.loadForAccount(
+      accountId: 'one',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    var ready = false;
+    final detail = controller.detail(_subject).then((value) {
+      ready = true;
+      return value;
+    });
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      ready,
+      isTrue,
+      reason: 'blocked Bangumi extras must not block episodes',
+    );
+    expect(prefetched, hasLength(1));
+    expect((await detail).episodes, isNotEmpty);
+    enrichment.complete(_detailBundle);
+  });
+
+  test('simultaneous detail readers share the same network request', () async {
+    final base = Completer<AnimeDetailBundle>();
+    var requests = 0;
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      loadDetail: (_, _) {
+        requests++;
+        return base.future;
+      },
+    );
+    addTearDown(controller.dispose);
+    await controller.loadForAccount(
+      accountId: 'one',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    final first = controller.detail(_subject);
+    final second = controller.detail(_subject);
+    base.complete(_detailBundle);
+    await Future.wait([first, second]);
+    expect(requests, 1);
+  });
+
+  test(
     'schedule never invents weekdays from historical catalogue dates',
     () async {
       final controller = _controller(
@@ -557,6 +669,8 @@ CatalogController _controller(
   CatalogQueryLoader? loadQuery,
   CatalogScheduleLoader? loadSchedule,
   CatalogDetailLoader? loadDetail,
+  CatalogDetailEnricher? enrichDetail,
+  CatalogPlaybackPrefetcher? prefetchPlayback,
 }) => CatalogController(
   storage: storage,
   publishSnapshot: publish ?? (_) {},
@@ -566,8 +680,8 @@ CatalogController _controller(
   loadQuery: loadQuery,
   loadSchedule: loadSchedule,
   loadDetail: loadDetail ?? (_, _) async => _detailBundle,
-  enrichDetail: (bundle, _) async => bundle,
-  prefetchPlayback: (_, _) {},
+  enrichDetail: enrichDetail ?? (bundle, _) async => bundle,
+  prefetchPlayback: prefetchPlayback ?? (_, _) {},
   fallbackSeries: const [],
   fallbackMovies: const [],
   now: () => DateTime.utc(2026, 8, 2, 12),
