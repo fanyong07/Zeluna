@@ -23,6 +23,90 @@ import '../integration_test/support/isolated_player_environment.dart';
 // paths. Only the platform engine/video texture and account persistence are
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
+  testWidgets('quick local verification replaces a pending unchecked startup', (
+    tester,
+  ) async {
+    final account = _PauseAccount(online: true)
+      ..verification = Completer<PlaybackLine>()
+      ..quickResult = Completer<List<PlaybackLine>>();
+    final fixture = await _mount(
+      tester,
+      account: account,
+      initialLine: _unverifiedBackup,
+      reachFirstFrame: false,
+    );
+    expect(account.blockedVerifications, 1);
+    final initialToken = account.lastVerificationToken!;
+    account.quickResult!.complete([_backup]);
+    await tester.pump();
+    await tester.pump();
+    expect(fixture.engine.opens, hasLength(1));
+    expect(fixture.engine.opens.single.uri, _backup.url);
+    expect(initialToken.isCancelled, isTrue);
+    account.verification!.complete(_unverifiedBackup);
+    await tester.pump();
+    expect(fixture.engine.opens, hasLength(1));
+    await _expectReadyPlayback(tester, fixture);
+  });
+
+  for (final autoSwitch in [false, true]) {
+    testWidgets('quick verified alternative obeys auto-switch $autoSwitch', (
+      tester,
+    ) async {
+      final account = _PauseAccount(online: true, autoSwitch: autoSwitch)
+        ..verification = Completer<PlaybackLine>()
+        ..quickResult = Completer<List<PlaybackLine>>();
+      final fixture = await _mount(
+        tester,
+        account: account,
+        initialLine: _unverifiedBackup,
+        reachFirstFrame: false,
+      );
+      final initialToken = account.lastVerificationToken!;
+      account.quickResult!.complete([_primary]);
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.engine.opens, hasLength(autoSwitch ? 1 : 0));
+      expect(initialToken.isCancelled, autoSwitch);
+      account.verification!.complete(_backup);
+      await tester.pump();
+      await tester.pump();
+      expect(fixture.engine.opens, hasLength(1));
+      expect(
+        fixture.engine.opens.single.uri,
+        Media(autoSwitch ? _primary.url! : _backup.url!).uri,
+      );
+      await _expectReadyPlayback(tester, fixture);
+    });
+  }
+
+  testWidgets('manual reload owns startup over an older quick result', (
+    tester,
+  ) async {
+    final account = _PauseAccount(online: true)
+      ..verification = Completer<PlaybackLine>()
+      ..quickResult = Completer<List<PlaybackLine>>();
+    final fixture = await _mount(
+      tester,
+      account: account,
+      initialLine: _unverifiedBackup,
+      reachFirstFrame: false,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+    await tester.pump();
+    expect(account.blockedVerifications, 2);
+    account.quickResult!.complete([_primary]);
+    await tester.pump();
+    await tester.pump();
+    expect(fixture.engine.opens, isEmpty);
+    account.verification!.complete(_backup);
+    await tester.pump();
+    await tester.pump();
+    expect(fixture.engine.opens, hasLength(1));
+    expect(fixture.engine.opens.single.uri, _backup.url);
+    await _expectReadyPlayback(tester, fixture);
+  });
+
   testWidgets(
     'cancelled open verification never opens the unchecked original',
     (tester) async {
@@ -736,6 +820,7 @@ Future<_Fixture> _mount(
   _PauseAccount? account,
   bool nativeLock = false,
   bool reachFirstFrame = true,
+  PlaybackLine initialLine = _primary,
 }) async {
   account ??= _PauseAccount();
   final activeAccount = account;
@@ -797,7 +882,7 @@ Future<_Fixture> _mount(
             episodes: const [playerTestEpisode],
             episode: playerTestEpisode,
             offlineOnly: !account.online,
-            initialLine: _primary,
+            initialLine: initialLine,
           ),
         ),
       ),
@@ -805,7 +890,7 @@ Future<_Fixture> _mount(
   );
   await tester.pump();
   await tester.pump();
-  expect(engine.opens, hasLength(1));
+  expect(engine.opens, hasLength(activeAccount.verification == null ? 1 : 0));
   if (reachFirstFrame) {
     engine.progress(const Duration(seconds: 15));
     await tester.pump();
@@ -1105,19 +1190,25 @@ const _unverifiedBackup = PlaybackLine(
 );
 
 class _PauseAccount extends IsolatedPlayerTestAccount {
-  _PauseAccount({this.online = false, this.quick = const [_primary]});
+  _PauseAccount({
+    this.online = false,
+    this.quick = const [_primary],
+    this.autoSwitch = true,
+  });
   final bool online;
+  final bool autoSwitch;
   final List<PlaybackLine> quick;
+  Completer<List<PlaybackLine>>? quickResult;
   final expanded = StreamController<PlaybackLineLookupUpdate>();
   Completer<PlaybackLine>? verification;
   RulePlaybackCancellationToken? lastVerificationToken;
   int blockedVerifications = 0;
   @override
   Future<AnimeState> build() async => (await super.build()).copyWith(
-    settings: const PlaybackSettings(
+    settings: PlaybackSettings(
       rememberLine: false,
       autoNext: false,
-      autoSwitchLine: true,
+      autoSwitchLine: autoSwitch,
     ),
   );
   @override
@@ -1125,7 +1216,7 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) async => quick;
+  }) async => quickResult == null ? quick : await quickResult!.future;
   @override
   Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
     AnimeSubject subject,

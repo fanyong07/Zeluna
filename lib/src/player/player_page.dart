@@ -1558,6 +1558,28 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         }
       }
       PlaybackLine? nextLine = _line;
+      var resumeVerifiedStartup = false;
+      if (_loadingLine &&
+          _openProbeToken != null &&
+          _firstFrameTraceOpenSerial == null &&
+          _canRecoverAutomatically(recoveryEpoch)) {
+        // Detail prefetch can still be checking an old request while the quick
+        // lookup has already qualified one on this device. Let that result
+        // finish startup, instead of waiting for the old request's timeout.
+        // A manual selection/pause invalidates recoveryEpoch; decoded playback
+        // and the user's auto-switch setting keep their existing ownership.
+        final ready = available.where(
+          (line) =>
+              line.clientVerified &&
+              playbackLineCanStartImmediately(line) &&
+              !_failedLineIds.contains(line.id) &&
+              (line.id == nextLine?.id || _currentSettings.autoSwitchLine),
+        );
+        if (ready.isNotEmpty) {
+          nextLine = ready.first;
+          resumeVerifiedStartup = true;
+        }
+      }
       if (!_isPlayableLine(nextLine) && available.isNotEmpty) {
         nextLine = _preferredPlayableLine(available);
       }
@@ -1572,7 +1594,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'playable_count': available.length,
         },
       );
-      if (autoplay &&
+      if ((autoplay || resumeVerifiedStartup) &&
           _canRecoverAutomatically(recoveryEpoch) &&
           _isPlayableLine(nextLine)) {
         await _openLine(nextLine!, force: true, automatic: true);
