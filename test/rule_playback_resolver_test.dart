@@ -65,7 +65,7 @@ void main() {
         expect(maxActive, lessThanOrEqualTo(4));
       } finally {
         inventoryGate.complete();
-        await Future.wait([...background, if (selected != null) selected]);
+        await Future.wait([...background, ?selected]);
       }
     },
   );
