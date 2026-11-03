@@ -12,8 +12,8 @@ import '../../core/network/network_security.dart';
 import '../../rules/rule_http_policy.dart';
 import 'media_transport_failure.dart';
 
-/// Android's bundled FFmpeg TLS stack can reject streams that Dart's verified
-/// TLS stack can read. Relay HLS/progressive bytes locally, not through a server.
+/// Native FFmpeg networking can disagree with the verified Dart media probe.
+/// Android and Windows share its TLS/DNS path through a per-open local relay.
 /// The capability URL and upstream credentials exist only for this open.
 class NativeMediaTransport {
   NativeMediaBridge? _bridge;
@@ -36,7 +36,7 @@ class NativeMediaTransport {
     final effectiveHeaders = effectiveMediaRequestHeaders(headers);
     // DASH has its own URL templates; do not rewrite it as an HLS playlist.
     final relay =
-        Platform.isAndroid &&
+        (Platform.isAndroid || Platform.isWindows) &&
         uri != null &&
         const {'http', 'https'}.contains(uri.scheme) &&
         format.toUpperCase() != 'DASH' &&

@@ -2718,7 +2718,10 @@ class RulePlaybackResolver {
     }
     var timedOut = false;
     final keyAvailability = <Uri, bool>{};
-    for (final candidate in candidates) {
+    // VOD starts with the first segment. A working later segment cannot make
+    // its missing opening segment/key playable; the decoder still opens it.
+    // Live windows may expire while checked, so retain their recent fallback.
+    for (final candidate in candidates.take(metadata.isLive ? 3 : 1)) {
       try {
         var aes128KeyVerified = false;
         if (candidate.usesAes128) {

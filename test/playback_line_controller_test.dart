@@ -3,6 +3,24 @@ import 'package:anime/src/player/lines/playback_line_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'recovery prefers on-device verified backup before stale server order',
+    () {
+      final controller = PlaybackLineController();
+      addTearDown(controller.dispose);
+      final current = _line('current', 'source-a');
+      final stale = _line('stale', 'source-b', cacheState: 'stale');
+      final checked = _line('checked', 'source-c', clientVerified: true);
+      expect(
+        controller.nextPlayableLine(
+          currentLine: current,
+          lines: [current, stale, checked],
+        ),
+        same(checked),
+      );
+    },
+  );
+
   test('one runtime failure retries before the line is quarantined', () {
     final controller = PlaybackLineController();
     addTearDown(controller.dispose);
@@ -91,6 +109,8 @@ PlaybackLine _line(
   int latencyMs = 30,
   bool available = true,
   bool serverVerified = true,
+  bool clientVerified = false,
+  String cacheState = 'unknown',
 }) {
   return PlaybackLine(
     id: id,
@@ -103,6 +123,8 @@ PlaybackLine _line(
     format: 'HLS',
     available: available,
     serverVerified: serverVerified,
+    clientVerified: clientVerified,
+    cacheState: cacheState,
     latency: Duration(milliseconds: latencyMs),
   );
 }

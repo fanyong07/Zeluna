@@ -8,6 +8,7 @@ import 'package:anime/src/rules/rule_playback_cancellation.dart';
 import 'package:anime/src/player/player_page.dart';
 import 'package:anime/src/player/subtitles/subtitle_store.dart';
 import 'package:anime/src/player/video/native_video_controller.dart' as owned;
+import 'package:anime/src/player/video/media_transport_failure.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,6 +23,115 @@ import '../integration_test/support/isolated_player_environment.dart';
 // paths. Only the platform engine/video texture and account persistence are
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
+  testWidgets(
+    'cancelled open verification never opens the unchecked original',
+    (tester) async {
+      final account = _PauseAccount(online: true, quick: [_unverifiedBackup]);
+      final fixture = await _mount(tester, account: account);
+      account.verification = Completer<PlaybackLine>();
+      fixture.engine.fail('verify backup before opening it');
+      await tester.pump();
+      expect(account.blockedVerifications, 1);
+      account.lastVerificationToken!.cancel();
+      account.verification!.complete(_unverifiedBackup);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(fixture.engine.opens, hasLength(1));
+    },
+  );
+
+  testWidgets('startup deadline switches to a ready backup without retrying', (
+    tester,
+  ) async {
+    final fixture = await _mount(
+      tester,
+      account: _PauseAccount(online: true, quick: [_primary, _backup]),
+      reachFirstFrame: false,
+    );
+    for (var second = 0; second < 9; second++) {
+      await tester.pump(const Duration(seconds: 1));
+    }
+    await tester.pump();
+    expect(fixture.engine.opens, hasLength(2));
+    expect(fixture.engine.opens.last.uri, _backup.url);
+    await _expectReadyPlayback(tester, fixture);
+  });
+
+  testWidgets(
+    'repeated startup TLS failures switch without reopening bad line',
+    (tester) async {
+      final fixture = await _mount(
+        tester,
+        account: _PauseAccount(online: true, quick: [_primary, _backup]),
+        reachFirstFrame: false,
+      );
+      const failure = MediaTransportFailure(
+        MediaTransportFailureKind.tls,
+        manifest: false,
+      );
+      fixture.native.onTransportFailure!(failure);
+      await tester.pump();
+      expect(fixture.engine.opens, hasLength(1));
+      fixture.native.onTransportFailure!(failure);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pump();
+      expect(fixture.engine.opens, hasLength(2));
+      expect(fixture.engine.opens.last.uri, _backup.url);
+      expect(
+        fixture.engine.opens.where(
+          (open) => open.uri == fixture.engine.opens.first.uri,
+        ),
+        hasLength(1),
+      );
+      await _expectReadyPlayback(tester, fixture);
+    },
+  );
+
+  testWidgets('isolated media failure does not interrupt decoded playback', (
+    tester,
+  ) async {
+    final fixture = await _mount(
+      tester,
+      account: _PauseAccount(online: true, quick: [_primary, _backup]),
+    );
+    for (var i = 0; i < 3; i++) {
+      fixture.native.onTransportFailure!(
+        const MediaTransportFailure(
+          MediaTransportFailureKind.tls,
+          manifest: false,
+        ),
+      );
+    }
+    await tester.pump();
+    expect(fixture.engine.opens, hasLength(1));
+    expect(fixture.engine.state.playing, isTrue);
+  });
+
+  testWidgets('startup transport errors preserve explicit pause intent', (
+    tester,
+  ) async {
+    final fixture = await _mount(
+      tester,
+      account: _PauseAccount(online: true, quick: [_primary, _backup]),
+      reachFirstFrame: false,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    for (var i = 0; i < 3; i++) {
+      fixture.native.onTransportFailure!(
+        const MediaTransportFailure(
+          MediaTransportFailureKind.tls,
+          manifest: false,
+        ),
+      );
+    }
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(fixture.engine.opens, hasLength(1));
+    expect(fixture.engine.state.playing, isFalse);
+  });
+
   testWidgets('first online failure searches a backup during current retry', (
     tester,
   ) async {
@@ -625,6 +735,7 @@ Future<_Fixture> _mount(
   WidgetTester tester, {
   _PauseAccount? account,
   bool nativeLock = false,
+  bool reachFirstFrame = true,
 }) async {
   account ??= _PauseAccount();
   final activeAccount = account;
@@ -641,6 +752,7 @@ Future<_Fixture> _mount(
     platformPlayer: nativeLock ? _NativeLockEngine(engine) : engine,
   );
   final surface = _HeadlessSurface(player);
+  late owned.NativeVideoController native;
 
   const wakelockChannel =
       'dev.flutter.pigeon.wakelock_plus_platform_interface.WakelockPlusApi.toggle';
@@ -671,11 +783,12 @@ Future<_Fixture> _mount(
         theme: ThemeData.dark(),
         home: PlayerPage(
           nativeVideoControllerFactory: (readSerial) =>
-              owned.NativeVideoController.forTesting(
+              native = owned.NativeVideoController.forTesting(
                 player: player,
                 surfaceController: surface,
                 readOpenSerial: readSerial,
                 readDecodedFrame: () async => true,
+                prepareMedia: _prepareFixtureMedia,
               ),
           request: PlaySessionRequest(
             subject: account.online
@@ -693,13 +806,15 @@ Future<_Fixture> _mount(
   await tester.pump();
   await tester.pump();
   expect(engine.opens, hasLength(1));
-  engine.progress(const Duration(seconds: 15));
-  await tester.pump();
-  await tester.pump();
-  await tester.pump(const Duration(milliseconds: 500));
-  await tester.pump();
-  expect(account.firstFrames, greaterThan(0));
-  return _Fixture(engine, account);
+  if (reachFirstFrame) {
+    engine.progress(const Duration(seconds: 15));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+    expect(account.firstFrames, greaterThan(0));
+  }
+  return _Fixture(engine, account, native);
 }
 
 Future<void> _expectReadyPlayback(WidgetTester tester, _Fixture fixture) async {
@@ -729,10 +844,21 @@ Future<void> _expectReadyPlayback(WidgetTester tester, _Fixture fixture) async {
   );
 }
 
+// Network policy and loopback lifetime are covered by transport tests. These
+// page regressions use a recording decoder, so no real listener is required.
+Future<Media> _prepareFixtureMedia(
+  String resource, {
+  required Map<String, String> headers,
+  String format = '',
+  bool publicHttpOnly = false,
+  void Function(MediaTransportFailure)? onFailure,
+}) async => Media(resource, httpHeaders: headers);
+
 class _Fixture {
-  _Fixture(this.engine, this.account);
+  _Fixture(this.engine, this.account, this.native);
   final _RecordingEngine engine;
   final _PauseAccount account;
+  final owned.NativeVideoController native;
 }
 
 class _RecordingEngine extends PlatformPlayer {
@@ -984,6 +1110,7 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
   final List<PlaybackLine> quick;
   final expanded = StreamController<PlaybackLineLookupUpdate>();
   Completer<PlaybackLine>? verification;
+  RulePlaybackCancellationToken? lastVerificationToken;
   int blockedVerifications = 0;
   @override
   Future<AnimeState> build() async => (await super.build()).copyWith(
@@ -1021,6 +1148,7 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
   }) async {
     if (forceRefresh && line.id == _backup.id && verification != null) {
       blockedVerifications++;
+      lastVerificationToken = cancellationToken;
       return verification!.future;
     }
     return line;

@@ -508,6 +508,29 @@ void main() {
   });
 
   test(
+    'stale or client-probe-only server evidence cannot skip local checking',
+    () {
+      for (final line in [
+        _line('stale', serverVerified: true, cacheState: 'stale'),
+        _line('needs-client', serverVerified: true, requiresClientProbe: true),
+      ]) {
+        expect(playbackLineCanStartImmediately(line), isFalse);
+      }
+      expect(
+        playbackLineCanStartImmediately(
+          _line(
+            'checked-on-device',
+            serverVerified: true,
+            clientVerified: true,
+            cacheState: 'stale',
+          ),
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'progressive probing checks every line with bounded concurrency',
     () async {
       final candidates = List.generate(

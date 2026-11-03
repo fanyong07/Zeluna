@@ -1769,7 +1769,10 @@ final class PlaybackDiscoveryController {
               (line.requiresClientProbe ||
                   (line.serverVerified &&
                       !line.clientVerified &&
-                      line.latency == null)) &&
+                      // A server timing belongs to its old network/cache.
+                      // Stale routes still need the bounded concurrent probe,
+                      // otherwise recovery checks them one by one on open.
+                      (line.latency == null || line.cacheState == 'stale'))) &&
               (line.expiresAt == null ||
                   line.expiresAt!.isAfter(refreshThreshold)),
         )

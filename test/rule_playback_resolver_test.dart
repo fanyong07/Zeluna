@@ -1528,6 +1528,39 @@ dead-child.m3u8
     expect(line.message, contains('媒体分片'));
   });
 
+  for (final missingKey in [false, true]) {
+    test(
+      'VOD HLS rejects an unreadable first ${missingKey ? 'key' : 'segment'} even when later segments work',
+      () async {
+        final requested = <String>[];
+        final resolver = RulePlaybackResolver(
+          client: MockClient((request) async {
+            requested.add(request.url.path);
+            if (request.url.path == '/vod.m3u8') {
+              return http.Response(
+                '#EXTM3U\n'
+                '${missingKey ? '#EXT-X-KEY:METHOD=AES-128,URI="missing.key"\n' : ''}'
+                '#EXTINF:10,\nfirst.ts\n'
+                '#EXT-X-KEY:METHOD=NONE\n'
+                '#EXTINF:10,\nlater.ts\n#EXT-X-ENDLIST\n',
+                200,
+                headers: {'content-type': 'application/vnd.apple.mpegurl'},
+              );
+            }
+            if (request.url.path == '/later.ts') return _playableSegment();
+            return http.Response('gone', 404);
+          }),
+        );
+        final verified = await resolver.verifyPlaybackLine(
+          line: _networkLine('https://cdn.example.com/vod.m3u8'),
+          enrichMetadata: false,
+        );
+        expect(verified.available, isFalse);
+        expect(requested, isNot(contains('/later.ts')));
+      },
+    );
+  }
+
   test(
     'HLS metadata timeout retries during required reachability check',
     () async {

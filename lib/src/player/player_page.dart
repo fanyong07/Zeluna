@@ -39,6 +39,7 @@ import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
 import 'session/playback_session_state.dart';
 import 'video/native_video_controller.dart';
+import 'video/media_transport_failure.dart';
 import 'video/native_video_compatibility.dart';
 import 'video/native_playback_gate_stub.dart'
     if (dart.library.io) 'video/native_playback_gate_io.dart';
@@ -131,6 +132,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   var _automaticRecoveryEpoch = 0;
   ({int epoch, int openSerial})? _expandedRecoveryOwner;
   int? _firstFrameTraceOpenSerial;
+  int _startupTransportFailures = 0;
   String? _pendingRecoveryLineId;
   String? _pendingRecoveryStrategy;
   String? _pendingRecoveryFromProvider;
@@ -183,8 +185,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   int get _lineScanTotalRules => _lineRepository.scanTotalRules;
   bool get _backupLookupInProgress => _lineRepository.backupInProgress;
   bool get _hasExpandedLineLookup => _lineRepository.hasExpandedLookup;
-  RulePlaybackCancellationToken? get _lineLookupCancellationToken =>
-      _lineRepository.activeCancellationToken;
+  RulePlaybackCancellationToken? _openProbeToken;
   Set<String> get _failedLineIds => _lineController.failedLineIds;
   Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
   String? get _preferredProviderId => _lineController.preferredProviderId;
@@ -255,10 +256,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       setProperty: _writeMpvProperty,
     )..addListener(_handleAnime4KChanged);
     _startPlaybackTrace();
-    _nativeVideo.onTransportFailure = (failure) => _playbackTrace.record(
-      'media_request_failed',
-      fields: failure.safeFields,
-    );
+    _nativeVideo.onTransportFailure = _handleMediaTransportFailure;
     _pendingInitialResumePosition = widget.request.resumePosition;
     _resetPlaybackStallWatchdog(
       position: widget.request.resumePosition,
@@ -726,6 +724,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   @override
   void dispose() {
+    _openProbeToken?.cancel();
     _localSourceLookupToken?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _subtitleStoreEpoch++;
@@ -1785,7 +1784,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         ).inMilliseconds,
       },
     );
-    _handleRuntimeLineFailure(current, message: '画面一直在缓冲，正在尝试恢复这条线路。');
+    _handleRuntimeLineFailure(
+      current,
+      message: '画面一直在缓冲，正在尝试恢复这条线路。',
+      definitive: _recoveryController.lastRecoveryWasRepeatedBuffering,
+    );
   }
 
   void _scheduleSingleBackupLookup({
@@ -2100,6 +2103,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
     _nativeVideo.resumeSeek.cancel();
     final serial = ++_openLineSerial;
+    _openProbeToken?.cancel();
+    _openProbeToken = null;
+    _startupTransportFailures = 0;
     _nativeMediaEvents.invalidate();
     _handledFailureOpenSerial = null;
     _playbackTrace.recordBufferingChanged(
@@ -2131,13 +2137,27 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     });
     _bindSupplementalSubtitles();
     if (!playbackLineCanStartImmediately(line)) {
-      line = await ref
-          .read(animeControllerProvider.notifier)
-          .verifyPlaybackLine(
-            line,
-            forceRefresh: true,
-            cancellationToken: _lineLookupCancellationToken,
-          );
+      // Inventory completion/replacement must not cancel an active media-open
+      // check. Cancelled probes return the original candidate, not proof that
+      // this device can fetch it; never hand that result to the decoder.
+      final token = RulePlaybackCancellationToken();
+      _openProbeToken = token;
+      final notifier = ref.read(animeControllerProvider.notifier);
+      final accountVersion = notifier.accountContextVersion;
+      try {
+        line = await notifier.verifyPlaybackLine(
+          line,
+          enrichMetadata: false,
+          forceRefresh: true,
+          cancellationToken: token,
+        );
+      } finally {
+        if (identical(_openProbeToken, token)) _openProbeToken = null;
+      }
+      if (token.isCancelled ||
+          notifier.accountContextVersion != accountVersion) {
+        return;
+      }
     }
     if (!mounted || serial != _openLineSerial) return;
     // Verification may complete after a new explicit pause/manual selection.
@@ -2332,6 +2352,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _handleRuntimeLineFailure(
       line,
       message: hardTimedOut ? '未能解码出画面，正在检查其他线路。' : '暂时没有出画面。',
+      // The startup watchdog already spent this route's budget. Retrying the
+      // same URL doubles the wait and defeats its soft-timeout backup choice.
+      definitive: true,
     );
   }
 
@@ -2339,11 +2362,42 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _lineController.clearFailure(lineId);
   }
 
+  void _handleMediaTransportFailure(MediaTransportFailure failure) {
+    _playbackTrace.record('media_request_failed', fields: failure.safeFields);
+    final line = _line;
+    if (!mounted ||
+        line == null ||
+        !_loadingLine ||
+        _nativeVideo.hasDecodedFrame ||
+        !_canRecoverAutomatically(_automaticRecoveryEpoch) ||
+        _handledFailureOpenSerial == _openLineSerial ||
+        failure.kind == MediaTransportFailureKind.unknown) {
+      return;
+    }
+    _startupTransportFailures++;
+    // A failed request is not a failed movie: HLS can recover a single segment.
+    // Look for a backup immediately, but only abandon startup after repeated
+    // transport failures. Reopening this same URL just repeats its TLS failure.
+    if (_currentSettings.autoSwitchLine) {
+      _startExpandedLineLookup(autoplay: true);
+    }
+    if (_startupTransportFailures < 2) return;
+    _handleRuntimeLineFailure(
+      line,
+      message: '当前线路连接失败，正在检查其他线路。',
+      definitive: true,
+    );
+  }
+
   bool _markLineFailure(PlaybackLine line, {bool definitive = false}) {
     return _lineController.markFailure(line, definitive: definitive);
   }
 
-  void _handleRuntimeLineFailure(PlaybackLine line, {required String message}) {
+  void _handleRuntimeLineFailure(
+    PlaybackLine line, {
+    required String message,
+    bool definitive = false,
+  }) {
     if (!mounted || _handledFailureOpenSerial == _openLineSerial) return;
     _handledFailureOpenSerial = _openLineSerial;
     final recoveryEpoch = _automaticRecoveryEpoch;
@@ -2384,6 +2438,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     final shouldSwitch = _markLineFailure(
       line,
       definitive:
+          definitive ||
           warmupPrimaryFailed ||
           shouldSwitchAfterPlaybackInterruption(
             position: resumePosition,
@@ -2580,6 +2635,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   void _cancelAutomaticRecovery() {
     _automaticRecoveryEpoch++;
+    _openProbeToken?.cancel();
     _recoveryController.cancelCurrentLineRetry();
     _recoveryController.clearPendingAutoSwitch();
   }
@@ -2791,6 +2847,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _resetNextEpisodePrefetch();
     _danmakuController.changeEpisode();
     final playbackSerial = ++_openLineSerial;
+    _openProbeToken?.cancel();
+    _openProbeToken = null;
     _nativeMediaEvents.invalidate();
     _webVideo.cancelStartupWatchdog();
     _nativeVideo.cancelFirstFrameWatchdog();

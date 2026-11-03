@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import '../playback_line_display.dart';
 
@@ -18,6 +19,12 @@ final class PlaybackRecoveryController {
   late DateTime _lastProgressAt;
   DateTime? _lastStallRecoveryAt;
   DateTime? _stallSuppressedUntil;
+  final _bufferSamples = Queue<({DateTime end, Duration blocked})>();
+  final _bufferEpisodes = Queue<DateTime>();
+  DateTime? _bufferObservationStarted;
+  DateTime? _lastBufferSample;
+  bool _wasBuffering = false;
+  bool lastRecoveryWasRepeatedBuffering = false;
   bool _autoSwitching = false;
   Future<void> Function(Duration resumePosition)? _pendingAutoSwitchAttempt;
   Duration? _pendingAutoSwitchResumePosition;
@@ -36,6 +43,7 @@ final class PlaybackRecoveryController {
     _lastProgressPosition = position;
     _lastProgressAt = now;
     _stallSuppressedUntil = grace > Duration.zero ? now.add(grace) : null;
+    _resetBufferHealth();
   }
 
   void notePlaybackProgress(Duration value) {
@@ -44,6 +52,7 @@ final class PlaybackRecoveryController {
     final jumpedBackward =
         _lastProgressPosition - value > const Duration(seconds: 1);
     if (!movedForward && !jumpedBackward) return;
+    if (jumpedBackward) _resetBufferHealth();
     _lastProgressPosition = value;
     _lastProgressAt = _now();
   }
@@ -59,14 +68,33 @@ final class PlaybackRecoveryController {
     required Duration duration,
     required Duration buffer,
   }) {
-    if (_disposed || recoveryBlocked) return false;
+    if (_disposed) return false;
     final now = _now();
     final suppressedUntil = _stallSuppressedUntil;
-    if (suppressedUntil != null && now.isBefore(suppressedUntil)) return false;
+    if (recoveryBlocked ||
+        !appInForeground ||
+        !playing ||
+        loading ||
+        playbackFailed ||
+        position <= Duration.zero ||
+        (duration > Duration.zero &&
+            duration - position <= const Duration(seconds: 3)) ||
+        (suppressedUntil != null && now.isBefore(suppressedUntil))) {
+      _lastProgressAt = now;
+      _lastProgressPosition = position;
+      _resetBufferHealth();
+      return false;
+    }
     final lastRecovery = _lastStallRecoveryAt;
     final sinceLastRecovery = lastRecovery == null
         ? const Duration(days: 365)
         : now.difference(lastRecovery);
+    final repeatedBuffering = _recordBufferHealth(
+      now,
+      buffering &&
+          playbackBufferedAhead(position: position, buffer: buffer) <=
+              playbackStallBufferThreshold,
+    );
     final shouldRecover = playbackShouldRecoverFromStall(
       appInForeground: appInForeground,
       playing: playing,
@@ -79,13 +107,63 @@ final class PlaybackRecoveryController {
       stalledFor: now.difference(_lastProgressAt),
       sinceLastRecovery: sinceLastRecovery,
     );
-    if (!shouldRecover) return false;
+    if (!shouldRecover && !repeatedBuffering) return false;
     _lastStallRecoveryAt = now;
     resetStallWatchdog(
       position: position,
       grace: playbackStallRecoveryCooldown,
     );
+    lastRecoveryWasRepeatedBuffering = repeatedBuffering;
     return true;
+  }
+
+  void _resetBufferHealth() {
+    _bufferSamples.clear();
+    _bufferEpisodes.clear();
+    _bufferObservationStarted = null;
+    _lastBufferSample = null;
+    _wasBuffering = false;
+  }
+
+  // The existing one-second watchdog also catches a route that downloads a
+  // second of video between repeated three/four-second stalls. Short progress
+  // resets the continuous-stall clock, but must not erase this bounded window.
+  bool _recordBufferHealth(DateTime now, bool buffering) {
+    const window = Duration(seconds: 20);
+    final previous = _lastBufferSample;
+    if (previous != null &&
+        now.difference(previous) > const Duration(seconds: 3)) {
+      _resetBufferHealth();
+    }
+    _bufferObservationStarted ??= now;
+    final last = _lastBufferSample;
+    if (last != null && _wasBuffering) {
+      _bufferSamples.add((end: now, blocked: now.difference(last)));
+    }
+    if (buffering && !_wasBuffering) _bufferEpisodes.add(now);
+    _lastBufferSample = now;
+    _wasBuffering = buffering;
+    final cutoff = now.subtract(window);
+    while (_bufferSamples.isNotEmpty &&
+        !_bufferSamples.first.end.isAfter(cutoff)) {
+      _bufferSamples.removeFirst();
+    }
+    while (_bufferEpisodes.isNotEmpty &&
+        _bufferEpisodes.first.isBefore(cutoff)) {
+      _bufferEpisodes.removeFirst();
+    }
+    final blocked = _bufferSamples.fold<Duration>(Duration.zero, (sum, sample) {
+      final start = sample.end.subtract(sample.blocked);
+      return sum +
+          (start.isBefore(cutoff)
+              ? sample.end.difference(cutoff)
+              : sample.blocked);
+    });
+    return buffering &&
+        now.difference(_bufferObservationStarted!) >=
+            const Duration(seconds: 12) &&
+        _bufferEpisodes.length >= 3 &&
+        blocked >= const Duration(seconds: 8);
   }
 
   Future<void> runAutoSwitch({

@@ -448,6 +448,16 @@ final class NativePlaybackRequest {
   final Duration resumePosition;
 }
 
+/// Optional wire-preparation seam for tests with a recording native engine.
+typedef NativeMediaPreparer =
+    Future<Media> Function(
+      String resource, {
+      required Map<String, String> headers,
+      String format,
+      bool publicHttpOnly,
+      void Function(MediaTransportFailure)? onFailure,
+    });
+
 /// Owns the native media-kit objects and every subscription/timer tied to
 /// their lifetime. UI code may subscribe through [track], but it never disposes
 /// individual native resources itself.
@@ -471,7 +481,9 @@ final class NativeVideoController {
     required this.surfaceController,
     required int Function() readOpenSerial,
     Future<bool> Function()? readDecodedFrame,
-  }) : _readDecodedFrame = readDecodedFrame {
+    NativeMediaPreparer? prepareMedia,
+  }) : _readDecodedFrame = readDecodedFrame,
+       _prepareMediaForTesting = prepareMedia {
     assert(identical(surfaceController.player, player));
     resumeSeek = NativeResumeSeekController(
       readOpenSerial: readOpenSerial,
@@ -488,6 +500,7 @@ final class NativeVideoController {
   bool _decodedFrame = false;
   bool get hasDecodedFrame => _decodedFrame;
   final NativeMediaTransport _mediaTransport = NativeMediaTransport();
+  NativeMediaPreparer? _prepareMediaForTesting;
 
   Future<Media> prepareMedia(
     String resource, {
@@ -495,7 +508,7 @@ final class NativeVideoController {
     String format = '',
     bool publicHttpOnly = false,
     void Function(MediaTransportFailure)? onFailure,
-  }) => _mediaTransport.prepare(
+  }) => (_prepareMediaForTesting ?? _mediaTransport.prepare)(
     resource,
     headers: headers,
     format: format,

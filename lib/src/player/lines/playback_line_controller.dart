@@ -54,11 +54,19 @@ final class PlaybackLineController {
     required List<PlaybackLine> lines,
   }) {
     final currentId = currentLine?.id;
-    for (final line in playablePlaybackLinesInSourceOrder(lines)) {
-      if (line.id == currentId || failedLineIds.contains(line.id)) continue;
-      return line;
+    final candidates = playablePlaybackLinesInSourceOrder(lines)
+        .where(
+          (line) => line.id != currentId && !failedLineIds.contains(line.id),
+        )
+        .toList(growable: false);
+    // Source order is retained within each group. A backup already checked on
+    // this network should not wait behind stale server-only candidates.
+    for (final line in candidates) {
+      if (line.clientVerified && playbackLineCanStartImmediately(line)) {
+        return line;
+      }
     }
-    return null;
+    return candidates.isEmpty ? null : candidates.first;
   }
 
   List<PlaybackLine> preserveLoadedLineIfProbeDisagrees({

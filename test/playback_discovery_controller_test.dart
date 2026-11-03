@@ -9,6 +9,64 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'stale server timings cannot skip concurrent device verification',
+    () async {
+      final slow = Completer<void>();
+      final fast = Completer<void>();
+      final calls = <String>[];
+      final candidates = [
+        for (final id in ['slow', 'fast'])
+          _line(
+            id,
+            provider: 'aggregate.maccms',
+            serverVerified: true,
+            cacheState: 'stale',
+            latency: const Duration(milliseconds: 200),
+          ),
+      ];
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              candidates,
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              calls.add(line.id);
+              await (line.id == 'slow' ? slow.future : fast.future);
+              return _verified(line);
+            },
+      );
+      addTearDown(() {
+        if (!slow.isCompleted) slow.complete();
+        if (!fast.isCompleted) fast.complete();
+        controller.dispose();
+      });
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .forEach(snapshots.add);
+      await _waitUntil(() => calls.length == 2);
+      fast.complete();
+      await _waitUntil(
+        () => snapshots.any(
+          (s) => s.lines.any((l) => l.id == 'fast' && l.clientVerified),
+        ),
+      );
+      expect(slow.isCompleted, isFalse);
+      expect(calls, ['slow', 'fast']);
+      slow.complete();
+      await done;
+    },
+  );
+
   for (final intent in PlaybackLookupIntent.values) {
     test(
       '${intent.name} with a remembered provider reaches the third candidate',

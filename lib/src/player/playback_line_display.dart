@@ -131,9 +131,9 @@ bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
 /// player immediately. Their inventory probe runs in the background so route
 /// timing never blocks the first frame.
 bool playbackLineCanStartImmediately(PlaybackLine line) {
-  if (line.serverVerified || line.clientVerified) return true;
-  final rawUrl = line.url?.trim() ?? '';
-  return Uri.tryParse(rawUrl)?.scheme.toLowerCase() == 'file';
+  return line.available &&
+      (line.url?.trim().isNotEmpty ?? false) &&
+      !playbackLineNeedsPreDisplayVerification(line);
 }
 
 List<PlaybackLine> initialPlaybackLinesForDisplay(PlaybackLine? line) {

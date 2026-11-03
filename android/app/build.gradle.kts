@@ -184,6 +184,8 @@ gradle.taskGraph.whenReady(
 // --target-platform only narrows Dart/engine output, not all transitive JNI
 // libraries; --split-per-abi would add ABI-specific versionCode offsets.
 val zelunaTargetAbi = providers.gradleProperty("zelunaTargetAbi").orNull
+// Opt-in device QA lives beside the installed app. Release identity is fixed.
+val zelunaQaApplication = providers.gradleProperty("zelunaQaApplication").orNull == "true"
 if (zelunaTargetAbi != null) {
     require(zelunaTargetAbi in setOf("arm64-v8a", "armeabi-v7a", "x86_64")) {
         "Unsupported zelunaTargetAbi."
@@ -234,6 +236,9 @@ android {
 
     buildTypes {
         configureEach {
+            if (zelunaQaApplication && name in setOf("debug", "profile")) {
+                applicationIdSuffix = ".qa"
+            }
             if (zelunaTargetAbi != null) {
                 ndk.abiFilters.clear()
                 ndk.abiFilters.add(zelunaTargetAbi)

@@ -4,6 +4,112 @@ import 'package:anime/src/player/lines/playback_recovery_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('pause clears accumulated short-buffering recovery pressure', () {
+    var now = DateTime.utc(2026, 11, 3);
+    final controller = PlaybackRecoveryController(now: () => now);
+    addTearDown(controller.dispose);
+    var position = const Duration(seconds: 10);
+    bool sample(int second, {bool paused = false}) {
+      now = now.add(const Duration(seconds: 1));
+      final buffering = second % 5 < 4;
+      if (!buffering) {
+        position += const Duration(seconds: 1);
+        controller.notePlaybackProgress(position);
+      }
+      return controller.shouldRecoverFromStall(
+        recoveryBlocked: paused,
+        appInForeground: true,
+        playing: !paused,
+        buffering: buffering,
+        loading: false,
+        playbackFailed: false,
+        position: position,
+        duration: const Duration(minutes: 24),
+        buffer: position + const Duration(milliseconds: 500),
+      );
+    }
+
+    controller.resetStallWatchdog(position: position);
+    for (var second = 0; second < 10; second++) {
+      expect(sample(second), isFalse);
+    }
+    expect(sample(10, paused: true), isFalse);
+    controller.notePlaybackProgress(position);
+    for (var second = 0; second < 8; second++) {
+      expect(sample(second), isFalse);
+    }
+  });
+
+  test(
+    'repeated short buffering cannot evade the continuous stall watchdog',
+    () {
+      var now = DateTime.utc(2026, 11, 3);
+      final controller = PlaybackRecoveryController(now: () => now);
+      addTearDown(controller.dispose);
+      var position = const Duration(seconds: 10);
+      controller.resetStallWatchdog(position: position);
+      var recovered = false;
+      for (var second = 0; second < 20 && !recovered; second++) {
+        now = now.add(const Duration(seconds: 1));
+        final buffering = second % 5 < 4;
+        if (!buffering) {
+          position += const Duration(seconds: 1);
+          controller.notePlaybackProgress(position);
+        }
+        recovered = controller.shouldRecoverFromStall(
+          recoveryBlocked: false,
+          appInForeground: true,
+          playing: true,
+          buffering: buffering,
+          loading: false,
+          playbackFailed: false,
+          position: position,
+          duration: const Duration(minutes: 24),
+          buffer: position + const Duration(milliseconds: 500),
+        );
+      }
+      expect(
+        recovered,
+        isTrue,
+        reason:
+            'Four-second buffering bursts must not keep a slow route forever',
+      );
+    },
+  );
+
+  test(
+    'one short buffering burst followed by steady progress is tolerated',
+    () {
+      var now = DateTime.utc(2026, 11, 3);
+      final controller = PlaybackRecoveryController(now: () => now);
+      addTearDown(controller.dispose);
+      var position = const Duration(seconds: 10);
+      controller.resetStallWatchdog(position: position);
+      for (var second = 0; second < 30; second++) {
+        now = now.add(const Duration(seconds: 1));
+        final buffering = second >= 5 && second < 9;
+        if (!buffering) {
+          position += const Duration(seconds: 1);
+          controller.notePlaybackProgress(position);
+        }
+        expect(
+          controller.shouldRecoverFromStall(
+            recoveryBlocked: false,
+            appInForeground: true,
+            playing: true,
+            buffering: buffering,
+            loading: false,
+            playbackFailed: false,
+            position: position,
+            duration: const Duration(minutes: 24),
+            buffer: position + const Duration(milliseconds: 500),
+          ),
+          isFalse,
+        );
+      }
+    },
+  );
+
   test('backup and current-line retries replace older recovery work', () async {
     final controller = PlaybackRecoveryController();
     addTearDown(controller.dispose);

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:anime/src/core/network/media_request_headers.dart';
 import 'package:anime/src/core/network/network_security.dart';
@@ -8,6 +9,47 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'native playback uses the verified transport without forwarding credentials to loopback',
+    () async {
+      final transport = NativeMediaTransport();
+      addTearDown(transport.dispose);
+      final media = await transport.prepare(
+        'https://media.example.test/video.m3u8?token=fixture',
+        format: 'HLS',
+        headers: {'Authorization': 'Bearer fixture', 'Cookie': 'fixture'},
+      );
+      final local = Uri.parse(media.uri);
+      expect(local.host, InternetAddress.loopbackIPv4.address);
+      expect(local.scheme, 'http');
+      expect(media.httpHeaders ?? {}, isEmpty);
+      expect(local.toString(), isNot(contains('fixture')));
+      await transport.dispose();
+      final client = http.Client();
+      addTearDown(client.close);
+      await expectLater(
+        client.get(local),
+        throwsA(isA<http.ClientException>()),
+      );
+    },
+    skip: !Platform.isAndroid && !Platform.isWindows,
+  );
+
+  test('local files and DASH keep their existing native path', () async {
+    final transport = NativeMediaTransport();
+    addTearDown(transport.dispose);
+    for (final resource in [
+      'file:///offline/video.mp4',
+      'https://media.example.test/video.mpd',
+    ]) {
+      final media = await transport.prepare(resource, headers: {});
+      expect(
+        media.uri,
+        resource.startsWith('file:') ? '/offline/video.mp4' : resource,
+      );
+    }
+  });
+
   test(
     'transport reports HTTP failure without media URLs or headers',
     () async {
