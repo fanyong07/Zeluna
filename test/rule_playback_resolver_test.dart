@@ -16,6 +16,60 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'an explicit open probe is not queued behind the inventory scan',
+    () async {
+      final inventoryGate = Completer<void>();
+      final inventoryStarted = Completer<void>();
+      var active = 0;
+      var maxActive = 0;
+      var backgroundStarted = 0;
+      final resolver = RulePlaybackResolver(
+        client: MockClient((request) async {
+          active++;
+          if (active > maxActive) maxActive = active;
+          try {
+            if (request.url.path != '/selected.mp4') {
+              backgroundStarted++;
+              if (backgroundStarted == 3) inventoryStarted.complete();
+              await inventoryGate.future;
+            }
+            return http.Response.bytes(
+              _mp4ProbeSample(),
+              200,
+              headers: {'content-type': 'video/mp4'},
+            );
+          } finally {
+            active--;
+          }
+        }),
+      );
+      final background = [
+        for (var i = 0; i < 6; i++)
+          resolver.verifyPlaybackLine(
+            line: _networkLine('https://cdn.example.com/scan-$i.mp4'),
+            enrichMetadata: false,
+          ),
+      ];
+      Future<PlaybackLine>? selected;
+      try {
+        await inventoryStarted.future.timeout(const Duration(seconds: 1));
+        selected = resolver.verifyPlaybackLine(
+          line: _networkLine('https://cdn.example.com/selected.mp4'),
+          enrichMetadata: false,
+          forceRefresh: true,
+        );
+        final result = await selected.timeout(const Duration(seconds: 1));
+        expect(result.clientVerified, isTrue);
+        expect(inventoryGate.isCompleted, isFalse);
+        expect(maxActive, lessThanOrEqualTo(4));
+      } finally {
+        inventoryGate.complete();
+        await Future.wait([...background, if (selected != null) selected]);
+      }
+    },
+  );
+
   for (final format in ['delimited', 'nested']) {
     test(
       'Kazumi API chapter $format preserves requested episode and probes media',
@@ -1296,7 +1350,7 @@ void main() {
   });
 
   test(
-    'initial playable probes are limited to four concurrent requests',
+    'inventory probes leave one of the four wire slots for playback',
     () async {
       final firstWaveStarted = Completer<void>();
       final releaseFirstWave = Completer<void>();
@@ -1332,7 +1386,7 @@ void main() {
           started++;
           active++;
           if (active > maxActive) maxActive = active;
-          if (started == 4) firstWaveStarted.complete();
+          if (started == 3) firstWaveStarted.complete();
           await releaseFirstWave.future;
           active--;
           return http.Response.bytes(
@@ -1351,14 +1405,14 @@ void main() {
       );
       await firstWaveStarted.future.timeout(const Duration(seconds: 1));
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(started, 4);
+      expect(started, 3);
       releaseFirstWave.complete();
 
       final lines = await resolving;
       expect(lines, hasLength(5));
       expect(lines.every((line) => line.available), isTrue);
       expect(started, 5);
-      expect(maxActive, 4);
+      expect(maxActive, 3);
     },
   );
 

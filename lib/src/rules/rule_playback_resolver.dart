@@ -85,7 +85,11 @@ class RulePlaybackResolver {
   late final _pages = RulePageClient(timeout: timeout);
   final Map<String, _TimedCacheEntry<_PlayableProbeResult>> _probeCache = {};
   final Map<String, Future<_PlayableProbeResult>> _probeRequests = {};
-  final _playableProbeLimiter = _AsyncLimiter(_maxConcurrentPlayableProbes);
+  // Keep one of the four wire slots for an explicit open/refresh. Inventory
+  // expansion can enqueue dozens of slow candidates and must not delay the
+  // selected route behind them. Total probe concurrency remains bounded.
+  final _playableProbeLimiter = _AsyncLimiter(_maxConcurrentPlayableProbes - 1);
+  final _foregroundProbeLimiter = _AsyncLimiter(1);
   final _metadataProbeLimiter = _AsyncLimiter(_maxConcurrentMetadataProbes);
   Future<AndroidCspCapabilities>? _cspCapabilitiesRequest;
   final Map<String, Future<void>> _cspPreparationRequests = {};
@@ -2315,7 +2319,10 @@ class RulePlaybackResolver {
     if (existing != null) return existing;
 
     final cacheGeneration = _cacheGeneration;
-    final request = _playableProbeLimiter.run(
+    final limiter = forceRefresh
+        ? _foregroundProbeLimiter
+        : _playableProbeLimiter;
+    final request = limiter.run(
       () => _performPlayableProbe(
         client,
         sourceUri: target,
