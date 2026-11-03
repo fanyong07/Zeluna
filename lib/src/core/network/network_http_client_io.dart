@@ -26,6 +26,9 @@ http.Client createNetworkHttpClient(NetworkRequestPolicy policy) {
           : 80;
       final race = raceConnections<Socket>(
         timeout: policy.requestTimeout,
+        // ConnectionTask.cancel must fail with SocketException so IOClient
+        // and callers can handle shutdown as a request failure, not StateError.
+        cancellationError: const SocketException('Connection cancelled'),
         close: (socket) => socket.destroy(),
         candidates: [
           for (final address in addresses)

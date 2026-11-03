@@ -19,6 +19,7 @@ ConnectionAttempt<T> raceConnections<T>({
   required void Function(T) close,
   Duration stagger = const Duration(milliseconds: 250),
   Duration timeout = const Duration(seconds: 12),
+  Object? cancellationError,
 }) {
   final result = Completer<T>();
   final attempts = <int, ConnectionAttempt<T>>{};
@@ -110,7 +111,7 @@ ConnectionAttempt<T> raceConnections<T>({
       close(winner as T);
       winner = null;
     }
-    fail(StateError('Connection cancelled'));
+    fail(cancellationError ?? StateError('Connection cancelled'));
     stop();
   });
 }

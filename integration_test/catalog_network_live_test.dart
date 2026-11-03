@@ -31,6 +31,9 @@ void main() {
         'zeluna-catalog-network-qa-',
       );
       Hive.init('${dir.path}/hive');
+      final oldOverrides = HttpOverrides.current;
+      HttpOverrides.global = _BlockDirectArtwork();
+      addTearDown(() => HttpOverrides.global = oldOverrides);
       var directCalls = 0;
       final direct = MockClient((_) async {
         directCalls++;
@@ -50,13 +53,18 @@ void main() {
           ),
         ],
       );
-      addTearDown(() async {
+      var cleanedUp = false;
+      Future<void> cleanUp() async {
+        if (cleanedUp) return;
+        cleanedUp = true;
         await tester.pumpWidget(const SizedBox.shrink());
         container.dispose();
         direct.close();
         await Hive.close();
         if (await dir.exists()) await dir.delete(recursive: true);
-      });
+      }
+
+      addTearDown(cleanUp);
       final state = await container
           .read(animeControllerProvider.future)
           .timeout(const Duration(seconds: 45));
@@ -127,6 +135,8 @@ void main() {
       // Only public timing/count evidence; never credentials or signed media URLs.
       // ignore: avoid_print
       print('CATALOG_NETWORK_QA ${jsonEncode(report)}');
+      // Dispose in the same error zone that owns the in-flight socket futures.
+      await cleanUp();
     },
     skip: !enabled,
   );
@@ -146,4 +156,18 @@ class _MemoryCredentials
   Future<void> delete(String key) async {
     _values.remove(key);
   }
+}
+
+// Image.network must also fail if it accidentally falls back to the blocked
+// origin. Backend traffic and normal certificate verification are unchanged.
+class _BlockDirectArtwork extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) =>
+      super.createHttpClient(context)
+        ..findProxy = (uri) {
+          if (const {'api.bgm.tv', 'lain.bgm.tv'}.contains(uri.host)) {
+            throw const SocketException('QA: direct artwork unreachable');
+          }
+          return 'DIRECT';
+        };
 }
