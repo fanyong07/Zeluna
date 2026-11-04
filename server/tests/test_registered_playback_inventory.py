@@ -20,8 +20,8 @@ def test_empty_work_results_still_show_every_registered_source(route, method, co
         response = TestClient(app).get(f"/api/v3/{route}/bangumi:123", params={"content_type": content_type})
     assert response.status_code == 200
     items = response.json()
-    assert len(items) == 35
-    assert len({item["inventory_source_id"] for item in items}) == 35
+    assert len(items) == 37
+    assert len({item["inventory_source_id"] for item in items}) == 37
     assert sum(item["diagnostic_status"] == "candidate_unadmitted" for item in items) == 0
     assert all(item["url"] == "" and item["available"] is False for item in items)
     assert all(item["queried"] is False for item in items)
@@ -78,7 +78,7 @@ def test_visibility_completion_never_changes_provider_admission_or_queries():
     discovery.assert_not_awaited()
     assert tuple(aggregator.provider_metadata) == before
     assert tuple(aggregator.source_inventory) == inventory
-    assert len(result) == 35
+    assert len(result) == 37
     assert all(item["headers"] == {} and item["url"] == "" for item in result)
     assert all("api" not in item and "source_address" not in item for item in result)
 
@@ -195,4 +195,4 @@ def test_removed_origins_cannot_reappear_from_old_positive_cache():
            for source in ["crawler:dm706", "crawler:dbku", "maccms:风车", "tvbox:暴风"]]
     result = complete_registered_playback_inventory(old)
     assert not any(item.get("url") for item in result)
-    assert len(result) == 35
+    assert len(result) == 37

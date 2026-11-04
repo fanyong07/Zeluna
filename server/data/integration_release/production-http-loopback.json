@@ -1,0 +1,139 @@
+{
+  "generated_at": "2026-11-04T14:36:05.036626+00:00",
+  "base": "http://127.0.0.1:8000",
+  "checks": {
+    "status": {
+      "status": 200,
+      "seconds": 0.124,
+      "enabled_ids": [
+        "aggregate.maccms",
+        "crawler.age",
+        "crawler.girigiri",
+        "crawler.anich",
+        "crawler.xgcartoon",
+        "crawler.yhdmm",
+        "crawler.jibi",
+        "crawler.yinghua2",
+        "crawler.wedm",
+        "crawler.xifan",
+        "crawler.nivod",
+        "crawler.ppnix",
+        "crawler.animeko",
+        "crawler.kazumi"
+      ]
+    },
+    "providers_enabled": {
+      "ok": true
+    },
+    "anich_episodes": {
+      "status": 200,
+      "seconds": 1.755,
+      "count": 12
+    },
+    "anich_vod": {
+      "status": 200,
+      "seconds": 0.017,
+      "lines": 10,
+      "cached": 10,
+      "hosts": [
+        "dc.xhscdn.com",
+        "lf16-faceu-file-sign.bytecdn.com",
+        "m3u8132.yhdmm3u8.top",
+        "p16-sg-default.akamaized.net",
+        "p6-faceu-img-sign.byteimg.com",
+        "play.xfvod.pro",
+        "sns-video-bd.xhscdn.com",
+        "v16-tts-video-download.titok-inc.com",
+        "v16.toutiao50.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "anich_cached_vod": {
+      "status": 200,
+      "seconds": 0.008,
+      "lines": 10,
+      "cached": 10,
+      "hosts": [
+        "dc.xhscdn.com",
+        "lf16-faceu-file-sign.bytecdn.com",
+        "m3u8132.yhdmm3u8.top",
+        "p16-sg-default.akamaized.net",
+        "p6-faceu-img-sign.byteimg.com",
+        "play.xfvod.pro",
+        "sns-video-bd.xhscdn.com",
+        "v16-tts-video-download.titok-inc.com",
+        "v16.toutiao50.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "animeko_episodes": {
+      "status": 200,
+      "seconds": 0.562,
+      "count": 28
+    },
+    "animeko_vod": {
+      "status": 200,
+      "seconds": 9.749,
+      "lines": 3,
+      "cached": 0,
+      "hosts": [
+        "ana.girigirilove.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "animeko_media_sample": {
+      "ok": true,
+      "stage": "media-sample",
+      "hops": [
+        {
+          "status": 206,
+          "bytes_read": 1024,
+          "content_type": "video/mp4",
+          "kind": "mp4",
+          "host": "ana.girigirilove.com"
+        }
+      ]
+    },
+    "kazumi_episodes": {
+      "status": 200,
+      "seconds": 0.83,
+      "count": 84,
+      "first_titles": [
+        "01",
+        "02",
+        "03"
+      ]
+    },
+    "kazumi_no_playback": {
+      "status": 200,
+      "seconds": 0.009,
+      "lines": 0,
+      "ok": true
+    },
+    "anich_media_sample": {
+      "ok": true,
+      "stage": "media-sample",
+      "hops": [
+        {
+          "status": 206,
+          "bytes_read": 1024,
+          "content_type": "video/mp4",
+          "kind": "mp4",
+          "host": "lf16-faceu-file-sign.bytecdn.com"
+        }
+      ]
+    }
+  }
+}

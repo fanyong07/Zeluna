@@ -61,6 +61,7 @@ from .config import (
     SOURCE_MAX_CONCURRENCY,
 )
 from .database import async_session
+from . import anich_direct
 from .managed_lines.service import (
     ManagedLineService,
     managed_line_service as default_managed_line_service,
@@ -127,6 +128,50 @@ def public_source_label(value: object) -> str:
             if tail:
                 return tail
     return text
+
+
+def public_playback_item(item: dict, *, keep_internal: bool = False) -> dict:
+    """Project cached routes through current mappings without exposing cache keys."""
+    result = dict(item)
+    original_url = str(result.get("url") or "")
+    wrap_url = str(result.get("_resolved_wrap_url") or "")
+    if not wrap_url:
+        wrap_url = anich_direct.origin_for(original_url) or ""
+    if not wrap_url and anich_direct.family_of(original_url) != anich_direct.AddressFamily.UNKNOWN:
+        wrap_url = original_url
+    entry = anich_direct.lookup_entry(wrap_url or original_url)
+    if wrap_url and not entry:
+        from .scrapers.anime.anich import _schedule_resolve
+        _schedule_resolve([wrap_url])
+    if entry:
+        result["url"] = entry[0]
+        if "expires_at" in result:
+            result["expires_at"] = int(entry[1])
+    elif wrap_url and wrap_url != original_url:
+        # A persisted direct URL may outlive its signature or health record.
+        result["url"] = wrap_url
+        if "expires_at" in result:
+            result["expires_at"] = 0
+        if "status" in result:
+            result.update(available=False, status=CLIENT_PROBE_REQUIRED, inventory_only=False,
+                          message="地址已回退，等待客户端验证")
+    if str(result.get("url") or "") != original_url:
+        from .scrapers.base import media_format_from_url
+        inferred = media_format_from_url(str(result["url"]))
+        if inferred != "auto":
+            result["format"] = inferred
+    if keep_internal and wrap_url:
+        result["_resolved_wrap_url"] = wrap_url
+    else:
+        result.pop("_resolved_wrap_url", None)
+    if "expires_at" in result and not result["expires_at"] and not wrap_url:
+        signed_expiry = anich_direct.parse_expiry(str(result.get("url") or ""), time.time())
+        if signed_expiry > 0:
+            result["expires_at"] = int(signed_expiry)
+    for key in ("source", "catalog_source", "source_name", "provider_name", "provider_id", "tag"):
+        if key in result:
+            result[key] = public_source_label(result[key])
+    return result
 
 
 #: 贴片广告高发的媒体主机片段(采集站及其 CDN)。
@@ -639,6 +684,7 @@ class PlaybackService:
         for item in items:
             if not isinstance(item, dict):
                 continue
+            item = public_playback_item(item)
             if not cls._is_safe_inventory_item(item):
                 continue
             try:
@@ -1418,7 +1464,10 @@ class PlaybackService:
             subject_id=stable_id,
             episode=episode,
             title=title,
-            lines_json=json.dumps(lines, ensure_ascii=False),
+            lines_json=json.dumps(
+                [public_playback_item(line, keep_internal=True) for line in lines],
+                ensure_ascii=False,
+            ),
             line_count=sum(
                 1
                 for line in lines
@@ -1578,6 +1627,7 @@ class PlaybackService:
         贴片,无谓重写只会白加一跳延迟。
         """
         url = (line.url or "").strip()
+        url = anich_direct.lookup(url) or url
         if not url or not needs_clean(url, line.format):
             return url
         try:
@@ -1600,8 +1650,12 @@ class PlaybackService:
 
     def _stamped_line_expiry(self, line: AggregatedVideoLine) -> int:
         """逐线过期时间;易腐的按需代取源在无签名可解析时单独盖短 TTL。"""
+        wrap_url = anich_direct.origin_for(line.url) or line.url
+        entry = anich_direct.lookup_entry(wrap_url)
+        if entry:
+            return int(entry[1])
         expiry = self._line_expiry(line.url)
-        if expiry == 0 and line.source == ANICH_LINE_SOURCE:
+        if expiry == 0 and (line.source == ANICH_LINE_SOURCE or line.source.startswith(("crawler:anich:", "crawler.anich:"))):
             ttl_hours = PLAYBACK_ANICH_LINE_TTL_HOURS
             if ttl_hours > 0:
                 return int(time.time() + ttl_hours * 3600)
@@ -1856,7 +1910,7 @@ class PlaybackService:
             return 0
         lowered = {str(key).lower(): values for key, values in query.items()}
         now = int(time.time())
-        for key in ("expires", "expire", "exp", "deadline", "wsTime"):
+        for key in ("x-expires", "expires", "expire", "exp", "deadline", "wsTime"):
             values = lowered.get(key.lower()) or []
             for raw in values:
                 value = str(raw).strip()

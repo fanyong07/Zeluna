@@ -15,13 +15,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
+from ... import config
 from ...title_matching import analyze_source_match
 from ..base import (
     INVALID_MEDIA_URL,
@@ -32,8 +35,11 @@ from ..base import (
     SubjectResult,
     VideoLine,
     classify_media_url,
+    media_format_from_url,
 )
 from . import anich_proto
+from . import anich_hosts
+from ... import anich_direct
 from .anich_proto import decode_variant_base64
 from .anich_transport import (
     AniChTransport,
@@ -44,6 +50,7 @@ from .anich_transport import (
     anich_latest_path,
     anich_search_path,
     anich_vod_path,
+    to_fetch_url,
 )
 
 # 画质词按优先级排列(与逆向套件 pick() 同序);label 同时是 quality 字段文本。
@@ -67,6 +74,80 @@ _PAREN_SPLIT_RE = re.compile(r"[()()【】\[\]]")
 _LEADING_NUMBER_RE = re.compile(r"^\d+\s*·\s*")
 _SEARCH_PAGE_LIMIT = 20
 _OWN_CDN_TOKENS = ANICH_OWN_CDN_HOST_TOKENS
+
+logger = logging.getLogger(__name__)
+
+#: 已在解析队列里的包装地址。同一地址会在多集、多次请求里反复出现,
+#: 不去重就会把同一条地址重复排队,出口只有一台小机器,扛不住雪崩。
+_RESOLVE_PENDING: set[str] = set()
+
+#: 持有后台任务引用。事件循环对任务只持弱引用,不自己留一份的话任务可能
+#: 在执行前就被 GC 掉 —— 表现就是"排了队却什么都没发生"。
+_RESOLVE_TASKS: set[asyncio.Task] = set()
+_RESOLVE_RETRY_AFTER: dict[str, float] = {}
+_RESOLVE_QUEUE_LIMIT = 128
+_RESOLVE_RETRY_SECONDS = 300.0
+_RESOLVE_BATCH_GATE = asyncio.Semaphore(1)
+
+
+def _schedule_resolve(wrap_urls: list[str]) -> None:
+    """对未解析的自建域地址发起**后台**解析。
+
+    刻意 fire-and-forget:解析要过一次外部出口,慢且可能失败,绝不能挂在
+    播放链路上。本次仍交付包装地址兜底(国内网络能直连解出来),解析完成
+    后下一次请求就能拿到真实地址。
+    """
+    now = time.monotonic()
+    for url, deadline in list(_RESOLVE_RETRY_AFTER.items()):
+        if deadline <= now:
+            _RESOLVE_RETRY_AFTER.pop(url, None)
+    remaining = max(0, _RESOLVE_QUEUE_LIMIT - len(_RESOLVE_PENDING))
+    fresh = [
+        url for url in dict.fromkeys(wrap_urls)
+        if url not in _RESOLVE_PENDING and url not in _RESOLVE_RETRY_AFTER
+    ][:remaining]
+    if not fresh:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _RESOLVE_PENDING.update(fresh)
+    task = loop.create_task(_resolve_in_background(fresh))
+    _RESOLVE_TASKS.add(task)
+    task.add_done_callback(_RESOLVE_TASKS.discard)
+
+
+async def _resolve_in_background(wrap_urls: list[str]) -> None:
+    """后台解析并在完成后让缓存立即生效。"""
+    from ... import anich_refresh
+    from ...database import async_session
+
+    try:
+        async with _RESOLVE_BATCH_GATE:
+            async with async_session() as session:
+                await anich_refresh.resolve_and_store(session, wrap_urls)
+    except Exception as error:  # noqa: BLE001 - 后台补解失败不得影响播放
+        logger.debug(
+            "后台解析自建地址失败(%d 条): %s", len(wrap_urls), type(error).__name__
+        )
+    finally:
+        _RESOLVE_PENDING.difference_update(wrap_urls)
+        deadline = time.monotonic() + _RESOLVE_RETRY_SECONDS
+        for url in wrap_urls:
+            _RESOLVE_RETRY_AFTER[url] = deadline
+
+
+async def close_resolver_tasks() -> None:
+    tasks = list(_RESOLVE_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    _RESOLVE_TASKS.clear()
+    _RESOLVE_PENDING.clear()
+
+
 #: 剧集表缓存时长。实测该请求约 1s,叠加串行节流后每次取流要多等两秒以上;
 #  而集数表在一集的生命周期内几乎不变,短期缓存是安全的。
 ANICH_EPISODES_CACHE_SECONDS = 900.0
@@ -120,10 +201,17 @@ def line_display_title(caption: str) -> str:
 
 
 def _is_own_cdn(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    # 上游自建 CDN 以子域形式出现在 cloudflare 托管网域下,
-    # 因此按"主域名子串命中"判定(与逆向套件 pick 一致)。
-    return any(token in host for token in _OWN_CDN_TOKENS)
+    return anich_direct.family_of(url) != anich_direct.AddressFamily.UNKNOWN
+
+
+def _fetch_url(url: str) -> str:
+    """取流前把中转的对外域名换成本机地址。
+
+    实现放在 ``anich_transport.to_fetch_url`` —— 清单**内部**的分片地址由
+    ``hls_clean._absolute`` 解析,那里也必须用同一套替换规则,否则线路池里
+    的清单地址换了、清单里嵌的分片地址还是公网域名,整条线路照样取不到。
+    """
+    return to_fetch_url(url)
 
 
 # 交付形态权重 —— **按实测延迟排序,不按画质**。
@@ -143,6 +231,14 @@ _SITE_HLS_REWARD = 45.0
 #  底分,使"慢但画质好"的线路不会掉到"同样慢且画质未知"的代取流之后。
 _DELIVERY_REWARD = 25.0
 _PROXY_REWARD = 20.0
+#: 贴片素材的底分。它比自建 CDN 还快,但它是**正片之外的视频**:
+#  用户在播放时看到的是广告。给低于任何正片形态的分数,靠前端换线策略
+#  兜底;真正的问题在上游数据,这里只保证它不会占据首播位。
+_AD_CREATIVE_REWARD = 5.0
+
+#: 大厂对象存储主机族。原表是手写短名单,现由 ``anich_hosts`` 的实测清单
+#  统一供数(新增 bytecdn / vzcdn / myqcloud / yximgs 等 8 个族),
+#  并保留原表以防清单回退时判据整体失效。
 _OBJECT_STORE_TOKENS = (
     "adkwai.com",
     "kwai.net",
@@ -150,6 +246,7 @@ _OBJECT_STORE_TOKENS = (
     "xiaohongshu.com",
     "scsusercontent.cn",
     "myqcloud.com",
+    *anich_hosts.OBJECT_STORE_HOSTS,
 )
 # 线上混入的转发/过滤入口:脚本端点带 query 参数,不是媒体本体。
 # 例:player.91ju.cc/wgart/api.php?action=ad_filter_proxy&video_url=...
@@ -165,16 +262,26 @@ def _is_script_endpoint(url: str) -> bool:
 
 
 def line_rank(url: str, caption: str) -> float:
-    """服务端排序分;分数越高越优先。**主信号是预期延迟,不是画质。**"""
+    """服务端排序分;分数越高越优先。**主信号是预期延迟,不是画质。**
+
+    判据顺序:先按 ``anich_hosts`` 的实测主机族定性(它对"贴片目录"这类
+    路径形状有独立判据,域名级正则区分不了),再退回到本模块的历史
+    子串名单,最后才对画质破平。
+    """
     host = (urlparse(url).hostname or "").lower()
     lowered = url.lower()
+    # 贴片素材优先定性:它与大厂对象存储同域同 CDN,只有路径形状能区分
+    if anich_hosts.is_ad_creative(url):
+        return _AD_CREATIVE_REWARD
     if any(token in host for token in _OBJECT_STORE_TOKENS):
         score = _OBJECT_STORE_REWARD          # 大厂 CDN,实测最快
     elif any(token in host for token in ANICH_OWN_CDN_HOST_TOKENS):
         # 自建 CDN 的两种形态都偏慢:官方二压目录 vs 边缘代取流
         score = _DELIVERY_REWARD if "vod-cdn" in host else _PROXY_REWARD
-    elif ".m3u8" in lowered:
+    elif anich_hosts.classify(url) is anich_hosts.HostRole.SITE_HLS:
         score = _SITE_HLS_REWARD              # 采集站原始 HLS,实测次快
+    elif ".m3u8" in lowered:
+        score = _SITE_HLS_REWARD
     else:
         score = _PROXY_REWARD
     # 画质只在同类内破平(想要二压画质仍可手动切,线路都在列表里)
@@ -307,6 +414,8 @@ class AniChScraper(BaseScraper):
 
         scored: list[tuple[float, int, VideoLine]] = []
         seen_urls: set[str] = set()
+        #: 本轮遇到、但缓存里还没有的自建域地址。函数末尾统一丢给后台补解。
+        unresolved_wraps: list[str] = []
         for index, item in enumerate(raw_items):
             try:
                 url = decode_variant_base64(item.get("url_raw") or "")
@@ -331,15 +440,26 @@ class AniChScraper(BaseScraper):
             # 上游给的线路标识(hb-10 / jk-18 / xk-12…)。直接作为该线路的
             # 来源名:它天然唯一,且不暴露聚合服务本身的名字。
             tag = (item.get("source") or "").strip()
+            # 自建域地址是 302 包装层,而本部署出口被它按 IP 封禁
+            # (Cloudflare Error 1006),原样交给客户端只会得到 403。
+            # 已解析且首字节探活通过时优先交付真实地址;不同客户端网络
+            # 仍可能得到不同结果,缓存命中不代表整片已验证。
+            delivery_url = url
+            if _is_own_cdn(url):
+                resolved = anich_direct.lookup(url)
+                if resolved:
+                    delivery_url = resolved
+                else:
+                    unresolved_wraps.append(url)
             scored.append(
                 (
-                    line_rank(url, caption),
+                    line_rank(delivery_url, caption),
                     index,
                     VideoLine(
-                        url=url,
+                        url=_fetch_url(delivery_url),
                         title=line_display_title(caption),
                         quality=caption_quality(caption),
-                        format=declared_format,
+                        format=(media_format_from_url(delivery_url) if delivery_url != url else declared_format),
                         headers={},
                         source_name=tag or f"line-{index + 1}",
                     ),
@@ -356,6 +476,8 @@ class AniChScraper(BaseScraper):
             seen_names[line.source_name] = count
             if count > 1:
                 line.source_name = f"{line.source_name}-{count}"
+        # 先返回、后补解:播放不被解析拖慢,缓存在下一次请求生效。
+        _schedule_resolve(unresolved_wraps)
         return lines
 
     async def _episodes(self, bangumi_id: int) -> list[dict]:

@@ -1,0 +1,163 @@
+{
+  "time": 1793804281.9966486,
+  "refresh_seconds": 21600.0,
+  "reverify_seconds": 86400.0,
+  "resolver_proxy_host": "127.0.0.1",
+  "resolver_proxy_port": 7899,
+  "mappings": {
+    "total": 23,
+    "healthy": 16,
+    "memory_loaded": 16,
+    "unsigned": 10,
+    "signed": 13,
+    "recent_updates": 13,
+    "recent_verified": 7,
+    "max_fail_count": 5,
+    "families": {
+      "cloudflare": 21,
+      "edgeone": 2
+    },
+    "destination_hosts": [
+      "lf16-faceu-file-sign.bytecdn.com",
+      "lf19-faceu-file-sign.bytecdn.com",
+      "p3-faceu-img-sign.byteimg.com",
+      "p6-faceu-img-sign.byteimg.com",
+      "v16-tts-video-download.titok-inc.com",
+      "v16.topbuzzcdn.com",
+      "v16.toutiao50.com"
+    ]
+  },
+  "database": {
+    "integrity": "ok",
+    "migration": "0016_anich_resolved_addresses"
+  },
+  "bindings_for_sample": [],
+  "cached_samples": [
+    {
+      "subject_id": "bangumi:400602",
+      "episode": 1,
+      "line_count": 25,
+      "verified_at": 1793804192.204426
+    },
+    {
+      "subject_id": "crawler:anich:32564",
+      "episode": 2,
+      "line_count": 6,
+      "verified_at": 1793804160.1945293
+    },
+    {
+      "subject_id": "bangumi:27364",
+      "episode": 1,
+      "line_count": 20,
+      "verified_at": 1793803480.0479424
+    },
+    {
+      "subject_id": "bangumi:27364",
+      "episode": 2,
+      "line_count": 20,
+      "verified_at": 1793803474.6151092
+    },
+    {
+      "subject_id": "bangumi:513878",
+      "episode": 1,
+      "line_count": 3,
+      "verified_at": 1793803451.6661942
+    },
+    {
+      "subject_id": "bangumi:622288",
+      "episode": 2,
+      "line_count": 24,
+      "verified_at": 1793803437.6592095
+    },
+    {
+      "subject_id": "bangumi:622288",
+      "episode": 1,
+      "line_count": 25,
+      "verified_at": 1793803424.404258
+    },
+    {
+      "subject_id": "bangumi:400602",
+      "episode": 3,
+      "line_count": 24,
+      "verified_at": 1793803382.2637844
+    },
+    {
+      "subject_id": "bangumi:309311",
+      "episode": 1,
+      "line_count": 11,
+      "verified_at": 1793803323.8642352
+    },
+    {
+      "subject_id": "bangumi:1728",
+      "episode": 2,
+      "line_count": 3,
+      "verified_at": 1793803260.217787
+    },
+    {
+      "subject_id": "bangumi:1728",
+      "episode": 1,
+      "line_count": 2,
+      "verified_at": 1793802191.8596709
+    },
+    {
+      "subject_id": "bangumi:55770",
+      "episode": 1,
+      "line_count": 21,
+      "verified_at": 1793802178.619336
+    }
+  ],
+  "catalog_candidates": [
+    {
+      "stable_id": "bangumi:400602",
+      "title": "葬送的芙莉莲",
+      "original_title": "葬送のフリーレン"
+    },
+    {
+      "stable_id": "bangumi:459283",
+      "title": "葬送的芙莉莲 ～●●的魔法～",
+      "original_title": "葬送のフリーレン ～●●の魔法～"
+    },
+    {
+      "stable_id": "bangumi:515759",
+      "title": "葬送的芙莉莲 第二季",
+      "original_title": "葬送のフリーレン 第2期"
+    },
+    {
+      "stable_id": "bangumi:549563",
+      "title": "葬送的芙莉莲 ～●●的魔法～2期",
+      "original_title": "葬送のフリーレン ～●●の魔法～2期"
+    },
+    {
+      "stable_id": "bangumi:638133",
+      "title": "葬送的芙莉莲 第三季 黄金乡篇",
+      "original_title": "葬送のフリーレン 第3期【黄金郷編】"
+    },
+    {
+      "stable_id": "tmdb:tv:209867",
+      "title": "葬送的芙莉莲",
+      "original_title": "葬送のフリーレン"
+    },
+    {
+      "stable_id": "tmdb:tv:327813",
+      "title": "葬送的芙莉莲",
+      "original_title": "葬送のフリーレン"
+    }
+  ],
+  "fresh_vod": {
+    "episode": 2,
+    "status": 200,
+    "seconds": 0.038,
+    "lines": 6,
+    "cached": 6,
+    "wrapper_count": 0,
+    "hosts": [
+      "dc.xhscdn.com",
+      "m3u8132.yhdmm3u8.top",
+      "play.xfvod.pro",
+      "sns-video-bd.xhscdn.com",
+      "v16.topbuzzcdn.com"
+    ],
+    "private_keys": 0,
+    "label_leaks": 0
+  }
+}

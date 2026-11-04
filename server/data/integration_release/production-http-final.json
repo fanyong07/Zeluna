@@ -1,0 +1,180 @@
+{
+  "generated_at": "2026-11-04T14:55:32.358611+00:00",
+  "base": "https://api.zeluna.top:8443",
+  "checks": {
+    "status": {
+      "status": 200,
+      "seconds": 1.466,
+      "enabled_ids": [
+        "aggregate.maccms",
+        "crawler.age",
+        "crawler.girigiri",
+        "crawler.anich",
+        "crawler.xgcartoon",
+        "crawler.yhdmm",
+        "crawler.jibi",
+        "crawler.yinghua2",
+        "crawler.wedm",
+        "crawler.xifan",
+        "crawler.nivod",
+        "crawler.ppnix",
+        "crawler.animeko",
+        "crawler.kazumi"
+      ]
+    },
+    "providers_enabled": {
+      "ok": true
+    },
+    "anich_episodes": {
+      "status": 200,
+      "seconds": 0.807,
+      "count": 12
+    },
+    "anich_vod": {
+      "status": 200,
+      "seconds": 0.471,
+      "lines": 10,
+      "cached": 10,
+      "hosts": [
+        "dc.xhscdn.com",
+        "lf16-faceu-file-sign.bytecdn.com",
+        "m3u8132.yhdmm3u8.top",
+        "p16-sg-default.akamaized.net",
+        "p6-faceu-img-sign.byteimg.com",
+        "play.xfvod.pro",
+        "sns-video-bd.xhscdn.com",
+        "v16-tts-video-download.titok-inc.com",
+        "v16.toutiao50.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "anich_cached_vod": {
+      "status": 200,
+      "seconds": 1.087,
+      "lines": 10,
+      "cached": 10,
+      "hosts": [
+        "dc.xhscdn.com",
+        "lf16-faceu-file-sign.bytecdn.com",
+        "m3u8132.yhdmm3u8.top",
+        "p16-sg-default.akamaized.net",
+        "p6-faceu-img-sign.byteimg.com",
+        "play.xfvod.pro",
+        "sns-video-bd.xhscdn.com",
+        "v16-tts-video-download.titok-inc.com",
+        "v16.toutiao50.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "animeko_episodes": {
+      "status": 200,
+      "seconds": 1.155,
+      "count": 28
+    },
+    "animeko_vod": {
+      "status": 200,
+      "seconds": 0.394,
+      "lines": 3,
+      "cached": 3,
+      "hosts": [
+        "ana.girigirilove.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    },
+    "animeko_media_sample": {
+      "ok": true,
+      "stage": "media-sample",
+      "hops": [
+        {
+          "status": 206,
+          "bytes_read": 1024,
+          "content_type": "video/mp4",
+          "kind": "mp4",
+          "host": "ana.girigirilove.com"
+        }
+      ]
+    },
+    "kazumi_episodes": {
+      "status": 200,
+      "seconds": 1.389,
+      "count": 84,
+      "first_titles": [
+        "01",
+        "02",
+        "03"
+      ]
+    },
+    "kazumi_no_playback": {
+      "status": 200,
+      "seconds": 0.365,
+      "lines": 0,
+      "ok": true
+    },
+    "anich_media_sample": {
+      "ok": true,
+      "stage": "media-sample",
+      "hops": [
+        {
+          "status": 206,
+          "bytes_read": 1024,
+          "content_type": "video/mp4",
+          "kind": "mp4",
+          "host": "lf16-faceu-file-sign.bytecdn.com"
+        }
+      ]
+    },
+    "stable_v3": {
+      "status": 200,
+      "seconds": 0.901,
+      "lines": 40,
+      "cached": 40,
+      "hosts": [
+        "1080p.huyall.com",
+        "api.zeluna.top",
+        "bfikuncdn.com",
+        "cdn.wlcdn88.com",
+        "cdn4.ryplay4.com",
+        "dl.playxf.top",
+        "hd.kuktxu.com",
+        "hn.bfvvs.com",
+        "play.hhuus.com",
+        "play.modujx10.com",
+        "play.subokk.com",
+        "play.xfvod.pro",
+        "play.xluuss.com",
+        "ukzy.ukubf4.com",
+        "v.cdnlz14.com",
+        "v.gsuus.com",
+        "v3.ppqrrs.com",
+        "v3.tlkqc.com",
+        "v3.zuidazym3u8.com",
+        "vip.dytt-hot.com",
+        "vip.ffzy-plays.com",
+        "vod1.maowushi.com",
+        "vodcnd13.ky32e.com",
+        "vv.jisuzyv.com"
+      ],
+      "wrappers": 0,
+      "private_urls": 0,
+      "media_proxy_urls": 0,
+      "internal_label_leaks": 0,
+      "private_cache_keys": 0
+    }
+  },
+  "acceptance": {
+    "ok": true,
+    "failures": []
+  }
+}

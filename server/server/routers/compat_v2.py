@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..aggregator import aggregator
 from ..database import PlaybackCache, upsert_playback_cache
+from ..playback import public_playback_item
 from ..dependencies import get_session
 from ..m3u8_resolver import resolver as m3u8_resolver
 from ..config import M3U8_SEARCH_ENABLED, PLAYBACK_PROVIDER_IDS
+from ..scrapers.anime.anich_transport import AniChUpstreamError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v2", tags=["compat-v2"])
@@ -56,7 +58,14 @@ async def unified_search(
 
 @router.get("/episodes/{subject_id:path}")
 async def unified_episodes(subject_id: str) -> JSONResponse:
-    episodes = await aggregator.get_episodes(subject_id)
+    try:
+        episodes = await aggregator.get_episodes(subject_id)
+    except AniChUpstreamError:
+        return JSONResponse(
+            {"message": "来源暂时繁忙，请稍后重试"},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
     return JSONResponse(
         [
             {
@@ -92,27 +101,35 @@ async def unified_vod(
             cached_lines = json.loads(row.lines_json)
             return JSONResponse(
                 [
-                    {
+                    public_playback_item({
                         "url": line.get("url", ""),
+                        "_resolved_wrap_url": line.get("_resolved_wrap_url", ""),
                         "title": line.get("title", ""),
                         "quality": line.get("quality", ""),
                         "format": line.get("format", ""),
                         "source": line.get("source", ""),
                         "headers": line.get("headers", {}),
                         "cached": True,
-                    }
+                    })
                     for line in cached_lines
                 ]
             )
         except (json.JSONDecodeError, TypeError):
             pass
 
-    lines = await aggregator.resolve_verified_lines(
-        subject_id,
-        episode,
-        title,
-        verify=True,
-    )
+    try:
+        lines = await aggregator.resolve_verified_lines(
+            subject_id,
+            episode,
+            title,
+            verify=True,
+        )
+    except AniChUpstreamError:
+        return JSONResponse(
+            {"message": "来源暂时繁忙，请稍后重试"},
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
     lines_data = [
         {
             "url": line.url,
@@ -131,14 +148,17 @@ async def unified_vod(
                 subject_id=subject_id,
                 episode=episode,
                 title=title,
-                lines_json=json.dumps(lines_data, ensure_ascii=False),
+                lines_json=json.dumps(
+                    [public_playback_item(line, keep_internal=True) for line in lines_data],
+                    ensure_ascii=False,
+                ),
                 line_count=len(lines_data),
                 verified_at=time.time(),
             )
         except Exception as error:
             logger.warning("Playback cache write failed: %s", error)
 
-    return JSONResponse([{**line, "cached": False} for line in lines_data])
+    return JSONResponse([public_playback_item({**line, "cached": False}) for line in lines_data])
 
 
 @router.get("/home")

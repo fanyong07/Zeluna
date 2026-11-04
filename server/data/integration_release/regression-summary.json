@@ -1,0 +1,28 @@
+{
+  "date": "2026-11-04",
+  "full_suite": {
+    "command": ".venv/Scripts/python.exe -m pytest tests -q -p no:cacheprovider --tb=short",
+    "passed": 1222,
+    "subtests_passed": 309,
+    "warnings": 1,
+    "warning_type": "StarletteDeprecationWarning",
+    "seconds": 479.16,
+    "exit_code": 0,
+    "note": "Full run precedes three additional compat_v2 boundary tests; do not add overlapping targeted totals to this count."
+  },
+  "final_targeted_suite": {
+    "files": ["tests/test_api_playback.py", "tests/test_anich_direct.py", "tests/test_anich_scraper.py", "tests/test_playback_repository.py", "tests/test_integration_http_probe.py", "tests/test_media_sample.py"],
+    "passed": 70,
+    "subtests_passed": 4,
+    "seconds": 26.43,
+    "exit_code": 0
+  },
+  "provider_targeted_suites": {
+    "animeko": {"passed": 55, "seconds": 8.43},
+    "kazumi": {"passed": 112, "seconds": 13.44},
+    "combined_integrations_before_final_patch": {"passed": 224, "subtests_passed": 2, "seconds": 33.51}
+  },
+  "ruff_selected_sources_tools_tests": "passed",
+  "production_acceptance_report": "production-http-final.json",
+  "production_file_and_service_attestation": "production-attestation.json"
+}

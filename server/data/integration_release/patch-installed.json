@@ -1,0 +1,19 @@
+{
+  "files": {
+    "server/playback.py": "1788a05d6c63d82bbf2471fabcec0a92524e40c3cbf1711f946c4347c8a27c45",
+    "server/routers/compat_v2.py": "ea1efa59e0cbbb8be66d864f34cef7e986a7a8e5dfb7aace05799ad8d27e1612",
+    "server/scrapers/anime/anich.py": "97e016905e628b60fe5bf49852b6d577d0ffd9019ec91ad07ed77372591781f5",
+    "server/config.py": "387e13fd4c10410e72fd7ac6f2614dc2f0c7b6ea5f299d0c4a7fb10a2e0f6d8f",
+    "server/anich_direct.py": "c95f633a25cd42d51b8aa83ca43de4651d17bf3177e60bfb18d686de779d0745",
+    "tools/verify_integrations_http.py": "8a8cf879cbafebdd0e699d282f23faad4dd4b32f91f44da94a8339d029c8b2f0"
+  },
+  "before_sha256": {
+    "server/playback.py": "fe48f743056d3d2d2da429f2dc6cfd87d1d27c808fec8209e206665c72aa51b9",
+    "server/routers/compat_v2.py": "e5123ebbbf75c07c9de8ef67e179c0c8bd4e73afaed07d2da07716002c89ac18",
+    "server/scrapers/anime/anich.py": "bf5130870e9c03f5fc6ef36e695ec8bcd88a375913946187ab74b09bc578217c",
+    "server/config.py": "aef7117a1ce65647da479bcf237f3423a0e0587b7fdc9cfaed2f3611bd6e2ee3",
+    "server/anich_direct.py": "2b64a339598802db9d43ae7af2f1ce9e34bb3730fc5ba3c7e79844113b9b1358",
+    "tools/verify_integrations_http.py": "8a8cf879cbafebdd0e699d282f23faad4dd4b32f91f44da94a8339d029c8b2f0"
+  },
+  "sha256": "97a5032a6f73e7376b406238e1189df38bb634f2f887cdd382e13ea61b137408"
+}

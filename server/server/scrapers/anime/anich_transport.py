@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -33,8 +33,7 @@ ANICH_FALLBACK_BASES: tuple[str, ...] = (
     "https://ani.emmmm.eu.org",
     "https://api.emmmm.eu.org.cdn.cloudflare.net",
 )
-ANICH_USER_AGENT = "cx.xs.open Android 1.5.23"
-# 上游自建 CDN 主域判据(线路排序加分用);cloudflare 托管别名由子串命中。
+ANICH_USER_AGENT = "cx.xs.open Android 1.5.23"# 上游自建 CDN 主域判据(线路排序加分用);cloudflare 托管别名由子串命中。
 ANICH_OWN_CDN_HOST_TOKENS: tuple[str, ...] = (
     "vod-cdn.sends.eu.org",
     "v-cdn.emmmm.eu.org",
@@ -60,6 +59,41 @@ def anich_episodes_path(bangumi_id: int | str) -> str:
 def anich_vod_path(bangumi_id: int | str, episode_sort: int) -> str:
     """注意第二个参数是跨季全局集号(``sort``),不是季内序号。"""
     return f"/vod/{int(bangumi_id)}/{int(episode_sort)}"
+
+
+def to_fetch_url(url: str) -> str:
+    """把中转交付的地址换成本机中转地址再取流。
+
+    中转给播放地址时会套上它自己的**对外**域名,因为客户端在公网那头必须
+    解析得到。但后端取流用的是同一个地址 —— 若照它去取,请求会绕一圈公网
+    DNS 与 TLS 再回到本机;域名解析不了时(实测该域名在这台机器上只解析出
+    IPv6,而本机没有 IPv6 出口)整条播放直接失败。
+
+    必须覆盖**两处**,缺一处就漏:
+      * 线路池里那条清单地址本身(``anich.get_video_urls``);
+      * 清单**内部**解析出来的分片地址(``hls_clean._absolute``)。
+
+    只换 scheme、host、port,路径与查询原样保留 —— 这样两端路径前缀不同也
+    不会拼错,分片地址、token、签名都不受影响。
+    """
+    from ... import config
+
+    public = config.ANICH_RELAY_PUBLIC_BASE
+    local = config.ANICH_RELAY_FETCH_BASE
+    if not public or not local or not url:
+        return url
+    outer = urlparse(public)
+    inner = urlparse(local)
+    if not outer.hostname or not inner.hostname:
+        return url
+    parsed = urlparse(url)
+    if parsed.hostname != outer.hostname or parsed.port != outer.port:
+        return url
+    authority = f"{inner.scheme}://{inner.hostname}"
+    if inner.port and inner.port != (443 if inner.scheme == "https" else 80):
+        authority += f":{inner.port}"
+    suffix = f"?{parsed.query}" if parsed.query else ""
+    return f"{authority}{parsed.path}{suffix}"
 
 
 class AniChUpstreamError(RuntimeError):
@@ -108,15 +142,39 @@ class AniChTransport:
         )
         self._clock = clock
         self._sleep = sleep_func
+        # 走自建中转时只发一个地址,不再直连上游;中转侧负责取数与容灾。
+        relay = config.ANICH_RELAY_BASE
+        self._relay = relay
+        client_headers = {"User-Agent": ANICH_USER_AGENT}
+        if relay and config.ANICH_RELAY_KEY:
+            client_headers["X-Relay-Key"] = config.ANICH_RELAY_KEY
         self._client = httpx.AsyncClient(
-            headers={"User-Agent": ANICH_USER_AGENT},
+            headers=client_headers,
             timeout=self._timeout,
             transport=transport,
         )
+        if relay:
+            self._bases = (relay,)
+            # 上游节流由中转统一保证;本地不再叠加长间隔,否则白等。
+            self._interval = (
+                config.ANICH_RELAY_MIN_INTERVAL_SECONDS
+                if interval is None
+                else interval
+            )
         self._dispatch_lock = asyncio.Lock()
         self._last_dispatch_at: float | None = None
         self._working_base: str | None = None
         self._base_cooldown_until: dict[str, float] = {}
+
+    @property
+    def base(self) -> str | None:
+        """当前工作主域(诊断用;不得写入日志或对外元数据)。"""
+        return self._working_base
+
+    @property
+    def via_relay(self) -> bool:
+        """是否经由自建中转取数。"""
+        return bool(self._relay)
 
     @property
     def base(self) -> str | None:

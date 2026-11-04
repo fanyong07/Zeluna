@@ -38,11 +38,13 @@ from .scrapers.direct_stream import NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
 from .scrapers.anime.age import AgeScraper
 from .scrapers.anime.anich import AniChScraper
+from .scrapers.anime.animeko import AnimekoScraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import (
     OriginSearchThrottledError,
     create_html_direct_anime_scrapers,
 )
+from .scrapers.anime.kazumi import KazumiScraper
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.anime.yhdmm import YhdmmScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
@@ -120,6 +122,7 @@ DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 _PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {
     "anich": 8.0, "xifan": 16.0, "xgcartoon": 6.0, "girigiri": 6.0,
     "yhdmm": 10.0, "jibi": 6.0, "yinghua2": 6.0, "wedm": 6.0,
+    "animeko": 30.0, "kazumi": 18.0,
 }
 #: 该源对短标题命中良好,对带季号的长关键词几乎全是噪声,所以要多给一个
 #  别名的余量(别名序里基础标题通常排在带季号的之后)。
@@ -457,6 +460,13 @@ class ContentAggregator:
                 **create_html_direct_anime_scrapers(),
                 "nivod": NivodScraper(),
                 "ppnix": PpnixScraper(),
+                # animeko-subs 规则库(21 个站点共用一个 provider)。默认关闭:
+                # 规则库要联网拉,打开方式见 config.ANIMEKO_ENABLED。
+                "animeko": AnimekoScraper(),
+                # Kazumi 规则库(18 条活跃规则共用一个 provider;规则快照随
+                # 仓库走,不再额外联网拉规则)。默认关闭:一个 provider 背后
+                # 是十几个外部站点,打开方式见 config.KAZUMI_ENABLED。
+                "kazumi": KazumiScraper(),
             }
             if crawler_scrapers is None
             else dict(crawler_scrapers)
@@ -511,6 +521,8 @@ class ContentAggregator:
                 family="crawler",
                 display_name=provider_id,
                 adapter=adapter,
+                capabilities=("search", "detail") if provider_id == "kazumi"
+                else ("search", "detail", "resolve", "latest"),
                 enabled=self._provider_enabled(f"crawler.{provider_id}"),
             )
 

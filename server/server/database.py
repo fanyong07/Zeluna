@@ -697,6 +697,57 @@ class SourceBinding(Base):
     )
 
 
+class AniChResolvedAddress(Base):
+    """自建 CDN 包装地址 → 真实媒体地址的解析缓存。
+
+    线路池里的自建域地址(v-cdn.emmmm.eu.org / vod-cdn.sends.eu.org)是
+    302 包装层,不是媒体本体。本部署的出口 IP 被该层按 IP 封禁
+    (Cloudflare Error 1006),所以解析必须借独立出口完成,结果缓存在此,
+    播放时直接取真实地址,客户端不再接触包装域名。
+
+    两种时效必须区分清楚:
+      * ``expires_at = 0`` —— 重定向未带签名,按长期有效处理;
+      * ``expires_at > 0`` —— 签名到期时刻(emmmm 族实测约 30 天)。
+    用 0 表示"无签名"而不是"未知",读取侧才能把两者分开。
+
+    这张表只存地址,永远不含媒体字节。
+    """
+
+    __tablename__ = "anich_resolved_addresses"
+    __table_args__ = (
+        Index("uq_anich_resolved_wrap_url", "wrap_url", unique=True),
+        Index("ix_anich_resolved_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    wrap_url: Mapped[str] = mapped_column(Text)
+    real_url: Mapped[str] = mapped_column(Text)
+    host_family: Mapped[str] = mapped_column(
+        String(30), default="", server_default=""
+    )
+    resolved_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    expires_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    verify_ok: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    verified_at: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default="0"
+    )
+    fail_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+    last_error: Mapped[str] = mapped_column(
+        String(200), default="", server_default=""
+    )
+    latency_ms: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0"
+    )
+
+
 class SourceHealth(Base):
     """采集站的长期健康分，用于自动降权和恢复。"""
 

@@ -178,8 +178,13 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(line_display_title("10(繁体中文)"), "繁体中文")
 
     def test_line_rank_prefers_low_latency_delivery(self):
-        """排序主信号是实测延迟:大厂对象存储 ~400ms,自建 CDN ~2000ms+。"""
-        object_store = line_rank("https://v1.adkwai.com/bs2/adVideoLp/x", "")
+        """排序主信号是实测延迟:大厂对象存储 ~400ms,自建 CDN ~2000ms+。
+
+        注意对象存储的样本**不能**再用 ``/bs2/adVideoLp/``:实测该路径是
+        快手广告投放目录(97 条 adkwai 线路里 96 条在此),它在 2026-11
+        的清单核对后被单独定性为贴片素材,不再代表正片交付速度。
+        """
+        object_store = line_rank("https://v1.adkwai.com/bs2/normal/x.mp4", "")
         site_hls = line_rank("https://m3u8.site.example/a/index.m3u8", "")
         own_cdn = line_rank(
             "https://a.vod-cdn.sends.eu.org.cdn.cloudflare.net/v/x",
@@ -190,8 +195,21 @@ class PureFunctionTests(unittest.TestCase):
         self.assertGreater(site_hls, own_cdn)
         self.assertGreater(own_cdn, proxy)  # 二压带画质加分,略高于纯代取流
 
+    def test_ad_creative_delivery_ranks_below_every_real_line(self):
+        """贴片素材不得占据首播位 —— 它比其他形态都快,但不是正片。"""
+        ad = line_rank("https://v1.adkwai.com/bs2/adVideoLp/x", "")
+        for real in (
+            line_rank("https://v1.adkwai.com/bs2/normal/x.mp4", ""),
+            line_rank("https://m3u8.site.example/a/index.m3u8", ""),
+            line_rank("https://v-cdn.emmmm.eu.org/video/x", ""),
+            line_rank(
+                "https://vod-cdn.sends.eu.org.cdn.cloudflare.net/video/zs/x", ""
+            ),
+        ):
+            self.assertLess(ad, real)
+
     def test_quality_only_breaks_ties_within_a_delivery_class(self):
-        base = "https://v1.adkwai.com/bs2/adVideoLp/"
+        base = "https://v1.adkwai.com/bs2/normal/"
         premium = line_rank(base + "a", "第1集(官方简中-全高清-1080P)")
         plain = line_rank(base + "b", "第1集")
         self.assertGreater(premium, plain)
@@ -206,6 +224,10 @@ class PureFunctionTests(unittest.TestCase):
 class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.handler = _Handler()
+        from unittest.mock import patch
+        self.resolver_patch = patch("server.scrapers.anime.anich._schedule_resolve")
+        self.resolver_patch.start()
+        self.addCleanup(self.resolver_patch.stop)
         self.scraper = _scraper(self.handler)
 
     async def asyncTearDown(self):
@@ -243,6 +265,18 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(all(line.headers == {} for line in lines))
 
+    async def test_resolved_wrapper_uses_destination_format(self):
+        from server import anich_direct
+        wrapper = _VOD_LINES[0][0]
+        destination = "https://cdn.example/resolved.mp4"
+        anich_direct.replace_cache({wrapper: (destination, 0)})
+        try:
+            lines = await self.scraper.get_video_urls(str(BANGUMI_ID), 1)
+            resolved = next(line for line in lines if line.url == destination)
+            self.assertEqual(resolved.format, "mp4")
+        finally:
+            anich_direct.replace_cache({})
+
     async def test_script_forwarding_endpoint_is_rejected(self):
         subject = _scraper(_Handler(), max_lines=12)
         try:
@@ -270,12 +304,17 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await subject.aclose()
         hosts = [line.url.split("/")[2] for line in lines]
-        # 实测延迟序:大厂对象存储 < 采集站 HLS < 自建 CDN/代取流
-        self.assertIn("adkwai", hosts[0])
+        # 实测延迟序:采集站 HLS < 自建 CDN/代取流
         self.assertTrue(
-            any("playxf" in h or "m3u8" in h for h in hosts[1:3]),
-            f"采集站 HLS 应排在自建 CDN 之前: {hosts}",
+            any("playxf" in h or "m3u8" in h for h in hosts[:2]),
+            f"采集站 HLS 应排在最前: {hosts}",
         )
+        # 贴片投放路径(adkwai /bs2/adVideoLp/)必须沉到正片之后
+        self.assertNotIn("adkwai", hosts[0])
+        ad_positions = [i for i, line in enumerate(lines) if "adVideoLp" in line.url]
+        real_positions = [i for i, line in enumerate(lines) if "adVideoLp" not in line.url]
+        if ad_positions and real_positions:
+            self.assertGreater(min(ad_positions), max(real_positions))
 
     async def test_display_names_use_upstream_line_tags(self):
         subject = _scraper(_Handler())
@@ -292,7 +331,7 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_all_lines_are_returned_and_ranked(self):
-        """线路全量返回(不截断),排序把预期延迟最低的放最前。"""
+        """线路全量返回(不截断),排序把预期延迟最低的**正片**放最前。"""
         subject = _scraper(self.handler)
         try:
             lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
@@ -300,8 +339,9 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
             await subject.aclose()
         # fixture 六条原始行:一条同址重复、一条脚本端点被拒 → 全量 4 条
         self.assertEqual(len(lines), 4)
-        # 头名是大厂对象存储(实测 ~400ms),而非最慢的自建 CDN 二压
-        self.assertIn("adkwai", lines[0].url)
+        # 头名是采集站 HLS;adkwai 那条是 /bs2/adVideoLp/ 贴片投放,
+        # 实测 97 条 adkwai 线路里 96 条在此目录,不能当正片首播位
+        self.assertNotIn("adVideoLp", lines[0].url)
         # 官方二压仍在列表里,只是不再默认排第一
         self.assertTrue(any("vod-cdn" in line.url for line in lines))
         self.assertTrue(
