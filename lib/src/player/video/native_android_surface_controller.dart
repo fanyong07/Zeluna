@@ -62,11 +62,15 @@ final class NativeAndroidSurfaceController
   // though it returns Future<void>. command uses mpv_command_async with the
   // player's default async configuration, so codec reconfiguration never blocks
   // Dart's timers or frame scheduling. Await replies to preserve detach order.
+  // NativeVideoController creates this output only on native Android. The web
+  // NativePlayer stub lacks command, so keep this native-only dispatch dynamic
+  // like the other mpv property calls; no native method runs on the web path.
   NativeAndroidSurfaceController({required this.player})
-    : _setProperty = ((key, value) => (player.platform as NativePlayer).command(
-        ['set', key, value],
-        waitForInitialization: false,
-      )),
+    : _setProperty = ((key, value) => (player.platform as dynamic).command([
+        'set',
+        key,
+        value,
+      ], waitForInitialization: false)),
       _waitForPlayer = (() =>
           (player.platform as NativePlayer).waitForPlayerInitialization) {
     _attach();
