@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import unittest
+from unittest.mock import AsyncMock, patch
 from html import escape
 from pathlib import Path
 
@@ -807,7 +809,9 @@ def _mock_transport() -> httpx.MockTransport:
             raise httpx.ConnectTimeout("boom", request=request)
         if request.url.host == "forbidden.example":
             return httpx.Response(403, text="waf")
-        if request.url.host == "good.example":
+        if request.url.host == "good.example" or request.headers.get("host") == "good.example":
+            if request.url.path.startswith("/play/"):
+                return httpx.Response(200, text='<div id="player"></div><script src="/js/player.js"></script>')
             body = _SEARCH_PAGE if request.url.path == "/search" else _DETAIL_PAGE
             return httpx.Response(200, content=body)
         return httpx.Response(404)
@@ -833,6 +837,15 @@ _FORBIDDEN_RULE = _xpath_rule(
 
 
 class KazumiScraperIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # Resolver DNS checks stay real but every answer is injected offline.
+        self._dns_patch = patch.object(
+            asyncio.get_running_loop(), "getaddrinfo",
+            new=AsyncMock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]),
+        )
+        self._dns_patch.start()
+        self.addCleanup(self._dns_patch.stop)
+
     async def test_search_isolates_rule_failures_and_returns_partial_results(self):
         scraper = KazumiScraper(
             enabled=True,
@@ -895,7 +908,7 @@ class KazumiScraperIsolationTests(unittest.IsolatedAsyncioTestCase):
             await scraper.aclose()
         self.assertEqual([s.title for s in results], ["Frieren", "Bocchi"])
 
-    async def test_get_detail_returns_chapters_and_empty_video_urls(self):
+    async def test_get_detail_returns_chapters_and_independent_client_resolver(self):
         scraper = KazumiScraper(
             enabled=True,
             rules=[_GOOD_RULE],
@@ -915,10 +928,13 @@ class KazumiScraperIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([item.number for item in detail.episodes], [1, 2])
             self.assertEqual([item.title for item in detail.episodes], ["第01话", "第02话"])
             self.assertEqual(detail.extra["kazumi_rule"], "good")
-            self.assertEqual(detail.extra["playback_capability"], "chapters-only")
+            self.assertEqual(detail.extra["playback_capability"], "static-media-or-client-resolver")
 
-            # 规则库没有视频地址字段 → 恒为空,且不得抛异常。
-            self.assertEqual(await scraper.get_video_urls(subject_id, 1), [])
+            lines = await scraper.get_video_urls(subject_id, 1)
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0].url, "", "网页只放进独立描述,不是媒体 URL")
+            self.assertEqual(lines[0].client_resolver["kind"], "kazumi_page_v1")
+            self.assertEqual(lines[0].client_resolver["page_url"], "https://good.example/play/1-1")
             self.assertEqual(await scraper.get_latest(), [])
         finally:
             await scraper.aclose()
@@ -945,7 +961,7 @@ class KazumiScraperIsolationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([item.number for item in detail.episodes], [25])
             self.assertEqual(len(requests), 2)
             self.assertEqual(await scraper.get_video_urls(results[0].source_id, 25), [])
-            self.assertEqual(len(requests), 2, "播放入口不请求章节页或媒体")
+            self.assertEqual(len(requests), 3, "复用详情缓存,只取指定章节页,静态页面无播放器时保持空结果")
             content = await scraper._fetch_as("GET", "https://good.example/anime/1.html")
             self.assertIsInstance(content, bytes)
             self.assertEqual(content.charset, "gbk")

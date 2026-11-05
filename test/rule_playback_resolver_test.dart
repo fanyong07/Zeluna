@@ -1857,6 +1857,30 @@ segment-2.ts
   });
 
   test(
+    'HLS ranges are estimates and URL quality is not measured resolution',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/1080p/ranges.m3u8',
+        probe: (request) {
+          if (request.url.path.endsWith('ranges.m3u8')) {
+            return http.Response(
+              '#EXTM3U\n#EXTINF:10,\n#EXT-X-BYTERANGE:1024@0\nshared.ts\n#EXTINF:10,\n#EXT-X-BYTERANGE:1024@1024\nshared.ts\n#EXT-X-ENDLIST\n',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          return _playableSegment();
+        },
+      );
+      expect(line.available, isTrue);
+      expect(line.sizeBytes, 2048);
+      expect(line.sizeEstimated, isTrue);
+      expect(line.videoWidth, isNull);
+      expect(line.videoHeight, isNull);
+    },
+  );
+
+  test(
     'mixed HLS byte ranges are not reported as an exact total size',
     () async {
       final line = await _resolveSinglePlayableLine(

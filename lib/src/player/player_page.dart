@@ -34,6 +34,7 @@ import 'lines/playback_recovery_controller.dart';
 import 'local_media.dart';
 import 'playback_continuity.dart';
 import 'playback_line_display.dart';
+import 'ui/playback_line_tile.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
@@ -106,6 +107,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   String? _loadedUrl;
   String? _playerMessage;
   String? _lineLookupMessage;
+  RulePlaybackCancellationToken? _metadataProbeToken;
   RulePlaybackCancellationToken? _localSourceLookupToken;
   bool _localSourceLookupInProgress = false;
   Duration _position = Duration.zero;
@@ -356,6 +358,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recordRecommendationFirstFrame();
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
     _loadEnabledDanmakuAfterFirstFrame();
+    final inventoryEpisodeId = _episode.id;
+    final metadataOpenSerial = _openLineSerial;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _leaving ||
+          _episode.id != inventoryEpisodeId ||
+          _openLineSerial != metadataOpenSerial) {
+        return;
+      }
+      // Fill the visible route inventory only after the first frame; discovery
+      // does not replace a healthy selection or block native startup.
+      _startExpandedLineLookup(autoplay: false);
+      unawaited(_enrichSelectedLineMetadata(line, metadataOpenSerial));
+    });
     _playbackTrace.recordBufferingChanged(
       buffering: false,
       fields: <String, Object?>{
@@ -398,6 +414,56 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (line.id == _warmupTransitionPrimaryLineId ||
         line.id == _warmupTransitionFallbackLineId) {
       _clearWarmupTransitionState();
+    }
+  }
+
+  Future<void> _enrichSelectedLineMetadata(
+    PlaybackLine line,
+    int openSerial,
+  ) async {
+    final uri = Uri.tryParse(line.url ?? '');
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme) ||
+        widget.request.offlineOnly ||
+        (line.sizeBytes != null &&
+            line.videoWidth != null &&
+            line.videoHeight != null)) {
+      return;
+    }
+    _metadataProbeToken?.cancel();
+    final token = RulePlaybackCancellationToken();
+    _metadataProbeToken = token;
+    try {
+      final metadata = await ref
+          .read(animeControllerProvider.notifier)
+          .verifyPlaybackLine(
+            line,
+            enrichMetadata: true,
+            cancellationToken: token,
+          )
+          .timeout(const Duration(seconds: 12));
+      if (!mounted ||
+          _leaving ||
+          token.isCancelled ||
+          _openLineSerial != openSerial ||
+          _line?.id != line.id ||
+          _line?.url != line.url) {
+        return;
+      }
+      final current = _line!;
+      final enriched = mergePlaybackLineMediaMetadata(
+        current: current,
+        metadata: metadata,
+      );
+      setState(() {
+        _line = enriched;
+        _lines = upsertPlaybackLine(_lines, enriched);
+      });
+    } catch (_) {
+      // Optional information must never pause, reopen or fail active playback.
+    } finally {
+      token.cancel();
+      if (identical(_metadataProbeToken, token)) _metadataProbeToken = null;
     }
   }
 
@@ -724,6 +790,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   @override
   void dispose() {
+    _metadataProbeToken?.cancel();
     _openProbeToken?.cancel();
     _localSourceLookupToken?.cancel();
     WidgetsBinding.instance.removeObserver(this);
@@ -2125,6 +2192,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
     _nativeVideo.resumeSeek.cancel();
     final serial = ++_openLineSerial;
+    _metadataProbeToken?.cancel();
+    _metadataProbeToken = null;
     _openProbeToken?.cancel();
     _openProbeToken = null;
     _startupTransportFailures = 0;
@@ -3420,7 +3489,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'app_version': '${version.version}+${version.buildNumber}',
         'platform': defaultTargetPlatform.name,
         'playback_phase': _sessionController.state.phase.name,
-        'decoded_video': _nativeVideo.hasDecodedFrame,
+        ..._nativeVideo.frameDiagnostics,
         'line_count': _lines.length,
         'verified_count': _lines
             .where((l) => l.available && (l.clientVerified || l.serverVerified))

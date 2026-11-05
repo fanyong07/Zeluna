@@ -79,14 +79,17 @@ void main() {
         find.byKey(const ValueKey('portrait-route-route-57')),
         250,
         scrollable: find.byType(Scrollable).last,
-        maxScrolls: 25,
+        maxScrolls: 80,
       );
       expect(find.textContaining('线路失败'), findsOneWidget);
       final disabledRow = find.byKey(const ValueKey('portrait-route-route-57'));
       expect(
         tester
             .widget<InkWell>(
-              find.descendant(of: disabledRow, matching: find.byType(InkWell)),
+              find.descendant(
+                of: disabledRow,
+                matching: find.byKey(const ValueKey('route-tap-route-57')),
+              ),
             )
             .onTap,
         isNull,
@@ -338,13 +341,13 @@ void main() {
         ),
       );
 
-      expect(find.text('共 1 条线路，1 条可以播放 · 3 个来源暂无线路'), findsOneWidget);
-      expect(find.text('在线服务 · iKun'), findsOneWidget);
-      expect(find.text('在线服务 · 线路失败源'), findsOneWidget);
+      expect(find.text('共 1 条线路，1 条可以播放 · 3 项待解析或暂无线路'), findsOneWidget);
+      expect(find.text('iKun'), findsOneWidget);
+      expect(find.text('线路失败源'), findsOneWidget);
       expect(find.byType(ExpansionTile), findsNothing);
 
-      expect(find.text('在线服务 · 无结果源'), findsOneWidget);
-      expect(find.text('在线服务 · 未查询源'), findsOneWidget);
+      expect(find.text('无结果源'), findsOneWidget);
+      expect(find.text('未查询源'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
@@ -410,7 +413,7 @@ void main() {
     );
 
     expect(find.text('共 1 条线路，1 条可以播放'), findsOneWidget);
-    expect(find.text('在线服务 · 魔都2'), findsOneWidget);
+    expect(find.text('魔都2'), findsOneWidget);
     expect(find.text('其它来源（1）'), findsNothing);
     expect(find.text('当前站点没有匹配到这部作品'), findsNothing);
     expect(tester.takeException(), isNull);

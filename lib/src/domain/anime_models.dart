@@ -1,4 +1,5 @@
 import '../core/identity/stable_identity.dart';
+import 'client_media_resolver.dart';
 
 enum AnimeHomeTab {
   recent('最近更新'),
@@ -291,6 +292,8 @@ abstract final class PlaybackDiscoveryStatus {
   static const sourceDisabled = 'source_disabled';
   static const candidateUnadmitted = 'candidate_unadmitted';
   static const compatibilityInactive = 'compatibility_inactive';
+  static const unsupportedContentType = 'unsupported_content_type';
+  static const clientResolverRequired = 'client_resolver_required';
 }
 
 class PlaybackLine {
@@ -303,6 +306,7 @@ class PlaybackLine {
     required this.quality,
     required this.format,
     this.url,
+    this.clientResolver,
     this.headers = const {},
     this.latency,
     this.sizeLabel,
@@ -347,6 +351,9 @@ class PlaybackLine {
   final String quality;
   final String format;
   final String? url;
+
+  /// A pending page task must be resolved and probed before native playback.
+  final ClientMediaResolverDescriptor? clientResolver;
   final Map<String, String> headers;
   final Duration? latency;
   final String? sizeLabel;

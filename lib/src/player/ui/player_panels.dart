@@ -722,7 +722,9 @@ class _LinePanelBody extends StatelessWidget {
     }
     final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
     final routeCount = routes.length;
-    final playableCount = routes.where((line) => line.available).length;
+    final playableCount = routes
+        .where((line) => line.available && !failedLineIds.contains(line.id))
+        .length;
     final unresolvedCount = cards.length - routeCount;
     final sourceSummary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
@@ -735,7 +737,7 @@ class _LinePanelBody extends StatelessWidget {
             text: scanning
                 ? '正在查找全部线路$progress · 已找到 $routeCount 条'
                 : '共 $routeCount 条线路，$playableCount 条可以播放'
-                      '${unresolvedCount > 0 ? ' · $unresolvedCount 个来源暂无线路' : ''}',
+                      '${unresolvedCount > 0 ? ' · $unresolvedCount 项待解析或暂无线路' : ''}',
           ),
           if (unresolvedCount > 0) ...[
             const SizedBox(height: 6),
@@ -1189,153 +1191,14 @@ class _LineTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final latency = runtimeFailed
-        ? '可重试'
-        : line.available
-        ? playbackLineLatencyLabel(line)
-        : line.requiresClientProbe
-        ? playbackLineLatencyLabel(line)
-        : playbackLineFailureLabel(line);
-    final latencyColor = line.requiresClientProbe
-        ? AppStatusColors.probing
-        : line.available && !runtimeFailed
-        ? line.latency == null
-              ? AppStatusColors.probing
-              : AppStatusColors.available
-        : runtimeFailed
-        ? AppStatusColors.probing
-        : AppStatusColors.failed;
-    final accent = AppStatusColors.selected;
-    final provider = playbackLineProviderLabel(line);
-    final detail = line.title.trim();
-    final metadata = playbackLineMediaLabel(line);
-    return Material(
-      color: selected ? accent.withValues(alpha: 0.12) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 30,
-                child: Text(
-                  '${index + 1}',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: selected ? accent : AppColors.theaterMuted,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      provider,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        color: selected ? accent : AppColors.theaterInk,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    if (detail.isNotEmpty && detail != provider)
-                      Text(
-                        detail,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    Text(
-                      latency,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: latencyColor,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      // Available lines show where they point; failed ones show
-                      // a sanitized reason rather than the resolver's own text.
-                      line.available
-                          ? line.url ?? '没有可播放的地址'
-                          : line.sourceInventoryId.isNotEmpty
-                          ? playbackSourceStateExplanation(line)
-                          : playbackLineFailureLabel(line),
-                      maxLines:
-                          line.sourceInventoryId.isNotEmpty && !line.available
-                          ? 3
-                          : 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppColors.theaterFaint,
-                      ),
-                    ),
-                    if (line.queryLocation.isNotEmpty && line.queried == true)
-                      Text(
-                        line.queryLocation == 'local'
-                            ? '搜索与解析：本机网络'
-                            : '搜索与解析：VPS',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    if (showLocalQuery)
-                      TextButton.icon(
-                        key: ValueKey('local-query-${line.id}'),
-                        onPressed: onQueryLocally,
-                        icon: const Icon(Icons.devices_rounded, size: 16),
-                        label: const Text('本机重查（本集）'),
-                      ),
-                    if (line.available && metadata.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        metadata,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (selected)
-                    Text(
-                      '当前',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    )
-                  else
-                    Icon(
-                      line.requiresClientProbe
-                          ? Icons.schedule_rounded
-                          : line.available
-                          ? Icons.chevron_right_rounded
-                          : Icons.block_rounded,
-                      color: AppColors.theaterFaint,
-                      size: 19,
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
+    return PlaybackLineTile(
+      line: line,
+      index: index,
+      selected: selected,
+      runtimeFailed: runtimeFailed,
+      onTap: onTap,
+      onQueryLocally: onQueryLocally,
+      showLocalQuery: showLocalQuery,
     );
   }
 }

@@ -89,6 +89,8 @@ server/.venv/
 server/.pytest_cache/
 server/.ruff_cache/
 server/**/*.db
+server/**/*.db-shm
+server/**/*.db-wal
 server/.env
 server/.env.*
 !server/.env.example

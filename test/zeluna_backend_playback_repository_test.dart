@@ -189,6 +189,128 @@ void main() {
     },
   );
 
+  test('服务端媒体元数据兼容snake/camel并且缺测保持未知', () async {
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: MockClient(
+        (_) async => _jsonResponse([
+          {
+            'url': 'https://cdn.example/known.mp4',
+            'source': 'crawler:fixture',
+            'size_bytes': 104857600,
+            'size_estimated': false,
+            'video_width': 1920,
+            'video_height': 1080,
+            'bitrate': 4000000,
+            'codecs': 'avc1.640028, mp4a.40.2',
+            'is_live': false,
+            'adaptive': true,
+            'startup_latency_ms': 125,
+          },
+          {
+            'url': 'https://cdn.example/legacy.mp4',
+            'source': 'crawler:fixture',
+            'sizeBytes': '209715200',
+            'sizeEstimated': 'true',
+            'videoWidth': 1280.0,
+            'height': '720',
+            'bitrate_bps': '2000000',
+            'codecs': ['avc1.4d401f', 'mp4a.40.2'],
+            'isLive': 'true',
+            'adaptive': 'false',
+          },
+          {
+            'url': 'https://cdn.example/unmeasured.m3u8',
+            'source': 'crawler:fixture',
+          },
+        ]),
+      ),
+    );
+    addTearDown(repository.dispose);
+    final lines = await repository.linesForEpisode(subject, episode);
+    expect(lines, hasLength(3));
+    expect(lines[0].sizeBytes, 104857600);
+    expect(lines[0].sizeEstimated, isFalse);
+    expect(lines[0].videoWidth, 1920);
+    expect(lines[0].videoHeight, 1080);
+    expect(lines[0].bitrate, 4000000);
+    expect(lines[0].codecs, 'avc1.640028, mp4a.40.2');
+    expect(lines[0].adaptive, isTrue);
+    expect(lines[0].isLive, isFalse);
+    expect(lines[0].latency, const Duration(milliseconds: 125));
+    expect(lines[1].sizeBytes, 209715200);
+    expect(lines[1].sizeEstimated, isTrue);
+    expect(lines[1].videoWidth, 1280);
+    expect(lines[1].videoHeight, 720);
+    expect(lines[1].bitrate, 2000000);
+    expect(lines[1].codecs, 'avc1.4d401f, mp4a.40.2');
+    expect(lines[1].isLive, isTrue);
+    expect(lines[1].adaptive, isFalse);
+    expect(lines[2].sizeBytes, isNull);
+    expect(lines[2].videoWidth, isNull);
+    expect(lines[2].videoHeight, isNull);
+    expect(lines[2].bitrate, isNull);
+    expect(lines[2].codecs, isNull);
+    expect(lines[2].latency, isNull);
+  });
+
+  test('媒体整数边界不截断负数分数布尔和超JSON精度数值', () async {
+    final invalid = <Object?>[
+      -1,
+      -0.1,
+      '-1',
+      true,
+      1.5,
+      '1.5',
+      'NaN',
+      'Infinity',
+      '9007199254740992',
+      9007199254740992,
+      {},
+      [],
+    ];
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: MockClient(
+        (_) async => _jsonResponse([
+          for (final value in [...invalid, 0, '0', 9007199254740991])
+            {
+              'url': 'https://cdn.example/${invalid.indexOf(value)}.mp4',
+              'source': 'crawler:fixture',
+              'size_bytes': value,
+              'size_estimated': true,
+              'video_width': value,
+              'video_height': value,
+              'bitrate': value,
+              'startup_latency_ms': value,
+              'source_latency_ms': value,
+              'codecs': {'value': 'not-a-codec'},
+            },
+        ]),
+      ),
+    );
+    addTearDown(repository.dispose);
+    final lines = await repository.linesForEpisode(subject, episode);
+    expect(lines, hasLength(invalid.length + 3));
+    for (final line in lines.take(invalid.length)) {
+      expect(line.sizeBytes, isNull);
+      expect(line.sizeEstimated, isFalse);
+      expect(line.videoWidth, isNull);
+      expect(line.videoHeight, isNull);
+      expect(line.bitrate, isNull);
+      expect(line.codecs, isNull);
+      expect(line.latency, isNull);
+    }
+    for (final line in lines.skip(invalid.length).take(2)) {
+      expect(line.sizeBytes, 0);
+      expect(line.videoWidth, 0);
+      expect(line.videoHeight, 0);
+      expect(line.bitrate, 0);
+      expect(line.latency, isNull);
+    }
+    expect(lines.last.sizeBytes, 9007199254740991);
+  });
+
   test('聚合后端会保留同一作品的不同站点线路', () async {
     String? requestedStableId;
     final client = MockClient((request) async {

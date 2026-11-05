@@ -37,8 +37,9 @@ void main() {
     'affected Android runtime selects software decoding before video open',
     () async {
       messenger.setMockMethodCallHandler(channel, (call) async {
-        expect(call.method, 'requiresSoftwareVideoDecode');
         expect(call.arguments, isNull);
+        if (call.method == 'requiresDirectVideoSurface') return false;
+        expect(call.method, 'requiresSoftwareVideoDecode');
         return true;
       });
       final compatibility = NativeVideoCompatibility();
@@ -46,6 +47,22 @@ void main() {
       expect(compatibility.configuration.hwdec, 'no');
       // Keep GPU rendering; only the MediaCodec decoder is bypassed.
       expect(compatibility.configuration.enableHardwareAcceleration, isTrue);
+    },
+  );
+
+  test(
+    'only a positive native capability chooses the direct Surface output',
+    () async {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'requiresDirectVideoSurface') return true;
+        if (call.method == 'requiresSoftwareVideoDecode') return true;
+        return null;
+      });
+      final compatibility = NativeVideoCompatibility();
+      await compatibility.initialize();
+      expect(compatibility.usesDirectSurface, isTrue);
+      expect(compatibility.configuration.vo, 'mediacodec_embed');
+      expect(compatibility.configuration.hwdec, 'mediacodec');
     },
   );
 

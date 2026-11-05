@@ -335,11 +335,17 @@ List<PlaybackLine> _playbackSourceCardsForDisplay(
   }
   final cards = <PlaybackLine>[];
   for (final candidates in grouped.values) {
-    // Diagnostics without a URL describe the source, not another route. Only
-    // collapse those placeholders; distinct media routes must all stay visible.
+    // A pending chapter resolver and a failed matched candidate still describe
+    // distinct routes, even before they have a media URL. Collapse only source
+    // inventory placeholders; never hide those candidates behind another route.
     final routes = <String, PlaybackLine>{
       for (final line in candidates)
-        if (line.url?.trim().isNotEmpty == true) line.id: line,
+        if (line.url?.trim().isNotEmpty == true ||
+            line.clientResolver != null ||
+            line.diagnosticStatus ==
+                PlaybackDiscoveryStatus.clientResolverRequired ||
+            line.diagnosticStatus == PlaybackDiscoveryStatus.routeUnavailable)
+          line.id: line,
     };
     if (routes.isNotEmpty) {
       cards.addAll(routes.values);
@@ -453,6 +459,7 @@ PlaybackLine preservePlaybackLineProbeMetadata({
     quality: incoming.quality,
     format: incoming.format,
     url: incoming.url,
+    clientResolver: incoming.clientResolver,
     headers: incoming.headers,
     latency: incoming.latency ?? previous.latency,
     sizeLabel: incoming.sizeLabel ?? previous.sizeLabel,
@@ -492,6 +499,9 @@ PlaybackLine preservePlaybackLineProbeMetadata({
     queryLocation: incoming.queryLocation.isEmpty
         ? previous.queryLocation
         : incoming.queryLocation,
+    sourceAddress: incoming.sourceAddress.isEmpty
+        ? previous.sourceAddress
+        : incoming.sourceAddress,
     diagnosticStatus: incoming.diagnosticStatus.isEmpty
         ? previous.diagnosticStatus
         : incoming.diagnosticStatus,
@@ -508,6 +518,105 @@ PlaybackLine preservePlaybackLineProbeMetadata({
         : incoming.available,
     message: previous.clientVerified ? previous.message : incoming.message,
   );
+}
+
+/// Applies background measurements without replacing the active route's state.
+/// An enrichment request may fail or finish after a route change: only the same
+/// URL and exact request headers may contribute media metadata, never failure,
+/// verification, cache, diagnostics, resolver or identity fields.
+PlaybackLine mergePlaybackLineMediaMetadata({
+  required PlaybackLine current,
+  required PlaybackLine metadata,
+}) {
+  final currentUrl = current.url?.trim() ?? '';
+  if (currentUrl.isEmpty ||
+      currentUrl != metadata.url?.trim() ||
+      !_samePlaybackLineHeaders(current.headers, metadata.headers)) {
+    return current;
+  }
+  final hasCurrentBytes = current.sizeBytes != null && current.sizeBytes! > 0;
+  final hasMetadataBytes =
+      metadata.sizeBytes != null && metadata.sizeBytes! > 0;
+  // An estimated manifest size must not replace a measured Content-Length.
+  final useMetadataBytes =
+      hasMetadataBytes &&
+      !(hasCurrentBytes && !current.sizeEstimated && metadata.sizeEstimated);
+  final legacyMetadata = _validLegacySizeLabel(metadata.sizeLabel);
+  final useLegacyMetadata =
+      !hasCurrentBytes &&
+      !useMetadataBytes &&
+      legacyMetadata != null &&
+      (_validLegacySizeLabel(current.sizeLabel) == null ||
+          current.sizeEstimated ||
+          !metadata.sizeEstimated);
+  int? positive(int? value, int? fallback) =>
+      value != null && value > 0 ? value : fallback;
+  String measuredText(String value, String fallback) =>
+      _unknownPlaybackMetadata(value) ? fallback : value;
+
+  return PlaybackLine(
+    id: current.id,
+    episodeId: current.episodeId,
+    providerId: current.providerId,
+    providerName: current.providerName,
+    title: current.title,
+    quality: measuredText(metadata.quality, current.quality),
+    format: measuredText(metadata.format, current.format),
+    url: current.url,
+    clientResolver: current.clientResolver,
+    headers: current.headers,
+    latency: metadata.latency != null && metadata.latency! >= Duration.zero
+        ? metadata.latency
+        : current.latency,
+    sizeLabel: useLegacyMetadata
+        ? legacyMetadata
+        : useMetadataBytes
+        ? metadata.sizeLabel ?? current.sizeLabel
+        : current.sizeLabel,
+    sizeBytes: useMetadataBytes ? metadata.sizeBytes : current.sizeBytes,
+    sizeEstimated: useMetadataBytes || useLegacyMetadata
+        ? metadata.sizeEstimated
+        : current.sizeEstimated,
+    videoWidth: positive(metadata.videoWidth, current.videoWidth),
+    videoHeight: positive(metadata.videoHeight, current.videoHeight),
+    bitrate: positive(metadata.bitrate, current.bitrate),
+    codecs: _unknownPlaybackMetadata(metadata.codecs ?? '')
+        ? current.codecs
+        : metadata.codecs,
+    isLive: current.isLive || metadata.isLive,
+    adaptive: current.adaptive || metadata.adaptive,
+    publicHttpOnly: current.publicHttpOnly,
+    serverVerified: current.serverVerified,
+    requiresClientProbe: current.requiresClientProbe,
+    clientVerified: current.clientVerified,
+    startupProfile: current.startupProfile,
+    cacheState: current.cacheState,
+    sourceErrorCategory: current.sourceErrorCategory,
+    sourceName: current.sourceName,
+    sourceInventoryId: current.sourceInventoryId,
+    clientQuerySupported: current.clientQuerySupported,
+    queryLocation: current.queryLocation,
+    sourceAddress: current.sourceAddress,
+    diagnosticStatus: current.diagnosticStatus,
+    queried: current.queried,
+    aliasesAttempted: current.aliasesAttempted,
+    searchHitCount: current.searchHitCount,
+    bestMatchScore: current.bestMatchScore,
+    matched: current.matched,
+    episodeFound: current.episodeFound,
+    discoveryElapsed: current.discoveryElapsed,
+    expiresAt: current.expiresAt,
+    available: current.available,
+    message: current.message,
+  );
+}
+
+bool _samePlaybackLineHeaders(
+  Map<String, String> left,
+  Map<String, String> right,
+) {
+  return left.length == right.length &&
+      left.entries.every((entry) => right[entry.key] == entry.value);
 }
 
 Duration playbackRecoveryPosition(Duration position) {
@@ -711,31 +820,6 @@ List<PlaybackLine> sortPlaybackLinesForDisplay(Iterable<PlaybackLine> lines) {
   return List<PlaybackLine>.unmodifiable(sorted.map((item) => item.$2));
 }
 
-/// Curated alias pool for playback lines whose provider name is an internal
-/// rule id. Names stay stable per provider because the pick is a pure hash.
-const playbackProviderAliasPool = <String>[
-  '晨风',
-  '疏影',
-  '栖云',
-  '观澜',
-  '听雨',
-  '春汀',
-  '月泉',
-  '松声',
-  '竹里',
-  '澄江',
-  '空山',
-  '白露',
-  '青崖',
-  '半夏',
-  '临溪',
-  '望舒',
-  '拂晓',
-  '汀兰',
-  '折柳',
-  '灯前',
-];
-
 /// Quality chip text for the player chrome, or null when the source carries
 /// no real information ("未知" placeholders never earn chrome space).
 String? playbackQualityChipLabel(PlaybackLine? line) {
@@ -750,12 +834,80 @@ String? playbackQualityChipLabel(PlaybackLine? line) {
   return quality;
 }
 
-/// A user-facing name for the line's provider. Internal rule ids such as
-/// `xfdmneo` never reach the UI; they map to a stable friendly alias instead.
+/// Site/rule identities, not made-up aliases. Unlisted explicit rule names stay
+/// intact so a new upstream rule never silently becomes an unrelated site.
+const _playbackSourceNames = <String, String>{
+  'xfdm': '稀饭动漫',
+  'xfdmneo': '稀饭动漫',
+  'xfdmnext': '稀饭动漫 Next',
+  'xifan': '稀饭动漫',
+  'xifan-dongman': '稀饭动漫',
+  'xifan-dongman-next': '稀饭动漫 Next',
+  'mxdm': 'MX动漫',
+  'moonci': '月城动漫',
+  'sorani': '青空次元',
+  'lmm': '路漫漫',
+  'girigirilove': 'GiriGiri爱动漫',
+  'girigiri-ai-dongman': 'GiriGiri爱动漫',
+  'haixing-dongman': '海星动漫',
+  'jibi-dongman': '叽哔动漫',
+  'dm-yhdm': '樱花动漫',
+  'yinghua': '樱花动漫',
+  'yinghua2': '樱花动漫',
+  'dm-mxdm': 'MX动漫',
+  'dm-cyfz': '次元方舟',
+  'dm-ml': '米粒动漫',
+  '2k-dongman': '2k动漫',
+  'aafun': '风铃动漫',
+  'aafun-dongman': '风铃动漫',
+  'cyfz': '次元方舟',
+  'mcy': '漫次元',
+  'mitaodm': '蜜桃动漫',
+  'ciyuancheng': '次元城动画',
+  'baimao': '白毛动漫',
+  'dalvdm': '打驴动漫',
+  'eacg': 'E-ACG',
+  'age': 'AGE动漫',
+  'fantuan': '饭团动漫',
+};
+
+final _playbackAggregatorPrefix = RegExp(
+  r'^(?:(?:crawler|zeluna)[.:])?(?:anich|kazumi|animeko)'
+  r'(?:[\s·•:：/|\\_\-]+|$)',
+  caseSensitive: false,
+);
+final _playbackServicePrefix = RegExp(
+  r'^(?:在线服务|聚合服务|聚合器)(?:[\s·•:：/|\\_\-]+|$)',
+);
+final _playbackBracketedAggregator = RegExp(
+  r'^[\[【(（]\s*(?:anich|kazumi|animeko)\s*[\]】)）]\s*',
+  caseSensitive: false,
+);
+final _playbackNumberedRoute = RegExp(
+  r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-\d+(?:-\d+)*$',
+  caseSensitive: false,
+);
+
+/// Removes transport/catalog labels without touching the actual site or route.
+/// Also used for the optional secondary title so prefixes never leak back in.
+String playbackLineTitleLabel(PlaybackLine line) =>
+    _playbackSourceLabel(line.title);
+
 String playbackLineProviderLabel(PlaybackLine line) {
+  final provider = _playbackSourceLabel(line.providerName);
+  final source = _playbackSourceLabel(line.sourceName);
+  // An AniCh tag such as hb-10 or yhdm-cn-10 names a distinct real route.
+  if (_playbackNumberedRoute.hasMatch(provider)) return provider;
+  if (_playbackNumberedRoute.hasMatch(source)) return source;
+  if (source.isNotEmpty) return source;
+  if (provider.isNotEmpty) return provider;
+  final resolverName = _playbackSourceLabel(
+    line.clientResolver?.ruleName ?? '',
+  );
+  if (resolverName.isNotEmpty) return resolverName;
   return playbackProviderLabel(
-    providerId: line.providerId,
-    providerName: line.providerName,
+    providerId: line.clientResolver?.ruleId ?? line.providerId,
+    providerName: '',
   );
 }
 
@@ -763,43 +915,120 @@ String playbackProviderLabel({
   required String providerId,
   required String providerName,
 }) {
-  final name = providerName.trim();
-  // Numbered upstream tags identify real routes; keep them out of the alias pool.
-  if (name.isNotEmpty &&
-      (RegExp(r'^[a-z]{1,12}-[0-9]+(?:-[0-9]+)?$').hasMatch(name) ||
-          !_looksLikeInternalProviderId(name))) {
-    return name;
-  }
-  final key = providerId.trim().isNotEmpty ? providerId.trim() : name;
-  if (key.isEmpty) return '线路';
-  final alias =
-      playbackProviderAliasPool[_stableHash(key.toLowerCase()) %
-          playbackProviderAliasPool.length];
-  return '$alias线路';
+  final name = _playbackSourceLabel(providerName);
+  if (name.isNotEmpty) return name;
+  final id = _stripPlaybackAggregatorPrefix(providerId);
+  final known = _knownPlaybackSourceName(id);
+  if (known != null) return known;
+  if (_playbackNumberedRoute.hasMatch(id)) return id;
+  // Opaque provider namespaces/hashes are not a source name.
+  return '线路';
 }
 
-/// Internal ids read as lowercase ascii tokens ("xfdmneo", "custom:abc-1").
-/// Anything with CJK, uppercase letters or spaces is treated as a real name.
-bool _looksLikeInternalProviderId(String value) {
-  return RegExp(r'^[a-z0-9]+([-_.:][a-z0-9]+)*$').hasMatch(value);
+String _stripPlaybackAggregatorPrefix(String value) {
+  var result = value.replaceAll(RegExp(r'[\x00-\x1f\x7f]'), '').trim();
+  while (result.isNotEmpty) {
+    final stripped = result
+        .replaceFirst(_playbackBracketedAggregator, '')
+        .replaceFirst(_playbackServicePrefix, '')
+        .replaceFirst(_playbackAggregatorPrefix, '')
+        .trim();
+    if (stripped == result) break;
+    result = stripped;
+  }
+  return result;
 }
 
-int _stableHash(String value) {
-  var hash = 0x811c9dc5;
-  for (final unit in value.codeUnits) {
-    hash ^= unit;
-    hash = (hash * 0x01000193) & 0x7fffffff;
+String? _knownPlaybackSourceName(String value) {
+  final key = value.trim().toLowerCase();
+  final direct = _playbackSourceNames[key];
+  if (direct != null) return direct;
+  // Imported Animeko rules can have factory prefixes. Only map exact known ids;
+  // never guess a site from a partial token such as hb or a media CDN hostname.
+  final tail = key.split(':').last;
+  return _playbackSourceNames[tail];
+}
+
+String _playbackSourceLabel(String value) {
+  final name = _stripPlaybackAggregatorPrefix(value);
+  if (name.isEmpty ||
+      const {
+        'unknown',
+        '未知',
+        '--',
+        'null',
+        'none',
+      }.contains(name.toLowerCase())) {
+    return '';
   }
-  return hash;
+  if (RegExp(r'^(?:rule|line):v\d+:', caseSensitive: false).hasMatch(name) ||
+      RegExp(r'^[a-f0-9]{32,}$', caseSensitive: false).hasMatch(name)) {
+    return '';
+  }
+  final known = _knownPlaybackSourceName(name);
+  if (known != null) return known;
+  final parts = name.split(RegExp(r'\s*[:：·]\s*'));
+  if (parts.length > 1) {
+    final knownSite = _knownPlaybackSourceName(parts.first);
+    if (knownSite != null) {
+      return '$knownSite · ${parts.skip(1).join(' · ')}';
+    }
+  }
+  return name;
+}
+
+enum PlaybackLineLatencyBand { unknown, fast, moderate, slow }
+
+PlaybackLineLatencyBand playbackLineLatencyBand(PlaybackLine line) {
+  final latency = line.latency;
+  if (latency == null || latency < Duration.zero) {
+    return PlaybackLineLatencyBand.unknown;
+  }
+  if (latency <= const Duration(milliseconds: 500)) {
+    return PlaybackLineLatencyBand.fast;
+  }
+  if (latency <= const Duration(milliseconds: 1500)) {
+    return PlaybackLineLatencyBand.moderate;
+  }
+  return PlaybackLineLatencyBand.slow;
 }
 
 String playbackLineLatencyLabel(PlaybackLine line) {
   final latency = line.latency;
-  if (latency != null) return '${latency.inMilliseconds}ms';
+  if (latency != null && latency >= Duration.zero) {
+    return '${latency.inMilliseconds}ms';
+  }
+  if (line.clientResolver != null ||
+      line.diagnosticStatus == PlaybackDiscoveryStatus.clientResolverRequired) {
+    return '本机解析中';
+  }
   if (line.requiresClientProbe) return '检查中';
   if (line.serverVerified && !line.clientVerified) return '测速中';
   if (line.clientVerified) return '可用';
   return '速度未知';
+}
+
+/// A chapter resolver/page task is not a video URL, even if a malformed input
+/// happens to fill in both fields. Do not offer that page as a media copy action.
+String? playbackLineMediaUrl(PlaybackLine line) {
+  if (line.clientResolver != null ||
+      line.diagnosticStatus == PlaybackDiscoveryStatus.clientResolverRequired) {
+    return null;
+  }
+  final value = line.url?.trim() ?? '';
+  if (value.isEmpty || RegExp(r'[\x00-\x1f\x7f]').hasMatch(value)) return null;
+  final uri = Uri.tryParse(value);
+  if (uri == null) return null;
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme == 'file' || scheme == 'content') return value;
+  if ((scheme != 'https' && scheme != 'http') || uri.host.isEmpty) return null;
+  if (RegExp(
+    r'\.(?:html?|php|aspx?)(?:$|/)',
+    caseSensitive: false,
+  ).hasMatch(uri.path)) {
+    return null;
+  }
+  return value;
 }
 
 String playbackLineFailureLabel(PlaybackLine line) {
@@ -811,6 +1040,8 @@ String playbackLineFailureLabel(PlaybackLine line) {
     PlaybackDiscoveryStatus.sourceDisabled => '未启用',
     PlaybackDiscoveryStatus.candidateUnadmitted => '候选未接入',
     PlaybackDiscoveryStatus.compatibilityInactive => '旧接口未启用',
+    PlaybackDiscoveryStatus.unsupportedContentType => '不支持此内容类型',
+    PlaybackDiscoveryStatus.clientResolverRequired => '本机解析中',
     PlaybackDiscoveryStatus.searching => '搜索中',
     PlaybackDiscoveryStatus.searchTimeout => '搜索超时',
     PlaybackDiscoveryStatus.searchError => '来源异常',
@@ -880,6 +1111,9 @@ String playbackSourceStateExplanation(PlaybackLine line) {
     PlaybackDiscoveryStatus.compatibilityInactive => '旧兼容接口未启用，仅保留登记信息。',
     PlaybackDiscoveryStatus.quarantined => '此源原先已停用，本集未查询；不是本次播放失败。',
     PlaybackDiscoveryStatus.retired => '此源已停用，不会发起播放查询。',
+    PlaybackDiscoveryStatus.unsupportedContentType => '此适配器不支持当前内容类型，本集未发起搜索。',
+    PlaybackDiscoveryStatus.clientResolverRequired =>
+      '已找到本集章节，正在本机解析播放器页面；尚未证明可播。',
     PlaybackDiscoveryStatus.searching => '正在搜索当前作品，暂未取得结果。',
     PlaybackDiscoveryStatus.searchTimeout => '本次搜索响应超时，不能据此认定源已永久失效。',
     PlaybackDiscoveryStatus.searchError => '本次搜索请求失败，未取得可靠的匹配结果。',
@@ -897,9 +1131,9 @@ String playbackSourceStateExplanation(PlaybackLine line) {
 
 String playbackLineMediaLabel(PlaybackLine line) {
   return [
-    _sizeLabel(line),
-    _resolutionLabel(line),
-    _formatLabel(line),
+    playbackLineSizeLabel(line),
+    playbackLineResolutionLabel(line),
+    playbackLineFormatLabel(line),
     if (line.bitrate != null && line.bitrate! > 0) _bitrateLabel(line.bitrate!),
     if ((line.codecs ?? '').trim().isNotEmpty) _codecLabel(line.codecs!),
   ].where((item) => item.isNotEmpty).join(' · ');
@@ -907,38 +1141,84 @@ String playbackLineMediaLabel(PlaybackLine line) {
 
 int _availabilityRank(PlaybackLine line) => line.available ? 0 : 1;
 
-String _sizeLabel(PlaybackLine line) {
-  // 动态流 came from the HLS "no ENDLIST" / DASH dynamic-manifest check; what
-  // that actually means to a viewer is simply that it is live.
-  if (line.isLive) return '直播';
-  final bytes = line.sizeBytes;
-  if (bytes != null && bytes > 0) {
-    final value = (bytes / 1024 / 1024).toStringAsFixed(1);
-    return '${line.sizeEstimated ? '约 ' : ''}$value MB';
-  }
-  final legacy = (line.sizeLabel ?? '').trim();
-  if (legacy.isEmpty || legacy == '--') return '大小未知';
-  return legacy;
+bool playbackLineHasKnownSize(PlaybackLine line) {
+  if (line.isLive) return false;
+  if (line.sizeBytes != null) return line.sizeBytes! > 0;
+  return _validLegacySizeLabel(line.sizeLabel) != null;
 }
 
-String _resolutionLabel(PlaybackLine line) {
+/// Positive probe bytes take precedence; zero/negative bytes are unknown, not
+/// proof of an empty video. Legacy size text is retained only when bytes are
+/// absent and the text includes a positive, finite size with a real unit.
+String playbackLineSizeLabel(PlaybackLine line) {
+  if (line.isLive) return '直播';
+  final bytes = line.sizeBytes;
+  if (bytes != null) {
+    if (bytes <= 0) return '大小未知';
+    final megabytes = bytes / 1024 / 1024;
+    final value = megabytes < 0.1 ? '<0.1' : megabytes.toStringAsFixed(1);
+    return '${line.sizeEstimated ? '约 ' : ''}$value MB';
+  }
+  final legacy = _validLegacySizeLabel(line.sizeLabel);
+  if (legacy == null) return '大小未知';
+  return line.sizeEstimated && !legacy.contains('约') ? '约 $legacy' : legacy;
+}
+
+String? _validLegacySizeLabel(String? value) {
+  final label = (value ?? '').trim();
+  if (_unknownPlaybackMetadata(label)) return null;
+  final match = RegExp(
+    r'^(?:约\s*|~\s*)?(\d+(?:\.\d+)?)\s*(?:[kmgt]i?b|b|bytes?|字节)',
+    caseSensitive: false,
+  ).firstMatch(label);
+  if (match == null) return null;
+  final amount = double.tryParse(match.group(1)!);
+  return amount != null && amount.isFinite && amount > 0 ? label : null;
+}
+
+bool playbackLineHasKnownResolution(PlaybackLine line) =>
+    line.videoWidth != null &&
+    line.videoWidth! > 0 &&
+    line.videoHeight != null &&
+    line.videoHeight! > 0;
+
+String playbackLineResolutionLabel(PlaybackLine line) {
   final width = line.videoWidth;
   final height = line.videoHeight;
   if (width != null && width > 0 && height != null && height > 0) {
-    return '${line.adaptive ? '最高 ' : ''}$width×$height';
+    return '$width×$height';
   }
   final quality = line.quality.trim();
-  if (quality.isEmpty ||
-      quality == '--' ||
-      quality.toLowerCase() == 'unknown') {
+  if (_unknownPlaybackMetadata(quality) ||
+      RegExp(r'^0(?:[pPkK]|\s*[x×]\s*\d+)?$').hasMatch(quality)) {
     return '分辨率未知';
   }
-  return quality;
+  return '源标 $quality';
 }
 
-String _formatLabel(PlaybackLine line) {
+String playbackLineFormatLabel(PlaybackLine line) {
   final format = line.format.trim();
-  return format.isEmpty ? '格式未知' : format;
+  return _unknownPlaybackMetadata(format) ? '格式未知' : format;
+}
+
+bool _unknownPlaybackMetadata(String value) {
+  final lowered = value.trim().toLowerCase();
+  return lowered.isEmpty ||
+      lowered.contains('未知') ||
+      lowered.contains('unknown') ||
+      const {
+        '--',
+        '-',
+        'n/a',
+        'na',
+        'null',
+        'none',
+        'nan',
+        'infinity',
+        'auto',
+        '自动',
+        'default',
+      }.contains(lowered);
 }
 
 String _bitrateLabel(int bitsPerSecond) {

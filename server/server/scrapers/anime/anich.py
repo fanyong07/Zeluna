@@ -73,6 +73,7 @@ _EPISODE_PREFIX_RE = re.compile(r"^\s*(?:第\s*\d+\s*[话集]|EP?\s*\d+)\s*")
 _PAREN_SPLIT_RE = re.compile(r"[()()【】\[\]]")
 _LEADING_NUMBER_RE = re.compile(r"^\d+\s*·\s*")
 _SEARCH_PAGE_LIMIT = 20
+_SEARCH_METADATA_TIMEOUT_SECONDS = 1.8
 _OWN_CDN_TOKENS = ANICH_OWN_CDN_HOST_TOKENS
 
 logger = logging.getLogger(__name__)
@@ -345,18 +346,44 @@ class AniChScraper(BaseScraper):
                 analysis.evidence.exact_title or analysis.evidence.safe_title_variant
             )
 
-        if any(precise_match(row.title) for row in results):
+        # Search ``date`` can be an update/end date (Frieren's card says
+        # 2024, while detail.airdate says 2023). Refine ONE precise candidate
+        # with authoritative metadata; an exact card beats another season's
+        # safe-title variant regardless of upstream ordering. No episodes or
+        # media are fetched here, and details share the normal metadata cache.
+        precise = [row for row in results if precise_match(row.title)]
+        if precise:
+            exact = next((row for row in precise if analyze_source_match(
+                row.title, [keyword], candidate_type="anime", expected_type="anime",
+                candidate_year=0, expected_year=0,
+            ).evidence.exact_title), precise[0])
+            await self._refine_search_metadata(exact)
             return results
-        for row in results[:3]:
-            try:
-                meta = await self._detail_metadata(int(row.source_id))
-            except Exception:
-                continue
-            row.extra["aliases"] = meta["aliases"]
-            row.year = meta["year"] or row.year
-            if any(precise_match(title) for title in meta["aliases"]):
-                break
+        if results:
+            await self._refine_search_metadata(results[0])
         return results
+
+    async def _refine_search_metadata(self, row: SubjectResult) -> bool:
+        try:
+            # Optional enrichment must not hold already completed search cards
+            # until the whole provider deadline expires. The outer search
+            # cancellation still propagates; only this small sub-budget falls
+            # back to unmodified cards, without launching background requests.
+            meta = await asyncio.wait_for(
+                self._detail_metadata(int(row.source_id)),
+                timeout=_SEARCH_METADATA_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return False
+        identity = analyze_source_match(
+            meta["title"], [row.title], candidate_type="anime", expected_type="anime",
+            candidate_year=0, expected_year=0,
+        )
+        if not identity.evidence.allows_circuit_recovery:
+            return False
+        row.extra["aliases"] = meta["aliases"]
+        row.year = meta["year"] or row.year
+        return True
 
     async def get_latest(self, page: int = 1) -> list[SubjectResult]:
         # 只取首页:precache 场景足够,深翻页对该源没有增量价值。
@@ -413,7 +440,7 @@ class AniChScraper(BaseScraper):
         raw_items = anich_proto.decode_vod(body)
 
         scored: list[tuple[float, int, VideoLine]] = []
-        seen_urls: set[str] = set()
+        seen_urls: set[tuple[str, str]] = set()
         #: 本轮遇到、但缓存里还没有的自建域地址。函数末尾统一丢给后台补解。
         unresolved_wraps: list[str] = []
         for index, item in enumerate(raw_items):
@@ -422,7 +449,9 @@ class AniChScraper(BaseScraper):
             except ValueError:
                 continue
             key = url.lower()
-            if not key.startswith(("http://", "https://")) or key in seen_urls:
+            tag = (item.get("source") or "").strip()
+            identity = (tag, url)
+            if not key.startswith(("http://", "https://")) or identity in seen_urls:
                 continue
             caption = item.get("caption") or ""
             declared_format = "hls" if ".m3u8" in key else ""
@@ -433,13 +462,12 @@ class AniChScraper(BaseScraper):
                 url, declared_format
             ) in {INVALID_MEDIA_URL, PLAYER_PAGE_URL}:
                 continue
-            seen_urls.add(key)
+            seen_urls.add(identity)
             # 每条线路必须有独立身份:客户端按 providerId|sourceName 折叠卡片,
             # 共用一个名字会把数十条压成一张卡。直接用上游的线路标识
             # (hb-10/jk-18/xk-12…)作展示名:天然唯一,且不暴露聚合源名称。
             # 上游给的线路标识(hb-10 / jk-18 / xk-12…)。直接作为该线路的
             # 来源名:它天然唯一,且不暴露聚合服务本身的名字。
-            tag = (item.get("source") or "").strip()
             # 自建域地址是 302 包装层,而本部署出口被它按 IP 封禁
             # (Cloudflare Error 1006),原样交给客户端只会得到 403。
             # 已解析且首字节探活通过时优先交付真实地址;不同客户端网络

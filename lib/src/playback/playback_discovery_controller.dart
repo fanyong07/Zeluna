@@ -143,7 +143,11 @@ final class PlaybackDiscoveryController {
     required void Function() clearRuleRuntimeCaches,
     DateTime Function()? now,
     Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
+    Duration backendFullRefreshDelay = const Duration(seconds: 2),
+    int backendFullRefreshAttempts = 8,
   }) : assert(interactivePreferredHeadStart.inMicroseconds > 0),
+       assert(!backendFullRefreshDelay.isNegative),
+       assert(backendFullRefreshAttempts > 0),
        _backendRepository = backendRepository,
        _ruleRepository = ruleRepository,
        _verifyLine = verifyLine,
@@ -151,6 +155,8 @@ final class PlaybackDiscoveryController {
        _clearRuleRuntimeCaches = clearRuleRuntimeCaches,
        _now = now ?? DateTime.now,
        _interactivePreferredHeadStart = interactivePreferredHeadStart,
+       _backendFullRefreshDelay = backendFullRefreshDelay,
+       _backendFullRefreshAttempts = backendFullRefreshAttempts,
        _backendCache = PlaybackPrefetchCache(now: now),
        _episodeWarmupCache = NextEpisodeWarmupCache(
          ttl: const Duration(minutes: 45),
@@ -165,6 +171,8 @@ final class PlaybackDiscoveryController {
   final void Function() _clearRuleRuntimeCaches;
   final DateTime Function() _now;
   final Duration _interactivePreferredHeadStart;
+  final Duration _backendFullRefreshDelay;
+  final int _backendFullRefreshAttempts;
   final PlaybackPrefetchCache _backendCache;
   final NextEpisodeWarmupCache _episodeWarmupCache;
   final Map<String, _PlaybackLookupOperation> _backendLookups =
@@ -1003,6 +1011,7 @@ final class PlaybackDiscoveryController {
       var checked = baseLines;
       final scheduled = <Object, PlaybackLine>{};
       var completed = 0;
+      var discoveryPending = false;
       final inFlightProbes = <Future<void>>{};
       Future<PlaybackLine> verify(PlaybackLine line) async {
         while (inFlightProbes.length >= 4) {
@@ -1013,7 +1022,7 @@ final class PlaybackDiscoveryController {
         try {
           return await verifyPlaybackLine(
             line,
-            enrichMetadata: false,
+            enrichMetadata: true,
             cancellationToken: token,
           );
         } finally {
@@ -1044,15 +1053,30 @@ final class PlaybackDiscoveryController {
       }
 
       Stream<(List<PlaybackLine>?, PlaybackLine?)> expandedEvents() async* {
-        final expanded = await _backendLinesForEpisode(
-          scope,
-          subject,
-          episode,
-          expandAll: true,
-          cancellationToken: token,
-        );
-        if (!_isCurrent(scope) || token.isCancelled) return;
-        yield (expanded, null);
+        // A bounded HTTP response may precede the shared server scan finishing.
+        // Keep collecting its snapshots; partial data is never a complete list.
+        for (
+          var attempt = 0;
+          attempt < _backendFullRefreshAttempts;
+          attempt++
+        ) {
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          final expanded = await _backendLinesForEpisode(
+            scope,
+            subject,
+            episode,
+            expandAll: true,
+            cancellationToken: token,
+          );
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          discoveryPending = expanded.any(
+            (line) => line.cacheState == 'partial',
+          );
+          yield (expanded, null);
+          if (!discoveryPending) break;
+          // Do not let slow candidate probes postpone the next server snapshot.
+          await _waitForBackendRefresh(token);
+        }
         yield* probes(checked);
       }
 
@@ -1111,6 +1135,7 @@ final class PlaybackDiscoveryController {
         completedRules: scheduled.isEmpty ? 1 : scheduled.length,
         totalRules: scheduled.isEmpty ? 1 : scheduled.length,
         phase: PlaybackLineLookupPhase.complete,
+        timedOut: discoveryPending,
       );
     }
 
@@ -1198,6 +1223,25 @@ final class PlaybackDiscoveryController {
     }
     if (!_isCurrent(scope) || token.isCancelled) return;
     yield combined(complete: true);
+  }
+
+  Future<void> _waitForBackendRefresh(
+    RulePlaybackCancellationToken token,
+  ) async {
+    if (token.isCancelled || _backendFullRefreshDelay == Duration.zero) return;
+    final done = Completer<void>();
+    final timer = Timer(_backendFullRefreshDelay, () {
+      if (!done.isCompleted) done.complete();
+    });
+    final unlink = token.register(() {
+      if (!done.isCompleted) done.complete();
+    });
+    try {
+      await done.future;
+    } finally {
+      timer.cancel();
+      unlink();
+    }
   }
 
   void prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {
@@ -1401,7 +1445,8 @@ final class PlaybackDiscoveryController {
               (line) =>
                   !line.clientVerified &&
                   (line.serverVerified || line.requiresClientProbe) &&
-                  (line.url?.trim().isNotEmpty ?? false) &&
+                  ((line.url?.trim().isNotEmpty ?? false) ||
+                      line.clientResolver != null) &&
                   (line.expiresAt == null ||
                       line.expiresAt!.isAfter(refreshThreshold)),
             )
@@ -1639,7 +1684,8 @@ final class PlaybackDiscoveryController {
         .where(
           (line) =>
               line.requiresClientProbe &&
-              (line.url?.trim().isNotEmpty ?? false) &&
+              ((line.url?.trim().isNotEmpty ?? false) ||
+                  line.clientResolver != null) &&
               (line.expiresAt == null ||
                   line.expiresAt!.isAfter(
                     now.add(const Duration(seconds: 15)),
@@ -1765,7 +1811,8 @@ final class PlaybackDiscoveryController {
     return lines
         .where(
           (line) =>
-              (line.url?.trim().isNotEmpty ?? false) &&
+              ((line.url?.trim().isNotEmpty ?? false) ||
+                  line.clientResolver != null) &&
               (line.requiresClientProbe ||
                   (line.serverVerified &&
                       !line.clientVerified &&
@@ -1853,13 +1900,16 @@ final class PlaybackDiscoveryController {
 
 // Verification flags describe a version of one backend route, but are still
 // security distinctions between independent routes in mergePlaybackLines.
-Object _backendRouteRequestKey(PlaybackLine line) => (
-  line.providerId,
-  line.episodeId,
-  line.id,
-  line.url ?? '',
-  stableHeaderFingerprint(line.headers),
-);
+Object _backendRouteRequestKey(PlaybackLine line) =>
+    line.clientResolver != null || line.id.startsWith('client-resolver:')
+    ? (line.providerId, line.episodeId, line.id)
+    : (
+        line.providerId,
+        line.episodeId,
+        line.id,
+        line.url ?? '',
+        stableHeaderFingerprint(line.headers),
+      );
 
 List<PlaybackLine> _mergeBackendRouteUpdates(
   Iterable<PlaybackLine> previous,

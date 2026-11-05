@@ -122,6 +122,14 @@ class RulePlaybackResolver {
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     if (cancellationToken?.isCancelled ?? false) return line;
+    if (line.clientResolver != null) {
+      return _resolveBackendChapter(
+        line,
+        enrichMetadata: enrichMetadata,
+        forceRefresh: forceRefresh,
+        cancellationToken: cancellationToken,
+      );
+    }
     final rawUrl = line.url?.trim() ?? '';
     final target = Uri.tryParse(rawUrl);
     if (target == null ||
@@ -136,7 +144,10 @@ class RulePlaybackResolver {
       );
     }
 
-    final resolveContext = RulePageRequestScope(cancellationToken);
+    final resolveContext = RulePageRequestScope(
+      cancellationToken,
+      rule: _activeRulePlaybackResolveContext?.rule,
+    );
     return runZoned(() async {
       final injectedClient = line.publicHttpOnly
           ? _drpyPublicClient ?? _client
@@ -296,6 +307,166 @@ class RulePlaybackResolver {
         if (ownedClient) client.close();
       }
     }, zoneValues: {_rulePlaybackResolveContextKey: resolveContext});
+  }
+
+  /// Resolve the backend's explicit chapter task without installing a rule or
+  /// treating its HTML as playable. The resulting request must pass the same
+  /// manifest/segment probe as all other client-side media candidates.
+  Future<PlaybackLine> _resolveBackendChapter(
+    PlaybackLine line, {
+    required bool enrichMetadata,
+    required bool forceRefresh,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final descriptor = line.clientResolver!;
+    final manifest = RulePermissionManifest.official(
+      id: 'backend:kazumi:${descriptor.ruleId}',
+      name: descriptor.ruleName,
+      version: '1',
+      engine: 'backend-chapter',
+      contentTypes: const ['anime'],
+      pageDomains: descriptor.pageHosts,
+      mediaDomains: descriptor.mediaHosts,
+      javascript: true,
+      webViewSniffing: true,
+      cleartextHttp: descriptor.pageUrl.scheme == 'http',
+      customReferer: true,
+      customUserAgent: true,
+    );
+    final rule = RulePlugin(
+      id: manifest.id,
+      name: descriptor.ruleName,
+      version: '1',
+      source: RuleSourceKind.kazumi,
+      contentType: RuleContentType.anime,
+      engine: 'backend-chapter',
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(0),
+      qualityScore: 0,
+      tags: const ['Kazumi'],
+      baseUrl: descriptor.pageUrl.toString(),
+      searchUrl: '',
+      searchable: false,
+      quickSearch: false,
+      filterable: false,
+      permissionManifest: manifest,
+    );
+    final injected = _rulePublicClient ?? _client;
+    final client =
+        injected ?? createUntrustedSourceHttpClient(timeout: timeout);
+    final child = RulePlaybackCancellationToken();
+    final unlink = cancellationToken?.register(child.cancel);
+    final timer = Timer(timeout, child.cancel);
+    final watch = Stopwatch()..start();
+    Map<String, String> headersFor(Uri referer) => {
+      'Referer': referer.toString(),
+      'User-Agent': descriptor.userAgent.isEmpty
+          ? _desktopUserAgent
+          : descriptor.userAgent,
+    };
+    try {
+      final resolved = await runZoned(
+        () async {
+          final body = await _get(
+            client,
+            descriptor.pageUrl,
+            headersFor(descriptor.referer),
+          );
+          return RuleMediaResolver(
+            readPage: (uri, headers) => _get(client, uri, headers),
+            extract: _extractCurrentChapterMedia,
+            headersFor: headersFor,
+            sniffer: _animekoWebViewSniffer,
+          ).resolve(
+            page: descriptor.pageUrl,
+            body: body,
+            manifest: manifest,
+            cancellationToken: child,
+            budget: timeout - watch.elapsed,
+          );
+        },
+        zoneValues: {
+          _rulePlaybackResolveContextKey: RulePageRequestScope(
+            child,
+            rule: rule,
+          ),
+        },
+      ).timeout(timeout);
+      if (cancellationToken?.isCancelled == true) return line;
+      if (resolved == null || child.isCancelled) {
+        return _copyPlaybackLineWithProbe(
+          line,
+          const _PlayableProbeResult(false, '本集章节尚未解析出媒体，请尝试其他线路。'),
+        );
+      }
+      final candidate = PlaybackLine(
+        id: line.id,
+        episodeId: line.episodeId,
+        providerId: line.providerId,
+        providerName: line.providerName,
+        title: line.title,
+        quality: line.quality,
+        format: 'auto',
+        url: resolved.url,
+        headers: resolved.headers,
+        publicHttpOnly: true,
+        requiresClientProbe: true,
+        cacheState: line.cacheState,
+        sourceName: line.sourceName,
+        sourceInventoryId: line.sourceInventoryId,
+        clientQuerySupported: line.clientQuerySupported,
+        queryLocation: line.queryLocation == 'hybrid' ? 'hybrid' : 'local',
+        sourceAddress: line.sourceAddress,
+        diagnosticStatus: PlaybackDiscoveryStatus.clientProbeRequired,
+        queried: line.queried,
+        aliasesAttempted: line.aliasesAttempted,
+        searchHitCount: line.searchHitCount,
+        bestMatchScore: line.bestMatchScore,
+        matched: true,
+        episodeFound: true,
+        discoveryElapsed: line.discoveryElapsed,
+        expiresAt: line.expiresAt,
+        message: '本集媒体已解析，等待本机清单和首段验证',
+      );
+      final remaining = timeout - watch.elapsed;
+      if (remaining <= Duration.zero) {
+        throw TimeoutException('Chapter resolution budget exhausted.');
+      }
+      final verified = await runZoned(
+        () => verifyPlaybackLine(
+          line: candidate,
+          enrichMetadata: enrichMetadata,
+          forceRefresh: forceRefresh,
+          cancellationToken: child,
+        ),
+        zoneValues: {
+          _rulePlaybackResolveContextKey: RulePageRequestScope(
+            child,
+            rule: rule,
+          ),
+        },
+      ).timeout(remaining);
+      if (cancellationToken?.isCancelled == true) return line;
+      if (child.isCancelled) {
+        throw TimeoutException('Chapter verification budget exhausted.');
+      }
+      return verified;
+    } catch (error) {
+      if (cancellationToken?.isCancelled == true) return line;
+      return _copyPlaybackLineWithProbe(
+        line,
+        _PlayableProbeResult(
+          false,
+          _friendlyError(error),
+          errorCategory: _probeFailureCategory(error),
+        ),
+      );
+    } finally {
+      watch.stop();
+      timer.cancel();
+      unlink?.call();
+      child.cancel();
+      if (injected == null) client.close();
+    }
   }
 
   Future<List<PlaybackLine>> _resolveDrpy(
@@ -3160,9 +3331,8 @@ _ProbeMediaMetadata _mediaMetadataFromSample(
   }
   if (format == 'DASH') return _dashProbeMetadata(sourceUri, text);
 
-  final dimensions = format == 'MP4'
-      ? _mp4Dimensions(sample.sample) ?? _resolutionDimensionsForUrl(sourceUri)
-      : _resolutionDimensionsForUrl(sourceUri);
+  // URL quality tokens are source labels, never measured pixel dimensions.
+  final dimensions = format == 'MP4' ? _mp4Dimensions(sample.sample) : null;
   return _ProbeMediaMetadata(
     format: format,
     startupProfile: format == 'MP4'
@@ -3402,7 +3572,6 @@ _ProbeMediaMetadata _hlsProbeMetadata(
       mediaSegmentCount > 0 &&
       rangedMediaSegmentCount == mediaSegmentCount &&
       byteRangeBytes > 0;
-  final dimensions = _resolutionDimensionsForUrl(sourceUri);
   final orderedSegmentUris = hasEndList
       ? sampleSegmentUris
       : sampleSegmentUris.reversed.toList(growable: false);
@@ -3413,8 +3582,8 @@ _ProbeMediaMetadata _hlsProbeMetadata(
   return _ProbeMediaMetadata(
     format: 'HLS',
     sizeBytes: hasEndList && hasExactByteRangeTotal ? byteRangeBytes : null,
-    videoWidth: dimensions?.width,
-    videoHeight: dimensions?.height,
+    // Declared segment ranges omit initialization/container overhead.
+    sizeEstimated: hasEndList && hasExactByteRangeTotal,
     isLive: sampleComplete && !hasEndList,
     durationSeconds: hasEndList && durationSeconds > 0 ? durationSeconds : null,
     sampleSegmentUri: sampleSegmentUri,
@@ -3517,7 +3686,6 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
             bitrate > 0
         ? (bitrate * durationSeconds / 8).round()
         : null;
-    final fallbackDimensions = _resolutionDimensionsForUrl(sourceUri);
     final resources = selected == null
         ? const <_DashProbeResource>[]
         : _dashProbeResources(sourceUri, selected);
@@ -3525,8 +3693,8 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
       format: 'DASH',
       sizeBytes: estimatedBytes,
       sizeEstimated: estimatedBytes != null,
-      videoWidth: width ?? fallbackDimensions?.width,
-      videoHeight: height ?? fallbackDimensions?.height,
+      videoWidth: width,
+      videoHeight: height,
       bitrate: bitrate,
       codecs: codecs.isEmpty ? null : codecs,
       isLive: isDynamic,
@@ -3535,12 +3703,7 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
       dashResources: resources,
     );
   } catch (_) {
-    final dimensions = _resolutionDimensionsForUrl(sourceUri);
-    return _ProbeMediaMetadata(
-      format: 'DASH',
-      videoWidth: dimensions?.width,
-      videoHeight: dimensions?.height,
-    );
+    return const _ProbeMediaMetadata(format: 'DASH');
   }
 }
 
@@ -4011,6 +4174,7 @@ PlaybackLine _copyPlaybackLineWithProbe(
     quality: line.quality,
     format: detectedFormat.isEmpty ? line.format : detectedFormat,
     url: line.url,
+    clientResolver: line.clientResolver,
     headers: line.headers,
     latency: probe.latency ?? line.latency,
     sizeLabel: line.sizeLabel,
@@ -4043,9 +4207,12 @@ PlaybackLine _copyPlaybackLineWithProbe(
     sourceInventoryId: line.sourceInventoryId,
     clientQuerySupported: line.clientQuerySupported,
     queryLocation: line.queryLocation,
-    diagnosticStatus:
-        line.queryLocation == 'local' &&
-            line.diagnosticStatus == PlaybackDiscoveryStatus.clientProbeRequired
+    sourceAddress: line.sourceAddress,
+    diagnosticStatus: line.clientResolver != null && !probe.available
+        ? PlaybackDiscoveryStatus.routeUnavailable
+        : const {'local', 'hybrid'}.contains(line.queryLocation) &&
+              line.diagnosticStatus ==
+                  PlaybackDiscoveryStatus.clientProbeRequired
         ? (probe.available
               ? PlaybackDiscoveryStatus.matched
               : PlaybackDiscoveryStatus.routeUnavailable)
@@ -4060,7 +4227,9 @@ PlaybackLine _copyPlaybackLineWithProbe(
     expiresAt: line.expiresAt,
     available: probe.available,
     message: probe.available
-        ? (line.queryLocation == 'local' ? '本机媒体探测通过；实际播放以播放器为准' : line.message)
+        ? (const {'local', 'hybrid'}.contains(line.queryLocation)
+              ? '本机媒体探测通过；实际播放以播放器为准'
+              : line.message)
         : probe.message,
   );
 }
@@ -5383,6 +5552,67 @@ String? _extractByWildcardRule(String source, String rule) {
   if (endIndex < 0) return null;
   final value = _decodePlayerUrl(source.substring(cursor, endIndex));
   return value.isEmpty ? null : value;
+}
+
+/// The chapter bridge may inspect the current player, not arbitrary URLs from
+/// the page (which often include preroll adverts and next-episode prefetch).
+String? _extractCurrentChapterMedia(String body, String baseUrl) {
+  String? media(Object? raw) {
+    final text = raw?.toString().trim() ?? '';
+    if (text.isEmpty) return null;
+    final normalized = _normalizePlayableUrl(text, baseUrl);
+    return _isExplicitPlayableUrl(normalized) ? normalized : null;
+  }
+
+  final text = body.trim();
+  if (text.startsWith('https://') || text.startsWith('http://')) {
+    if (!RegExp(r'[\s<>]').hasMatch(text)) return media(text);
+  }
+  final player = RegExp(r'\bplayer_\w+\s*=\s*').firstMatch(text);
+  if (player != null) {
+    final start = text.indexOf('{', player.end);
+    if (start < 0) return null;
+    var depth = 0;
+    var quoted = false;
+    var escaped = false;
+    for (var i = start; i < text.length; i++) {
+      final char = text[i];
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (char == r'\') {
+          escaped = true;
+        } else if (char == '"') {
+          quoted = false;
+        }
+      } else if (char == '"') {
+        quoted = true;
+      } else if (char == '{') {
+        depth++;
+      } else if (char == '}' && --depth == 0) {
+        return media(_playerJsonUrl(text.substring(start, i + 1)));
+      }
+    }
+    return null;
+  }
+  if (text.startsWith('{')) {
+    try {
+      final json = jsonDecode(text);
+      if (json is Map) {
+        return media(_decodePlayerUrl(json['url'], json['encrypt']));
+      }
+    } on FormatException {
+      return null;
+    }
+  }
+  final document = html_parser.parse(body);
+  for (final element in document.querySelectorAll(
+    'video[src], video source[src]',
+  )) {
+    final found = media(element.attributes['src']);
+    if (found != null) return found;
+  }
+  return null;
 }
 
 String? _extractPlayableUrl(String html, String baseUrl) {

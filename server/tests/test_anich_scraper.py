@@ -337,8 +337,8 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
             lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
         finally:
             await subject.aclose()
-        # fixture 六条原始行:一条同址重复、一条脚本端点被拒 → 全量 4 条
-        self.assertEqual(len(lines), 4)
+        # 同地址但不同线路标识仍独立；只排除脚本端点 → 全量 5 条
+        self.assertEqual(len(lines), 5)
         # 头名是采集站 HLS;adkwai 那条是 /bs2/adVideoLp/ 贴片投放,
         # 实测 97 条 adkwai 线路里 96 条在此目录,不能当正片首播位
         self.assertNotIn("adVideoLp", lines[0].url)
@@ -348,16 +348,16 @@ class AniChScraperTests(unittest.IsolatedAsyncioTestCase):
             any(line.quality == "官方简中·1080P" for line in lines)
         )
 
-    async def test_duplicate_urls_are_deduplicated(self):
+    async def test_shared_url_keeps_independent_upstream_route_names(self):
         subject = _scraper(_Handler(), max_lines=12)
         try:
             lines = await subject.get_video_urls(str(BANGUMI_ID), 1)
         finally:
             await subject.aclose()
         urls = [line.url for line in lines]
-        # fixture 六条原始行:一条同址重复、一条脚本端点被拒 → 剩 4 条
-        self.assertEqual(len(urls), 4)
-        self.assertEqual(len(urls), len(set(urls)))
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(len(set(urls)), 4)
+        self.assertEqual({line.source_name for line in lines}, {"hb-10", "aw-11", "jk-18", "dl-7", "xs-6"})
 
     async def test_episodes_are_cached_across_calls(self):
         """剧集表约 1s 且占一次串行节流额度,重复取流不应重复拉取。"""
@@ -513,14 +513,14 @@ def test_detail_lookup_is_bounded_and_failure_keeps_search_results():
         try:
             rows = await scraper.search("Distinct English Title")
             assert len(rows) == 10
-            assert 1 <= sum("/bangumi/detail/" in call for call in handler.calls) <= 3
+            assert sum("/bangumi/detail/" in call for call in handler.calls) == 1
             assert not any("episodes" in call for call in handler.calls)
         finally:
             await scraper.aclose()
     asyncio.run(run())
 
 
-def test_detail_lookup_checks_at_most_three_candidates():
+def test_detail_lookup_checks_at_most_one_candidate():
     class EmptyDetailHandler(_Handler):
         def __call__(self, request):
             self.calls.append(request.url.path)
@@ -536,8 +536,160 @@ def test_detail_lookup_checks_at_most_three_candidates():
         try:
             rows = await scraper.search("Distinct English Title")
             assert len(rows) == 10
-            assert sum("/bangumi/detail/" in call for call in handler.calls) == 3
+            assert sum("/bangumi/detail/" in call for call in handler.calls) == 1
             assert not any("episodes" in call for call in handler.calls)
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_exact_card_refines_airdate_before_another_seasons_variant():
+    from server.protobuf_encoder import _field_double
+
+    class UpdateDateHandler(_Handler):
+        def __call__(self, request):
+            path = request.url.path
+            self.calls.append(path)
+            if path == "/bangumi/search":
+                return httpx.Response(200, content=b"".join(
+                    _field_bytes(1, _field_varint(1, ident) + _string_field(2, title)
+                                 + _field_double(6, date))
+                    for ident, title, date in (
+                        (37654, "葬送的芙莉莲 第二季", 1768492800000.0),
+                        (32339, "葬送的芙莉莲", 1711116000000.0),
+                    )
+                ))
+            assert path == "/bangumi/detail/32339", "only exact identity gets metadata"
+            return httpx.Response(200, json={
+                "title": "葬送的芙莉莲", "airdate": 1695945600000,
+                "titles": ["葬送のフリーレン", "葬送的芙莉蓮"],
+            })
+
+    async def run():
+        handler = UpdateDateHandler()
+        scraper = _scraper(handler)
+        try:
+            for _ in range(2):
+                rows = await scraper.search("葬送的芙莉莲")
+                exact = next(row for row in rows if row.source_id == "32339")
+                assert exact.year == 2023
+                assert exact.extra["aliases"] == ["葬送のフリーレン", "葬送的芙莉蓮"]
+                assert rows[0].year == 2026
+            assert handler.calls.count("/bangumi/detail/32339") == 1
+            assert not any("episodes" in path or "vod" in path for path in handler.calls)
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_optional_metadata_timeout_keeps_search_cards_and_cancels_detail(monkeypatch):
+    from unittest.mock import patch
+    from server.scrapers.anime import anich
+
+    monkeypatch.setattr(anich, "_SEARCH_METADATA_TIMEOUT_SECONDS", 0.01)
+
+    async def run():
+        scraper = _scraper(_Handler())
+        cancelled = []
+
+        async def slow_detail(_source_id):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        try:
+            with patch.object(scraper, "_detail_metadata", side_effect=slow_detail):
+                rows = await scraper.search("葬送的芙莉莲 第二季")
+            assert len(rows) == 1
+            assert rows[0].year == LIST_DATE_YEAR
+            assert cancelled == [True]
+            assert not scraper._transport._base_cooldown_until
+            assert scraper._details_cache == {}
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_outer_cancellation_and_search_failure_are_not_swallowed():
+    from unittest.mock import patch
+    from server.scrapers.anime.anich_transport import AniChUpstreamError
+
+    async def run():
+        scraper = _scraper(_Handler())
+        started = asyncio.Event()
+
+        async def slow_detail(_source_id):
+            started.set()
+            await asyncio.sleep(60)
+
+        try:
+            with patch.object(scraper, "_detail_metadata", side_effect=slow_detail):
+                task = asyncio.create_task(scraper.search("葬送的芙莉莲 第二季"))
+                await started.wait()
+                task.cancel()
+                try:
+                    await task
+                    raise AssertionError("outer cancellation was swallowed")
+                except asyncio.CancelledError:
+                    pass
+            original = AniChUpstreamError("fixture search failure", status=503)
+            with patch.object(scraper._transport, "request", side_effect=original):
+                try:
+                    await scraper.search("葬送的芙莉莲 第二季")
+                    raise AssertionError("search transport failure was swallowed")
+                except AniChUpstreamError as error:
+                    assert error is original
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_exact_card_with_missing_optional_detail_still_fetches_episode_media():
+    class MissingDetailHandler(_Handler):
+        def __call__(self, request):
+            if request.url.path.startswith("/bangumi/detail/"):
+                self.calls.append(request.url.path)
+                return httpx.Response(404)
+            return super().__call__(request)
+
+    async def run():
+        scraper = _scraper(MissingDetailHandler())
+        try:
+            rows = await scraper.search("葬送的芙莉莲 第二季")
+            assert len(rows) == 1
+            assert rows[0].year == LIST_DATE_YEAR
+            assert not scraper._transport._base_cooldown_until
+            from unittest.mock import patch
+            with patch("server.scrapers.anime.anich._schedule_resolve"):
+                lines = await scraper.get_video_urls(rows[0].source_id, 1)
+            assert lines
+            assert not scraper._transport._base_cooldown_until
+        finally:
+            await scraper.aclose()
+    asyncio.run(run())
+
+
+def test_exact_card_keeps_identity_when_detail_is_another_season():
+    class WrongDetailHandler(_Handler):
+        def __call__(self, request):
+            if request.url.path.startswith("/bangumi/detail/"):
+                self.calls.append(request.url.path)
+                return httpx.Response(200, json={
+                    "title": "葬送的芙莉莲 第一季", "airdate": 1695945600000,
+                    "titles": ["unrelated-alias"],
+                })
+            return super().__call__(request)
+
+    async def run():
+        scraper = _scraper(WrongDetailHandler())
+        try:
+            rows = await scraper.search("葬送的芙莉莲 第二季")
+            assert len(rows) == 1
+            assert rows[0].title == "葬送的芙莉莲 第二季"
+            assert rows[0].year == LIST_DATE_YEAR
+            assert "aliases" not in rows[0].extra
         finally:
             await scraper.aclose()
     asyncio.run(run())

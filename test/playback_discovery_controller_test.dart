@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/domain/client_media_resolver.dart';
 import 'package:anime/src/playback/playback_discovery_controller.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
@@ -9,6 +10,93 @@ import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'URL-less chapter task is probed and replaced in ordinary lookup and updates',
+    () async {
+      final descriptor = ClientMediaResolverDescriptor.fromJson({
+        'kind': 'kazumi_page_v1',
+        'page_url': 'https://chapter.example/play/1.html',
+        'referer': 'https://chapter.example/detail/1.html',
+        'rule_id': 'independent',
+        'rule_name': '独立规则',
+        'user_agent': '',
+        'page_hosts': ['chapter.example'],
+        'media_hosts': ['cdn.example'],
+      })!;
+      for (final mode in ['ordinary', 'updates']) {
+        final pending = PlaybackLine(
+          id: 'client-resolver:one',
+          episodeId: _episode.id,
+          providerId: 'crawler.kazumi',
+          providerName: '独立规则',
+          title: '本集章节',
+          quality: '',
+          format: 'auto',
+          clientResolver: descriptor,
+          requiresClientProbe: true,
+          diagnosticStatus: PlaybackDiscoveryStatus.clientResolverRequired,
+        );
+        final ready = PlaybackLine(
+          id: pending.id,
+          episodeId: _episode.id,
+          providerId: pending.providerId,
+          providerName: pending.providerName,
+          title: pending.title,
+          quality: '',
+          format: 'MP4',
+          url: 'https://cdn.example/episode.mp4',
+          available: true,
+          clientVerified: true,
+        );
+        var probeCalls = 0;
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async => [
+              pending,
+            ],
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) async {
+                expect(line.clientResolver, same(descriptor));
+                probeCalls++;
+                return ready;
+              },
+        );
+        try {
+          _load(controller, accountId: 'account-a', contextVersion: 1);
+          final List<PlaybackLine> result;
+          if (mode == 'ordinary') {
+            result = await controller.linesForEpisode(_subject, _episode);
+          } else {
+            result =
+                (await controller
+                        .lineUpdatesForEpisode(_subject, _episode)
+                        .toList())
+                    .last
+                    .lines;
+          }
+          expect(result.where((l) => l.id == pending.id), [
+            same(ready),
+          ], reason: mode);
+          expect(
+            result.where((l) => l.clientResolver != null),
+            isEmpty,
+            reason: mode,
+          );
+          expect(probeCalls, 1, reason: mode);
+        } finally {
+          controller.dispose();
+        }
+      }
+    },
+  );
+
   test(
     'stale server timings cannot skip concurrent device verification',
     () async {
@@ -364,14 +452,88 @@ void main() {
       );
       addTearDown(controller.dispose);
       _load(controller, accountId: 'account-a', contextVersion: 1);
-      await controller.lineUpdatesForEpisode(_subject, _episode).toList();
-      final second = await controller
+      final first = await controller
           .lineUpdatesForEpisode(_subject, _episode)
           .toList();
       expect(fullCalls, 2);
+      expect(
+        first.any((update) => update.lines.any((line) => line.id == 'full-1')),
+        isTrue,
+      );
+      expect(first.last.lines.map((line) => line.id), contains('full-2'));
+      expect(first.last.timedOut, isFalse);
+      final second = await controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList();
+      expect(fullCalls, 2, reason: 'only the completed result is cached');
       expect(second.last.lines.map((line) => line.id), ['full-2']);
     },
   );
+
+  test(
+    'partial full discovery stays retryable when its budget is exhausted',
+    () async {
+      var fullCalls = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async {
+            if (!expandAll) return [];
+            fullCalls++;
+            return [
+              _line(
+                'pending-$fullCalls',
+                clientVerified: true,
+                cacheState: 'partial',
+              ),
+            ];
+          },
+        ),
+        activeVersion: () => 1,
+        backendFullRefreshAttempts: 3,
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final updates = await controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList();
+      expect(fullCalls, 3);
+      expect(updates.last.isComplete, isTrue);
+      expect(updates.last.timedOut, isTrue);
+      expect(
+        controller.cachedBackendEntries,
+        0,
+        reason: 'partial routes and empty quick responses are not cached',
+      );
+      expect(updates.last.lines.map((line) => line.id), contains('pending-3'));
+    },
+  );
+
+  test('cancelling partial discovery interrupts the refresh delay', () async {
+    var fullCalls = 0;
+    final token = RulePlaybackCancellationToken();
+    final controller = _controller(
+      backend: _FakePlaybackRepository(
+        load: (_, _, {required expandAll, cancellationToken}) async {
+          if (!expandAll) return [];
+          fullCalls++;
+          return [
+            _line('pending', clientVerified: true, cacheState: 'partial'),
+          ];
+        },
+      ),
+      activeVersion: () => 1,
+      backendFullRefreshDelay: const Duration(hours: 1),
+    );
+    addTearDown(controller.dispose);
+    _load(controller, accountId: 'account-a', contextVersion: 1);
+    final done = controller
+        .lineUpdatesForEpisode(_subject, _episode, cancellationToken: token)
+        .toList();
+    await _waitUntil(() => fullCalls == 1);
+    token.cancel();
+    await done.timeout(const Duration(seconds: 2));
+    expect(fullCalls, 1);
+  });
 
   test(
     'next episode publishes ready preferred route while fallback is pending',
@@ -3485,6 +3647,8 @@ PlaybackDiscoveryController _controller({
   PlaybackLineVerifier? verify,
   void Function()? clearRuleRuntimeCaches,
   Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
+  Duration backendFullRefreshDelay = Duration.zero,
+  int backendFullRefreshAttempts = 8,
 }) => PlaybackDiscoveryController(
   backendRepository: (_) => backend,
   ruleRepository: (_) => rule ?? _FakePlaybackRepository.empty(),
@@ -3499,6 +3663,8 @@ PlaybackDiscoveryController _controller({
   isContextCurrent: (version) => version == activeVersion(),
   clearRuleRuntimeCaches: clearRuleRuntimeCaches ?? () {},
   interactivePreferredHeadStart: interactivePreferredHeadStart,
+  backendFullRefreshDelay: backendFullRefreshDelay,
+  backendFullRefreshAttempts: backendFullRefreshAttempts,
 );
 
 void _load(

@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 import time
 from urllib.parse import quote, urlparse
 
@@ -97,11 +98,60 @@ def to_fetch_url(url: str) -> str:
 
 
 class AniChUpstreamError(RuntimeError):
-    """一次不可恢复的上游失败(status 为 None 表示连接层错误)。"""
+    """Structured, endpoint-free failure; retain its cause across cooldowns.
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    ``reason`` describes this request, while ``cause_reason`` describes the
+    failure that put an origin in cooldown. ``retry_after_seconds`` is relative
+    to the current monotonic clock, not a persisted timestamp.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        reason: str = "upstream_http_error",
+        retry_after_seconds: float = 0.0,
+        cause_reason: str = "",
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.reason = reason
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds))
+        self.cause_reason = cause_reason or reason
+
+
+def _http_failure_reason(error: httpx.HTTPError) -> str:
+    if isinstance(error, httpx.ConnectTimeout):
+        return "connect_timeout"
+    if isinstance(error, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return "read_timeout"
+    if isinstance(error, httpx.ConnectError):
+        cause: BaseException | None = error
+        visited: set[int] = set()
+        while cause is not None and id(cause) not in visited:
+            visited.add(id(cause))
+            if isinstance(cause, socket.gaierror):
+                return "dns_failure"
+            cause = cause.__cause__ or cause.__context__
+        if any(marker in str(error).casefold() for marker in (
+            "getaddrinfo", "name or service", "nodename", "dns",
+        )):
+            return "dns_failure"
+        return "connect_error"
+    return "transport_error"
+
+
+def _status_failure_reason(status: int) -> str:
+    if status == 429:
+        return "rate_limited"
+    if status in (401, 403, 451):
+        return "restricted"
+    if status in (404, 410):
+        return "stale_route"
+    if status == 200:
+        return "empty_response"
+    return "upstream_http_error"
 
 
 class AniChTransport:
@@ -142,19 +192,22 @@ class AniChTransport:
         )
         self._clock = clock
         self._sleep = sleep_func
-        # 走自建中转时只发一个地址,不再直连上游;中转侧负责取数与容灾。
+        # 配置中转时仅在中转候选间轮转,不向直连上游发送 relay key。
         relay = config.ANICH_RELAY_BASE
-        self._relay = relay
+        relay_bases = tuple(dict.fromkeys(
+            item.strip().rstrip("/") for item in relay.split(",") if item.strip()
+        ))
+        self._relay = bool(relay_bases)
         client_headers = {"User-Agent": ANICH_USER_AGENT}
-        if relay and config.ANICH_RELAY_KEY:
+        if self._relay and config.ANICH_RELAY_KEY:
             client_headers["X-Relay-Key"] = config.ANICH_RELAY_KEY
         self._client = httpx.AsyncClient(
             headers=client_headers,
             timeout=self._timeout,
             transport=transport,
         )
-        if relay:
-            self._bases = (relay,)
+        if self._relay:
+            self._bases = relay_bases
             # 上游节流由中转统一保证;本地不再叠加长间隔,否则白等。
             self._interval = (
                 config.ANICH_RELAY_MIN_INTERVAL_SECONDS
@@ -165,6 +218,7 @@ class AniChTransport:
         self._last_dispatch_at: float | None = None
         self._working_base: str | None = None
         self._base_cooldown_until: dict[str, float] = {}
+        self._base_failures: dict[str, AniChUpstreamError] = {}
 
     @property
     def base(self) -> str | None:
@@ -176,11 +230,6 @@ class AniChTransport:
         """是否经由自建中转取数。"""
         return bool(self._relay)
 
-    @property
-    def base(self) -> str | None:
-        """当前工作主域(诊断用;不得写入日志或对外元数据)。"""
-        return self._working_base
-
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -190,51 +239,84 @@ class AniChTransport:
 
         失败语义:每个候选域先直试;403/429 退避后对该域再试一次;
         连接层错误或仍失败则冷却该域并顺延到下一候选。全部候选耗尽
-        后抛 ``AniChUpstreamError``(status 取最后一次限流状态或 None)。
+        后抛 ``AniChUpstreamError``，保留最后失败的分类、HTTP 状态与 cause。
+        冷却内不派发请求；剩余重试时间及触发冷却的原因随异常返回。
         """
-        last_error: BaseException | None = None
-        last_status: int | None = None
+        last_error: AniChUpstreamError | None = None
         candidates = self._available_bases()
         if not candidates:
-            raise AniChUpstreamError("all anich bases cooling down")
+            # A zero-I/O failure still has a concrete originating status/cause.
+            # Pick the first origin eligible for retry, not a fresh blank error.
+            next_base = min(self._bases, key=lambda base: self._base_cooldown_until[base])
+            cause = self._base_failures.get(next_base)
+            raise AniChUpstreamError(
+                "all anich bases cooling down",
+                reason="upstream_cooldown",
+                status=cause.status if cause else None,
+                retry_after_seconds=self._cooldown_remaining(),
+                cause_reason=cause.cause_reason if cause else "upstream_cooldown",
+            ) from cause
         for candidate in candidates:
             retried_rate_limit = False
             while True:
+                url = candidate + path
                 try:
-                    status, body = await self._dispatch(candidate + path)
+                    status, body = await self._dispatch(url)
                 except httpx.HTTPError as error:
                     last_error = AniChUpstreamError(
-                        f"anich transport error: {error}"
+                        f"anich transport error ({type(error).__name__})",
+                        reason=_http_failure_reason(error),
                     )
-                    self._note_failure(candidate)
+                    last_error.__cause__ = error
+                    self._note_failure(candidate, last_error)
                     break
                 if status == 200 and (body or path.startswith("/bangumi/search?")):
                     self._note_success(candidate)
                     return body
+                # Keep the actual HTTP failure in memory for classification,
+                # without putting endpoints or response bodies in error text.
+                cause = httpx.HTTPStatusError(
+                    f"unexpected anich response ({status})",
+                    request=httpx.Request("GET", url),
+                    response=httpx.Response(status),
+                )
                 # AniCh returns HTTP 500 for some unmatched title spellings.
-                # This is a query failure, not evidence that the entire origin
-                # (including known-good searches and /vod) is down. Fail fast
-                # so discovery can try its next alias within the same budget.
+                # A bad alias must not quarantine the otherwise usable origin.
                 if path.startswith("/bangumi/search?") and status in (400, 404, 422, 500):
                     raise AniChUpstreamError(
-                        f"anich search query failed ({status})", status=status,
-                    )
+                        f"anich search query failed ({status})",
+                        status=status,
+                        reason="search_query_failed",
+                    ) from cause
+                # A missing optional detail record is item-scoped. Search
+                # enrichment must not quarantine otherwise usable /search or
+                # /vod routes merely because one record is absent.
+                if path.startswith("/bangumi/detail/") and status in (404, 410):
+                    raise AniChUpstreamError(
+                        f"anich detail unavailable ({status})",
+                        status=status,
+                        reason="stale_route",
+                    ) from cause
                 if status in (403, 429) and not retried_rate_limit:
                     retried_rate_limit = True
                     await self._sleep(min(self._backoff_max, 5.0))
                     continue
-                last_status = status
                 last_error = AniChUpstreamError(
                     f"unexpected anich response ({status})",
                     status=status,
+                    reason=_status_failure_reason(status),
                 )
-                self._note_failure(candidate)
+                last_error.__cause__ = cause
+                self._note_failure(candidate, last_error)
                 break
+        assert last_error is not None
         raise AniChUpstreamError(
-            f"anich request failed ({type(last_error).__name__}: {last_error}); "
-            f"last_status={last_status}",
-            status=getattr(last_error, "status", None),
-        )
+            f"anich request failed ({last_error.reason}); last_status={last_error.status}",
+            status=last_error.status,
+            reason=last_error.reason,
+            retry_after_seconds=self._cooldown_remaining(),
+            cause_reason=last_error.cause_reason,
+        ) from last_error
 
     # ── 内部细节 ─────────────────────────────────────────────
     async def _dispatch(self, url: str) -> tuple[int, bytes]:
@@ -264,9 +346,19 @@ class AniChTransport:
             if self._base_cooldown_until.get(candidate, 0) <= now
         ]
 
+    def _cooldown_remaining(self) -> float:
+        now = self._clock()
+        return min(
+            (max(0.0, self._base_cooldown_until.get(base, now) - now)
+             for base in self._bases),
+            default=0.0,
+        )
+
     def _note_success(self, base: str) -> None:
         self._working_base = base
         self._base_cooldown_until.pop(base, None)
+        self._base_failures.pop(base, None)
 
-    def _note_failure(self, base: str) -> None:
+    def _note_failure(self, base: str, error: AniChUpstreamError) -> None:
         self._base_cooldown_until[base] = self._clock() + self._base_cooldown_seconds
+        self._base_failures[base] = error

@@ -1,16 +1,11 @@
 """Kazumi 规则库动漫源适配器(provider id ``crawler.kazumi``)。
 
-能力边界(实测结论,不是设计取舍)
---------------------------------
-Kazumi 规则格式里**没有任何"提取视频地址"的字段**:``api / type / name /
-baseURL / searchURL / searchList / searchName / searchResult / chapterRoads /
-chapterResult`` 之外,只剩播放器/反爬/模式开关。客户端拿到章节页之后,靠
-WebView 里 hook 网络请求、嗅探响应体里的 ``#EXTM3U`` 才得到 m3u8 地址。
-
-所以这个库能贡献的只有 **搜索 + 章节** 两段,直链拿不到 —— 这也是
-:meth:`KazumiScraper.get_video_urls` 返回空列表并在注释里写明原因的原因。
-硬凑直链(例如把播放页 URL 当线路返回)只会往线路池里灌死链,拖累真正
-能播的来源。
+章节 → 媒体
+-----------
+规则描述搜索与章节结构,章节既可能是直媒体,也可能是播放器网页。
+``get_video_urls`` 严格选择请求集数的所有线路,先解析直媒体与静态播放器,
+再在有界 iframe 内寻找当前媒体。确需 JavaScript 的页面返回独立的
+``kazumi_page_v1`` 客户端描述,从不把 HTML 页面伪装成媒体 URL。
 
 引擎要点(逐条都有实测依据)
 --------------------------
@@ -44,6 +39,7 @@ import random
 import re
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from typing import Any, Final, Optional
@@ -53,6 +49,7 @@ import httpx
 from lxml import etree, html as lxml_html
 
 from ..base import BaseScraper, EpisodeInfo, SubjectDetail, SubjectResult, VideoLine
+from .kazumi_media import KazumiMediaResolver, MediaChapter, public_url_shape
 from .kazumi_rules import (
     KazumiChapterApi,
     KazumiRequest,
@@ -431,6 +428,13 @@ def _stringify_body(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@dataclass
+class _KazumiEpisode(EpisodeInfo):
+    """内部保留线路身份,不改变公共 EpisodeInfo 或 source_episode_id。"""
+
+    channel: str = "1"
+
+
 # ── 规则执行器(纯逻辑,不持有连接) ─────────────────────────────
 class KazumiRuleEngine:
     """把一条 :class:`KazumiRule` 跑成 :class:`SubjectResult` / 章节列表。
@@ -711,6 +715,11 @@ class KazumiRuleEngine:
             lang="ja",
             extra={
                 "kazumi_rule": self._rule.name,
+                "source_identity": {
+                    "rule_id": self._rule.name,
+                    "rule_name": self._rule.name,
+                    "site_name": urlparse(self._rule.base_url).hostname or "",
+                },
                 "kazumi_api": self._rule.api_level,
                 "detail_url": resolved_detail,
             },
@@ -768,24 +777,25 @@ class KazumiRuleEngine:
         chapter_result = relative_selector(rule.chapter_result) if roads else rule.chapter_result
 
         episodes: list[EpisodeInfo] = []
-        seen: set[str] = set()
-        for road in search_roots:
-            for link in xpath_all(road, chapter_result):
+        seen: set[tuple[int, str]] = set()
+        for road_index, road in enumerate(search_roots, 1):
+            for position, link in enumerate(xpath_all(road, chapter_result), 1):
                 href = _href_of(link)
                 url = absolute_url(detail_url, href)
                 if not url:
-                    # chapterResult 直接命中 ``text()`` 的规则,取不到 href,
-                    # 这种规则抽不出可跳转的章节页,只能丢弃该条。
+                    # chapterResult 直接命中 text() 时没有可跳转的章节地址。
                     continue
                 label = _text_of(link) or url.rsplit("/", 1)[-1]
-                if url in seen:
+                key = (road_index, url)
+                if key in seen:
                     continue
-                seen.add(url)
+                seen.add(key)
                 episodes.append(
-                    EpisodeInfo(
-                        number=episode_number_from_label(label, len(episodes) + 1),
+                    _KazumiEpisode(
+                        number=episode_number_from_label(label, position),
                         title=label,
                         source_episode_id=url,
+                        channel=str(road_index),
                     )
                 )
         return episodes
@@ -846,8 +856,8 @@ class KazumiRuleEngine:
             return []
 
         episodes: list[EpisodeInfo] = []
-        seen: set[tuple[str, str]] = set()
-        for blob in road_blobs:
+        seen: set[tuple[str, int, str]] = set()
+        for blob_index, blob in enumerate(road_blobs, 1):
             if not blob:
                 continue
             for segment_index, segment in enumerate(
@@ -858,8 +868,9 @@ class KazumiRuleEngine:
                 road_name = (
                     road_names[segment_index] if segment_index < len(road_names) else ""
                 )
-                for token in segment.split(chapter_api.episode_separator):
-                    parts = token.split(chapter_api.field_separator)
+                channel = f"{blob_index}-{segment_index + 1}"
+                for position, token in enumerate(segment.split(chapter_api.episode_separator), 1):
+                    parts = token.split(chapter_api.field_separator, 1)
                     label = parts[0].strip() if parts else ""
                     target = parts[1].strip() if len(parts) > 1 else ""
                     if not label and not target:
@@ -867,19 +878,18 @@ class KazumiRuleEngine:
                     label = label or target
                     # 去重键必须带线路名:同一条目在 "cht" 与 "chs" 两条线路下都
                     # 有 "01",只按标签去重会把第二条线路整条丢掉。
-                    dedupe_key = (road_name, label)
+                    dedupe_key = (channel, position, target or label)
                     if dedupe_key in seen:
                         continue
                     seen.add(dedupe_key)
                     episodes.append(
-                        EpisodeInfo(
-                            number=episode_number_from_label(
-                                label, len(episodes) + 1
-                            ),
+                        _KazumiEpisode(
+                            number=episode_number_from_label(label, position),
                             title=(
                                 f"{road_name} {label}".strip() if road_name else label
                             ),
                             source_episode_id=target or label,
+                            channel=channel,
                         )
                     )
         return episodes
@@ -897,8 +907,8 @@ class KazumiRuleEngine:
             return []
 
         episodes: list[EpisodeInfo] = []
-        seen: set[str] = set()
-        for road in roads:
+        seen: set[tuple[int, int, str]] = set()
+        for road_index, road in enumerate(roads, 1):
             try:
                 road_name_values = (
                     jsonpath_values(road, chapter_api.road_name_path)
@@ -911,7 +921,7 @@ class KazumiRuleEngine:
                 episode_nodes = jsonpath_values(road, chapter_api.episodes_path)
             except KazumiRuleError:
                 continue
-            for node in episode_nodes:
+            for position, node in enumerate(episode_nodes, 1):
                 try:
                     labels = (
                         jsonpath_values(node, chapter_api.episode_name_path)
@@ -936,16 +946,23 @@ class KazumiRuleEngine:
                     target = substitute_placeholders(
                         page.url, source=source_key, episodeUrl=episode_key
                     )
+                    query = _stringify_query(_substitute(
+                        page.query, source=source_key, episodeUrl=episode_key
+                    ))
+                    if query and is_fetchable_url(target):
+                        target = str(httpx.URL(target).copy_merge_params(query))
                 if not target:
                     target = episode_key
-                if not label or label in seen:
+                key = (road_index, position, target or label)
+                if not label or key in seen:
                     continue
-                seen.add(label)
+                seen.add(key)
                 episodes.append(
-                    EpisodeInfo(
-                        number=episode_number_from_label(label, len(episodes) + 1),
+                    _KazumiEpisode(
+                        number=episode_number_from_label(label, position),
                         title=f"{road_name} {label}".strip() if road_name else label,
                         source_episode_id=target or label,
+                        channel=str(road_index),
                     )
                 )
         return episodes
@@ -1050,6 +1067,7 @@ class KazumiScraper(BaseScraper):
         attempts: int = 2,
         retry_backoff: float = 0.6,
         enabled: bool | None = None,
+        media_deadline: float = 12.0,
     ) -> None:
         super().__init__()
         self._name = "kazumi"
@@ -1110,6 +1128,14 @@ class KazumiScraper(BaseScraper):
         self._detail_urls: "OrderedDict[str, str]" = OrderedDict()
         self._result_cache: "OrderedDict[str, list[SubjectResult]]" = OrderedDict()
         self._cache_limit = 128
+        self._metadata_ttl = 60.0
+        self._detail_cache: OrderedDict[str, tuple[float, SubjectDetail]] = OrderedDict()
+        self._detail_locks: dict[str, asyncio.Lock] = {}
+        self._page_cache: OrderedDict[str, tuple[float, bytes]] = OrderedDict()
+        self._media_deadline = max(0.1, float(media_deadline))
+        self._media_resolver = KazumiMediaResolver(
+            transport=transport, timeout=min(request_timeout, 5.0), throttle=self._throttle,
+        )
 
         self._client = httpx.AsyncClient(
             timeout=request_timeout,
@@ -1201,6 +1227,33 @@ class KazumiScraper(BaseScraper):
         return results
 
     async def get_detail(self, source_id: str) -> Optional[SubjectDetail]:
+        """短期缓存章节,并发详情/播放请求共享一次取数。"""
+        rule_name, inner_id = split_source_id(source_id)
+        if not self._enabled or rule_name not in self._engines or not inner_id:
+            return None
+        cached = self._detail_cache.get(source_id)
+        if cached and time.monotonic() - cached[0] < self._metadata_ttl:
+            self._detail_cache.move_to_end(source_id)
+            return cached[1]
+        lock = self._detail_locks.setdefault(source_id, asyncio.Lock())
+        try:
+            async with lock:
+                cached = self._detail_cache.get(source_id)
+                if cached and time.monotonic() - cached[0] < self._metadata_ttl:
+                    return cached[1]
+                detail = await self._get_detail_uncached(source_id)
+                if detail is not None:
+                    self._detail_cache[source_id] = (time.monotonic(), detail)
+                    self._detail_cache.move_to_end(source_id)
+                    while len(self._detail_cache) > self._cache_limit:
+                        self._detail_cache.popitem(last=False)
+                return detail
+        finally:
+            # Existing waiters retain the lock object; new callers read cache.
+            if not lock.locked() and not getattr(lock, "_waiters", None):
+                self._detail_locks.pop(source_id, None)
+
+    async def _get_detail_uncached(self, source_id: str) -> Optional[SubjectDetail]:
         """取条目详情(实质就是章节列表)。
 
         规则库里没有"详情页字段"的约定:标题与详情页 URL 都来自搜索结果。
@@ -1261,50 +1314,95 @@ class KazumiScraper(BaseScraper):
             extra={
                 "kazumi_rule": rule_name,
                 "detail_url": detail_url,
-                "playback_capability": "chapters-only",
+                "playback_capability": "static-media-or-client-resolver",
                 "playback_capability_note": (
-                    "Kazumi 规则不含视频地址字段,客户端靠 WebView 嗅探 "
-                    "#EXTM3U;本后端只能提供搜索与章节。"
+                    "按当前集解析直媒体、静态播放器和有界 iframe；"
+                    "JavaScript 页面返回独立客户端解析描述。"
                 ),
+                "source_identity": {
+                    "rule_id": rule_name,
+                    "rule_name": rule_name,
+                    "site_name": urlparse(engine.rule.base_url).hostname or "",
+                },
             },
         )
 
     async def get_video_urls(
         self, source_id: str, episode: int = 1
     ) -> list[VideoLine]:
-        """恒返回空列表 —— Kazumi 规则库里没有视频地址字段。
-
-        不是偷懒,是**格式能力边界**:规则只有 ``searchList`` / ``searchName``
-        / ``searchResult`` / ``chapterRoads`` / ``chapterResult`` 这些 XPath
-        与几个接口配置,原文里没有任何"取 m3u8/mp4"的字段。客户端 Kazumi 的
-        播放流程是:打开章节页 → WebView 里 hook ``XMLHttpRequest``/fetch →
-        嗅探响应体里出现 ``#EXTM3U`` 的请求 → 拿它的 URL 当线路。
-
-        服务端没有 WebView,也没有可复现的嗅探入口,硬凑三条路都走不通:
-
-        * 把章节页 URL 当线路返回 → 线路池里会多出一堆 ``.html`` 死链,
-          ``classify_media_url`` 判为 ``player_page``,只会拖慢验活;
-        * 去抓章节页里内联的 ``player_aaaa`` → 那是 MacCMS 模板的私货,
-          规则库并没有承诺它存在,而且这些站多数是 JS 拼地址;
-        * 反向猜接口 → 每站一套签名,规则库里没有对应字段可依。
-
-        所以这里返回空列表,由 ``playback`` 服务把它们跳过。章节数据仍然
-        有用:它给客户端提供"这一集存在"的权威清单与集号映射。
-        """
-        return []
+        """保留指定集数的全部已知线路，页面解析保持有界。"""
+        rule_name, inner_id = split_source_id(source_id)
+        engine = self._engines.get(rule_name)
+        if not self._enabled or engine is None or not inner_id:
+            return []
+        if isinstance(episode, bool) or not isinstance(episode, int) or episode < 1:
+            return []
+        started = time.monotonic()
+        try:
+            # Metadata consumes the same total budget. The resolver owns its
+            # remaining timer so finished routes survive slower peers timing out.
+            async with asyncio.timeout(self._media_deadline):
+                detail = await self.get_detail(source_id)
+            if detail is None:
+                return []
+            referer = str(detail.extra.get("detail_url") or engine.search_referer)
+            chapters: list[MediaChapter] = []
+            seen: set[tuple[str, str]] = set()
+            for item in detail.episodes:
+                if item.number != episode:
+                    continue
+                raw = str(item.source_episode_id or "").strip()
+                # A bare API id is not a chapter URL. Only a rule-provided
+                # page template or an actual absolute/relative URL is used.
+                if not is_fetchable_url(raw) and not raw.startswith(("/", "./", "../")):
+                    continue
+                candidate = absolute_url(referer or engine.rule.base_url, raw)
+                if not public_url_shape(candidate):
+                    continue
+                channel = str(getattr(item, "channel", "") or len(chapters) + 1)
+                key = (channel, candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                chapters.append(MediaChapter(candidate, item.title or f"第{episode}集", channel))
+            return await self._media_resolver.resolve(
+                chapters, rule=engine.rule, referer=referer,
+                user_agent=engine._user_agent,
+                deadline=max(0.01, self._media_deadline - (time.monotonic() - started)),
+            )
+        except (TimeoutError, KazumiPageError, httpx.HTTPError):
+            return []
 
     async def get_latest(self, page: int = 1) -> list[SubjectResult]:
         """规则库没有"最新更新"字段,不支持列表页扫描。"""
         return []
 
     async def aclose(self) -> None:
+        await self._media_resolver.aclose()
         await self._client.aclose()
 
     # ── 内部:HTTP ───────────────────────────────────────────────
     def _fetcher_for(self, rule: KazumiRule) -> _Fetcher:
         """给某条规则配一个带 ``base_url`` 的取数对象(引擎自己不会猜源站)。"""
         base = rule.base_url or ""
-        return _Fetcher(self._fetch_as, base)
+        return _Fetcher(self._fetch_metadata, base)
+
+    async def _fetch_metadata(self, method: str, url: str, **kwargs: Any) -> bytes:
+        """Cache only metadata GETs; avoid fetching detail twice for title+chapters."""
+        cacheable = method.upper() == "GET" and not any(
+            kwargs.get(key) for key in ("params", "headers", "form", "json_body")
+        )
+        cached = self._page_cache.get(url) if cacheable else None
+        if cached and time.monotonic() - cached[0] < self._metadata_ttl:
+            self._page_cache.move_to_end(url)
+            return cached[1]
+        content = await self._fetch_as(method, url, **kwargs)
+        if cacheable:
+            self._page_cache[url] = (time.monotonic(), content)
+            self._page_cache.move_to_end(url)
+            while len(self._page_cache) > self._cache_limit:
+                self._page_cache.popitem(last=False)
+        return content
 
     async def _fetch_as(
         self,
@@ -1434,7 +1532,7 @@ class KazumiScraper(BaseScraper):
         只作为兜底:多数情况下 ``search`` 已经把标题带回来了。
         """
         try:
-            content = await self._fetch_as("GET", detail_url)
+            content = await self._fetch_metadata("GET", detail_url)
             document = parse_document(content)
         except Exception as error:  # noqa: BLE001 - 只是兜底,失败就算了
             logger.debug(

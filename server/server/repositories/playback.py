@@ -281,6 +281,7 @@ class SqlPlaybackRepository:
                     source_name=binding.source_name,
                 )
                 self._session.add(row)
+            row.source_name = binding.source_name
             row.matched_title = binding.matched_title
             row.media_type = binding.media_type
             row.year = binding.year

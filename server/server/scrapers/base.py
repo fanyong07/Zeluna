@@ -148,6 +148,7 @@ class VideoLine:
     format: str = ""          # 格式: hls, mp4
     headers: dict = field(default_factory=dict)  # 请求头
     source_name: str = ""     # 来源爬虫名
+    client_resolver: dict = field(default_factory=dict)  # 待客户端解析的结构化描述
 
 
 class BaseScraper(ABC):

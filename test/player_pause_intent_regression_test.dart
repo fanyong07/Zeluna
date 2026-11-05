@@ -23,6 +23,30 @@ import '../integration_test/support/isolated_player_environment.dart';
 // paths. Only the platform engine/video texture and account persistence are
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
+  testWidgets(
+    'first frame fills the full inventory without replacing healthy playback',
+    (tester) async {
+      final account = _PauseAccount(online: true);
+      final fixture = await _mount(tester, account: account);
+      expect(account.expanded.hasListener, isTrue);
+      final opens = fixture.engine.opens.length;
+      final originalUri = fixture.engine.opens.last.uri;
+      account.expanded.add(
+        const PlaybackLineLookupUpdate(
+          lines: [_primary, _backup],
+          completedRules: 1,
+          totalRules: 1,
+          phase: PlaybackLineLookupPhase.complete,
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(fixture.engine.opens, hasLength(opens));
+      expect(fixture.engine.opens.last.uri, originalUri);
+      expect(fixture.engine.state.playing, isTrue);
+    },
+  );
+
   testWidgets('quick local verification replaces a pending unchecked startup', (
     tester,
   ) async {

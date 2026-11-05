@@ -14,7 +14,8 @@ import asyncio
 import ipaddress
 import re
 import socket
-from collections.abc import AsyncIterator, Awaitable, Iterator
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from typing import Optional
 from dataclasses import dataclass, field, replace
 from urllib.parse import urljoin, urlparse
@@ -38,6 +39,7 @@ from .scrapers.direct_stream import NivodScraper, PpnixScraper
 from .scrapers.series.vod_common import CommonVodScraper
 from .scrapers.anime.age import AgeScraper
 from .scrapers.anime.anich import AniChScraper
+from .scrapers.anime.anich_transport import AniChUpstreamError
 from .scrapers.anime.animeko import AnimekoScraper
 from .scrapers.anime.girigiri import GiriGiriScraper
 from .scrapers.anime.html_direct import (
@@ -73,6 +75,7 @@ logger = logging.getLogger(__name__)
 
 SERVER_VERIFIED = "server_verified"
 CLIENT_PROBE_REQUIRED = "client_probe_required"
+CLIENT_RESOLVER_REQUIRED = "client_resolver_required"
 UNAVAILABLE = "unavailable"
 
 STARTUP_UNKNOWN = "unknown"
@@ -215,6 +218,82 @@ def _is_inventory_candidate_url(url: str, declared_format: str = "") -> bool:
     return _is_public_ip(host)
 
 
+def _client_resolver_descriptor(value: object) -> dict:
+    """Validate the bounded page-execution contract, not a playable media URL."""
+    if not isinstance(value, dict) or value.get("kind") != "kazumi_page_v1":
+        return {}
+
+    def public_url(raw: object) -> str:
+        if not isinstance(raw, str) or not raw or len(raw) > 8192:
+            return ""
+        if any(ord(char) < 32 or ord(char) == 127 for char in raw) or "\\" in raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+            parsed.port
+        except ValueError:
+            return ""
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not host
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or host == "localhost"
+            or host.endswith((".localhost", ".local"))
+        ):
+            return ""
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            return raw
+        return raw if _is_public_ip(host) else ""
+
+    def public_hosts(raw: object) -> list[str]:
+        if not isinstance(raw, list) or not 1 <= len(raw) <= 32:
+            return []
+        hosts: list[str] = []
+        for item in raw:
+            if not isinstance(item, str) or len(item) > 253:
+                return []
+            host = item.strip().lower().rstrip(".")
+            if (
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z0-9-]+", host)
+                or ".." in host
+                or not public_url(f"https://{host}/")
+            ):
+                return []
+            if host not in hosts:
+                hosts.append(host)
+        return hosts
+
+    page_url = public_url(value.get("page_url"))
+    referer = public_url(value.get("referer") or page_url)
+    page_hosts = public_hosts(value.get("page_hosts"))
+    media_hosts = public_hosts(value.get("media_hosts"))
+    if (
+        not page_url or not referer or not page_hosts or not media_hosts
+        or _source_site_name(page_url) not in page_hosts
+        or _source_site_name(referer) not in page_hosts
+    ):
+        return {}
+    labels: dict[str, str] = {}
+    for name, limit in (("rule_id", 128), ("rule_name", 256), ("user_agent", 512)):
+        raw = value.get(name, "")
+        if not isinstance(raw, str) or len(raw) > limit or any(
+            ord(char) < 32 or ord(char) == 127 for char in raw
+        ):
+            return {}
+        labels[name] = raw
+    if not labels["rule_id"]:
+        return {}
+    return {
+        "kind": "kazumi_page_v1", "page_url": page_url, "referer": referer,
+        **labels, "page_hosts": page_hosts, "media_hosts": media_hosts,
+    }
+
+
 @dataclass
 class AggregatedSubject:
     """聚合后的条目"""
@@ -259,6 +338,70 @@ class AggregatedVideoLine:
     verification_status: str = "unverified"
     startup_profile: str = STARTUP_UNKNOWN
     startup_latency_ms: int = 0
+    client_resolver: dict = field(default_factory=dict)
+    provider_id: str = ""
+    site_name: str = ""
+    rule_id: str = ""
+    rule_name: str = ""
+    size_bytes: int | None = None
+    size_estimated: bool = False
+    video_width: int | None = None
+    video_height: int | None = None
+    bitrate: int | None = None
+    codecs: str = ""
+    is_live: bool = False
+    adaptive: bool = False
+
+
+def _non_negative_metadata_int(value: object) -> int | None:
+    """Keep integral JSON values portable to Dart/web without lossy coercion."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not re.fullmatch(r"[0-9]+", value.strip()):
+            return None
+        try:
+            value = int(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    return value if isinstance(value, int) and 0 <= value <= 2**53 - 1 else None
+
+
+def _line_metadata(value: object) -> dict:
+    size = _non_negative_metadata_int(getattr(value, "size_bytes", None))
+    codecs = getattr(value, "codecs", "")
+    if not isinstance(codecs, str) or len(codecs) > 512 or any(
+        ord(char) < 32 or ord(char) == 127 for char in codecs
+    ):
+        codecs = ""
+    return {
+        "size_bytes": size,
+        "size_estimated": size is not None and getattr(value, "size_estimated", False) is True,
+        "video_width": _non_negative_metadata_int(getattr(value, "video_width", None)),
+        "video_height": _non_negative_metadata_int(getattr(value, "video_height", None)),
+        "bitrate": _non_negative_metadata_int(getattr(value, "bitrate", None)),
+        "codecs": codecs.strip(),
+        "is_live": getattr(value, "is_live", False) is True,
+        "adaptive": getattr(value, "adaptive", False) is True,
+    }
+
+
+def _source_site_name(value: object) -> str:
+    """Extract a site host, never retain a subject URL as a public label."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    text = value.strip()
+    try:
+        parsed = urlparse(text if "://" in text else f"//{text}")
+        if parsed.username is not None or parsed.password is not None:
+            return ""
+        return (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
 
 
 @dataclass
@@ -271,6 +414,71 @@ class SourceMatch:
     episode_count: int = 0
     score: int = 0
     evidence: SourceMatchEvidence = field(default_factory=SourceMatchEvidence)
+    provider_id: str = ""
+    site_name: str = ""
+    rule_id: str = ""
+    rule_name: str = ""
+
+    def __post_init__(self) -> None:
+        # Old bindings contain only source_id/source_name. Recover rule identity
+        # from the adapters' existing IDs without a schema/data migration.
+        parts = self.source_id.split(":", 2)
+        if len(parts) == 3 and parts[0] == "crawler":
+            provider, inner_id = parts[1:]
+            self.provider_id = self.provider_id or f"crawler.{provider}"
+            if provider == "animeko":
+                decoded = AnimekoScraper.decode_source_id(inner_id)
+                if decoded is not None:
+                    rule_id, subject_url = decoded
+                    self.rule_id = self.rule_id or rule_id
+                    self.site_name = self.site_name or _source_site_name(subject_url)
+            elif provider == "kazumi":
+                rule_id, separator, inner = inner_id.partition("::")
+                if separator and rule_id.strip() and inner.strip():
+                    self.rule_id = self.rule_id or rule_id.strip()
+            # A persisted rule key is not a new provider/inventory entry.
+            if self.source_name.startswith(f"{provider}:rule:"):
+                self.source_name = provider
+        elif parts[0] in {"maccms", "tvbox"}:
+            self.provider_id = self.provider_id or f"aggregate.{parts[0]}"
+        else:
+            self.provider_id = self.provider_id or parts[0]
+        self.site_name = self.site_name or self.rule_id or self.source_name
+        self.rule_name = self.rule_name or self.rule_id
+
+    @property
+    def group_key(self) -> tuple[str, str]:
+        """One work per rule, even when independent rules share an origin host."""
+        return self.provider_id, self.rule_id or self.site_name
+
+    @property
+    def binding_key(self) -> str:
+        """Persist rule-isolated bindings within the existing 100-char column."""
+        if not self.rule_id:
+            return self.source_name
+        prefix = f"{self.source_name}:rule:"
+        rule_key = self.rule_id
+        if len(prefix) + len(rule_key) > 100:
+            rule_key = f"v1:{stable_digest(rule_key)[:32]}"
+        return f"{prefix}{rule_key}"
+
+
+def _video_line_identity(line: AggregatedVideoLine) -> str:
+    # A shared CDN URL/host is not a route identity: independent channel/rule
+    # choices (and different Referer/Cookie headers) must survive full inventory.
+    descriptor = line.client_resolver
+    canonical = json.dumps(
+        {
+            "provider_id": line.provider_id,
+            "rule_id": line.rule_id or descriptor.get("rule_id", ""),
+            "source": line.source,
+            "url": line.url,
+            "page_url": descriptor.get("page_url", ""),
+            "headers": line.headers,
+        },
+        sort_keys=True, ensure_ascii=True, separators=(",", ":"),
+    )
+    return f"route:{stable_digest(canonical)}"
 
 
 @dataclass(frozen=True)
@@ -279,6 +487,14 @@ class LineVerificationResult:
     error_category: str = ""
     latency_ms: int = 0
     startup_profile: str = STARTUP_UNKNOWN
+    size_bytes: int | None = None
+    size_estimated: bool = False
+    video_width: int | None = None
+    video_height: int | None = None
+    bitrate: int | None = None
+    codecs: str = ""
+    is_live: bool = False
+    adaptive: bool = False
 
 
 def _crawler_line_source(site: str, line_source_name: str) -> str:
@@ -388,7 +604,44 @@ class SourceResolutionOutcome:
         yield self.status
 
 
-def _classify_resolution_exception(error: BaseException) -> str:
+def _classify_resolution_exception(
+    error: BaseException, _seen: set[int] | None = None,
+) -> str:
+    seen = _seen if _seen is not None else set()
+    if id(error) in seen:
+        return UNKNOWN_EXCEPTION
+    seen.add(id(error))
+    if isinstance(error, AniChUpstreamError):
+        # Only structured transport errors get reason-based classification.
+        # An arbitrary RuntimeError(message='dns_failure') is still unknown.
+        known_reasons = {
+            "dns_failure": DNS_FAILURE, "connect_timeout": CONNECT_TIMEOUT,
+            "read_timeout": READ_TIMEOUT, "rate_limited": RATE_LIMITED,
+            "restricted": RESTRICTED, "stale_route": STALE_ROUTE,
+            "empty_response": EMPTY_MEDIA, "parser_mismatch": PARSER_MISMATCH,
+        }
+        reasons = (
+            (error.cause_reason, error.reason)
+            if error.reason == "upstream_cooldown"
+            else (error.reason, error.cause_reason)
+        )
+        for reason in reasons:
+            if reason in known_reasons:
+                return known_reasons[reason]
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            category = _classify_resolution_exception(cause, seen)
+            if category != UNKNOWN_EXCEPTION:
+                return category
+        if error.status == 429:
+            return RATE_LIMITED
+        if error.status in {401, 403, 451}:
+            return RESTRICTED
+        if error.status in {404, 410}:
+            return STALE_ROUTE
+        if "connect_error" in reasons:
+            return CONNECT_TIMEOUT
+        return UNKNOWN_EXCEPTION
     if isinstance(error, OriginSearchThrottledError):
         return RATE_LIMITED
     if isinstance(error, socket.gaierror):
@@ -408,6 +661,11 @@ def _classify_resolution_exception(error: BaseException) -> str:
         if status in {404, 410}:
             return STALE_ROUTE
     if isinstance(error, httpx.ConnectError):
+        cause = error.__cause__ or error.__context__
+        if cause is not None:
+            category = _classify_resolution_exception(cause, seen)
+            if category != UNKNOWN_EXCEPTION:
+                return category
         message = str(error).casefold()
         if any(
             marker in message
@@ -425,6 +683,67 @@ def _strongest_error_category(categories: list[str], fallback: str) -> str:
     if not values:
         return fallback
     return max(values, key=lambda value: _ERROR_CATEGORY_PRIORITY.get(value, 0))
+
+
+def _response_media_size(status: int, headers: httpx.Headers) -> int | None:
+    """Whole resource bytes, never a 206 sample length or manifest length."""
+    if headers.get("content-encoding", "identity").lower() not in {"", "identity"}:
+        return None
+    if status == 206:
+        match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+)", headers.get("content-range", "").strip(), re.I)
+        if match is None:
+            return None
+        start, end, total = (int(value) for value in match.groups())
+        return _non_negative_metadata_int(total) if 0 <= start <= end < total else None
+    if status == 200 and headers.get("content-encoding", "identity").lower() in {"", "identity"}:
+        return _non_negative_metadata_int(headers.get("content-length"))
+    return None
+
+
+def _hls_sample_metadata(manifest: str, *, complete: bool) -> dict:
+    """Read only explicit playlist facts; no URL/quality-label resolution guesses."""
+    lines = [line.strip() for line in manifest.splitlines() if line.strip()]
+    result: dict = {}
+    for index, line in enumerate(lines):
+        if not line.startswith("#EXT-X-STREAM-INF:"):
+            continue
+        # Verification follows the first variant. Its metadata must describe
+        # that same variant, not an untested highest-quality sibling.
+        if not any(not item.startswith("#") for item in lines[index + 1:]):
+            continue
+        attributes = {
+            key.upper(): quoted or bare
+            for key, quoted, bare in re.findall(r'([A-Z0-9-]+)=(?:"([^"]*)"|([^,]*))', line.split(":", 1)[1], re.I)
+        }
+        dimensions = re.fullmatch(r"(\d+)x(\d+)", attributes.get("RESOLUTION", ""), re.I)
+        if dimensions:
+            result.update(video_width=_non_negative_metadata_int(dimensions[1]),
+                          video_height=_non_negative_metadata_int(dimensions[2]))
+        result.update(
+            bitrate=_non_negative_metadata_int(attributes.get("AVERAGE-BANDWIDTH") or attributes.get("BANDWIDTH")),
+            codecs=attributes.get("CODECS", ""), adaptive=True,
+        )
+        return result
+    has_end = "#EXT-X-ENDLIST" in lines
+    if complete:
+        result["is_live"] = not has_end
+    # Byte-range sums describe declared segment payload, not an exact complete
+    # download: initialization maps, repeated ranges and packaging may differ.
+    # Ordinary segment sizes/durations cannot justify a whole-file size.
+    if complete and has_end:
+        sizes: list[int | None] = []
+        pending: int | None = None
+        for line in lines:
+            if line.startswith("#EXT-X-BYTERANGE:"):
+                pending = _non_negative_metadata_int(line.split(":", 1)[1].split("@", 1)[0])
+            elif not line.startswith("#"):
+                sizes.append(pending)
+                pending = None
+        if sizes and all(size is not None and size > 0 for size in sizes):
+            total = _non_negative_metadata_int(sum(sizes))
+            if total is not None:
+                result.update(size_bytes=total, size_estimated=True)
+    return result
 
 
 class ContentAggregator:
@@ -577,6 +896,8 @@ class ContentAggregator:
         content_type: str,
         year: int,
         diagnostics: dict[str, SourceDiscoveryDiagnostic] | None = None,
+        partial_matches: dict[str, SourceMatch] | None = None,
+        on_matches: Callable[[list[SourceMatch]], None] | None = None,
     ) -> list[SourceMatch]:
         expected_type = "series" if content_type == "tv" else content_type
         if (
@@ -612,85 +933,109 @@ class ContentAggregator:
         failures: list[BaseException] = []
         successful_searches = 0
         search_hit_count = 0
-        result_groups = []
-        # Shared across aliases: at most three metadata-only detail requests per origin.
+        # Keep completed aliases/rules outside a wait_for-cancelled collector.
+        matches = partial_matches if partial_matches is not None else {}
         content_details: dict[str, SubjectResult | None] = {}
         aliases_queried = 0
-        for alias in attempted_aliases:
-            aliases_queried += 1
-            try:
-                results = await scraper.search(alias)
-                results = await self._refine_content_results(
-                    scraper, results, aliases, content_type=content_type, year=year,
-                    cache=content_details,
-                )
-                result_groups.append(results)
-                # Throttled origins need no further alias once identity is exact.
-                if provider in {"anich", "xifan"} and any(
-                    match.evidence.exact_title or match.evidence.safe_title_variant
-                    for match in self._score_scraper_results(
-                        provider, results, aliases, content_type=content_type, year=year
-                    )
-                ):
-                    break
-            except Exception as error:
-                result_groups.append(error)
-        matches: dict[str, SourceMatch] = {}
-        for raw_results in result_groups:
-            if isinstance(raw_results, BaseException):
-                failures.append(raw_results)
-                logger.debug(
-                    "Source discovery failed [%s]: %s",
-                    provider,
-                    type(raw_results).__name__,
-                )
-                continue
-            results = raw_results
-            successful_searches += 1
+        cancelled = False
+        diagnostic = diagnostics.get(provider) if diagnostics is not None else None
+
+        async def accept(results: list[SubjectResult]) -> None:
+            nonlocal search_hit_count
             search_hit_count += len(results)
-            for candidate in self._score_scraper_results(
-                provider,
-                results,
-                aliases,
-                content_type=content_type,
-                year=year,
-            ):
+            # Score raw results first: a cancelled metadata refinement must not
+            # discard already valid identities from completed rule searches.
+            raw_scored = self._score_scraper_results(
+                provider, results, aliases, content_type=content_type, year=year,
+            )
+            before_refinement = {
+                candidate.source_id: matches.get(candidate.source_id)
+                for candidate in raw_scored
+            }
+            for candidate in raw_scored:
                 previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:
                     matches[candidate.source_id] = candidate
+            results = await self._refine_content_results(
+                scraper, results, aliases, content_type=content_type, year=year,
+                cache=content_details,
+            )
+            scored = self._score_scraper_results(
+                provider, results, aliases, content_type=content_type, year=year,
+            )
+            # The completed detail is authoritative even when it lowers a
+            # provisional raw score; raw scores are retained only on timeout.
+            for candidate in raw_scored:
+                previous = before_refinement[candidate.source_id]
+                if previous is None:
+                    matches.pop(candidate.source_id, None)
+                else:
+                    matches[candidate.source_id] = previous
+            for candidate in scored:
+                previous = matches.get(candidate.source_id)
+                if previous is None or candidate.score > previous.score:
+                    matches[candidate.source_id] = candidate
+            if on_matches is not None:
+                on_matches(self.select_source_matches(scored))
 
-        if diagnostics is not None:
-            diagnostic = diagnostics.get(provider)
+        try:
+            for alias in attempted_aliases:
+                aliases_queried += 1
+                if diagnostic is not None:
+                    diagnostic.queried = True
+                    diagnostic.aliases_attempted = aliases_queried
+                    diagnostic.status = SourceDiscoveryStatus.SEARCHING
+                try:
+                    # Optional rule-batch API. Ordinary crawlers retain exactly
+                    # their historical search contract and alias budgets.
+                    if callable(getattr(type(scraper), "search_progressively", None)):
+                        async for results in scraper.search_progressively(alias):
+                            await accept(results)
+                    else:
+                        await accept(await scraper.search(alias))
+                    successful_searches += 1
+                    if provider in {"anich", "xifan"} and any(
+                        match.evidence.exact_title or match.evidence.safe_title_variant
+                        for match in matches.values()
+                    ):
+                        break
+                except Exception as error:
+                    failures.append(error)
+                    logger.debug(
+                        "Source discovery failed [%s]: %s", provider,
+                        type(error).__name__,
+                    )
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
             if diagnostic is not None:
-                diagnostic.queried = bool(attempted_aliases)
+                diagnostic.queried = bool(aliases_queried)
                 diagnostic.aliases_attempted = aliases_queried
                 diagnostic.search_hit_count = search_hit_count
                 diagnostic.best_match_score = max(
-                    (match.score for match in matches.values()),
-                    default=None,
+                    (match.score for match in matches.values()), default=None,
                 )
                 diagnostic.matched = bool(matches)
                 diagnostic.elapsed_ms = max(
-                    0,
-                    int((time.monotonic() - started_at) * 1000),
+                    0, int((time.monotonic() - started_at) * 1000),
                 )
                 if matches:
                     diagnostic.status = SourceDiscoveryStatus.MATCHED
-                elif search_hit_count:
-                    diagnostic.status = SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
-                elif successful_searches:
-                    diagnostic.status = SourceDiscoveryStatus.SEARCH_MISS
-                elif any(
+                    diagnostic.error_category = ""
+                elif cancelled or any(
                     isinstance(error, (asyncio.TimeoutError, TimeoutError))
                     for error in failures
                 ):
                     diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
                     diagnostic.error_category = READ_TIMEOUT
+                elif search_hit_count:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_HIT_NO_MATCH
+                elif successful_searches:
+                    diagnostic.status = SourceDiscoveryStatus.SEARCH_MISS
                 elif failures:
                     diagnostic.status = SourceDiscoveryStatus.SEARCH_ERROR
-                    diagnostic.error_category = _classify_resolution_exception(
-                        failures[0]
-                    )
+                    diagnostic.error_category = _classify_resolution_exception(failures[0])
         return list(matches.values())
 
     def _new_discovery_diagnostics(self) -> dict[str, SourceDiscoveryDiagnostic]:
@@ -764,6 +1109,64 @@ class ContentAggregator:
         return [cache.get(result.source_id) or result for result in results]
 
     @staticmethod
+    def _rule_identity(provider: str, result: SubjectResult) -> dict[str, str]:
+        """Shared extra contract for multi-rule adapters; legacy extras still work."""
+        identity = result.extra.get("source_identity")
+        if not isinstance(identity, dict):
+            identity = {}
+        rule_id = str(identity.get("rule_id") or "").strip()
+        rule_name = str(identity.get("rule_name") or "").strip()
+        site_name = _source_site_name(identity.get("site_name"))
+        if provider == "animeko":
+            rule_id = rule_id or str(result.extra.get("animeko_source") or "")
+            rule_name = rule_name or str(result.extra.get("animeko_source_name") or "")
+        elif provider == "kazumi":
+            rule_id = rule_id or str(result.extra.get("kazumi_rule") or "")
+            site_name = site_name or _source_site_name(result.extra.get("detail_url"))
+        if not rule_id:
+            return {}
+        return {"rule_id": rule_id, "rule_name": rule_name, "site_name": site_name}
+
+    @staticmethod
+    def select_source_matches(
+        matches: list[SourceMatch], *, max_matches: int | None = None,
+    ) -> list[SourceMatch]:
+        """Deduplicate by site identity, then sample fairly across providers."""
+        by_rule: dict[tuple[str, str], SourceMatch] = {}
+        for match in matches:
+            key = (match.provider_id, match.rule_id or match.site_name)
+            previous = by_rule.get(key)
+            if previous is None or match.score > previous.score:
+                by_rule[key] = match
+        by_site: dict[tuple[str, str], SourceMatch] = {}
+        for match in by_rule.values():
+            previous = by_site.get(match.group_key)
+            if previous is None or match.score > previous.score:
+                by_site[match.group_key] = match
+        ranked = sorted(by_site.values(), key=lambda item: item.score, reverse=True)
+        if max_matches is None:
+            return ranked
+        limit = max(0, max_matches)
+        if len(ranked) <= limit:
+            return ranked
+        buckets: dict[str, list[SourceMatch]] = {}
+        for match in ranked:
+            buckets.setdefault(match.provider_id, []).append(match)
+        selected: list[SourceMatch] = []
+        depth = 0
+        while len(selected) < limit:
+            wave = [group[depth] for group in buckets.values() if len(group) > depth]
+            if not wave:
+                break
+            for match in wave:
+                selected.append(match)
+                if len(selected) >= limit:
+                    break
+            depth += 1
+        # The cap is fair; keep historical score ordering for downstream callers.
+        return sorted(selected, key=lambda item: item.score, reverse=True)
+
+    @staticmethod
     def _score_scraper_results(
         provider: str,
         results: list[SubjectResult],
@@ -825,6 +1228,7 @@ class ContentAggregator:
                     )
                 ),
                 evidence=analysis.evidence,
+                **ContentAggregator._rule_identity(provider, result),
             )
             previous = matches.get(source_id)
             if previous is None or candidate.score > previous.score:
@@ -949,7 +1353,7 @@ class ContentAggregator:
         *,
         content_type: str = "",
         year: int = 0,
-        max_matches: int = 12,
+        max_matches: int | None = None,
         include_diagnostics: bool = False,
     ) -> (
         list[SourceMatch]
@@ -990,6 +1394,9 @@ class ContentAggregator:
                 maccms_matches.append(match)
             return maccms_matches
 
+        provider_partials: dict[str, dict[str, SourceMatch]] = {
+            name: {} for name, _scraper, _timeout in providers
+        }
         jobs: list[tuple[str, Awaitable[list[SourceMatch]]]] = []
         if self._provider_enabled("aggregate.maccms"):
             jobs.append(("maccms", asyncio.wait_for(collect_maccms(), timeout=8)))
@@ -1004,6 +1411,7 @@ class ContentAggregator:
                         content_type=content_type,
                         year=year,
                         diagnostics=diagnostics,
+                        partial_matches=provider_partials[name],
                     ),
                     timeout=timeout,
                 ),
@@ -1035,7 +1443,14 @@ class ContentAggregator:
                             diagnostic.error_category = READ_TIMEOUT
                         continue
                     diagnostic.queried = True
-                    diagnostic.aliases_attempted = min(1, len(clean_aliases))
+                    diagnostic.aliases_attempted = max(
+                        diagnostic.aliases_attempted, min(1, len(clean_aliases)),
+                    )
+                    if provider_partials.get(name):
+                        diagnostic.status = SourceDiscoveryStatus.MATCHED
+                        diagnostic.matched = True
+                        diagnostic.error_category = ""
+                        continue
                     if isinstance(group, (asyncio.TimeoutError, TimeoutError)):
                         diagnostic.status = SourceDiscoveryStatus.SEARCH_TIMEOUT
                         diagnostic.error_category = READ_TIMEOUT
@@ -1044,25 +1459,19 @@ class ContentAggregator:
                         diagnostic.error_category = _classify_resolution_exception(
                             group
                         )
-                if name != "maccms":
-                    continue
-                group = maccms_matches
+                group = (
+                    maccms_matches if name == "maccms"
+                    else list(provider_partials.get(name, {}).values())
+                )
             for candidate in group:
                 previous = matches.get(candidate.source_id)
                 if previous is None or candidate.score > previous.score:
                     matches[candidate.source_id] = candidate
 
-        # 同一站点只保留匹配度最高的一项，避免错季或同名版本刷屏。
-        by_site: dict[str, SourceMatch] = {}
-        for match in matches.values():
-            previous = by_site.get(match.source_name)
-            if previous is None or match.score > previous.score:
-                by_site[match.source_name] = match
-        result = sorted(
-            by_site.values(),
-            key=lambda item: item.score,
-            reverse=True,
-        )[:max_matches]
+        # One best work per site/rule, not one work for the entire rule provider.
+        result = self.select_source_matches(
+            list(matches.values()), max_matches=max_matches,
+        )
         return (result, diagnostics) if include_diagnostics else result
 
     async def discover_source_matches_progressively(
@@ -1075,7 +1484,7 @@ class ContentAggregator:
     ) -> AsyncIterator[SourceMatch]:
         """Yield the first useful source matches without waiting for every site."""
         clean_aliases = _prepare_discovery_aliases(aliases)
-        if not clean_aliases:
+        if not clean_aliases or max_matches <= 0:
             return
 
         providers: list[tuple[str, MediaProvider, float]] = []
@@ -1091,7 +1500,7 @@ class ContentAggregator:
             )
             for name, scraper in self._active_crawler_scrapers.items()
         )
-        queue: asyncio.Queue[SourceMatch | object] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, SourceMatch | object]] = asyncio.Queue()
         completed_producer = object()
 
         async def produce_maccms() -> None:
@@ -1103,7 +1512,9 @@ class ContentAggregator:
                     query_budget=MACCMS_QUICK_QUERY_BUDGET,
                     alias_limit=MACCMS_QUICK_ALIAS_LIMIT,
                 ):
-                    await queue.put(candidate)
+                    queue.put_nowait(("aggregate.maccms", candidate))
+                    # Give already-ready rule providers a scheduling turn.
+                    await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1112,30 +1523,29 @@ class ContentAggregator:
                     type(error).__name__,
                 )
             finally:
-                queue.put_nowait(completed_producer)
+                queue.put_nowait(("aggregate.maccms", completed_producer))
 
         async def produce_provider(
             name: str,
             scraper: MediaProvider,
             timeout: float,
         ) -> None:
+            def publish(group: list[SourceMatch]) -> None:
+                for candidate in group:
+                    queue.put_nowait((candidate.provider_id, candidate))
+
             try:
-                group = await asyncio.wait_for(
+                await asyncio.wait_for(
                     self._discover_scraper_matches(
                         name,
                         scraper,
                         clean_aliases[:1],
                         content_type=content_type,
                         year=year,
+                        on_matches=publish,
                     ),
                     timeout=timeout,
                 )
-                for candidate in sorted(
-                    group,
-                    key=lambda item: item.score,
-                    reverse=True,
-                ):
-                    await queue.put(candidate)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -1145,7 +1555,10 @@ class ContentAggregator:
                     type(error).__name__,
                 )
             finally:
-                queue.put_nowait(completed_producer)
+                queue.put_nowait((
+                    f"aggregate.{name}" if name == "tvbox" else f"crawler.{name}",
+                    completed_producer,
+                ))
 
         tasks: list[asyncio.Task[None]] = []
         if self._provider_enabled("aggregate.maccms"):
@@ -1154,24 +1567,45 @@ class ContentAggregator:
             asyncio.create_task(produce_provider(name, scraper, timeout))
             for name, scraper, timeout in providers
         )
-        yielded_sites: set[str] = set()
+        yielded_sites: set[tuple[str, str]] = set()
+        yielded_rules: set[tuple[str, str]] = set()
         yielded_count = 0
         active_producers = len(tasks)
+        pending: dict[str, deque[SourceMatch]] = {}
+        provider_turns: dict[str, int] = {}
+
+        def accept_message(message: tuple[str, SourceMatch | object]) -> None:
+            nonlocal active_producers
+            provider_id, value = message
+            if value is completed_producer:
+                active_producers -= 1
+            elif isinstance(value, SourceMatch):
+                pending.setdefault(provider_id, deque()).append(value)
+
         try:
-            while active_producers:
-                candidate = await queue.get()
-                if candidate is completed_producer:
-                    active_producers -= 1
+            while active_producers or any(pending.values()):
+                if not any(pending.values()):
+                    accept_message(await queue.get())
+                # Inspect all already-ready producers before taking another item
+                # from a large batch. A slow provider never blocks early output.
+                while not queue.empty():
+                    accept_message(queue.get_nowait())
+                ready = [provider_id for provider_id, group in pending.items() if group]
+                if not ready:
                     continue
-                if not isinstance(candidate, SourceMatch):
+                provider_id = min(ready, key=lambda key: provider_turns.get(key, 0))
+                candidate = pending[provider_id].popleft()
+                rule_key = (candidate.provider_id, candidate.rule_id or candidate.site_name)
+                if candidate.group_key in yielded_sites or rule_key in yielded_rules:
                     continue
-                if candidate.source_name in yielded_sites:
-                    continue
-                yielded_sites.add(candidate.source_name)
+                yielded_sites.add(candidate.group_key)
+                yielded_rules.add(rule_key)
+                provider_turns[provider_id] = provider_turns.get(provider_id, 0) + 1
                 yield candidate
                 yielded_count += 1
                 if yielded_count >= max_matches:
                     return
+                await asyncio.sleep(0)
         finally:
             for task in tasks:
                 if not task.done():
@@ -1206,8 +1640,35 @@ class ContentAggregator:
                             int((time.monotonic() - started_at) * 1000),
                         ),
                     )
+                raw_lines = [replace(
+                    line, provider_id=line.provider_id or match.provider_id,
+                    site_name=line.site_name or match.site_name,
+                    rule_id=line.rule_id or match.rule_id,
+                    rule_name=(line.rule_name if line.rule_name and line.rule_name != line.rule_id
+                               else match.rule_name or line.rule_name),
+                ) for line in raw_lines]
+                descriptor_lines: list[AggregatedVideoLine] = []
+                unresolved_lines: list[AggregatedVideoLine] = []
+                media_lines: list[AggregatedVideoLine] = []
+                for line in raw_lines:
+                    descriptor = _client_resolver_descriptor(line.client_resolver)
+                    if (
+                        match.provider_id == "crawler.kazumi"
+                        and not line.url and descriptor
+                    ):
+                        descriptor_lines.append(replace(
+                            line, client_resolver=descriptor,
+                            verification_status=CLIENT_RESOLVER_REQUIRED,
+                        ))
+                    elif line.url:
+                        media_lines.append(line)
+                    elif match.provider_id in {"crawler.animeko", "crawler.kazumi"}:
+                        # A discovered chapter outside the page-extraction
+                        # budget is inventory, not a playable URL/JS permission.
+                        unresolved_lines.append(replace(line, verification_status=UNAVAILABLE))
+                raw_lines = media_lines
                 if not verify:
-                    lines = [
+                    lines = [*unresolved_lines, *descriptor_lines, *[
                         replace(
                             line,
                             verification_status=CLIENT_PROBE_REQUIRED,
@@ -1215,19 +1676,24 @@ class ContentAggregator:
                         )
                         for line in raw_lines
                         if _is_client_probe_candidate_url(line.url, line.format)
-                    ]
+                    ]]
                     return SourceResolutionOutcome(
                         match=match,
                         lines=lines,
-                        status=(CLIENT_PROBE_REQUIRED if lines else UNAVAILABLE),
-                        error_category="" if lines else EMPTY_MEDIA,
+                        status=(
+                            CLIENT_PROBE_REQUIRED if any(line.url for line in lines)
+                            else CLIENT_RESOLVER_REQUIRED if descriptor_lines
+                            else UNAVAILABLE
+                        ),
+                        error_category=("" if any(line.url or line.client_resolver for line in lines)
+                                        else READ_TIMEOUT if unresolved_lines else EMPTY_MEDIA),
                         failure_scope=SourceFailureScope.ROUTE,
                         latency_ms=max(
                             0,
                             int((time.monotonic() - started_at) * 1000),
                         ),
                     )
-                lines: list[AggregatedVideoLine] = []
+                lines: list[AggregatedVideoLine] = [*descriptor_lines, *unresolved_lines]
                 client_categories: list[str] = []
                 failure_categories: list[str] = []
                 if raw_lines:
@@ -1262,6 +1728,7 @@ class ContentAggregator:
                                 verification_status=SERVER_VERIFIED,
                                 startup_profile=check.startup_profile,
                                 startup_latency_ms=check.latency_ms,
+                                **_line_metadata(check),
                             ))
                         elif (
                             status == CLIENT_PROBE_REQUIRED
@@ -1299,9 +1766,11 @@ class ContentAggregator:
                     if SERVER_VERIFIED in statuses
                     else CLIENT_PROBE_REQUIRED
                     if CLIENT_PROBE_REQUIRED in statuses
+                    else CLIENT_RESOLVER_REQUIRED
+                    if CLIENT_RESOLVER_REQUIRED in statuses
                     else UNAVAILABLE
                 )
-                if status == SERVER_VERIFIED:
+                if status in {SERVER_VERIFIED, CLIENT_RESOLVER_REQUIRED}:
                     error_category = ""
                 elif status == CLIENT_PROBE_REQUIRED:
                     error_category = _strongest_error_category(
@@ -1311,7 +1780,8 @@ class ContentAggregator:
                 else:
                     error_category = _strongest_error_category(
                         failure_categories,
-                        EMPTY_MEDIA if not raw_lines else UNKNOWN_EXCEPTION,
+                        READ_TIMEOUT if unresolved_lines and not raw_lines
+                        else EMPTY_MEDIA if not raw_lines else UNKNOWN_EXCEPTION,
                     )
                 return SourceResolutionOutcome(
                     match=match,
@@ -1364,22 +1834,33 @@ class ContentAggregator:
         health: dict[str, str] = {}
         diagnostics: dict[str, SourceResolutionOutcome] = {}
         unique: dict[str, AggregatedVideoLine] = {}
+        status_rank = {
+            UNAVAILABLE: 0, CLIENT_RESOLVER_REQUIRED: 1,
+            CLIENT_PROBE_REQUIRED: 2, SERVER_VERIFIED: 3,
+        }
         async for outcome in self.resolve_source_matches_progressively(
             matches,
             episode=episode,
             verify=verify,
         ):
             match, lines, status = outcome
-            health[match.source_name] = status
-            if isinstance(outcome, SourceResolutionOutcome):
-                diagnostics[match.source_name] = outcome
+            if match.binding_key != match.source_name:
+                health[match.binding_key] = status
+                if isinstance(outcome, SourceResolutionOutcome):
+                    diagnostics[match.binding_key] = outcome
+            previous_status = health.get(match.source_name)
+            if previous_status is None or status_rank.get(status, 0) > status_rank.get(previous_status, 0):
+                health[match.source_name] = status
+                if isinstance(outcome, SourceResolutionOutcome):
+                    diagnostics[match.source_name] = outcome
             for line in lines:
-                previous = unique.get(line.url)
+                key = _video_line_identity(line)
+                previous = unique.get(key)
                 if previous is None or (
                     previous.verification_status != SERVER_VERIFIED
                     and line.verification_status == SERVER_VERIFIED
                 ):
-                    unique[line.url] = line
+                    unique[key] = line
         if include_diagnostics:
             return list(unique.values()), health, diagnostics
         return list(unique.values()), health
@@ -1695,7 +2176,17 @@ class ContentAggregator:
                 scraper = self._active_crawler_scrapers.get(parts[1])
                 if scraper is not None:
                     lines = await scraper.get_video_urls(parts[2], episode)
+                    identity = SourceMatch(
+                        source_id=subject_id, source_name=parts[1], title="",
+                        content_type="", year=0,
+                    )
+                    rule_name = identity.rule_name
+                    if isinstance(scraper, AnimekoScraper):
+                        rule = scraper._rule_by_id(identity.rule_id)
+                        if rule is not None:
+                            rule_name = rule.display_name
                     for line in lines:
+                        descriptor = dict(getattr(line, "client_resolver", {}) or {})
                         all_lines.append(AggregatedVideoLine(
                             url=line.url,
                             title=line.title,
@@ -1706,6 +2197,12 @@ class ContentAggregator:
                             # provider|来源名 折叠时就只剩一条。
                             source=_crawler_line_source(parts[1], line.source_name),
                             headers=line.headers,
+                            client_resolver=descriptor,
+                            provider_id=identity.provider_id,
+                            site_name=identity.site_name,
+                            rule_id=identity.rule_id,
+                            rule_name=str(descriptor.get("rule_name") or rule_name),
+                            **_line_metadata(line),
                         ))
 
         # M3U8 fallback for under-served results
@@ -1731,8 +2228,9 @@ class ContentAggregator:
         seen = set()
         unique = []
         for line in all_lines:
-            if line.url not in seen:
-                seen.add(line.url)
+            key = _video_line_identity(line)
+            if key not in seen:
+                seen.add(key)
                 unique.append(line)
         return unique
 
@@ -1748,6 +2246,7 @@ class ContentAggregator:
           - mp4/其它: HEAD 或 GET, 状态码 < 400 且非 HTML
         """
         started_at = time.monotonic()
+        metadata: dict = {}
 
         def finish(
             status: str,
@@ -1759,6 +2258,7 @@ class ContentAggregator:
                 error_category=error_category,
                 latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
                 startup_profile=startup_profile,
+                **(metadata if status == SERVER_VERIFIED else {}),
             )
             return result if detailed else result.status
 
@@ -1825,6 +2325,7 @@ class ContentAggregator:
                                 resp.status_code,
                                 resp.headers.get("content-type", "").lower(),
                                 bytes(body),
+                                resp.headers,
                             )
                     return stale_redirect_sentinel
 
@@ -1840,7 +2341,7 @@ class ContentAggregator:
                         return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                     if response is stale_redirect_sentinel:
                         return finish(UNAVAILABLE, STALE_ROUTE)
-                    response_url, status, content_type, body = response
+                    response_url, status, content_type, body, response_headers = response
                     if status >= 400:
                         return finish_http_failure(status)
                     if classify_media_url(response_url, line.format) == PLAYER_PAGE_URL:
@@ -1859,6 +2360,15 @@ class ContentAggregator:
                         or "mpegurl" in content_type
                     )
                     if not is_hls:
+                        # DASH/other manifests are metadata documents too.
+                        is_manifest = (
+                            line.format.lower() in {"dash", "mpd"}
+                            or urlparse(response_url).path.lower().endswith(".mpd")
+                            or "dash+xml" in content_type
+                            or body_head.lower().startswith(("<?xml", "<mpd"))
+                        )
+                        if not is_manifest:
+                            metadata["size_bytes"] = _response_media_size(status, response_headers)
                         startup_profile = _sample_startup_profile(
                             line,
                             response_url,
@@ -1876,6 +2386,12 @@ class ContentAggregator:
                     if not body_head.startswith("#EXTM3U"):
                         return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                     manifest_text = body.decode("utf-8", errors="ignore")
+                    whole_length = _response_media_size(status, response_headers)
+                    complete = (
+                        status == 200 and len(body) < 65536
+                        and (whole_length is None or whole_length == len(body))
+                    )
+                    metadata.update(_hls_sample_metadata(manifest_text, complete=complete))
                     media_reference = next(
                         (
                             item.strip()
@@ -1887,7 +2403,10 @@ class ContentAggregator:
                     if not media_reference:
                         return finish(UNAVAILABLE, EMPTY_MEDIA)
                     media_url = urljoin(response_url, media_reference)
-                    if media_reference.lower().split("?", 1)[0].endswith(".m3u8"):
+                    if (
+                        "#EXT-X-STREAM-INF:" in manifest_text
+                        or media_reference.lower().split("?", 1)[0].endswith(".m3u8")
+                    ):
                         if depth == 3:
                             return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                         current = media_url
@@ -1929,7 +2448,7 @@ class ContentAggregator:
                             return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                         if key_response is stale_redirect_sentinel:
                             return finish(UNAVAILABLE, STALE_ROUTE)
-                        _, key_status, key_type, key_body = key_response
+                        _, key_status, key_type, key_body, _key_headers = key_response
                         if key_status >= 400:
                             return finish_http_failure(key_status)
                         key_head = key_body[:512].decode(
@@ -1951,7 +2470,7 @@ class ContentAggregator:
                         return finish(UNAVAILABLE, NON_PUBLIC_TARGET)
                     if sample is stale_redirect_sentinel:
                         return finish(UNAVAILABLE, STALE_ROUTE)
-                    _, sample_status, sample_type, sample_body = sample
+                    _, sample_status, sample_type, sample_body, _sample_headers = sample
                     if sample_status >= 400:
                         return finish_http_failure(sample_status)
                     if len(sample_body) < 188:

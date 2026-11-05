@@ -11,6 +11,7 @@ import io.flutter.plugin.common.MethodChannel
 
 open class MainActivity : FlutterActivity() {
     private var videoCompatibilityChannel: MethodChannel? = null
+    private var nativeVideoSurfaceChannel: NativeVideoSurfaceChannel? = null
     private var cspMethodChannel: CspMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
 
@@ -41,6 +42,15 @@ open class MainActivity : FlutterActivity() {
                     result.success(VideoDecodeCompatibility.requiresSoftwareDecode(
                         Build.SUPPORTED_ABIS.firstOrNull(),
                     ))
+                } else if (call.method == "requiresDirectVideoSurface") {
+                    result.success(VideoDecodeCompatibility.requiresDirectSurface(
+                        Build.VERSION.SDK_INT,
+                        Build.SUPPORTED_ABIS.firstOrNull(),
+                        Build.HARDWARE,
+                        Build.FINGERPRINT,
+                        Build.PRODUCT,
+                        Build.MODEL,
+                    ))
                 } else if (call.method == "playbackDiagnostics") {
                     // Local, user-requested diagnostics only. No device identifier.
                     result.success(mapOf(
@@ -52,6 +62,10 @@ open class MainActivity : FlutterActivity() {
                 }
             }
         }
+        nativeVideoSurfaceChannel = NativeVideoSurfaceChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            flutterEngine.renderer,
+        )
         cspMethodChannel = CspMethodChannel(
             applicationContext,
             flutterEngine.dartExecutor.binaryMessenger,
@@ -64,6 +78,8 @@ open class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         videoCompatibilityChannel?.setMethodCallHandler(null)
         videoCompatibilityChannel = null
+        nativeVideoSurfaceChannel?.close()
+        nativeVideoSurfaceChannel = null
         cspMethodChannel?.close()
         cspMethodChannel = null
         storageMethodChannel?.close()

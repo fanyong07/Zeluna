@@ -24,9 +24,11 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,6 +39,8 @@ from ..base import (
     SubjectDetail,
     SubjectResult,
     VideoLine,
+    DIRECT_MEDIA_URL,
+    classify_media_url,
     media_format_from_url,
 )
 from ..content_identity import classify_content
@@ -186,43 +190,62 @@ class AnimekoScraper(BaseScraper):
     # ── 搜索 ────────────────────────────────────────────────
 
     async def search(self, keyword: str) -> list[SubjectResult]:
+        results = [
+            result
+            async for group in self.search_progressively(keyword)
+            for result in group
+        ]
+        # Preserve the batch API's stable subscription order.
+        order = {rule.id: index for index, rule in enumerate(self._rules)}
+        return sorted(
+            results, key=lambda item: order.get(item.extra.get("animeko_source"), len(order)),
+        )
+
+    async def search_progressively(
+        self, keyword: str,
+    ) -> AsyncIterator[list[SubjectResult]]:
+        """Yield completed rule batches without losing them to a later deadline."""
         keyword = (keyword or "").strip()
         if not keyword or not self._enabled:
-            return []
+            return
         try:
             rules = await self.rules()
         except Exception as error:  # noqa: BLE001 - 规则库不可用不该炸搜索
             logger.warning("animeko 规则库不可用: %s", type(error).__name__)
-            return []
+            return
         playable = [rule for rule in rules if rule.is_playable]
-        if not playable:
-            return []
+        # Keep both the existing per-rule deadline/result cap and a bounded
+        # number of active origin requests, even for a larger subscription.
+        semaphore = asyncio.Semaphore(config.MACCMS_SEARCH_MAX_CONCURRENCY)
 
-        # 每个源一个协程,自带超时;gather 用 return_exceptions 兜住任何漏网异常,
-        # 单源失败只会让它自己的结果为空。
-        outcomes = await asyncio.gather(
-            *(self._search_rule(rule, keyword) for rule in playable),
-            return_exceptions=True,
-        )
+        async def search_rule(rule: MediaSourceRule) -> _RuleOutcome:
+            async with semaphore:
+                return await self._search_rule(rule, keyword)
 
-        results: list[SubjectResult] = []
+        tasks = [asyncio.create_task(search_rule(rule)) for rule in playable]
         failed: list[str] = []
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                failed.append(type(outcome).__name__)
-                continue
-            if outcome.error:
-                failed.append(f"{outcome.rule_id}:{outcome.error}")
-            results.extend(self._to_subject_results(outcome))
+        try:
+            for completed in asyncio.as_completed(tasks):
+                try:
+                    outcome = await completed
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:  # noqa: BLE001 - rule isolation
+                    failed.append(type(error).__name__)
+                    continue
+                if outcome.error:
+                    failed.append(f"{outcome.rule_id}:{outcome.error}")
+                yield self._to_subject_results(outcome)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         if failed:
             logger.info(
                 "animeko 搜索 %s:%d/%d 个源不可用(%s)",
-                keyword,
-                len(failed),
-                len(playable),
-                ", ".join(failed[:6]),
+                keyword, len(failed), len(playable), ", ".join(failed[:6]),
             )
-        return results
 
     async def _search_rule(self, rule: MediaSourceRule, keyword: str) -> _RuleOutcome:
         started = time.monotonic()
@@ -277,6 +300,11 @@ class AnimekoScraper(BaseScraper):
                     lang="ja" if identity.type == "anime" else "",
                     year=identity.year,
                     extra={
+                        "source_identity": {
+                            "rule_id": rule.id,
+                            "rule_name": rule.display_name,
+                            "site_name": urlparse(subject.url).hostname or rule.id,
+                        },
                         "animeko_source": rule.id,
                         "animeko_source_name": rule.display_name,
                         "animeko_url": subject.url,
@@ -344,6 +372,11 @@ class AnimekoScraper(BaseScraper):
             year=identity.year,
             episodes=detail_episodes,
             extra={
+                "source_identity": {
+                    "rule_id": rule.id,
+                    "rule_name": rule.display_name,
+                    "site_name": urlparse(subject_url).hostname or rule.id,
+                },
                 "animeko_source": rule.id,
                 "animeko_source_name": rule.display_name,
                 "animeko_url": subject_url,
@@ -413,26 +446,43 @@ class AnimekoScraper(BaseScraper):
         ]
         if not candidates:
             return []
-        # 一次只探前几条线路:每条都要多抓一个播放页,站点限速不会被绕过。
-        candidates = _ordered_candidates(rule, candidates)[
-            : config.ANIMEKO_PLAY_MAX_CHANNELS
-        ]
-
+        # The page-extraction budget limits requests, not known route inventory.
+        # Direct media needs no page request and survives regardless of position.
+        candidates = _ordered_candidates(rule, candidates)
         engine = self._engine_for(rule)
+        page_candidates = [
+            item for item in candidates
+            if classify_media_url(item.play_url) != DIRECT_MEDIA_URL
+        ][: config.ANIMEKO_PLAY_MAX_CHANNELS]
         results = await asyncio.gather(
-            *(self._media_from_episode(rule, engine, subject, item) for item in candidates),
+            *(self._media_from_episode(rule, engine, subject, item) for item in page_candidates),
             return_exceptions=True,
         )
+        resolved = {id(item): outcome for item, outcome in zip(page_candidates, results)}
         lines: list[VideoLine] = []
-        seen: set[str] = set()
-        for item, outcome in zip(candidates, results):
-            if isinstance(outcome, BaseException) or not outcome:
+        seen: set[tuple[str, str]] = set()
+        for item in candidates:
+            outcome = (
+                [item.play_url] if classify_media_url(item.play_url) == DIRECT_MEDIA_URL
+                else resolved.get(id(item))
+            )
+            urls = outcome if isinstance(outcome, list) else []
+            if not urls:
+                # Do not grant a browser execution contract to an uninspected
+                # chapter. It remains a distinct, disabled discovery record.
+                line = self._build_line(rule, item, "")
+                line.source_name = f"{rule.display_name}:{item.channel}:{item.index + 1}"
+                key = (line.source_name, item.play_url)
+                if key not in seen:
+                    seen.add(key)
+                    lines.append(line)
                 continue
-            for url in outcome:
-                if url in seen:
-                    continue
-                seen.add(url)
-                lines.append(self._build_line(rule, item, url))
+            for url in urls:
+                line = self._build_line(rule, item, url)
+                key = (line.source_name, url)
+                if key not in seen:
+                    seen.add(key)
+                    lines.append(line)
         return lines
 
     async def _media_from_episode(
@@ -483,7 +533,7 @@ class AnimekoScraper(BaseScraper):
             quality=_resolution_of(rule),
             format=media_format_from_url(url),
             headers=headers,
-            source_name=f"{rule.id}:{title}",
+            source_name=f"{rule.display_name}:{title}",
         )
 
     # ── 引擎工厂 ────────────────────────────────────────────

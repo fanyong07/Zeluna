@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
@@ -9,6 +10,7 @@ import '../local_media.dart';
 import 'native_playback_gate_stub.dart'
     if (dart.library.io) 'native_playback_gate_io.dart';
 import 'native_video_compatibility.dart';
+import 'native_android_surface_controller.dart';
 import 'media_transport_failure.dart';
 import 'native_media_transport_stub.dart'
     if (dart.library.io) 'native_media_transport_io.dart';
@@ -398,7 +400,9 @@ final class NativeDecodedFrameMonitor {
     required bool Function() canRead,
     required Future<bool> Function() readFrame,
     required void Function() onFrame,
+    void Function(String reason)? onProbe,
     Duration interval = const Duration(milliseconds: 400),
+    Duration readTimeout = const Duration(seconds: 2),
   }) {
     cancel();
     if (_disposed) return;
@@ -411,21 +415,34 @@ final class NativeDecodedFrameMonitor {
       if (_reading || !canRead()) return;
       _reading = true;
       try {
-        final decoded = await readFrame();
-        if (decoded && !_disposed && generation == _generation && isCurrent()) {
-          cancel();
-          onFrame();
+        // Bound a probe without extending the independently scheduled startup
+        // deadline. A hung read from one open must not starve its replacement.
+        final decoded = await readFrame().timeout(readTimeout);
+        if (!_disposed && generation == _generation && isCurrent()) {
+          onProbe?.call(decoded ? 'frame_available' : 'no_image');
+          if (decoded) {
+            cancel();
+            onFrame();
+          }
+        }
+      } on TimeoutException {
+        if (!_disposed && generation == _generation && isCurrent()) {
+          onProbe?.call('probe_timeout');
         }
       } catch (_) {
-        // No frame yet. The startup deadline remains authoritative.
+        if (!_disposed && generation == _generation && isCurrent()) {
+          onProbe?.call('probe_failed');
+        }
       } finally {
-        _reading = false;
+        // A stale completion must not unlock a newer in-flight probe.
+        if (generation == _generation) _reading = false;
       }
     });
   }
 
   void cancel() {
     _generation++;
+    _reading = false;
     _timer?.cancel();
     _timer = null;
   }
@@ -468,10 +485,12 @@ typedef NativeMediaPreparer =
 /// individual native resources itself.
 final class NativeVideoController {
   NativeVideoController({int Function()? readOpenSerial}) : player = Player() {
-    surfaceController = VideoController(
-      player,
-      configuration: NativeVideoCompatibility.instance.configuration,
-    );
+    surfaceController = NativeVideoCompatibility.instance.usesDirectSurface
+        ? NativeAndroidSurfaceController(player: player)
+        : VideoController(
+            player,
+            configuration: NativeVideoCompatibility.instance.configuration,
+          );
     resumeSeek = NativeResumeSeekController(
       readOpenSerial: readOpenSerial ?? () => 0,
       seek: player.seek,
@@ -506,6 +525,67 @@ final class NativeVideoController {
   bool get hasDecodedFrame => _decodedFrame;
   final NativeMediaTransport _mediaTransport = NativeMediaTransport();
   NativeMediaPreparer? _prepareMediaForTesting;
+  int _activeSerial = -1;
+  String _probeReason = 'not_sampled';
+  int _probeCount = 0;
+  String? _lastProbeSignature;
+
+  /// Only fixed reason codes, codec allowlist and dimensions. No URI, headers,
+  /// track title, raw exception or pixel data enters this local diagnostic.
+  Map<String, Object?> get frameDiagnostics {
+    final state = player.state;
+    final codec = state.track.video.codec?.toLowerCase();
+    const codecs = {'h264', 'hevc', 'vp8', 'vp9', 'av1', 'mpeg4', 'mpeg2video'};
+    final surface = surfaceController;
+    final image = surface is NativeAndroidSurfaceController
+        ? surface.lastFrame
+        : null;
+    return {
+      'video_output': surface is NativeAndroidSurfaceController
+          ? (surface.directOutput ? 'mediacodec_embed' : 'gpu_software')
+          : 'gpu',
+      'video_codec': codec == null
+          ? 'unknown'
+          : (codecs.contains(codec) ? codec : 'other'),
+      'video_width': state.videoParams.w ?? 0,
+      'video_height': state.videoParams.h ?? 0,
+      'surface_width': image?.width ?? 0,
+      'surface_height': image?.height ?? 0,
+      'surface_frames': image?.frames ?? 0,
+      'frame_probe': _probeReason,
+      'frame_probe_count': _probeCount,
+      'decoded_video': _decodedFrame,
+    };
+  }
+
+  void _recordFrameProbe(String reason) {
+    _probeReason = reason;
+    _probeCount++;
+    final fields = frameDiagnostics;
+    final signature =
+        '${fields['video_codec']}:${fields['video_width']}:'
+        '${fields['video_height']}:$reason';
+    if (signature == _lastProbeSignature) return;
+    _lastProbeSignature = signature;
+    debugPrint('native_frame_probe ${jsonEncode(fields)}');
+  }
+
+  Future<bool> _probeFrame() async {
+    final surface = surfaceController;
+    if (surface is NativeAndroidSurfaceController) {
+      final found = await surface.readFrame(serial: _activeSerial);
+      _recordFrameProbe(surface.probeReason);
+      return found;
+    }
+    final bytes = await player.screenshot(format: 'image/jpeg');
+    final found = bytes != null && bytes.length > 64;
+    _recordFrameProbe(
+      bytes == null
+          ? 'screenshot_empty'
+          : (found ? 'screenshot_image' : 'screenshot_short'),
+    );
+    return found;
+  }
 
   Future<Media> prepareMedia(
     String resource, {
@@ -546,6 +626,19 @@ final class NativeVideoController {
     );
     if (_disposed || !isCurrent()) return false;
     events.beginOpen(openSerial: serial, mediaUri: media.uri);
+    _activeSerial = serial;
+    _probeCount = 0;
+    _probeReason = 'awaiting_image';
+    _lastProbeSignature = null;
+    final surface = surfaceController;
+    if (surface is NativeAndroidSurfaceController) {
+      // A previous media may still be draining. Stop it before allocating the
+      // new texture, so its last image cannot confirm the replacement open.
+      await player.stop();
+      if (_disposed || !isCurrent()) return false;
+      await surface.beginOpen(serial);
+      if (_disposed || !isCurrent()) return false;
+    }
     onDispatched();
     await player.open(media, play: false);
     if (_disposed || !isCurrent() || !canPlay()) return false;
@@ -581,8 +674,15 @@ final class NativeVideoController {
     }
     _softwareDecodeTried = true;
     try {
-      final native = player.platform as dynamic;
-      await native.setProperty('hwdec', 'no');
+      final surface = surfaceController;
+      if (surface is NativeAndroidSurfaceController) {
+        // Preserve a real software fallback instead of repeatedly reopening
+        // a direct MediaCodec-only output with an incompatible decoder.
+        await surface.useSoftwareOutput();
+      } else {
+        final native = player.platform as dynamic;
+        await native.setProperty('hwdec', 'no');
+      }
       return !_disposed;
     } catch (_) {
       return false;
@@ -617,13 +717,14 @@ final class NativeVideoController {
     _decodedFrame = false;
     _decodedFrames.start(
       isCurrent: isCurrent,
-      canRead: () => readSnapshot().position > Duration.zero,
-      readFrame:
-          _readDecodedFrame ??
-          () async {
-            final bytes = await player.screenshot(format: 'image/jpeg');
-            return bytes != null && bytes.length > 64;
-          },
+      canRead: () =>
+          _activeSerial >= 0 && readSnapshot().position > Duration.zero,
+      readFrame: _readDecodedFrame ?? _probeFrame,
+      onProbe: (reason) {
+        if (reason == 'probe_failed' || reason == 'probe_timeout') {
+          _recordFrameProbe(reason);
+        }
+      },
       onFrame: () {
         _decodedFrame = true;
         _firstFrameWatchdog.cancel();
@@ -667,6 +768,8 @@ final class NativeVideoController {
     _subscriptions.clear();
     await Future.wait(subscriptions.map((item) => item.cancel()));
     await _mediaTransport.dispose();
+    final surface = surfaceController;
+    if (surface is NativeAndroidSurfaceController) await surface.dispose();
     await player.dispose();
   }
 }

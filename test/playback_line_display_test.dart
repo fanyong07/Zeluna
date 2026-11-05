@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:anime/src/data/anime_controller.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/domain/client_media_resolver.dart';
 import 'package:anime/src/player/playback_line_display.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -376,6 +377,50 @@ void main() {
     },
   );
 
+  test(
+    'same source keeps pending resolver and failed candidates without media URLs',
+    () {
+      final groups = groupPlaybackLinesForDiagnostics([
+        _line(
+          'source-placeholder',
+          providerId: 'crawler.kazumi',
+          sourceName: '稀饭动漫',
+          url: '',
+          available: false,
+          diagnosticStatus: PlaybackDiscoveryStatus.notQueried,
+        ),
+        _line(
+          'ready-route',
+          providerId: 'crawler.kazumi',
+          sourceName: '稀饭动漫',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+        ),
+        for (final id in ['resolver-a', 'resolver-b'])
+          _line(
+            id,
+            providerId: 'crawler.kazumi',
+            sourceName: '稀饭动漫',
+            url: '',
+            available: false,
+            diagnosticStatus: PlaybackDiscoveryStatus.clientResolverRequired,
+          ),
+        for (final id in ['failed-a', 'failed-b'])
+          _line(
+            id,
+            providerId: 'crawler.kazumi',
+            sourceName: '稀饭动漫',
+            url: '',
+            available: false,
+            diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+          ),
+      ]);
+      expect(
+        [...groups.primary, ...groups.other].map((line) => line.id).toSet(),
+        {'ready-route', 'resolver-a', 'resolver-b', 'failed-a', 'failed-b'},
+      );
+    },
+  );
+
   test('selecting a route keeps every alternative visible', () {
     final groups = groupPlaybackLinesForDiagnostics([
       _line(
@@ -711,6 +756,218 @@ void main() {
     );
 
     expect(merged.single.latency, isNull);
+  });
+
+  group('background media metadata merge', () {
+    test(
+      'failed enrichment updates only measured metadata, never active route state',
+      () {
+        final expires = DateTime.utc(2030, 1, 1);
+        final current = PlaybackLine(
+          id: 'active-id',
+          episodeId: 7,
+          providerId: 'active-provider',
+          providerName: '真实站点',
+          sourceName: '站点来源',
+          sourceInventoryId: 'registered:active',
+          title: '活动线路',
+          quality: '分辨率未知',
+          format: 'auto',
+          url: 'https://cdn.example/index.m3u8',
+          headers: const {'Referer': 'https://site.example/'},
+          latency: const Duration(milliseconds: 900),
+          available: true,
+          serverVerified: true,
+          clientVerified: true,
+          publicHttpOnly: true,
+          startupProfile: PlaybackStartupProfile.hls,
+          cacheState: 'fresh',
+          sourceErrorCategory: 'retained-category',
+          clientQuerySupported: true,
+          queryLocation: 'hybrid',
+          sourceAddress: 'https://site.example/',
+          diagnosticStatus: PlaybackDiscoveryStatus.serverVerified,
+          queried: true,
+          aliasesAttempted: 3,
+          searchHitCount: 7,
+          bestMatchScore: 100,
+          matched: true,
+          episodeFound: true,
+          discoveryElapsed: const Duration(seconds: 2),
+          expiresAt: expires,
+          message: '活动状态',
+        );
+        const metadata = PlaybackLine(
+          id: 'different-metadata-id',
+          episodeId: 99,
+          providerId: 'different-provider',
+          providerName: '不用于展示的探测名',
+          title: '不覆盖标题',
+          quality: '1080P',
+          format: 'HLS',
+          url: 'https://cdn.example/index.m3u8',
+          headers: {'Referer': 'https://site.example/'},
+          latency: Duration(milliseconds: 266),
+          sizeBytes: 50 * 1024 * 1024,
+          sizeEstimated: true,
+          videoWidth: 1920,
+          videoHeight: 1080,
+          bitrate: 5000000,
+          codecs: 'avc1.640028,mp4a.40.2',
+          adaptive: true,
+          available: false,
+          requiresClientProbe: true,
+          cacheState: 'stale',
+          diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+          message: '后台检查失败也不把在播线路标成失败',
+        );
+        final merged = mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: metadata,
+        );
+        expect(merged.id, current.id);
+        expect(merged.episodeId, current.episodeId);
+        expect(merged.providerId, current.providerId);
+        expect(merged.providerName, current.providerName);
+        expect(merged.sourceName, current.sourceName);
+        expect(merged.sourceInventoryId, current.sourceInventoryId);
+        expect(merged.title, current.title);
+        expect(merged.url, current.url);
+        expect(merged.headers, same(current.headers));
+        expect(merged.available, isTrue);
+        expect(merged.clientVerified, isTrue);
+        expect(merged.serverVerified, isTrue);
+        expect(merged.requiresClientProbe, isFalse);
+        expect(merged.publicHttpOnly, isTrue);
+        expect(merged.startupProfile, current.startupProfile);
+        expect(merged.cacheState, current.cacheState);
+        expect(merged.sourceErrorCategory, current.sourceErrorCategory);
+        expect(merged.clientQuerySupported, isTrue);
+        expect(merged.queryLocation, current.queryLocation);
+        expect(merged.sourceAddress, current.sourceAddress);
+        expect(merged.diagnosticStatus, current.diagnosticStatus);
+        expect(merged.queried, current.queried);
+        expect(merged.aliasesAttempted, current.aliasesAttempted);
+        expect(merged.searchHitCount, current.searchHitCount);
+        expect(merged.bestMatchScore, current.bestMatchScore);
+        expect(merged.matched, current.matched);
+        expect(merged.episodeFound, current.episodeFound);
+        expect(merged.discoveryElapsed, current.discoveryElapsed);
+        expect(merged.expiresAt, same(expires));
+        expect(merged.message, current.message);
+        expect(merged.latency, metadata.latency);
+        expect(merged.sizeBytes, metadata.sizeBytes);
+        expect(merged.sizeEstimated, isTrue);
+        expect(merged.videoWidth, 1920);
+        expect(merged.videoHeight, 1080);
+        expect(merged.bitrate, 5000000);
+        expect(merged.codecs, metadata.codecs);
+        expect(merged.quality, '1080P');
+        expect(merged.format, 'HLS');
+        expect(merged.adaptive, isTrue);
+      },
+    );
+
+    test('URL or request header changes discard stale measurements', () {
+      final current = _line('current', url: 'https://cdn.example/a.m3u8');
+      final differentUrl = _line(
+        'stale',
+        url: 'https://cdn.example/b.m3u8',
+        sizeBytes: 100,
+      );
+      final differentHeaders = _line(
+        'stale',
+        url: current.url,
+        headers: const {'Referer': 'https://different.example/'},
+        sizeBytes: 100,
+      );
+      expect(
+        mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: differentUrl,
+        ),
+        same(current),
+      );
+      expect(
+        mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: differentHeaders,
+        ),
+        same(current),
+      );
+      final noUrl = _line('empty', url: '');
+      expect(
+        mergePlaybackLineMediaMetadata(
+          current: noUrl,
+          metadata: _line('empty', url: ''),
+        ),
+        same(noUrl),
+      );
+    });
+
+    test(
+      'missing invalid and estimated metadata never erase measured values',
+      () {
+        final current = _line(
+          'current',
+          latencyMs: 266,
+          sizeBytes: 50 * 1024 * 1024,
+          width: 1920,
+          height: 1080,
+          bitrate: 5000000,
+          codecs: 'avc1.640028',
+          quality: '1080P',
+          format: 'HLS',
+          adaptive: true,
+        );
+        final sparse = _line(
+          'current',
+          latencyMs: -1,
+          sizeBytes: 0,
+          width: 0,
+          height: -1,
+          bitrate: -1,
+          codecs: 'unknown',
+          quality: 'unknown',
+          format: 'auto',
+          available: false,
+        );
+        final merged = mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: sparse,
+        );
+        expect(merged.latency, current.latency);
+        expect(merged.sizeBytes, current.sizeBytes);
+        expect(merged.videoWidth, current.videoWidth);
+        expect(merged.videoHeight, current.videoHeight);
+        expect(merged.bitrate, current.bitrate);
+        expect(merged.codecs, current.codecs);
+        expect(merged.quality, current.quality);
+        expect(merged.format, current.format);
+        expect(merged.adaptive, isTrue);
+        expect(merged.available, isTrue);
+        final estimated = mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: _line(
+            'current',
+            sizeBytes: 100 * 1024 * 1024,
+            estimated: true,
+          ),
+        );
+        expect(estimated.sizeBytes, current.sizeBytes);
+        expect(estimated.sizeEstimated, isFalse);
+        final live = mergePlaybackLineMediaMetadata(
+          current: current,
+          metadata: _line('current', isLive: true),
+        );
+        expect(live.isLive, isTrue);
+        final legacy = mergePlaybackLineMediaMetadata(
+          current: _line('current'),
+          metadata: _line('current', sizeLabel: '约 20 MB', estimated: true),
+        );
+        expect(playbackLineSizeLabel(legacy), '约 20 MB');
+      },
+    );
   });
 
   test(
@@ -1152,10 +1409,197 @@ void main() {
     expect(playbackLineLatencyLabel(line), '266ms');
     expect(
       playbackLineMediaLabel(line),
-      '约 50.0 MB · 最高 1920×1080 · HLS · 5.0 Mbps · H.264/AAC',
+      '约 50.0 MB · 1920×1080 · HLS · 5.0 Mbps · H.264/AAC',
     );
     expect(playbackLineLatencyLabel(_line('unknown')), '速度未知');
     expect(playbackLineMediaLabel(_line('unknown')), contains('大小未知'));
+  });
+
+  group('public playback metric helpers', () {
+    test('latency bands include exact 500 and 1500 ms boundaries', () {
+      final cases = <int, PlaybackLineLatencyBand>{
+        -1: PlaybackLineLatencyBand.unknown,
+        0: PlaybackLineLatencyBand.fast,
+        500: PlaybackLineLatencyBand.fast,
+        501: PlaybackLineLatencyBand.moderate,
+        1500: PlaybackLineLatencyBand.moderate,
+        1501: PlaybackLineLatencyBand.slow,
+      };
+      for (final entry in cases.entries) {
+        expect(
+          playbackLineLatencyBand(_line('delay', latencyMs: entry.key)),
+          entry.value,
+        );
+      }
+      expect(
+        playbackLineLatencyBand(_line('unknown')),
+        PlaybackLineLatencyBand.unknown,
+      );
+      expect(playbackLineLatencyLabel(_line('invalid', latencyMs: -1)), '速度未知');
+    });
+
+    test('positive byte sizes show MB and explicit estimates', () {
+      final line = _line('size', sizeBytes: 50 * 1024 * 1024, estimated: true);
+      expect(playbackLineSizeLabel(line), '约 50.0 MB');
+      expect(playbackLineHasKnownSize(line), isTrue);
+      expect(playbackLineSizeLabel(_line('small', sizeBytes: 1)), '<0.1 MB');
+    });
+
+    test(
+      'zero and invalid bytes never become a fake size or legacy fallback',
+      () {
+        for (final size in [0, -1]) {
+          final line = _line('invalid', sizeBytes: size, sizeLabel: '20 MB');
+          expect(playbackLineSizeLabel(line), '大小未知');
+          expect(playbackLineHasKnownSize(line), isFalse);
+        }
+        for (final label in [
+          '',
+          '--',
+          'unknown',
+          'NaN MB',
+          'Infinity MB',
+          '-1 MB',
+          '0 MB',
+        ]) {
+          final line = _line('legacy-invalid', sizeLabel: label);
+          expect(playbackLineSizeLabel(line), '大小未知');
+          expect(playbackLineHasKnownSize(line), isFalse);
+        }
+      },
+    );
+
+    test('valid legacy sizes retain text and estimate truthfully', () {
+      expect(
+        playbackLineSizeLabel(_line('legacy', sizeLabel: '1.5 GB')),
+        '1.5 GB',
+      );
+      expect(
+        playbackLineHasKnownSize(_line('legacy', sizeLabel: '1.5 GB')),
+        isTrue,
+      );
+      expect(
+        playbackLineSizeLabel(
+          _line('legacy', sizeLabel: '20 MB', estimated: true),
+        ),
+        '约 20 MB',
+      );
+      expect(
+        playbackLineSizeLabel(
+          _line('legacy', sizeLabel: '约 20 MB', estimated: true),
+        ),
+        '约 20 MB',
+      );
+      expect(
+        playbackLineSizeLabel(_line('live', isLive: true, sizeBytes: 100)),
+        '直播',
+      );
+      expect(
+        playbackLineHasKnownSize(_line('live', isLive: true, sizeBytes: 100)),
+        isFalse,
+      );
+    });
+
+    test(
+      'dimensions and legacy quality stay public without inventing missing data',
+      () {
+        final measured = _line(
+          'resolution',
+          width: 1920,
+          height: 1080,
+          adaptive: true,
+        );
+        expect(playbackLineResolutionLabel(measured), '1920×1080');
+        expect(playbackLineHasKnownResolution(measured), isTrue);
+        expect(
+          playbackLineResolutionLabel(_line('legacy', quality: '720P')),
+          '源标 720P',
+        );
+        expect(
+          playbackLineHasKnownResolution(_line('legacy', quality: '720P')),
+          isFalse,
+          reason: 'source quality text is not a measured pixel resolution',
+        );
+        for (final quality in [
+          '',
+          '--',
+          'unknown',
+          '分辨率未知',
+          'auto',
+          'NaN',
+          '0P',
+        ]) {
+          final unknown = _line('unknown', quality: quality);
+          expect(playbackLineResolutionLabel(unknown), '分辨率未知');
+          expect(playbackLineHasKnownResolution(unknown), isFalse);
+        }
+        expect(playbackLineFormatLabel(_line('format', format: 'HLS')), 'HLS');
+        for (final format in ['', '--', 'unknown', 'auto']) {
+          expect(
+            playbackLineFormatLabel(_line('format', format: format)),
+            '格式未知',
+          );
+        }
+      },
+    );
+
+    test('pending resolver page never surfaces as a video URL', () {
+      final descriptor = ClientMediaResolverDescriptor(
+        pageUrl: Uri.parse('https://chapter.example/play/1.html'),
+        referer: Uri.parse('https://chapter.example/'),
+        ruleId: 'xfdmneo',
+        ruleName: '稀饭动漫',
+        userAgent: '',
+        pageHosts: const ['chapter.example'],
+        mediaHosts: const ['cdn.example'],
+      );
+      final pending = _line(
+        'pending',
+        url: descriptor.pageUrl.toString(),
+        clientResolver: descriptor,
+        diagnosticStatus: PlaybackDiscoveryStatus.clientResolverRequired,
+      );
+      expect(playbackLineMediaUrl(pending), isNull);
+      expect(playbackLineLatencyLabel(pending), '本机解析中');
+      expect(playbackLineMediaUrl(_line('blank', url: '')), isNull);
+      expect(
+        playbackLineMediaUrl(
+          _line('page', url: 'https://example.com/play.html'),
+        ),
+        isNull,
+      );
+      expect(playbackLineMediaUrl(_line('bad', url: 'not-a-url')), isNull);
+      expect(
+        playbackLineMediaUrl(
+          _line(
+            'candidate',
+            available: false,
+            url: 'https://cdn.example/index.m3u8',
+          ),
+        ),
+        'https://cdn.example/index.m3u8',
+      );
+    });
+
+    test('flat display retains failed and pending candidates', () {
+      final failed = _line(
+        'failed-candidate',
+        available: false,
+        diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+      );
+      final pending = _line(
+        'resolver',
+        available: false,
+        url: '',
+        diagnosticStatus: PlaybackDiscoveryStatus.clientResolverRequired,
+      );
+      final all = allPlaybackLinesForDisplay([failed, pending, _line('ready')]);
+      expect(all.map((line) => line.id).toSet(), {
+        'failed-candidate',
+        'resolver',
+        'ready',
+      });
+    });
   });
 
   test('failed playback labels retain the exact reason and measured delay', () {
@@ -1181,7 +1625,14 @@ void main() {
     test(
       'upstream numbered route tags stay identifiable instead of aliasing',
       () {
-        for (final tag in ['hb-10', 'jk-18', 'route-57', 'hb-10-2']) {
+        for (final tag in [
+          'hb-10',
+          'jk-18',
+          'route-57',
+          'hb-10-2',
+          'yhdm-cn-10',
+          'dm-xhs-5',
+        ]) {
           expect(
             playbackProviderLabel(providerId: tag, providerName: tag),
             tag,
@@ -1190,16 +1641,33 @@ void main() {
       },
     );
 
-    test('内部规则 ID 不会出现在界面，映射为稳定别名', () {
-      final label = playbackProviderLabel(
-        providerId: 'xfdmneo',
-        providerName: 'xfdmneo',
-      );
-      expect(label, isNot(contains('xfdmneo')));
-      expect(label, endsWith('线路'));
+    test('已知规则 ID 映射为真实站名而不是随机别名', () {
+      for (final name in ['xfdmneo', 'kazumi:xfdmneo', 'Kazumi · xfdmneo']) {
+        expect(
+          playbackProviderLabel(
+            providerId: 'kazumi:xfdmneo',
+            providerName: name,
+          ),
+          '稀饭动漫',
+        );
+      }
       expect(
-        playbackProviderLabel(providerId: 'xfdmneo', providerName: 'xfdmneo'),
-        label,
+        playbackProviderLabel(
+          providerId: 'animeko:dm-yhdm',
+          providerName: 'dm-yhdm',
+        ),
+        '樱花动漫',
+      );
+      expect(
+        playbackProviderLabel(providerId: 'kazumi:mxdm', providerName: ''),
+        'MX动漫',
+      );
+      expect(
+        playbackProviderLabel(
+          providerId: 'animeko:xifan-dongman',
+          providerName: '',
+        ),
+        '稀饭动漫',
       );
     });
 
@@ -1217,13 +1685,99 @@ void main() {
       );
     });
 
-    test('不同 ID 映射保持确定性且来自别名池', () {
-      final label = playbackProviderLabel(
-        providerId: 'custom:abc-1',
-        providerName: '',
+    test('没有源名时使用中性线路名称而非虚构来源', () {
+      for (final id in [
+        '',
+        'custom:abc-1',
+        'crawler.animeko',
+        'crawler.kazumi',
+        'crawler.anich',
+      ]) {
+        expect(playbackProviderLabel(providerId: id, providerName: ''), '线路');
+      }
+      expect(
+        playbackProviderLabel(
+          providerId: 'crawler.anich',
+          providerName: 'AniCh',
+        ),
+        '线路',
       );
-      final alias = label.replaceAll('线路', '');
-      expect(playbackProviderAliasPool, contains(alias));
+    });
+
+    test('剥离多层聚合器前缀并保留真实线路和新规则名', () {
+      for (final value in [
+        'AniCh · hb-10',
+        'anich:hb-10',
+        '[AniCh] hb-10',
+        '在线服务 · Animeko · AniCh · hb-10',
+      ]) {
+        expect(
+          playbackProviderLabel(
+            providerId: 'crawler.anich',
+            providerName: value,
+          ),
+          'hb-10',
+        );
+      }
+      for (final route in ['yhdm-cn-10', 'dm-xhs-5', 'hb-10-2']) {
+        expect(
+          playbackProviderLabel(
+            providerId: route,
+            providerName: 'AniCh · $route',
+          ),
+          route,
+        );
+      }
+      expect(
+        playbackProviderLabel(
+          providerId: 'crawler.animeko',
+          providerName: 'Animeko · other-rule',
+        ),
+        'other-rule',
+      );
+      expect(
+        playbackProviderLabel(
+          providerId: 'crawler.kazumi',
+          providerName: 'Kazumi · 独立规则',
+        ),
+        '独立规则',
+      );
+    });
+
+    test('线路名称优先保留编号线路否则使用真实 sourceName', () {
+      expect(
+        playbackLineProviderLabel(
+          _line(
+            'anich-tag',
+            providerId: 'crawler.anich',
+            providerName: 'AniCh · hb-10',
+            sourceName: '某站点',
+          ),
+        ),
+        'hb-10',
+      );
+      expect(
+        playbackLineProviderLabel(
+          _line(
+            'source',
+            providerId: 'crawler.kazumi',
+            providerName: 'Kazumi',
+            sourceName: 'xfdmneo',
+          ),
+        ),
+        '稀饭动漫',
+      );
+      expect(
+        playbackLineProviderLabel(
+          _line(
+            'source',
+            providerId: 'crawler.animeko',
+            providerName: 'Animeko',
+            sourceName: 'dm-yhdm:线路1',
+          ),
+        ),
+        '樱花动漫 · 线路1',
+      );
     });
   });
 
@@ -1245,9 +1799,15 @@ void main() {
 PlaybackLine _line(
   String id, {
   String providerId = 'test',
+  String providerName = '测试线路',
+  String? quality,
+  ClientMediaResolverDescriptor? clientResolver,
+  Map<String, String> headers = const {},
   int? latencyMs,
   bool available = true,
   int? sizeBytes,
+  String? sizeLabel,
+  bool isLive = false,
   int? width,
   int? height,
   int? bitrate,
@@ -1272,13 +1832,18 @@ PlaybackLine _line(
     id: id,
     episodeId: 1,
     providerId: providerId,
-    providerName: '测试线路',
+    providerName: providerName,
     title: id,
-    quality: width == null || height == null ? '分辨率未知' : '${height}P',
+    quality:
+        quality ?? (width == null || height == null ? '分辨率未知' : '${height}P'),
     format: format,
     url: url ?? 'https://example.com/$id',
+    clientResolver: clientResolver,
+    headers: headers,
     latency: latencyMs == null ? null : Duration(milliseconds: latencyMs),
     sizeBytes: sizeBytes,
+    sizeLabel: sizeLabel,
+    isLive: isLive,
     sizeEstimated: estimated,
     videoWidth: width,
     videoHeight: height,

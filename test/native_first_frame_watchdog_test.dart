@@ -55,6 +55,94 @@ void main() {
     },
   );
 
+  testWidgets('hung probe from old open does not starve replacement', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    var frames = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () => frames += 100,
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () async => true,
+      onFrame: () => frames++,
+    );
+    // Do not finish the old read until the new open has proved its own image.
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(frames, 1);
+    old.complete(true);
+    await tester.pump();
+    expect(frames, 1);
+  });
+
+  testWidgets('stale finally cannot unlock an in-flight replacement probe', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    final current = Completer<bool>();
+    var reads = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () {},
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () {
+        reads++;
+        return current.future;
+      },
+      onFrame: () {},
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    old.complete(false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(reads, 1, reason: 'the new probe remains single-flight');
+    current.complete(false);
+    await tester.pump();
+    monitor.dispose();
+  });
+
+  testWidgets(
+    'timed-out image probe reports reason without cancelling deadline',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      addTearDown(monitor.dispose);
+      final pending = Completer<bool>();
+      final reasons = <String>[];
+      var frames = 0;
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () => pending.future,
+        onFrame: () => frames++,
+        onProbe: reasons.add,
+        readTimeout: const Duration(seconds: 1),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 1));
+      expect(reasons, ['probe_timeout']);
+      expect(frames, 0);
+      pending.complete(false);
+      await tester.pump();
+      monitor.dispose();
+    },
+  );
+
   testWidgets(
     'advancing audio clock without decoded video is not a first frame',
     (tester) async {

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .aggregator import (
     CLIENT_PROBE_REQUIRED,
+    CLIENT_RESOLVER_REQUIRED,
     CONNECT_TIMEOUT,
     DIRECT_SOURCE_PRIORITIES,
     DNS_FAILURE,
@@ -37,7 +38,10 @@ from .aggregator import (
     SourceMatch,
     SourceResolutionOutcome,
     aggregator,
+    _client_resolver_descriptor,
     _is_inventory_candidate_url,
+    _line_metadata,
+    _video_line_identity,
 )
 from .catalog import _is_animated, catalog_service, parse_stable_id
 from .config import (
@@ -413,15 +417,20 @@ class PlaybackService:
         aggregate: list[dict],
     ) -> list[dict]:
         result: list[dict] = []
-        seen_urls: set[str] = set()
+        seen_routes: set[str] = set()
         for item in [*managed, *aggregate]:
             if not isinstance(item, dict):
                 continue
             url = str(item.get("url") or "").strip()
-            if url and url in seen_urls:
-                continue
             if url:
-                seen_urls.add(url)
+                key = json.dumps([
+                    item.get("line_id") or "", item.get("provider_id") or "",
+                    item.get("source") or "", item.get("rule_id") or "", url,
+                    item.get("headers") or {},
+                ], sort_keys=True, ensure_ascii=True)
+                if key in seen_routes:
+                    continue
+                seen_routes.add(key)
             result.append(dict(item))
         return result
 
@@ -763,7 +772,7 @@ class PlaybackService:
             aliases,
             content_type=content_type,
             year=year,
-            max_matches=len(aggregator.source_inventory) + 8,
+            max_matches=None,
             include_diagnostics=True,
         )
         if isinstance(discovery, tuple):
@@ -961,16 +970,25 @@ class PlaybackService:
             status: str,
             outcome: object | None = None,
         ) -> bool:
-            health[match.source_name] = status
-            if isinstance(outcome, SourceResolutionOutcome):
-                diagnostics[match.source_name] = outcome
+            ranks = {UNAVAILABLE: 0, CLIENT_RESOLVER_REQUIRED: 1,
+                     CLIENT_PROBE_REQUIRED: 2, SERVER_VERIFIED: 3}
+            if match.binding_key != match.source_name:
+                health[match.binding_key] = status
+                if isinstance(outcome, SourceResolutionOutcome):
+                    diagnostics[match.binding_key] = outcome
+            previous_status = health.get(match.source_name)
+            if previous_status is None or ranks.get(status, 0) > ranks.get(previous_status, 0):
+                health[match.source_name] = status
+                if isinstance(outcome, SourceResolutionOutcome):
+                    diagnostics[match.source_name] = outcome
             for line in lines:
-                previous = resolved.get(line.url)
+                key = _video_line_identity(line)
+                previous = resolved.get(key)
                 if previous is None or (
                     previous.verification_status != SERVER_VERIFIED
                     and line.verification_status == SERVER_VERIFIED
                 ):
-                    resolved[line.url] = line
+                    resolved[key] = line
             # The app performs manifest + first-segment validation for public
             # client candidates while the full server refresh verifies every
             # source in the background.
@@ -1225,10 +1243,18 @@ class PlaybackService:
             )
             if aliases and not analysis.playback_eligible:
                 continue
-            circuit_open = self._source_circuit_is_open(
-                health.get(row.source_name),
-                now,
+            match = SourceMatch(
+                source_id=row.source_id,
+                source_name=row.source_name,
+                title=row.matched_title,
+                content_type=row.media_type,
+                year=row.year,
+                episode_count=row.episode_count,
+                score=row.score,
+                evidence=analysis.evidence,
             )
+            binding_health = health.get(match.binding_key) or health.get(match.source_name)
+            circuit_open = self._source_circuit_is_open(binding_health, now)
             trusted_binding = (
                 bool(aliases)
                 and row.success_count > 0
@@ -1238,28 +1264,17 @@ class PlaybackService:
             )
             if circuit_open and not trusted_binding:
                 continue
-            analyzed_rows.append((row, analysis.evidence))
+            analyzed_rows.append((row, match, binding_health))
         analyzed_rows.sort(
-            key=lambda item: self._source_binding_rank(
-                item[0],
-                health.get(item[0].source_name),
-            ),
+            key=lambda item: self._source_binding_rank(item[0], item[2]),
             reverse=True,
         )
-        analyzed_rows = analyzed_rows[:len(aggregator.source_inventory) + 8]
-        return [
-            SourceMatch(
-                source_id=row.source_id,
-                source_name=row.source_name,
-                title=row.matched_title,
-                content_type=row.media_type,
-                year=row.year,
-                episode_count=row.episode_count,
-                score=row.score,
-                evidence=evidence,
-            )
-            for row, evidence in analyzed_rows
-        ]
+        # Preserve health ranking within a site while keeping rule identities
+        # independent. Legacy ordinary crawlers still have one group per site.
+        best_groups: dict[tuple[str, str], SourceMatch] = {}
+        for _row, match, _binding_health in analyzed_rows:
+            best_groups.setdefault(match.group_key, match)
+        return list(best_groups.values())
 
     async def _load_source_health(
         self,
@@ -1391,7 +1406,7 @@ class PlaybackService:
             bindings=[
                 SourceBindingWrite(
                     source_id=match.source_id,
-                    source_name=match.source_name,
+                    source_name=match.binding_key,
                     matched_title=match.title,
                     media_type=match.content_type,
                     year=match.year,
@@ -1419,6 +1434,10 @@ class PlaybackService:
                 else UNAVAILABLE if raw_status is False
                 else str(raw_status)
             )
+            if status == CLIENT_RESOLVER_REQUIRED:
+                # A chapter execution task is neither a media success nor a
+                # failing provider. Native/device verification decides later.
+                continue
             diagnostic = (diagnostics or {}).get(source_name)
             latency_ms = max(0, int(getattr(diagnostic, "latency_ms", 0) or 0))
             error_category = str(
@@ -1533,6 +1552,32 @@ class PlaybackService:
         return True
 
     def _line_dict(self, line: AggregatedVideoLine) -> dict:
+        descriptor = _client_resolver_descriptor(line.client_resolver)
+        if descriptor and not line.url:
+            return {
+                "url": "",
+                "title": line.title,
+                "quality": line.quality,
+                "format": line.format,
+                **_line_metadata(line),
+                "source": public_source_label(line.source),
+                "catalog_source": public_source_label(self._site_name(line.source)),
+                **self._line_identity_fields(line),
+                "headers": {},
+                "available": False,
+                "inventory_only": False,
+                "status": CLIENT_RESOLVER_REQUIRED,
+                "route_status": CLIENT_RESOLVER_REQUIRED,
+                "client_resolver": descriptor,
+                "client_query_supported": False,
+                "query_location": "hybrid",
+                "message": "已找到本集章节，等待客户端解析媒体并验证首段",
+                "expires_at": self._stamped_line_expiry(line),
+            }
+        unresolved_chapter = (
+            not line.url and not descriptor
+            and line.provider_id in {"crawler.animeko", "crawler.kazumi"}
+        )
         server_verified = line.verification_status == SERVER_VERIFIED
         client_probe_required = (
             line.verification_status == CLIENT_PROBE_REQUIRED
@@ -1542,6 +1587,7 @@ class PlaybackService:
             "title": line.title,
             "quality": line.quality,
             "format": line.format,
+            **_line_metadata(line),
             "source": public_source_label(line.source),
             "catalog_source": public_source_label(self._site_name(line.source)),
             **self._line_identity_fields(line),
@@ -1549,7 +1595,9 @@ class PlaybackService:
             "startup_profile": line.startup_profile,
             "startup_latency_ms": line.startup_latency_ms,
             "available": server_verified,
-            "inventory_only": not (server_verified or client_probe_required),
+            "route_status": line.verification_status,
+            "inventory_only": bool(line.url) and not (server_verified or client_probe_required),
+            "chapter_discovered": unresolved_chapter,
             "status": (
                 SERVER_VERIFIED
                 if server_verified
@@ -1562,6 +1610,8 @@ class PlaybackService:
                 if server_verified
                 else "服务器出口受限，等待客户端完成清单和首段验证"
                 if client_probe_required
+                else "已发现本集章节，尚未解析媒体（本轮解析预算已用完或未取得媒体）"
+                if unresolved_chapter
                 else "当前线路验证失败"
             ),
             "expires_at": self._stamped_line_expiry(line),
@@ -1582,7 +1632,8 @@ class PlaybackService:
             tier = {
                 SERVER_VERIFIED: 0,
                 CLIENT_PROBE_REQUIRED: 1,
-            }.get(line.verification_status, 2)
+                CLIENT_RESOLVER_REQUIRED: 2,
+            }.get(line.verification_status, 3)
             latency = line.startup_latency_ms or 0
             # 未验证档没有可信延迟,用原顺序(上游已按其自身排序给出)
             return (tier, latency if tier == 0 else 0, index)
@@ -1596,6 +1647,18 @@ class PlaybackService:
         暴露到界面上。这里显式给出:每条线路用它自己的上游线路标识,聚合器
         本身的名字不出现在任何用户可见字段里。
         """
+        if line.provider_id in {"crawler.animeko", "crawler.kazumi"}:
+            descriptor = _client_resolver_descriptor(line.client_resolver)
+            rule_name = line.rule_name or descriptor.get("rule_name") or line.rule_id
+            return {
+                "provider_id": line.provider_id,
+                "provider_name": rule_name or line.site_name or line.provider_id.split(".", 1)[1],
+                "site_name": line.site_name,
+                "rule_id": line.rule_id or descriptor.get("rule_id", ""),
+                "rule_name": rule_name,
+                "line_id": _video_line_identity(line),
+                "source_name": rule_name or line.site_name,
+            }
         raw = str(line.source or "").strip()
         # 内部 provider id 本身不是站名,不该出现在界面上:那类来源的站名由
         # 各站自己的 source_name 提供,这里不覆盖
@@ -1614,6 +1677,7 @@ class PlaybackService:
             "provider_id": tag,
             "provider_name": tag,
             "tag": tag,
+            "line_id": _video_line_identity(line),
         }
 
     def _playable_url(self, line: AggregatedVideoLine) -> str:
@@ -1671,7 +1735,7 @@ class PlaybackService:
             previous = merged.get(match.source_id)
             if previous is None or match.score > previous.score:
                 merged[match.source_id] = match
-        return sorted(merged.values(), key=lambda item: item.score, reverse=True)
+        return aggregator.select_source_matches(list(merged.values()))
 
     def _complete_site_inventory(
         self,
@@ -1737,6 +1801,9 @@ class PlaybackService:
             elif status == CLIENT_PROBE_REQUIRED:
                 discovery.status = SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED
                 discovery.episode_found = True
+            elif status == CLIENT_RESOLVER_REQUIRED:
+                discovery.status = SourceDiscoveryStatus.CLIENT_RESOLVER_REQUIRED
+                discovery.episode_found = True
             else:
                 discovery.status = SourceDiscoveryStatus.ROUTE_UNAVAILABLE
         for source_name, resolution in diagnostics.items():
@@ -1760,6 +1827,15 @@ class PlaybackService:
                 item["source_latency_ms"] = diagnostic.latency_ms
             if discovery is not None:
                 self._apply_discovery_fields(item, discovery)
+                if item.get("url") or item.get("client_resolver"):
+                    # A provider's best route must not upgrade its failed or
+                    # client-pending peers. Keep the summary separately.
+                    item["provider_diagnostic_status"] = discovery.status.value
+                    item["diagnostic_status"] = {
+                        SERVER_VERIFIED: SourceDiscoveryStatus.SERVER_VERIFIED.value,
+                        CLIENT_PROBE_REQUIRED: SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED.value,
+                        CLIENT_RESOLVER_REQUIRED: SourceDiscoveryStatus.CLIENT_RESOLVER_REQUIRED.value,
+                    }.get(item.get("status"), SourceDiscoveryStatus.ROUTE_UNAVAILABLE.value)
         # Route labels can differ from their catalog provider (AniCh). Keep
         # that provenance separately and compare public labels consistently,
         # otherwise every cache hit adds another false source placeholder.
@@ -1816,8 +1892,8 @@ class PlaybackService:
     ) -> None:
         item.update({
             # 诊断字段直达界面,内部聚合服务名在此统一脱敏
-            "provider_id": public_source_label(diagnostic.provider_id),
-            "source_name": public_source_label(diagnostic.source_name),
+            "provider_id": item.get("provider_id") or public_source_label(diagnostic.provider_id),
+            "source_name": item.get("source_name") or public_source_label(diagnostic.source_name),
             "diagnostic_status": diagnostic.status.value,
             "queried": diagnostic.queried,
             "aliases_attempted": diagnostic.aliases_attempted,
@@ -1840,6 +1916,9 @@ class PlaybackService:
             diagnostic.episode_found = True
         elif resolution.status == CLIENT_PROBE_REQUIRED:
             diagnostic.status = SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED
+            diagnostic.episode_found = True
+        elif resolution.status == CLIENT_RESOLVER_REQUIRED:
+            diagnostic.status = SourceDiscoveryStatus.CLIENT_RESOLVER_REQUIRED
             diagnostic.episode_found = True
         elif resolution.error_category == EMPTY_MEDIA:
             diagnostic.status = SourceDiscoveryStatus.MATCHED_NO_EPISODE
@@ -1883,6 +1962,9 @@ class PlaybackService:
             SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED.value: (
                 "服务器网络无法确认，可在当前设备尝试"
             ),
+            SourceDiscoveryStatus.CLIENT_RESOLVER_REQUIRED.value: (
+                "本集章节已找到，等待客户端解析媒体"
+            ),
             SourceDiscoveryStatus.SERVER_VERIFIED.value: "在线服务已确认可播",
             SourceDiscoveryStatus.QUARANTINED.value: "来源已隔离，等待复查",
             SourceDiscoveryStatus.RETIRED.value: "来源已停用",
@@ -1899,6 +1981,8 @@ class PlaybackService:
             return SERVER_VERIFIED
         if status == SourceDiscoveryStatus.CLIENT_PROBE_REQUIRED.value:
             return CLIENT_PROBE_REQUIRED
+        if status == SourceDiscoveryStatus.CLIENT_RESOLVER_REQUIRED.value:
+            return CLIENT_RESOLVER_REQUIRED
         return UNAVAILABLE
 
     @staticmethod
@@ -1946,6 +2030,13 @@ class PlaybackService:
     @staticmethod
     def _is_safe_cached_item(item: dict) -> bool:
         url = str(item.get("url") or "").strip()
+        if item.get("client_resolver") or item.get("status") == CLIENT_RESOLVER_REQUIRED:
+            return (
+                not url
+                and item.get("available") is False
+                and item.get("status") == CLIENT_RESOLVER_REQUIRED
+                and bool(_client_resolver_descriptor(item.get("client_resolver")))
+            )
         if not url:
             return True
         classification = classify_media_url(
@@ -1976,10 +2067,12 @@ class PlaybackService:
         return any(
             isinstance(item, dict)
             and PlaybackService._is_safe_cached_item(item)
-            and bool(str(item.get("url") or "").strip())
             and (
-                item.get("available") is True
-                or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+                (bool(str(item.get("url") or "").strip()) and (
+                    item.get("available") is True
+                    or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+                ))
+                or str(item.get("status") or "") == CLIENT_RESOLVER_REQUIRED
             )
             for item in items
         )
@@ -1991,10 +2084,12 @@ class PlaybackService:
             for index, item in enumerate(items)
             if isinstance(item, dict)
             and PlaybackService._is_safe_cached_item(item)
-            and bool(str(item.get("url") or "").strip())
             and (
-                item.get("available") is True
-                or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+                (bool(str(item.get("url") or "").strip()) and (
+                    item.get("available") is True
+                    or str(item.get("status") or "") == CLIENT_PROBE_REQUIRED
+                ))
+                or str(item.get("status") or "") == CLIENT_RESOLVER_REQUIRED
             )
         ]
         def startup_profile(item: dict) -> str:
@@ -2039,7 +2134,8 @@ class PlaybackService:
 
         candidates.sort(
             key=lambda entry: (
-                0 if entry[1].get("available") is True else 1,
+                0 if entry[1].get("available") is True
+                else 2 if entry[1].get("status") == CLIENT_RESOLVER_REQUIRED else 1,
                 0 if entry[1].get("origin_kind") == "managed" else 1,
                 startup_rank(entry[1]),
                 startup_latency(entry[1]),
@@ -2051,6 +2147,9 @@ class PlaybackService:
         for _, item in candidates:
             try:
                 host = (urlparse(str(item.get("url") or "")).hostname or "").lower()
+                if not host and item.get("status") == CLIENT_RESOLVER_REQUIRED:
+                    descriptor = _client_resolver_descriptor(item.get("client_resolver"))
+                    host = (urlparse(descriptor.get("page_url", "")).hostname or "").lower()
             except ValueError:
                 continue
             if not host or host in hosts:
