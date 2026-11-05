@@ -11,6 +11,317 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
+    'real rule producer completion leaves backend probes alive and closes page scan',
+    () async {
+      final rule = _rule.copyWith(
+        id: 'fixture:owned-scan-token',
+        engine: 'tvbox-json-api',
+      );
+      final state = _enabledReviewRules([rule]);
+      final started = Completer<void>();
+      final release = Completer<PlaybackLine>();
+      final backendLine = _line(
+        'backend-slow',
+        available: false,
+        requiresClientProbe: true,
+      );
+      final realRules = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: [rule]),
+        ruleState: state,
+        resolver: _ReviewRuleResolver(
+          (rule, episode) async => [
+            _line('rule-ready', provider: rule.id, clientVerified: true),
+          ],
+        ),
+        cacheNamespace: 'owned-scan-controller',
+      );
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            backendLine,
+          ],
+        ),
+        rule: realRules,
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) {
+              if (!started.isCompleted) started.complete();
+              return release.future;
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(
+        controller,
+        accountId: 'account-a',
+        contextVersion: 1,
+        ruleState: state,
+      );
+      final parent = RulePlaybackCancellationToken();
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      final done = controller
+          .lineUpdatesForEpisode(_subject, _episode, cancellationToken: parent)
+          .forEach(snapshots.add);
+      await started.future;
+      await _waitUntil(
+        () => snapshots.any(
+          (update) => update.lines.any((line) => line.id == 'rule-ready'),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final cancelledByRule = parent.isCancelled;
+      release.complete(_verified(backendLine));
+      await done.timeout(const Duration(seconds: 1));
+      expect(cancelledByRule, isFalse);
+      expect(parent.isCancelled, isFalse);
+      expect(snapshots.last.isComplete, isTrue);
+      expect(
+        snapshots.last.lines.map((line) => line.id),
+        containsAll(['rule-ready', 'backend-slow']),
+      );
+      expect(
+        snapshots.last.lines
+            .singleWhere((line) => line.id == 'backend-slow')
+            .clientVerified,
+        isTrue,
+      );
+    },
+  );
+
+  for (final end in ['cancel', 'clear', 'dispose']) {
+    test(
+      '$end promptly retires four hung background verifiers and observes late errors',
+      () async {
+        final gates = <Completer<PlaybackLine>>[];
+        final tokens = <RulePlaybackCancellationToken>[];
+        final candidates = [
+          for (var i = 0; i < 5; i++)
+            _line('hung-$i', available: false, requiresClientProbe: true),
+        ];
+        final controller = _controller(
+          backend: _FakePlaybackRepository(
+            load: (_, _, {required expandAll, cancellationToken}) async =>
+                candidates,
+          ),
+          activeVersion: () => 1,
+          verify:
+              (
+                line, {
+                enrichMetadata = true,
+                forceRefresh = false,
+                cancellationToken,
+              }) {
+                tokens.add(cancellationToken!);
+                final gate = Completer<PlaybackLine>();
+                gates.add(gate);
+                return gate.future;
+              },
+        );
+        addTearDown(controller.dispose);
+        _load(controller, accountId: 'account-a', contextVersion: 1);
+        final caller = RulePlaybackCancellationToken();
+        final snapshots = <PlaybackLineLookupUpdate>[];
+        final done = controller
+            .lineUpdatesForEpisode(
+              _subject,
+              _episode,
+              cancellationToken: caller,
+            )
+            .forEach(snapshots.add);
+        await _waitUntil(() => gates.length == 4);
+        if (end == 'cancel') {
+          caller.cancel();
+        } else if (end == 'clear') {
+          controller.clearCaches();
+        } else {
+          controller.dispose();
+        }
+        await done.timeout(const Duration(seconds: 1));
+        expect(gates, hasLength(4));
+        expect(tokens.every((token) => token.isCancelled), isTrue);
+        expect(snapshots.every((update) => !update.isComplete), isTrue);
+        final count = snapshots.length;
+        for (final gate in gates) {
+          gate.completeError(StateError('retired late verifier'));
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(snapshots, hasLength(count));
+      },
+    );
+  }
+
+  test('one throwing probe does not discard peers or stop the queue', () async {
+    final lines = [
+      for (final id in ['throws', 'works', 'throws-sync']) _line(id),
+    ];
+    final results = await probePlaybackLinesProgressively(
+      lines,
+      maxConcurrent: 2,
+      verify: (line) {
+        if (line.id == 'throws-sync') throw StateError('synchronous failure');
+        if (line.id == 'throws') {
+          return Future.error(StateError('async failure'));
+        }
+        return Future.value(_verified(line));
+      },
+    ).toList();
+    expect(
+      results.map((line) => line.id).toSet(),
+      lines.map((line) => line.id).toSet(),
+    );
+    expect(results.singleWhere((line) => line.id == 'works').available, isTrue);
+    for (final line in results.where((line) => line.id != 'works')) {
+      expect(line.available, isFalse);
+      expect(line.url, lines.singleWhere((old) => old.id == line.id).url);
+      expect(line.sourceErrorCategory, 'probe_error');
+    }
+  });
+
+  test(
+    'cancelled progressive probes stop without waiting for a stuck verifier',
+    () async {
+      final token = RulePlaybackCancellationToken();
+      final pending = Completer<PlaybackLine>();
+      final done = probePlaybackLinesProgressively(
+        [_line('stuck')],
+        cancellationToken: token,
+        verify: (_) => pending.future,
+      ).toList();
+      await Future<void>.delayed(Duration.zero);
+      token.cancel();
+      expect(await done.timeout(const Duration(seconds: 1)), isEmpty);
+      pending.completeError(StateError('late failure is observed'));
+      await Future<void>.delayed(Duration.zero);
+    },
+  );
+
+  test(
+    'background deadline frees four stuck slots and preserves retryable routes',
+    () async {
+      final gates = <String, Completer<PlaybackLine>>{};
+      final probeTokens = <RulePlaybackCancellationToken>[];
+      final lines = [
+        for (var i = 0; i < 4; i++)
+          _line(
+            'stuck-$i',
+            available: false,
+            requiresClientProbe: true,
+            headers: const {'Referer': 'https://site.example/episode'},
+          ),
+        _line('fast-after-four', available: false, requiresClientProbe: true),
+      ];
+      final calls = <String>[];
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => lines,
+        ),
+        activeVersion: () => 1,
+        backgroundProbeTimeout: const Duration(milliseconds: 60),
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              calls.add(line.id);
+              if (line.id == 'fast-after-four') return _verified(line);
+              probeTokens.add(cancellationToken!);
+              return (gates[line.id] = Completer<PlaybackLine>()).future;
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final snapshots = await controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList()
+          .timeout(const Duration(seconds: 2));
+      expect(calls.toSet(), lines.map((line) => line.id).toSet());
+      expect(probeTokens.every((token) => token.isCancelled), isTrue);
+      final last = snapshots.last;
+      expect(last.phase, PlaybackLineLookupPhase.complete);
+      expect(last.lines, hasLength(5));
+      expect(
+        last.lines
+            .singleWhere((line) => line.id == 'fast-after-four')
+            .clientVerified,
+        isTrue,
+      );
+      for (final line in last.lines.where(
+        (line) => line.id.startsWith('stuck-'),
+      )) {
+        expect(line.available, isFalse);
+        expect(line.sourceErrorCategory, 'probe_timeout');
+        expect(line.requiresClientProbe, isTrue);
+        expect(line.headers, const {'Referer': 'https://site.example/episode'});
+        expect(line.url, lines.singleWhere((old) => old.id == line.id).url);
+        expect(line.latency, isNull);
+      }
+      final snapshotCount = snapshots.length;
+      for (final entry in gates.entries) {
+        entry.value.complete(
+          _verified(lines.singleWhere((line) => line.id == entry.key)),
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(snapshots.length, snapshotCount);
+      expect(
+        last.lines
+            .where((line) => line.id.startsWith('stuck-'))
+            .every((line) => !line.clientVerified),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'background exceptions remain visible and let later candidates run',
+    () async {
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            _line('bad', available: false, requiresClientProbe: true),
+            _line('good', available: false, requiresClientProbe: true),
+          ],
+        ),
+        activeVersion: () => 1,
+        verify:
+            (
+              line, {
+              enrichMetadata = true,
+              forceRefresh = false,
+              cancellationToken,
+            }) async {
+              if (line.id == 'bad') throw StateError('bad parser');
+              return _verified(line);
+            },
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final snapshots = await controller
+          .lineUpdatesForEpisode(_subject, _episode)
+          .toList();
+      expect(snapshots.last.phase, PlaybackLineLookupPhase.complete);
+      expect(
+        snapshots.last.lines
+            .singleWhere((line) => line.id == 'bad')
+            .sourceErrorCategory,
+        'probe_error',
+      );
+      expect(
+        snapshots.last.lines
+            .singleWhere((line) => line.id == 'good')
+            .clientVerified,
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'URL-less chapter task is probed and replaced in ordinary lookup and updates',
     () async {
       final descriptor = ClientMediaResolverDescriptor.fromJson({
@@ -3649,6 +3960,7 @@ PlaybackDiscoveryController _controller({
   Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
   Duration backendFullRefreshDelay = Duration.zero,
   int backendFullRefreshAttempts = 8,
+  Duration backgroundProbeTimeout = const Duration(seconds: 12),
 }) => PlaybackDiscoveryController(
   backendRepository: (_) => backend,
   ruleRepository: (_) => rule ?? _FakePlaybackRepository.empty(),
@@ -3665,6 +3977,7 @@ PlaybackDiscoveryController _controller({
   interactivePreferredHeadStart: interactivePreferredHeadStart,
   backendFullRefreshDelay: backendFullRefreshDelay,
   backendFullRefreshAttempts: backendFullRefreshAttempts,
+  backgroundProbeTimeout: backgroundProbeTimeout,
 );
 
 void _load(

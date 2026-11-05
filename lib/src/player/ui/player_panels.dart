@@ -392,8 +392,6 @@ class PlaybackSourcePanel extends StatefulWidget {
     required this.onPickLocal,
     required this.onOpenNetwork,
     required this.onSearch,
-    this.onQueryLocally,
-    this.localLookupInProgress = false,
     this.onCopyDiagnostics,
   });
 
@@ -408,8 +406,6 @@ class PlaybackSourcePanel extends StatefulWidget {
   final Future<void> Function(String url, Map<String, String> headers)
   onOpenNetwork;
   final Future<void> Function() onSearch;
-  final Future<void> Function(PlaybackLine source)? onQueryLocally;
-  final bool localLookupInProgress;
   final Future<void> Function()? onCopyDiagnostics;
 
   @override
@@ -469,8 +465,6 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         completedRules: widget.completedRules,
         totalRules: widget.totalRules,
         onSelected: widget.onSelected,
-        onQueryLocally: widget.onQueryLocally,
-        localLookupInProgress: widget.localLookupInProgress,
       ),
       _PlaybackSourceMode.local => _sourceAction(
         context,
@@ -694,8 +688,6 @@ class _LinePanelBody extends StatelessWidget {
     required this.completedRules,
     required this.totalRules,
     required this.onSelected,
-    this.onQueryLocally,
-    this.localLookupInProgress = false,
   });
 
   final List<PlaybackLine> lines;
@@ -705,8 +697,6 @@ class _LinePanelBody extends StatelessWidget {
   final int completedRules;
   final int totalRules;
   final ValueChanged<PlaybackLine> onSelected;
-  final Future<void> Function(PlaybackLine source)? onQueryLocally;
-  final bool localLookupInProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -716,10 +706,6 @@ class _LinePanelBody extends StatelessWidget {
       selectedLineId: selected?.id,
     );
     final cards = [...groups.primary, ...groups.other];
-    final localQueryCards = <String, String>{};
-    for (final card in cards.where((line) => line.clientQuerySupported)) {
-      localQueryCards.putIfAbsent(card.sourceInventoryId, () => card.id);
-    }
     final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
     final routeCount = routes.length;
     final playableCount = routes
@@ -765,6 +751,7 @@ class _LinePanelBody extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             clipBehavior: Clip.antiAlias,
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 for (var i = 0; i < cards.length; i++) ...[
                   _LineTile(
@@ -773,19 +760,6 @@ class _LinePanelBody extends StatelessWidget {
                     line: cards[i],
                     selected: selected?.id == cards[i].id,
                     runtimeFailed: failedLineIds.contains(cards[i].id),
-                    onQueryLocally:
-                        !localLookupInProgress &&
-                            cards[i].clientQuerySupported &&
-                            localQueryCards[cards[i].sourceInventoryId] ==
-                                cards[i].id &&
-                            onQueryLocally != null
-                        ? () => onQueryLocally!(cards[i])
-                        : null,
-                    showLocalQuery:
-                        cards[i].clientQuerySupported &&
-                        localQueryCards[cards[i].sourceInventoryId] ==
-                            cards[i].id &&
-                        onQueryLocally != null,
                     onTap: cards[i].available
                         ? () => onSelected(cards[i])
                         : null,
@@ -1177,8 +1151,6 @@ class _LineTile extends StatelessWidget {
     required this.selected,
     required this.runtimeFailed,
     required this.onTap,
-    this.onQueryLocally,
-    this.showLocalQuery = false,
   });
 
   final int index;
@@ -1186,8 +1158,6 @@ class _LineTile extends StatelessWidget {
   final bool selected;
   final bool runtimeFailed;
   final VoidCallback? onTap;
-  final VoidCallback? onQueryLocally;
-  final bool showLocalQuery;
 
   @override
   Widget build(BuildContext context) {
@@ -1197,8 +1167,6 @@ class _LineTile extends StatelessWidget {
       selected: selected,
       runtimeFailed: runtimeFailed,
       onTap: onTap,
-      onQueryLocally: onQueryLocally,
-      showLocalQuery: showLocalQuery,
     );
   }
 }

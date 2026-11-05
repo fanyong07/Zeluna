@@ -1711,6 +1711,91 @@ void main() {
     },
   );
 
+  test('completed rule scan never cancels its caller token', () async {
+    final rule = _animekoLookupRule(
+      id: 'custom:animeko:caller-token',
+      name: 'Caller token',
+      host: 'caller-token.example',
+      groupId: 'caller-token',
+      priority: 0,
+    );
+    final source = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(extraRules: [rule]),
+      ruleState: _approvedRuleState([rule]),
+      resolver: _DelayedRulePlaybackResolver(
+        delays: {rule.id: Duration.zero},
+        availableRuleIds: {rule.id},
+      ),
+      cacheNamespace: 'caller-token-lifetime-test',
+    );
+    final parent = RulePlaybackCancellationToken();
+    final updates = await source
+        .lineUpdatesForEpisode(
+          _animeSubject,
+          _episode,
+          cancellationToken: parent,
+        )
+        .toList();
+    expect(updates.last.isComplete, isTrue);
+    expect(
+      parent.isCancelled,
+      isFalse,
+      reason:
+          'closing this producer must not cancel backend discovery or page scan state',
+    );
+  });
+
+  test(
+    'parent cancellation still stops an owned progressive rule session',
+    () async {
+      final rules = List.generate(
+        10,
+        (index) => _animekoLookupRule(
+          id: 'custom:animeko:parent-cancel-$index',
+          name: 'Parent cancel $index',
+          host: 'parent-cancel-$index.example',
+          groupId: 'parent-cancel-group:$index',
+          priority: index,
+        ),
+      );
+      final resolver = _DelayedRulePlaybackResolver(
+        delays: {
+          rules.first.id: const Duration(milliseconds: 5),
+          for (final rule in rules.skip(1))
+            rule.id: const Duration(milliseconds: 100),
+        },
+        availableRuleIds: rules.map((rule) => rule.id).toSet(),
+      );
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: _approvedRuleState(rules),
+        resolver: resolver,
+        cacheNamespace: 'parent-cancel-owned-rule-session',
+      );
+      final parent = RulePlaybackCancellationToken();
+      final snapshots = <PlaybackLineLookupUpdate>[];
+      var callsAtCancellation = 0;
+      await source
+          .lineUpdatesForEpisode(
+            _animeSubject,
+            _episode,
+            cancellationToken: parent,
+          )
+          .forEach((update) {
+            snapshots.add(update);
+            callsAtCancellation = resolver.calls.length;
+            parent.cancel();
+          })
+          .timeout(const Duration(seconds: 1));
+      expect(parent.isCancelled, isTrue);
+      expect(snapshots, hasLength(1));
+      expect(snapshots.single.isComplete, isFalse);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      expect(resolver.calls, hasLength(callsAtCancellation));
+      expect(resolver.verifyPlayableCalls, everyElement(isFalse));
+    },
+  );
+
   test('cancelling progressive lookup stops dispatching new rules', () async {
     final rules = List.generate(
       10,
@@ -1753,7 +1838,12 @@ void main() {
     final callsAtCancellation = resolver.calls.length;
     await Future<void>.delayed(const Duration(milliseconds: 180));
 
-    expect(cancellationToken.isCancelled, isTrue);
+    expect(
+      cancellationToken.isCancelled,
+      isFalse,
+      reason:
+          'cancel only the owned child, not a caller shared with another producer',
+    );
     expect(callsAtCancellation, lessThan(rules.length));
     expect(resolver.calls, hasLength(callsAtCancellation));
     expect(resolver.verifyPlayableCalls, everyElement(isFalse));

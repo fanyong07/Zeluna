@@ -530,7 +530,11 @@ class RulePlaybackSourceRepository
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
   }) {
-    final sessionToken = cancellationToken ?? RulePlaybackCancellationToken();
+    // A producer owns its child cancellation. StreamController invokes onCancel
+    // even after normal close: using the caller's token there would cancel the
+    // parallel backend producer and prevent the page's final scan update.
+    final sessionToken = RulePlaybackCancellationToken();
+    final unlinkSession = cancellationToken?.register(sessionToken.cancel);
     late final StreamController<PlaybackLineLookupUpdate> controller;
     var started = false;
 
@@ -621,6 +625,7 @@ class RulePlaybackSourceRepository
           controller.addError(error, stackTrace);
         }
       } finally {
+        unlinkSession?.call();
         if (!controller.isClosed) await controller.close();
       }
     }
@@ -631,7 +636,10 @@ class RulePlaybackSourceRepository
         started = true;
         unawaited(run());
       },
-      onCancel: sessionToken.cancel,
+      onCancel: () {
+        unlinkSession?.call();
+        sessionToken.cancel();
+      },
     );
     return controller.stream;
   }

@@ -36,8 +36,8 @@ abstract final class PlaybackLineTileColors {
 
 /// Shared flat route row for detail pages and both player layouts.
 ///
-/// [onTap] is the route-selection action. URL inspection/copy and local query
-/// have their own gesture targets and never invoke it. [index] is zero-based.
+/// [onTap] is the route-selection action. URL inspection/copy have their own
+/// gesture targets and never invoke it. [index] is zero-based.
 class PlaybackLineTile extends StatelessWidget {
   const PlaybackLineTile({
     super.key,
@@ -47,8 +47,6 @@ class PlaybackLineTile extends StatelessWidget {
     this.onTap,
     this.index,
     this.compact = false,
-    this.onQueryLocally,
-    this.showLocalQuery = false,
   });
 
   final PlaybackLine line;
@@ -57,8 +55,6 @@ class PlaybackLineTile extends StatelessWidget {
   final VoidCallback? onTap;
   final int? index;
   final bool compact;
-  final VoidCallback? onQueryLocally;
-  final bool showLocalQuery;
 
   @override
   Widget build(BuildContext context) {
@@ -117,170 +113,179 @@ class PlaybackLineTile extends StatelessWidget {
             horizontal: compact ? 10 : 12,
             vertical: compact ? 8 : 11,
           ),
-          child: Column(
+          child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Wrap(
-                spacing: 8,
-                runSpacing: 4,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  if (index != null)
-                    Text(
-                      '${index! + 1}',
-                      key: ValueKey('line-index-${line.id}'),
-                      style: textStyle.copyWith(color: muted),
-                      semanticsLabel: '第 ${index! + 1} 条线路',
-                    ),
-                  Text(
-                    provider,
-                    key: ValueKey('line-name-${line.id}'),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  if (selected)
-                    Text(
-                      '当前',
-                      key: ValueKey('line-selected-${line.id}'),
-                      style: textStyle.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                ],
-              ),
-              if (showTitle)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
+              if (index != null) ...[
+                SizedBox(
+                  key: ValueKey('line-gutter-${line.id}'),
+                  // A shared four-digit gutter, not the width of this number.
+                  // It grows with text scaling but stays identical across rows.
+                  width: MediaQuery.textScalerOf(context).scale(28),
                   child: Text(
-                    title,
-                    key: ValueKey('line-title-${line.id}'),
-                    maxLines: compact ? 1 : 2,
-                    overflow: TextOverflow.ellipsis,
+                    '${index! + 1}',
+                    key: ValueKey('line-index-${line.id}'),
                     style: textStyle.copyWith(color: muted),
+                    semanticsLabel: '第 ${index! + 1} 条线路',
                   ),
                 ),
-              const SizedBox(height: 5),
-              Wrap(
-                spacing: 12,
-                runSpacing: 5,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    playbackLineLatencyLabel(line),
-                    key: ValueKey('line-latency-${line.id}'),
-                    semanticsLabel: '延迟：${playbackLineLatencyLabel(line)}',
-                    style: metricStyle.copyWith(
-                      color: PlaybackLineTileColors.latency(
-                        playbackLineLatencyBand(line),
-                        brightness,
-                      ),
-                    ),
-                  ),
-                  Text(
-                    playbackLineSizeLabel(line),
-                    key: ValueKey('line-size-${line.id}'),
-                    semanticsLabel: '视频大小：${playbackLineSizeLabel(line)}',
-                    style: metricStyle.copyWith(
-                      color: playbackLineHasKnownSize(line)
-                          ? PlaybackLineTileColors.size(brightness)
-                          : muted,
-                    ),
-                  ),
-                  Text(
-                    playbackLineResolutionLabel(line),
-                    key: ValueKey('line-resolution-${line.id}'),
-                    semanticsLabel: '分辨率：${playbackLineResolutionLabel(line)}',
-                    style: metricStyle.copyWith(
-                      color: playbackLineHasKnownResolution(line)
-                          ? PlaybackLineTileColors.resolution(brightness)
-                          : muted,
-                    ),
-                  ),
-                  Text(
-                    playbackLineFormatLabel(line),
-                    key: ValueKey('line-format-${line.id}'),
-                    style: textStyle.copyWith(color: muted),
-                  ),
-                ],
-              ),
-              if (status != null && status != playbackLineLatencyLabel(line))
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    status,
-                    key: ValueKey('line-status-${line.id}'),
-                    style: textStyle.copyWith(
-                      color: failed
-                          ? PlaybackLineTileColors.latency(
-                              PlaybackLineLatencyBand.slow,
-                              brightness,
-                            )
-                          : muted,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              if (url == null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    playbackSourceStateExplanation(line),
-                    key: ValueKey('line-explanation-${line.id}'),
-                    style: textStyle.copyWith(color: muted),
-                  ),
-                )
-              else ...[
-                const SizedBox(height: 4),
-                Text(
-                  url,
-                  key: ValueKey('line-url-${line.id}'),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: textStyle.copyWith(color: muted),
-                  semanticsLabel: '视频 URL：$url',
-                ),
-                Wrap(
-                  spacing: 4,
-                  runSpacing: 0,
+                const SizedBox(width: 8),
+              ],
+              Expanded(
+                child: Column(
+                  key: ValueKey('line-content-${line.id}'),
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    TextButton.icon(
-                      key: ValueKey('view-line-url-${line.id}'),
-                      onPressed: () => _showUrl(context, url),
-                      style: _urlButtonStyle(muted),
-                      icon: const Icon(Icons.link_rounded, size: 16),
-                      label: const Text('完整 URL'),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          provider,
+                          key: ValueKey('line-name-${line.id}'),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        if (selected)
+                          Text(
+                            '当前',
+                            key: ValueKey('line-selected-${line.id}'),
+                            style: textStyle.copyWith(
+                              color: accent,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                      ],
                     ),
-                    TextButton.icon(
-                      key: ValueKey('copy-line-url-${line.id}'),
-                      onPressed: () => _copyUrl(context, url),
-                      style: _urlButtonStyle(muted),
-                      icon: const Icon(Icons.copy_rounded, size: 15),
-                      label: const Text('复制 URL'),
+                    if (showTitle)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          title,
+                          key: ValueKey('line-title-${line.id}'),
+                          maxLines: compact ? 1 : 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: textStyle.copyWith(color: muted),
+                        ),
+                      ),
+                    const SizedBox(height: 5),
+                    _PlaybackLineMetrics(
+                      children: [
+                        Text(
+                          playbackLineLatencyLabel(line),
+                          key: ValueKey('line-latency-${line.id}'),
+                          semanticsLabel:
+                              '延迟：${playbackLineLatencyLabel(line)}',
+                          style: metricStyle.copyWith(
+                            color: PlaybackLineTileColors.latency(
+                              playbackLineLatencyBand(line),
+                              brightness,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          playbackLineSizeLabel(line),
+                          key: ValueKey('line-size-${line.id}'),
+                          semanticsLabel: '视频大小：${playbackLineSizeLabel(line)}',
+                          style: metricStyle.copyWith(
+                            color: playbackLineHasKnownSize(line)
+                                ? PlaybackLineTileColors.size(brightness)
+                                : muted,
+                          ),
+                        ),
+                        Text(
+                          playbackLineResolutionLabel(line),
+                          key: ValueKey('line-resolution-${line.id}'),
+                          semanticsLabel:
+                              '分辨率：${playbackLineResolutionLabel(line)}',
+                          style: metricStyle.copyWith(
+                            color: playbackLineHasKnownResolution(line)
+                                ? PlaybackLineTileColors.resolution(brightness)
+                                : muted,
+                          ),
+                        ),
+                        Text(
+                          playbackLineFormatLabel(line),
+                          key: ValueKey('line-format-${line.id}'),
+                          style: textStyle.copyWith(color: muted),
+                        ),
+                      ],
                     ),
+                    if (status != null &&
+                        status != playbackLineLatencyLabel(line))
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          status,
+                          key: ValueKey('line-status-${line.id}'),
+                          style: textStyle.copyWith(
+                            color: failed
+                                ? PlaybackLineTileColors.latency(
+                                    PlaybackLineLatencyBand.slow,
+                                    brightness,
+                                  )
+                                : muted,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    if (url == null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          playbackSourceStateExplanation(line),
+                          key: ValueKey('line-explanation-${line.id}'),
+                          style: textStyle.copyWith(color: muted),
+                        ),
+                      )
+                    else ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        url,
+                        key: ValueKey('line-url-${line.id}'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: textStyle.copyWith(color: muted),
+                        semanticsLabel: '视频 URL：$url',
+                      ),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 0,
+                        children: [
+                          TextButton.icon(
+                            key: ValueKey('view-line-url-${line.id}'),
+                            onPressed: () => _showUrl(context, url),
+                            style: _urlButtonStyle(muted),
+                            icon: const Icon(Icons.link_rounded, size: 16),
+                            label: const Text('完整 URL'),
+                          ),
+                          TextButton.icon(
+                            key: ValueKey('copy-line-url-${line.id}'),
+                            onPressed: () => _copyUrl(context, url),
+                            style: _urlButtonStyle(muted),
+                            icon: const Icon(Icons.copy_rounded, size: 15),
+                            label: const Text('复制 URL'),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (line.queryLocation.isNotEmpty && line.queried == true)
+                      Text(
+                        line.queryLocation == 'local'
+                            ? '搜索与解析：本机网络'
+                            : line.queryLocation == 'hybrid'
+                            ? '搜索：VPS · 媒体解析：本机网络'
+                            : '搜索与解析：VPS',
+                        key: ValueKey('line-query-location-${line.id}'),
+                        style: textStyle.copyWith(color: muted),
+                      ),
                   ],
                 ),
-              ],
-              if (line.queryLocation.isNotEmpty && line.queried == true)
-                Text(
-                  line.queryLocation == 'local'
-                      ? '搜索与解析：本机网络'
-                      : line.queryLocation == 'hybrid'
-                      ? '搜索：VPS · 媒体解析：本机网络'
-                      : '搜索与解析：VPS',
-                  key: ValueKey('line-query-location-${line.id}'),
-                  style: textStyle.copyWith(color: muted),
-                ),
-              if (showLocalQuery)
-                TextButton.icon(
-                  key: ValueKey('local-query-${line.id}'),
-                  onPressed: onQueryLocally,
-                  icon: const Icon(Icons.devices_rounded, size: 16),
-                  label: const Text('本机重查（本集）'),
-                ),
+              ),
             ],
           ),
         ),
@@ -290,7 +295,7 @@ class PlaybackLineTile extends StatelessWidget {
 
   ButtonStyle _urlButtonStyle(Color color) => TextButton.styleFrom(
     foregroundColor: color,
-    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+    padding: const EdgeInsets.symmetric(vertical: 4),
     minimumSize: const Size(48, 40),
     tapTargetSize: MaterialTapTargetSize.padded,
     textStyle: const TextStyle(fontSize: 12),
@@ -336,6 +341,34 @@ class PlaybackLineTile extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Equal tracks keep the second metric independent of the first one's text.
+/// Each pair keeps its natural height; larger text wraps instead of clipping.
+class _PlaybackLineMetrics extends StatelessWidget {
+  const _PlaybackLineMetrics({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= scaler.scale(4 * 112) + 3 * 12
+            ? 4
+            : 2;
+        final width = (constraints.maxWidth - (columns - 1) * 12) / columns;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 5,
+          children: [
+            for (final child in children) SizedBox(width: width, child: child),
+          ],
+        );
+      },
     );
   }
 }

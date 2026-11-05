@@ -5,8 +5,8 @@ import 'dart:io';
 import 'package:anime/src/data/local_maccms_playback.dart';
 import 'package:anime/src/data/zeluna_backend_playback_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
-import 'package:anime/src/playback/playback_discovery_controller.dart';
-import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/playback/playback_discovery_controller.dart'
+    show mergePlaybackLines;
 import 'package:anime/src/rules/drpy_runtime.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -176,76 +176,6 @@ void main() {
     expect(mergePlaybackLines(lines), hasLength(3));
     expect(mergePlaybackLines([...lines, ...lines]), hasLength(3));
   });
-  for (final invalidation in ['account', 'services', 'dispose', 'cancel']) {
-    test(
-      'late local descriptor cannot escape $invalidation cancellation',
-      () async {
-        final response = Completer<http.Response>();
-        final entered = Completer<void>();
-        final repository = ZelunaBackendPlaybackRepository(
-          baseUrl: 'https://backend.example',
-          client: MockClient((r) {
-            entered.complete();
-            return response.future;
-          }),
-        );
-        var activeVersion = 1;
-        final controller = PlaybackDiscoveryController(
-          backendRepository: (_) => repository,
-          ruleRepository: (_) => throw StateError('Rules must not be invoked'),
-          verifyLine:
-              (
-                line, {
-                enrichMetadata = true,
-                forceRefresh = false,
-                cancellationToken,
-              }) async => line,
-          isContextCurrent: (version) => version == activeVersion,
-          clearRuleRuntimeCaches: () {},
-        );
-        controller.loadForAccount(
-          accountId: 'a',
-          contextVersion: 1,
-          services: const ExternalServiceSettings(),
-          ruleState: const RulePluginState(),
-          history: const [],
-        );
-        final token = RulePlaybackCancellationToken();
-        final pending = controller.lookupSourceOnDevice(
-          subject: _subject('TV'),
-          episode: _episode,
-          source: _source,
-          cancellationToken: token,
-        );
-        await entered.future;
-        switch (invalidation) {
-          case 'account':
-            activeVersion = 2;
-            controller.loadForAccount(
-              accountId: 'b',
-              contextVersion: 2,
-              services: const ExternalServiceSettings(),
-              ruleState: const RulePluginState(),
-              history: const [],
-            );
-          case 'services':
-            controller.applyServices(
-              const ExternalServiceSettings(
-                playbackBackendEndpoint: 'https://other.example',
-              ),
-              contextVersion: 1,
-            );
-          case 'dispose':
-            controller.dispose();
-          case 'cancel':
-            token.cancel();
-        }
-        response.complete(http.Response(jsonEncode(_descriptor), 200));
-        expect(await pending, isEmpty);
-        if (invalidation != 'dispose') controller.dispose();
-      },
-    );
-  }
 
   test('single-source total deadline stops later probing', () async {
     final response = Completer<http.Response>();

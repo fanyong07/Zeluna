@@ -5,9 +5,43 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/lines/playback_line_controller.dart';
 import 'package:anime/src/player/lines/playback_line_repository.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('real rule stream completion turns the page scanner off', () async {
+    final ruleSource = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(),
+      ruleState: const RulePluginState(),
+      cacheNamespace: 'page-scan-owned-token',
+    );
+    final page = _repository(
+      loadExpandedLines: (subject, episode, token) => ruleSource
+          .lineUpdatesForEpisode(subject, episode, cancellationToken: token),
+    );
+    addTearDown(page.dispose);
+    final done = Completer<void>();
+    expect(
+      page.startExpandedLookup(
+        subject: _subject,
+        episode: _episode,
+        hasActivePlayableLine: false,
+        preserveLoadedLine: (lines) => lines,
+        onUpdate: (_) {},
+        onError: (error, stack) => done.completeError(error, stack),
+        onDone: done.complete,
+      ),
+      isTrue,
+    );
+    await done.future.timeout(const Duration(seconds: 1));
+    expect(page.scanInProgress, isFalse);
+    expect(page.lookupInProgress, isFalse);
+    expect(page.scanComplete, isTrue);
+    expect(page.hasExpandedLookup, isFalse);
+    expect(page.activeCancellationToken?.isCancelled, isFalse);
+  });
+
   test('a thrown probe cannot discard a different working candidate', () async {
     final repository = _repository(
       loadQuickLines: (_, _, _) async => [_line('error'), _line('ready')],

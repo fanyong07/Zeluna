@@ -2,6 +2,7 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/domain/client_media_resolver.dart';
 import 'package:anime/src/player/playback_line_display.dart';
 import 'package:anime/src/player/ui/playback_line_tile.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -294,59 +295,210 @@ void main() {
   });
 
   testWidgets(
-    '320px and large text wrap metrics actions and long URL without overflow',
+    '320px and 360px large text wrap metrics and URL actions without overflow',
     (tester) async {
-      tester.view.physicalSize = const Size(320, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
       var selections = 0;
-      var localQueries = 0;
       final longUrl = 'https://cdn.example/${'unbroken' * 100}/master.m3u8';
-      for (final compact in [false, true]) {
-        await tester.pumpWidget(
-          _host(
-            PlaybackLineTile(
-              line: _line(
-                providerName: 'Kazumi · 稀饭动漫长站点名称测试手机线路显示',
-                title: '官方字幕完整线路说明${'长文本' * 12}',
-                url: longUrl,
-                diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
-                available: false,
+      for (final width in [320.0, 360.0]) {
+        tester.view.physicalSize = Size(width, 900);
+        for (final compact in [false, true]) {
+          await tester.pumpWidget(
+            _host(
+              PlaybackLineTile(
+                line: _line(
+                  providerName: 'Kazumi · 稀饭动漫长站点名称测试手机线路显示',
+                  title: '官方字幕完整线路说明${'长文本' * 12}',
+                  url: longUrl,
+                  diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+                  available: false,
+                ),
+                selected: true,
+                runtimeFailed: true,
+                index: 999,
+                compact: compact,
+                onTap: () => selections++,
               ),
-              selected: true,
-              runtimeFailed: true,
-              index: 999,
-              compact: compact,
-              showLocalQuery: true,
-              onTap: () => selections++,
-              onQueryLocally: () => localQueries++,
+              textScale: 2.4,
             ),
-            textScale: 2.4,
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.byType(Wrap), findsAtLeastNWidgets(3));
-        expect(tester.takeException(), isNull);
-        final rowRect = tester.getRect(find.byType(PlaybackLineTile));
-        expect(rowRect.width, lessThanOrEqualTo(320));
-        await tester.ensureVisible(
-          find.byKey(const ValueKey('local-query-line')),
-        );
-        await tester.tap(find.byKey(const ValueKey('local-query-line')));
-        expect(localQueries, compact ? 2 : 1);
-        expect(selections, 0);
-        await tester.ensureVisible(
-          find.byKey(const ValueKey('view-line-url-line')),
-        );
-        await tester.tap(find.byKey(const ValueKey('view-line-url-line')));
-        await tester.pumpAndSettle();
-        expect(find.byType(SelectableText), findsOneWidget);
-        expect(tester.takeException(), isNull);
-        await tester.tap(find.byKey(const ValueKey('close-line-url-line')));
-        await tester.pumpAndSettle();
-        expect(selections, 0);
+          );
+          await tester.pumpAndSettle();
+          expect(find.byType(Wrap), findsAtLeastNWidgets(3));
+          expect(tester.takeException(), isNull);
+          final rowRect = tester.getRect(find.byType(PlaybackLineTile));
+          expect(rowRect.width, width);
+          final latency = _rect(tester, 'line-latency-line');
+          final size = _rect(tester, 'line-size-line');
+          final resolution = _rect(tester, 'line-resolution-line');
+          final format = _rect(tester, 'line-format-line');
+          expect(latency.left, resolution.left);
+          expect(size.left, format.left);
+          expect(latency.top, size.top);
+          expect(resolution.top, format.top);
+          expect(resolution.top, greaterThan(latency.top));
+          expect(latency.width, closeTo(size.width, 0.01));
+          expect(find.text('本机重查（本集）'), findsNothing);
+          expect(find.byKey(const ValueKey('local-query-line')), findsNothing);
+          await tester.ensureVisible(
+            find.byKey(const ValueKey('view-line-url-line')),
+          );
+          await tester.tap(find.byKey(const ValueKey('view-line-url-line')));
+          await tester.pumpAndSettle();
+          expect(find.byType(SelectableText), findsOneWidget);
+          expect(tester.takeException(), isNull);
+          await tester.tap(find.byKey(const ValueKey('close-line-url-line')));
+          await tester.pumpAndSettle();
+          expect(selections, 0);
+        }
       }
+    },
+  );
+
+  testWidgets(
+    'rows keep full width padding gutter and metric tracks across selection hover and URL lengths',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final lines = [
+        _line(id: 'short', latencyMs: 9, url: 'https://a.test/v.m3u8'),
+        _line(
+          id: 'long',
+          latencyMs: 123456,
+          sizeBytes: 9876543210,
+          width: 7680,
+          height: 4320,
+          format: 'DASH',
+          url: 'https://cdn.example/${'long-segment-' * 40}/master.m3u8',
+        ),
+        _line(
+          id: 'unknown',
+          title: '第1集 · 官方字幕完整线路',
+          latencyMs: null,
+          sizeBytes: null,
+          width: null,
+          height: null,
+          quality: '',
+          format: '',
+          url: 'https://b.test/1.mp4',
+        ),
+      ];
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      for (final width in [320.0, 360.0, 1280.0]) {
+        tester.view.physicalSize = Size(width, 2400);
+        for (final compact in [false, true]) {
+          for (final selectedId in ['short', 'long']) {
+            await tester.pumpWidget(
+              _host(
+                Column(
+                  children: [
+                    for (var i = 0; i < lines.length; i++)
+                      PlaybackLineTile(
+                        line: lines[i],
+                        index: i == 0
+                            ? 0
+                            : i == 1
+                            ? 98
+                            : 999,
+                        compact: compact,
+                        selected: lines[i].id == selectedId,
+                        onTap: () {},
+                      ),
+                  ],
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            final expectedSurface = _rect(tester, 'line-surface-short');
+            final expectedContent = _rect(tester, 'line-content-short');
+            final gutterWidth = _rect(tester, 'line-gutter-short').width;
+            final inset = compact ? 10.0 : 12.0;
+            final metricXs = [
+              for (final metric in ['latency', 'size', 'resolution', 'format'])
+                _rect(tester, 'line-$metric-short').left,
+            ];
+            expect(expectedSurface.width, width);
+            for (final line in lines) {
+              final id = line.id;
+              final surface = _rect(tester, 'line-surface-$id');
+              final content = _rect(tester, 'line-content-$id');
+              final gutter = _rect(tester, 'line-gutter-$id');
+              expect(surface.left, expectedSurface.left);
+              expect(surface.right, expectedSurface.right);
+              expect(_rect(tester, 'route-tap-$id').width, surface.width);
+              expect(gutter.left - surface.left, inset);
+              expect(gutter.width, gutterWidth);
+              expect(content.left, expectedContent.left);
+              expect(content.left - gutter.right, 8);
+              expect(surface.right - content.right, inset);
+              for (final part in ['name', 'title', 'url']) {
+                expect(_rect(tester, 'line-$part-$id').left, content.left);
+              }
+              expect(_rect(tester, 'line-url-$id').right, content.right);
+              expect(_rect(tester, 'view-line-url-$id').left, content.left);
+              for (var i = 0; i < metricXs.length; i++) {
+                final metric = ['latency', 'size', 'resolution', 'format'][i];
+                expect(_rect(tester, 'line-$metric-$id').left, metricXs[i]);
+              }
+              final beforeHover = _rect(tester, 'line-surface-$id');
+              await mouse.moveTo(surface.center);
+              await tester.pumpAndSettle();
+              expect(_rect(tester, 'line-surface-$id'), beforeHover);
+              expect(_rect(tester, 'route-tap-$id').width, surface.width);
+            }
+            final metrics = [
+              for (final metric in ['latency', 'size', 'resolution', 'format'])
+                _rect(tester, 'line-$metric-short'),
+            ];
+            expect(metrics.map((r) => r.width).toSet(), hasLength(1));
+            if (width == 1280) {
+              expect(metrics.map((r) => r.top).toSet(), hasLength(1));
+              expect(metrics.map((r) => r.left).toSet(), hasLength(4));
+            } else {
+              expect(metrics[0].left, metrics[2].left);
+              expect(metrics[1].left, metrics[3].left);
+              expect(metrics[2].top, greaterThan(metrics[0].top));
+            }
+            expect(tester.takeException(), isNull);
+          }
+        }
+      }
+    },
+  );
+
+  testWidgets(
+    'pending explanation grows naturally at large text instead of clipping',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final line = _line(
+        url: '',
+        available: false,
+        title: '',
+        latencyMs: null,
+        diagnosticStatus: PlaybackDiscoveryStatus.searchMiss,
+      );
+      await tester.pumpWidget(_host(PlaybackLineTile(line: line, index: 999)));
+      final regular = _rect(tester, 'line-explanation-line');
+      await tester.pumpWidget(
+        _host(PlaybackLineTile(line: line, index: 999), textScale: 2.4),
+      );
+      final large = _rect(tester, 'line-explanation-line');
+      final surface = _rect(tester, 'line-surface-line');
+      expect(large.height, greaterThan(regular.height));
+      expect(large.bottom, lessThanOrEqualTo(surface.bottom - 11));
+      final explanation = tester.widget<Text>(
+        find.byKey(const ValueKey('line-explanation-line')),
+      );
+      expect(explanation.maxLines, isNull);
+      expect(explanation.overflow, isNull);
+      expect(tester.takeException(), isNull);
     },
   );
 
@@ -364,6 +516,9 @@ void main() {
     },
   );
 }
+
+Rect _rect(WidgetTester tester, String key) =>
+    tester.getRect(find.byKey(ValueKey(key)));
 
 Color? _textColor(WidgetTester tester, String key) =>
     tester.widget<Text>(find.byKey(ValueKey(key))).style?.color;
@@ -384,6 +539,7 @@ Widget _host(
 );
 
 PlaybackLine _line({
+  String id = 'line',
   String providerId = 'crawler.kazumi',
   String providerName = 'Kazumi · xfdmneo',
   String sourceName = '',
@@ -401,7 +557,7 @@ PlaybackLine _line({
   String diagnosticStatus = '',
   ClientMediaResolverDescriptor? clientResolver,
 }) => PlaybackLine(
-  id: 'line',
+  id: id,
   episodeId: 1,
   providerId: providerId,
   providerName: providerName,

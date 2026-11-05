@@ -1,5 +1,6 @@
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/player/player_page.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -349,6 +350,134 @@ void main() {
       expect(find.text('无结果源'), findsOneWidget);
       expect(find.text('未查询源'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'source panel stretches short long selected and hovered rows to shared edges',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final lines = [
+        const PlaybackLine(
+          id: 'short',
+          episodeId: 1,
+          providerId: 'route-short',
+          providerName: 'hb-10',
+          title: '第1集',
+          quality: '',
+          format: 'HLS',
+          url: 'https://a.test/1.m3u8',
+          available: true,
+          latency: Duration(milliseconds: 9),
+        ),
+        PlaybackLine(
+          id: 'long',
+          episodeId: 1,
+          providerId: 'route-long',
+          providerName: '稀饭动漫',
+          title: '第1集 · 官方字幕完整线路',
+          quality: '',
+          format: 'DASH',
+          url: 'https://cdn.example/${'unbroken-' * 50}/master.m3u8',
+          available: true,
+          latency: const Duration(milliseconds: 123456),
+          sizeBytes: 1234567890,
+          videoWidth: 1920,
+          videoHeight: 1080,
+        ),
+        const PlaybackLine(
+          id: 'pending',
+          episodeId: 1,
+          providerId: 'route-pending',
+          providerName: '待解析线路',
+          title: '第1集',
+          quality: '',
+          format: '',
+          available: false,
+          diagnosticStatus: PlaybackDiscoveryStatus.clientResolverRequired,
+        ),
+      ];
+      var selections = 0;
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      for (final width in [320.0, 360.0, 1280.0]) {
+        for (final scale in [1.0, 2.4]) {
+          tester.view.physicalSize = Size(width, 2400);
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: ThemeData.dark(useMaterial3: true),
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(
+                  context,
+                ).copyWith(textScaler: TextScaler.linear(scale)),
+                child: child!,
+              ),
+              home: Scaffold(
+                body: PlaybackSourcePanel(
+                  selected: lines.first,
+                  lines: lines,
+                  failedLineIds: const {},
+                  scanning: false,
+                  completedRules: 3,
+                  totalRules: 3,
+                  onSelected: (_) => selections++,
+                  onPickLocal: () async {},
+                  onOpenNetwork: (_, _) async {},
+                  onSearch: () async {},
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final contentLeft = tester
+              .getRect(find.byKey(const ValueKey('line-content-short')))
+              .left;
+          for (final line in lines) {
+            final id = line.id;
+            final surfaceFinder = find.byKey(ValueKey('line-surface-$id'));
+            final surface = tester.getRect(surfaceFinder);
+            final gutter = tester.getRect(
+              find.byKey(ValueKey('line-gutter-$id')),
+            );
+            final content = tester.getRect(
+              find.byKey(ValueKey('line-content-$id')),
+            );
+            expect(surface.left, 12);
+            expect(surface.right, width - 12);
+            expect(gutter.left - surface.left, 12);
+            expect(content.left, contentLeft);
+            expect(content.left - gutter.right, 8);
+            expect(surface.right - content.right, 12);
+            for (final metric in ['latency', 'size', 'resolution', 'format']) {
+              final shortMetric = tester.getRect(
+                find.byKey(ValueKey('line-$metric-short')),
+              );
+              final metricRect = tester.getRect(
+                find.byKey(ValueKey('line-$metric-$id')),
+              );
+              expect(metricRect.left, shortMetric.left);
+              expect(metricRect.width, closeTo(shortMetric.width, 0.01));
+            }
+            await mouse.moveTo(surface.center);
+            await tester.pumpAndSettle();
+            expect(tester.getRect(surfaceFinder), surface);
+          }
+          expect(find.text('本机重查（本集）'), findsNothing);
+          expect(
+            tester
+                .widget<InkWell>(
+                  find.byKey(const ValueKey('route-tap-pending')),
+                )
+                .onTap,
+            isNull,
+          );
+          expect(selections, 0);
+          expect(tester.takeException(), isNull);
+        }
+      }
     },
   );
 

@@ -108,8 +108,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   String? _playerMessage;
   String? _lineLookupMessage;
   RulePlaybackCancellationToken? _metadataProbeToken;
-  RulePlaybackCancellationToken? _localSourceLookupToken;
-  bool _localSourceLookupInProgress = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
@@ -792,7 +790,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   void dispose() {
     _metadataProbeToken?.cancel();
     _openProbeToken?.cancel();
-    _localSourceLookupToken?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _subtitleStoreEpoch++;
     _supplementalSubtitles?.dispose();
@@ -1025,8 +1022,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onOpenNetwork: _openNetworkPlayback,
                           onSearch: _searchPlaybackLines,
                           onCopyDiagnostics: _copyPlaybackDiagnostics,
-                          onQueryLocally: _querySourceLocally,
-                          localLookupInProgress: _localSourceLookupInProgress,
                         ),
                       ),
                     if (_danmakuPanel)
@@ -1519,7 +1514,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         .read(animeControllerProvider.notifier)
         .accountContextVersion;
     if (accountContextVersion != _accountContextVersion) {
-      _localSourceLookupToken?.cancel();
       _accountContextVersion = accountContextVersion;
       unawaited(_initializeSupplementalSubtitles());
       _resetRecommendationTracking();
@@ -1586,7 +1580,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
-    _cancelLocalSourceLookup();
     final recoveryEpoch = _automaticRecoveryEpoch;
     final preserveActivePlayback = _isPlayableLine(_line) && !_playbackFailed;
     if (!preserveActivePlayback) {
@@ -1946,84 +1939,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _lineRepository.cancelSingleBackupLookup();
   }
 
-  void _cancelLocalSourceLookup() {
-    _localSourceLookupToken?.cancel();
-    _localSourceLookupToken = null;
-    _localSourceLookupInProgress = false;
-  }
-
-  Future<void> _querySourceLocally(PlaybackLine source) async {
-    if (_localSourceLookupInProgress || !source.clientQuerySupported) return;
-    final episode = _episode;
-    final notifier = ref.read(animeControllerProvider.notifier);
-    final accountVersion = notifier.accountContextVersion;
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('通过本机网络重查'),
-        content: Text(
-          '将向「${source.providerName}」发送当前作品的名称，并由本机搜索、解析和验证本集。\n\n实际出口取决于设备网络、代理或 VPN；不保证避开 IP 限制。仅对这一次查询生效，不修改规则权限。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('本机查询'),
-          ),
-        ],
-      ),
-    );
-    if (accepted != true ||
-        !mounted ||
-        _episode.id != episode.id ||
-        _localSourceLookupInProgress ||
-        notifier.accountContextVersion != accountVersion) {
-      return;
-    }
-    _localSourceLookupToken?.cancel();
-    final token = RulePlaybackCancellationToken();
-    _localSourceLookupToken = token;
-    setState(() => _localSourceLookupInProgress = true);
-    try {
-      await _lineRepository.cancelLookup();
-      if (token.isCancelled) return;
-      final local = await notifier.playbackDiscovery.lookupSourceOnDevice(
-        subject: widget.request.subject,
-        episode: episode,
-        source: source,
-        cancellationToken: token,
-      );
-      if (!mounted ||
-          token.isCancelled ||
-          _episode.id != episode.id ||
-          notifier.accountContextVersion != accountVersion) {
-        return;
-      }
-      if (local.isEmpty) {
-        _showPlayerToast('本机未取得新的线路');
-        return;
-      }
-      final retained = _lines.where(
-        (line) =>
-            line.sourceInventoryId != source.sourceInventoryId ||
-            line.id == _line?.id,
-      );
-      setState(() => _lineRepository.replaceLines([...retained, ...local]));
-      _showPlayerToast(
-        '本机查询完成，${local.where((line) => line.available).length} 条通过媒体验证；请选择线路播放',
-      );
-    } catch (_) {
-      if (mounted && !token.isCancelled) _showPlayerToast('本机查询失败，当前播放未切换');
-    } finally {
-      if (mounted && identical(_localSourceLookupToken, token)) {
-        setState(() => _localSourceLookupInProgress = false);
-      }
-    }
-  }
-
   void _startExpandedLineLookup({bool autoplay = false}) {
     final recoveryEpoch = _automaticRecoveryEpoch;
     if (!mounted ||
@@ -2041,7 +1956,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
     }
     if (_lineScanInProgress || _hasExpandedLineLookup) return;
-    _cancelLocalSourceLookup();
     _cancelSingleBackupLookup();
     final started = _lineRepository.startExpandedLookup(
       subject: widget.request.subject,
@@ -2945,8 +2859,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeVideo.cancelFirstFrameWatchdog();
     _cancelSingleBackupLookup();
     unawaited(_lineRepository.cancelLookup());
-    _localSourceLookupToken?.cancel();
-    _localSourceLookupInProgress = false;
     _lineRepository.resetForEpisode(
       episodeId: episode.id,
       initialLines: preparedLines,
