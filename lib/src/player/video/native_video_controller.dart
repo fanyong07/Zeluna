@@ -386,9 +386,9 @@ final class NativeFirstFrameWatchdog {
   }
 }
 
-/// A native screenshot is decoded video evidence; timestamps and dimensions
+/// A native decoded-image probe is video evidence; timestamps and dimensions
 /// alone can describe audio-only progress or an undecodable video track.
-/// Captured bytes stay in memory and are neither saved nor uploaded.
+/// Pixels stay in the native worker; only a boolean returns to the UI isolate.
 final class NativeDecodedFrameMonitor {
   Timer? _timer;
   int _generation = 0;
@@ -415,8 +415,8 @@ final class NativeDecodedFrameMonitor {
       if (_reading || !canRead()) return;
       _reading = true;
       try {
-        // Bound a probe without extending the independently scheduled startup
-        // deadline. A hung read from one open must not starve its replacement.
+        // Bound observation without extending the independent startup deadline.
+        // This does not cancel native work or release the shared native mutex.
         final decoded = await readFrame().timeout(readTimeout);
         if (!_disposed && generation == _generation && isCurrent()) {
           onProbe?.call(decoded ? 'frame_available' : 'no_image');
@@ -427,6 +427,11 @@ final class NativeDecodedFrameMonitor {
         }
       } on TimeoutException {
         if (!_disposed && generation == _generation && isCurrent()) {
+          // timeout does not cancel the native command/worker. Repeating it
+          // would queue more work behind media-kit's shared lock (and disposal).
+          // Retire this generation only; its independent startup watchdog still
+          // owns the hard deadline. Retire before callbacks can start a new open.
+          cancel();
           onProbe?.call('probe_timeout');
         }
       } catch (_) {
@@ -571,19 +576,21 @@ final class NativeVideoController {
   }
 
   Future<bool> _probeFrame() async {
+    final serial = _activeSerial;
     final surface = surfaceController;
     if (surface is NativeAndroidSurfaceController) {
-      final found = await surface.readFrame(serial: _activeSerial);
+      final found = await surface.readFrame(serial: serial);
+      if (_disposed || serial != _activeSerial) return false;
       _recordFrameProbe(surface.probeReason);
       return found;
     }
-    final bytes = await player.screenshot(format: 'image/jpeg');
-    final found = bytes != null && bytes.length > 64;
-    _recordFrameProbe(
-      bytes == null
-          ? 'screenshot_empty'
-          : (found ? 'screenshot_image' : 'screenshot_short'),
-    );
+    final native = player.platform;
+    if (native is! NativePlayer) return false;
+    // Validate a real decoded screenshot node in its worker, returning only a
+    // boolean. No JPEG encoding or full-frame pixel copy into the UI isolate.
+    final found = await native.hasDecodedVideoFrame();
+    if (_disposed || serial != _activeSerial) return false;
+    _recordFrameProbe(found ? 'decoded_image' : 'no_image');
     return found;
   }
 

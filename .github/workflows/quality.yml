@@ -228,6 +228,8 @@ jobs:
       - run: uv sync --project server --frozen --all-groups
       - name: Test repository policy and size-accounting tools
         run: uv run --project server python -m unittest discover -s tool/ci -p 'test_*.py'
+      - name: Test Android update feed generator
+        run: uv run --project server python -m unittest discover -s tool/tests -p 'test_*.py'
       - name: Verify repository artifact policy
         run: uv run --project server python tool/ci/repository_gate.py --root .
       - name: Generate Python CycloneDX SBOM

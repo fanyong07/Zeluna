@@ -16,6 +16,7 @@ import '../shared_ui/poster_card.dart';
 import '../shared_ui/settings_ui.dart';
 import '../shared_ui/danmaku_display_controls.dart';
 import '../sync/sync_controller.dart';
+import '../updates/app_update_card.dart';
 
 class ProfilePage extends ConsumerWidget {
   const ProfilePage({super.key});
@@ -1785,7 +1786,12 @@ class MiscSettingsPage extends ConsumerWidget {
                     title: '视频下载',
                     value: '支持常见格式的视频下载',
                   ),
-                  const SettingsReadonlyRow(title: '自动更新', value: '正式版发布后可开启'),
+                  SettingsActionRow(
+                    title: '应用更新',
+                    subtitle: '检查版本、下载安装包与更新设置',
+                    icon: Icons.system_update,
+                    onTap: () => context.push('/profile/version'),
+                  ),
                   const SettingsReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
                 ],
               ),
@@ -1835,6 +1841,8 @@ class VersionInfoPage extends StatelessWidget {
                   ),
                 ],
               ),
+              const SizedBox(height: 16),
+              const AppUpdateCard(),
             ],
           );
         },

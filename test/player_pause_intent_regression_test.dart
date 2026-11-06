@@ -24,6 +24,37 @@ import '../integration_test/support/isolated_player_environment.dart';
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
   testWidgets(
+    'mobile progress ticks rebuild canvas, not page and route lists',
+    (tester) async {
+      final fixture = await _mount(tester, viewport: const Size(390, 844));
+      final builds = <String, int>{};
+      final previousCallback = debugOnRebuildDirtyWidget;
+      debugOnRebuildDirtyWidget = (element, builtOnce) {
+        previousCallback?.call(element, builtOnce);
+        final name = element.widget.runtimeType.toString();
+        builds.update(name, (value) => value + 1, ifAbsent: () => 1);
+      };
+      try {
+        for (var tick = 1; tick <= 30; tick++) {
+          fixture.engine.progress(Duration(milliseconds: 15000 + tick * 50));
+          fixture.engine.buffered(Duration(milliseconds: 45000 + tick * 100));
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+      } finally {
+        debugOnRebuildDirtyWidget = previousCallback;
+      }
+      // Real page and native event guard, no substituted progress widget.
+      expect(builds['_PlayerCanvas'] ?? 0, greaterThanOrEqualTo(29));
+      expect(builds['PlayerPage'] ?? 0, 0, reason: '$builds');
+      expect(builds['_ResponsivePlayerLayout'] ?? 0, 0, reason: '$builds');
+      expect(builds['_PortraitPlayerDetails'] ?? 0, 0, reason: '$builds');
+      expect(builds['PortraitPlaybackLineList'] ?? 0, 0, reason: '$builds');
+      expect(find.text('0:16 / 3:00'), findsWidgets);
+      expect(fixture.engine.opens, hasLength(1));
+    },
+  );
+
+  testWidgets(
     'first frame fills the full inventory without replacing healthy playback',
     (tester) async {
       final account = _PauseAccount(online: true);
@@ -845,6 +876,7 @@ Future<_Fixture> _mount(
   bool nativeLock = false,
   bool reachFirstFrame = true,
   PlaybackLine initialLine = _primary,
+  Size viewport = const Size(1280, 800),
 }) async {
   account ??= _PauseAccount();
   final activeAccount = account;
@@ -854,7 +886,7 @@ Future<_Fixture> _mount(
     await SubtitleStore.open(null);
     return temp;
   }))!;
-  tester.view.physicalSize = const Size(1280, 800);
+  tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
   final engine = _RecordingEngine();
   final player = Player(
@@ -1035,6 +1067,11 @@ class _RecordingEngine extends PlatformPlayer {
   void progress(Duration value) {
     state = state.copyWith(position: value);
     positionController.add(value);
+  }
+
+  void buffered(Duration value) {
+    state = state.copyWith(buffer: value);
+    bufferController.add(value);
   }
 
   @override

@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.View
 import app.anime.anime.csp.CspMethodChannel
 import app.anime.anime.storage.StorageMethodChannel
+import app.anime.anime.update.AppUpdateMethodChannel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -14,6 +15,7 @@ open class MainActivity : FlutterActivity() {
     private var nativeVideoSurfaceChannel: NativeVideoSurfaceChannel? = null
     private var cspMethodChannel: CspMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
+    private var appUpdateMethodChannel: AppUpdateMethodChannel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,6 +75,10 @@ open class MainActivity : FlutterActivity() {
         storageMethodChannel = StorageMethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
         )
+        appUpdateMethodChannel = AppUpdateMethodChannel(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
@@ -84,6 +90,14 @@ open class MainActivity : FlutterActivity() {
         cspMethodChannel = null
         storageMethodChannel?.close()
         storageMethodChannel = null
+        appUpdateMethodChannel?.close()
+        appUpdateMethodChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onDestroy() {
+        appUpdateMethodChannel?.close()
+        appUpdateMethodChannel = null
+        super.onDestroy()
     }
 }

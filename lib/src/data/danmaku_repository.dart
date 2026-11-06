@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -26,14 +27,22 @@ class TransientDanmakuFailure extends DanmakuMatch {
 }
 
 class DanmakuRepository {
+  /// Limits apply only to retained timelines, not to comments returned to the
+  /// player. Setting either cache limit to zero disables timeline retention.
   DanmakuRepository({
     http.Client? client,
     http.Client? officialClient,
     String officialBaseUrl = 'https://api.zeluna.top',
     Future<String?> Function()? officialTokenProvider,
     DateTime Function()? now,
+    int maxCachedTimelines = 8,
+    int maxCachedComments = 50000,
     @visibleForTesting Stopwatch Function()? stopwatchFactory,
-  }) : _client =
+  }) : assert(maxCachedTimelines >= 0),
+       assert(maxCachedComments >= 0),
+       _maxCachedTimelines = maxCachedTimelines,
+       _maxCachedComments = maxCachedComments,
+       _client =
            client ??
            createUntrustedSourceHttpClient(maxResponseBytes: 8 * 1024 * 1024),
        _ownsClient = client == null,
@@ -64,12 +73,23 @@ class DanmakuRepository {
   final bool _ownsOfficialClient;
   final Uri _officialBaseUri;
   final Future<String?> Function()? _officialTokenProvider;
-  final Map<String, _TimedTimeline> _cache = {};
+  final int _maxCachedTimelines;
+  final int _maxCachedComments;
+  // Insertion order is recency order: the first entry is the next eviction.
+  final LinkedHashMap<String, _TimedTimeline> _cache = LinkedHashMap();
   final Map<String, Future<DanmakuTimeline>> _inFlight = {};
+  var _cachedCommentCount = 0;
   var _generation = 0;
+  var _closed = false;
   String? _wbiMixinKey;
   DateTime? _wbiMixinKeyExpiresAt;
   Future<String?>? _wbiKeyInFlight;
+
+  @visibleForTesting
+  int get debugCachedTimelineCount => _cache.length;
+
+  @visibleForTesting
+  int get debugCachedCommentCount => _cachedCommentCount;
 
   Future<DanmakuTimeline> timelineForEpisode(
     AnimeSubject subject,
@@ -77,10 +97,14 @@ class DanmakuRepository {
     ExternalServiceSettings settings, {
     bool forceRefresh = false,
   }) {
+    if (_closed) return Future.error(StateError('DanmakuRepository is closed'));
+    _pruneExpiredTimelines(_now());
     final key = _cacheKey(subject, episode, settings);
-    if (forceRefresh) _cache.remove(key);
-    final cached = _cache[key];
-    if (cached != null && cached.expiresAt.isAfter(_now())) {
+    if (forceRefresh) _removeCachedTimeline(key);
+    final cached = _cache.remove(key);
+    if (cached != null) {
+      // A hit promotes recency without extending the original expiry.
+      _cache[key] = cached;
       return Future.value(cached.timeline);
     }
     final active = _inFlight[key];
@@ -91,16 +115,7 @@ class DanmakuRepository {
     future = _loadTimeline(subject, episode, settings)
         .then((timeline) {
           if (generation != _generation) return timeline;
-          _cache[key] = _TimedTimeline(
-            timeline: timeline,
-            expiresAt: _now().add(
-              timeline.sources.any((source) => !source.available)
-                  ? _failureCacheDuration
-                  : timeline.comments.isEmpty
-                  ? _emptyCacheDuration
-                  : _successCacheDuration,
-            ),
-          );
+          _cacheTimeline(key, timeline);
           return timeline;
         })
         .whenComplete(() {
@@ -110,14 +125,63 @@ class DanmakuRepository {
     return future;
   }
 
+  void _cacheTimeline(String key, DanmakuTimeline timeline) {
+    final now = _now();
+    _pruneExpiredTimelines(now);
+    _removeCachedTimeline(key);
+    final commentCount = timeline.comments.length;
+    // These limits bound retention only. Large timelines still reach callers
+    // intact, and must not evict useful small entries when they cannot fit.
+    if (_maxCachedTimelines <= 0 ||
+        _maxCachedComments <= 0 ||
+        commentCount > _maxCachedComments) {
+      return;
+    }
+    while (_cache.isNotEmpty &&
+        (_cache.length >= _maxCachedTimelines ||
+            _cachedCommentCount + commentCount > _maxCachedComments)) {
+      _removeCachedTimeline(_cache.keys.first);
+    }
+    _cache[key] = _TimedTimeline(
+      timeline: timeline,
+      expiresAt: now.add(
+        timeline.sources.any((source) => !source.available)
+            ? _failureCacheDuration
+            : timeline.comments.isEmpty
+            ? _emptyCacheDuration
+            : _successCacheDuration,
+      ),
+    );
+    _cachedCommentCount += commentCount;
+  }
+
+  void _pruneExpiredTimelines(DateTime now) {
+    _cache.removeWhere((_, cached) {
+      if (cached.expiresAt.isAfter(now)) return false;
+      _cachedCommentCount -= cached.timeline.comments.length;
+      return true;
+    });
+  }
+
+  void _removeCachedTimeline(String key) {
+    final removed = _cache.remove(key);
+    if (removed != null) {
+      _cachedCommentCount -= removed.timeline.comments.length;
+    }
+  }
+
   void invalidate() {
     // Old callers may finish, but cannot serve or cache a new account view.
     _generation++;
     _cache.clear();
+    _cachedCommentCount = 0;
     _inFlight.clear();
   }
 
   void close() {
+    if (_closed) return;
+    _closed = true;
+    invalidate();
     if (_ownsClient) _client.close();
     if (_ownsOfficialClient) _officialClient.close();
   }

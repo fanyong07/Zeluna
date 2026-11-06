@@ -144,6 +144,80 @@ void main() {
   );
 
   testWidgets(
+    'timed-out native work is not requeued and hard startup deadline survives',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(monitor.dispose);
+      addTearDown(watchdog.dispose);
+      final pending = Completer<bool>();
+      var reads = 0;
+      var frames = 0;
+      final probes = <String>[];
+      final deadlines = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => _snapshot(buffer: const Duration(seconds: 5)),
+        onTimeout: deadlines.add,
+        softTimeout: const Duration(seconds: 4),
+        hardTimeout: const Duration(seconds: 4),
+      );
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () {
+          reads++;
+          return pending.future;
+        },
+        onFrame: () => frames++,
+        onProbe: probes.add,
+        readTimeout: const Duration(seconds: 1),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 1));
+      for (var i = 0; i < 12; i++) {
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+      expect(reads, 1, reason: 'timeout must not queue native work repeatedly');
+      expect(probes, ['probe_timeout']);
+      expect(deadlines, hasLength(1));
+      expect(deadlines.single.phase, NativeStartupTimeoutPhase.hard);
+      pending.complete(true);
+      await tester.pump();
+      expect(frames, 0, reason: 'late image is not a confirmed first frame');
+    },
+  );
+
+  testWidgets('timeout callback may start a fresh probe generation', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    var frames = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () => frames += 100,
+      readTimeout: const Duration(seconds: 1),
+      onProbe: (_) => monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () async => true,
+        onFrame: () => frames++,
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(frames, 1);
+    old.completeError(StateError('late native failure'));
+    await tester.pump();
+    expect(frames, 1);
+  });
+
+  testWidgets(
     'advancing audio clock without decoded video is not a first frame',
     (tester) async {
       final watchdog = NativeFirstFrameWatchdog();

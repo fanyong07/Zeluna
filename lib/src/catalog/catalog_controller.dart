@@ -135,6 +135,10 @@ final class CatalogController {
   static const seriesMetadataCacheKey = 'metadata.cache.series';
   static const movieMetadataCacheKey = 'metadata.cache.movie';
   static const homeFeedCacheKey = 'metadata.cache.home';
+
+  /// Full episode/cast bundles are heavier than home cards. Keep only recent
+  /// details for this account, rather than every title opened in the session.
+  static const detailCacheLimit = 32;
   static const _homeFeedCacheVersion = 5;
   static const _homeFeedCacheTtl = Duration(hours: 6);
   static const _metadataCacheVersion = 13;
@@ -168,6 +172,9 @@ final class CatalogController {
   final _metadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
   final _latestMetadataRefreshes = <String, Future<List<CatalogCandidate>>>{};
   final _detailLoads = <int, Future<AnimeDetailBundle>>{};
+  // Insertion order is least-to-most recently accessed. Tokens also revoke an
+  // evicted load's optional enrichment, even if a reload reuses its base object.
+  final _detailRecency = <int, Object>{};
   var _detailGeneration = 0;
   Future<void> _writeQueue = Future<void>.value();
 
@@ -195,6 +202,7 @@ final class CatalogController {
     _homeRefreshVersion++;
     _detailGeneration++;
     _detailLoads.clear();
+    _detailRecency.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
     await _writeQueue;
@@ -327,7 +335,12 @@ final class CatalogController {
     final scope = _scope();
     final cacheKey = Object.hash(subject.source, subject.platform, subject.id);
     final cached = _snapshot.selectedSubjects[cacheKey];
-    if (cached != null) return Future.value(cached);
+    if (cached != null) {
+      final token = _detailRecency.remove(cacheKey) ?? Object();
+      _detailRecency[cacheKey] = token;
+      // Recency is internal bookkeeping, not a new UI snapshot.
+      return Future.value(cached);
+    }
     return _detailLoads.putIfAbsent(cacheKey, () {
       final services = _services;
       final generation = _detailGeneration;
@@ -337,15 +350,16 @@ final class CatalogController {
             if (generation != _detailGeneration) {
               throw const AccountException('目录设置已更新，请重新打开详情');
             }
-            _publish(
-              scope,
-              _snapshot.copyWith(
-                selectedSubjects: {
-                  ..._snapshot.selectedSubjects,
-                  cacheKey: base,
-                },
-              ),
-            );
+            final token = Object();
+            _detailRecency.remove(cacheKey);
+            _detailRecency[cacheKey] = token;
+            final details = {..._snapshot.selectedSubjects, cacheKey: base};
+            while (_detailRecency.length > detailCacheLimit) {
+              final oldest = _detailRecency.keys.first;
+              _detailRecency.remove(oldest);
+              details.remove(oldest);
+            }
+            _publish(scope, _snapshot.copyWith(selectedSubjects: details));
             _prefetchPlayback(base.subject, base.episodes);
             // Optional cast/staff metadata must not hold up the poster or episodes.
             unawaited(
@@ -353,6 +367,7 @@ final class CatalogController {
                   .then((enriched) {
                     if (!_isCurrent(scope) ||
                         generation != _detailGeneration ||
+                        !identical(_detailRecency[cacheKey], token) ||
                         !identical(
                           _snapshot.selectedSubjects[cacheKey],
                           base,
@@ -451,6 +466,7 @@ final class CatalogController {
     _homeRefreshVersion++;
     _detailGeneration++;
     _detailLoads.clear();
+    _detailRecency.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
     _publish(scope, _snapshot.copyWith(selectedSubjects: const {}));
@@ -470,6 +486,7 @@ final class CatalogController {
     final scope = _scope();
     _detailGeneration++;
     _detailLoads.clear();
+    _detailRecency.clear();
     if (_snapshot.selectedSubjects.isEmpty) return;
     _publish(scope, _snapshot.copyWith(selectedSubjects: const {}));
   }
@@ -478,6 +495,7 @@ final class CatalogController {
     final scope = _scope();
     _detailGeneration++;
     _detailLoads.clear();
+    _detailRecency.clear();
     _homeRefreshVersion++;
     _latestMetadataRefreshes.remove(seriesMetadataCacheKey);
     _latestMetadataRefreshes.remove(movieMetadataCacheKey);
@@ -514,6 +532,7 @@ final class CatalogController {
     _homeRefreshVersion++;
     _detailGeneration++;
     _detailLoads.clear();
+    _detailRecency.clear();
     _metadataRefreshes.clear();
     _latestMetadataRefreshes.clear();
   }

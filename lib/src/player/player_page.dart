@@ -111,6 +111,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
+  // Native timeline events keep recovery/watchdog state current without
+  // rebuilding mobile metadata, episode grids or sorting every route again.
+  final _timelineRevision = ValueNotifier<int>(0);
   double _volume = 100;
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
@@ -812,6 +815,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _danmakuController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
+    _timelineRevision.dispose();
     super.dispose();
   }
 
@@ -900,99 +904,103 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                       onEpisodeSelected: _selectEpisode,
                       onLinePanel: _toggleLinePanel,
                       onLineSelected: _selectLine,
-                      player: _PlayerCanvas(
-                        controller: _controller,
-                        webPlayerController: _webPlayerController,
-                        playbackGeneration: playbackGeneration,
-                        subject: widget.request.subject,
-                        episodes: widget.request.episodes,
-                        episode: _episode,
-                        line: _line,
-                        settings: effectiveSettings,
-                        superResolutionActive: _anime4kController.isActive,
-                        services: state.services,
-                        danmaku: state.danmaku,
-                        remoteDanmaku: _danmakuController.remoteComments,
-                        localDanmaku: _danmakuController.localComments,
-                        theaterMode: _theaterMode,
-                        position: _position,
-                        duration: _duration,
-                        buffer: _buffer,
-                        volume: _volume,
-                        playing: _playing,
-                        buffering: _buffering,
-                        loadingLine: _loadingLine,
-                        lineLookupInProgress: _lineLookupInProgress,
-                        playbackFailed: _playbackFailed,
-                        fullscreen: _fullscreen,
-                        muted: _muted,
-                        controlsVisible: _controlsVisible,
-                        autoHideChrome: _shouldAutoHidePlayerControls,
-                        playerMessage: _surfaceMessage,
-                        onToggleControls: _togglePlayerControls,
-                        onChromeHotZoneChanged:
-                            _handlePlayerChromeHotZoneChanged,
-                        onBack: _handleBack,
-                        onReload: _reloadCurrentLine,
-                        onScreenshot: _captureScreenshot,
-                        onTheaterMode: _toggleTheaterMode,
-                        onCast: _showExternalPlayback,
-                        onPlayPause: _playing
-                            ? _pausePlayback
-                            : _resumePlayback,
-                        onPreviousEpisode: _canPlayPreviousEpisode
-                            ? _playPreviousEpisode
-                            : null,
-                        onNextEpisode: _canPlayNextEpisode
-                            ? _playNextEpisode
-                            : null,
-                        onTemporaryDoubleSpeedStart: _startTemporaryDoubleSpeed,
-                        onTemporaryDoubleSpeedEnd: _endTemporaryDoubleSpeed,
-                        onVideoViewportSize: _handleVideoViewportSize,
-                        onRewind: () => _seekBy(
-                          Duration(seconds: -state.settings.rewindSeconds),
-                        ),
-                        onForward: () => _seekBy(
-                          Duration(seconds: state.settings.forwardSeconds),
-                        ),
-                        onSeek: _seekTo,
-                        onMute: _toggleMute,
-                        onVolumeChanged: _setVolume,
-                        onGestureVolumeChanged: _setGestureVolume,
-                        onSpeedSelected: _selectSpeed,
-                        onControlMenuChanged: _handleControlMenuChanged,
-                        onFullscreen: () => _setFullscreen(!_fullscreen),
-                        onEpisodePanel: _toggleEpisodePanel,
-                        onEpisodeSelected: _selectEpisode,
-                        onLinePanel: _toggleLinePanel,
-                        onDanmakuPanel: _toggleDanmakuPanel,
-                        onDanmakuEnabledChanged: _setDanmakuEnabled,
-                        danmakuInput: _danmakuController.input,
-                        danmakuInputFocus: _danmakuInputFocus,
-                        onSendDanmaku: (text) => unawaited(
-                          _sendDanmaku(
-                            text,
-                            settings: state.danmaku,
-                            loggedIn:
-                                state
-                                    .accountSession
-                                    .current
-                                    ?.cloudAuthenticated ==
-                                true,
+                      player: AnimatedBuilder(
+                        animation: _timelineRevision,
+                        builder: (context, _) => _PlayerCanvas(
+                          controller: _controller,
+                          webPlayerController: _webPlayerController,
+                          playbackGeneration: playbackGeneration,
+                          subject: widget.request.subject,
+                          episodes: widget.request.episodes,
+                          episode: _episode,
+                          line: _line,
+                          settings: effectiveSettings,
+                          superResolutionActive: _anime4kController.isActive,
+                          services: state.services,
+                          danmaku: state.danmaku,
+                          remoteDanmaku: _danmakuController.remoteComments,
+                          localDanmaku: _danmakuController.localComments,
+                          theaterMode: _theaterMode,
+                          position: _position,
+                          duration: _duration,
+                          buffer: _buffer,
+                          volume: _volume,
+                          playing: _playing,
+                          buffering: _buffering,
+                          loadingLine: _loadingLine,
+                          lineLookupInProgress: _lineLookupInProgress,
+                          playbackFailed: _playbackFailed,
+                          fullscreen: _fullscreen,
+                          muted: _muted,
+                          controlsVisible: _controlsVisible,
+                          autoHideChrome: _shouldAutoHidePlayerControls,
+                          playerMessage: _surfaceMessage,
+                          onToggleControls: _togglePlayerControls,
+                          onChromeHotZoneChanged:
+                              _handlePlayerChromeHotZoneChanged,
+                          onBack: _handleBack,
+                          onReload: _reloadCurrentLine,
+                          onScreenshot: _captureScreenshot,
+                          onTheaterMode: _toggleTheaterMode,
+                          onCast: _showExternalPlayback,
+                          onPlayPause: _playing
+                              ? _pausePlayback
+                              : _resumePlayback,
+                          onPreviousEpisode: _canPlayPreviousEpisode
+                              ? _playPreviousEpisode
+                              : null,
+                          onNextEpisode: _canPlayNextEpisode
+                              ? _playNextEpisode
+                              : null,
+                          onTemporaryDoubleSpeedStart:
+                              _startTemporaryDoubleSpeed,
+                          onTemporaryDoubleSpeedEnd: _endTemporaryDoubleSpeed,
+                          onVideoViewportSize: _handleVideoViewportSize,
+                          onRewind: () => _seekBy(
+                            Duration(seconds: -state.settings.rewindSeconds),
                           ),
+                          onForward: () => _seekBy(
+                            Duration(seconds: state.settings.forwardSeconds),
+                          ),
+                          onSeek: _seekTo,
+                          onMute: _toggleMute,
+                          onVolumeChanged: _setVolume,
+                          onGestureVolumeChanged: _setGestureVolume,
+                          onSpeedSelected: _selectSpeed,
+                          onControlMenuChanged: _handleControlMenuChanged,
+                          onFullscreen: () => _setFullscreen(!_fullscreen),
+                          onEpisodePanel: _toggleEpisodePanel,
+                          onEpisodeSelected: _selectEpisode,
+                          onLinePanel: _toggleLinePanel,
+                          onDanmakuPanel: _toggleDanmakuPanel,
+                          onDanmakuEnabledChanged: _setDanmakuEnabled,
+                          danmakuInput: _danmakuController.input,
+                          danmakuInputFocus: _danmakuInputFocus,
+                          onSendDanmaku: (text) => unawaited(
+                            _sendDanmaku(
+                              text,
+                              settings: state.danmaku,
+                              loggedIn:
+                                  state
+                                      .accountSession
+                                      .current
+                                      ?.cloudAuthenticated ==
+                                  true,
+                            ),
+                          ),
+                          onWebReady: () => _handleWebReady(playbackGeneration),
+                          onWebError: () => _handleWebError(playbackGeneration),
+                          onWebPosition: (value) =>
+                              _handleWebPosition(playbackGeneration, value),
+                          onWebDuration: (value) =>
+                              _handleWebDuration(playbackGeneration, value),
+                          onWebPlaying: (value) =>
+                              _handleWebPlaying(playbackGeneration, value),
+                          onWebEnded: () => _handleWebEnded(playbackGeneration),
+                          onSettingsPanel: _toggleSettingsPanel,
+                          onSubtitlePanel: _toggleSubtitlePanel,
+                          supplementalSubtitles: _supplementalSubtitles,
                         ),
-                        onWebReady: () => _handleWebReady(playbackGeneration),
-                        onWebError: () => _handleWebError(playbackGeneration),
-                        onWebPosition: (value) =>
-                            _handleWebPosition(playbackGeneration, value),
-                        onWebDuration: (value) =>
-                            _handleWebDuration(playbackGeneration, value),
-                        onWebPlaying: (value) =>
-                            _handleWebPlaying(playbackGeneration, value),
-                        onWebEnded: () => _handleWebEnded(playbackGeneration),
-                        onSettingsPanel: _toggleSettingsPanel,
-                        onSubtitlePanel: _toggleSubtitlePanel,
-                        supplementalSubtitles: _supplementalSubtitles,
                       ),
                     ),
                     if (_episodePanel)
@@ -1354,7 +1362,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             previousPosition: previousPosition,
             currentPosition: value,
           );
-          setState(() => _position = value);
+          _position = value;
+          _timelineRevision.value++;
           if (reachedFirstFrame) _confirmNativeFirstFrame();
           _maybeRefreshNextEpisodePrefetch();
         }),
@@ -1385,7 +1394,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           )) {
             return;
           }
-          setState(() => _buffer = value);
+          if (_buffer == value) return;
+          _buffer = value;
+          _timelineRevision.value++;
         }),
       )
       ..track(
@@ -3618,7 +3629,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _scheduleNextEpisodePrefetch();
     }
     _notePlaybackProgress(value);
-    setState(() => _position = value);
+    _position = value;
+    _timelineRevision.value++;
     _maybeRefreshNextEpisodePrefetch();
   }
 

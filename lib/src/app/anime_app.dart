@@ -19,6 +19,7 @@ import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
 import '../shared_ui/app_chrome.dart';
+import '../updates/app_update_host.dart';
 import 'app_theme.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
@@ -187,7 +188,10 @@ class AnimeApp extends ConsumerWidget {
     return MaterialApp.router(
       builder: (context, child) => PosterNetworkScope(
         catalogBase: catalogBase,
-        child: child ?? const SizedBox.shrink(),
+        child: AppUpdateHost(
+          router: router,
+          child: child ?? const SizedBox.shrink(),
+        ),
       ),
       title: 'Zeluna',
       debugShowCheckedModeBanner: false,

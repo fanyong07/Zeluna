@@ -5,7 +5,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+import 'android_webview_task_queue.dart';
 import 'animeko_webview_sniffer_base.dart';
+import 'rule_playback_cancellation.dart';
 import 'rule_security.dart';
 
 AnimekoWebViewSniffer createAnimekoWebViewSniffer() => Platform.isWindows
@@ -381,19 +383,51 @@ class _WindowsSniffSession {
   }
 }
 
+/// Exercises the real Android plugin channels on desktop unit-test hosts.
+@visibleForTesting
+AnimekoWebViewSniffer createAndroidAnimekoWebViewSnifferForTesting() =>
+    _NativeAnimekoWebViewSniffer(androidHost: true);
+
 class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
+  _NativeAnimekoWebViewSniffer({bool? androidHost})
+    : _androidHost = androidHost ?? Platform.isAndroid;
+
+  // Android CookieManager/WebStorage are process-wide, not per sniffer instance.
+  static final _tasks = AndroidWebViewTaskQueue();
+  final bool _androidHost;
+
   @override
-  bool get supported => Platform.isAndroid;
+  bool get supported => _androidHost;
 
   @override
   Future<AnimekoWebViewSniffResult?> sniff(
     AnimekoWebViewSniffRequest request,
   ) async {
-    if (!supported ||
-        !request.manifest.webViewSniffing ||
-        request.cancellationToken?.isCancelled == true) {
-      return null;
-    }
+    if (!supported || !request.manifest.webViewSniffing) return null;
+    final lease = await _tasks.acquire(
+      timeout: request.timeout,
+      cancellationToken: request.cancellationToken,
+    );
+    if (lease == null) return null;
+    final cancelled = Completer<AnimekoWebViewSniffResult?>();
+    final unlink = lease.cancellation.register(() => cancelled.complete(null));
+    // Cancelled callers return promptly. The lane stays occupied until native
+    // run/setup/dispose acknowledge completion, so a late callback cannot clear
+    // another task's storage or create a second active WebView.
+    final operation = _sniffSerial(request, lease.cancellation).whenComplete(
+      () {
+        unlink();
+        lease.release();
+      },
+    );
+    return Future.any([operation, cancelled.future]);
+  }
+
+  Future<AnimekoWebViewSniffResult?> _sniffSerial(
+    AnimekoWebViewSniffRequest request,
+    RulePlaybackCancellationToken cancellation,
+  ) async {
+    if (cancellation.isCancelled) return null;
     final network = _SniffNetworkPolicy(request);
     if (!await network.allows(
       request.pageUrl.toString(),
@@ -402,14 +436,22 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
       return null;
     }
 
+    if (cancellation.isCancelled) return null;
     final result = Completer<AnimekoWebViewSniffResult?>();
-    final unlink = request.cancellationToken?.register(() {
+    final unlink = cancellation.register(() {
       if (!result.isCompleted) result.complete(null);
     });
     HeadlessInAppWebView? webView;
-    Timer? timeoutTimer;
+    Future<void> setup = Future<void>.value();
     Timer? nestedSettleTimer;
     String? nestedUrl;
+    var closing = false;
+    var rendererGone = false;
+    bool active() =>
+        !closing &&
+        !rendererGone &&
+        !result.isCompleted &&
+        !cancellation.isCancelled;
 
     Future<String> readCookies() async {
       if (request.manifest.cookiePolicy != RuleCookiePolicy.taskScoped) {
@@ -429,10 +471,10 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
     }
 
     Future<void> finish({String? videoUrl, String? nested}) async {
-      if (result.isCompleted) return;
+      if (!active()) return;
       nestedSettleTimer?.cancel();
       final cookieHeader = await readCookies();
-      if (!result.isCompleted) {
+      if (active()) {
         result.complete(
           AnimekoWebViewSniffResult(
             videoUrl: videoUrl,
@@ -445,7 +487,7 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
 
     void inspect(String? value, {String? baseUrl}) {
       final candidate = value?.trim() ?? '';
-      if (candidate.isEmpty || result.isCompleted) return;
+      if (candidate.isEmpty || !active()) return;
       final base = baseUrl?.trim().isNotEmpty == true
           ? baseUrl!.trim()
           : request.pageUrl.toString();
@@ -488,6 +530,7 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
       );
       if (cookieHeader.isEmpty) return;
       for (final pair in cookieHeader.split(';')) {
+        if (!active()) return;
         final separator = pair.indexOf('=');
         if (separator <= 0) continue;
         final name = pair.substring(0, separator).trim();
@@ -530,20 +573,42 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
             'user-agent',
           ),
           isInspectable: kDebugMode,
+          useOnRenderProcessGone: true,
         ),
-        onWebViewCreated: (controller) async {
-          await clearAnimekoWebViewTaskStorage(controller);
-          await seedCookies();
-          if (result.isCompleted) return;
-          await controller.loadUrl(
-            urlRequest: URLRequest(
-              url: WebUri(request.pageUrl.toString()),
-              headers: filterRuleRequestHeaders(
-                request.headers,
-                request.manifest,
-              ),
-            ),
-          );
+        onWebViewCreated: (controller) {
+          if (!active()) return;
+          setup = () async {
+            try {
+              // This controller starts at about:blank; there is no task JS
+              // storage to clear yet. Global APIs are protected by the lease.
+              await clearAnimekoWebViewTaskStorage(
+                controller,
+                skipJavaScript: true,
+                shouldContinue: active,
+              );
+              if (!active()) return;
+              await seedCookies();
+              if (!active()) return;
+              await controller.loadUrl(
+                urlRequest: URLRequest(
+                  url: WebUri(request.pageUrl.toString()),
+                  headers: filterRuleRequestHeaders(
+                    request.headers,
+                    request.manifest,
+                  ),
+                ),
+              );
+            } catch (_) {
+              if (!result.isCompleted) result.complete(null);
+            }
+          }();
+        },
+        onRenderProcessGone: (_, _) {
+          rendererGone = true;
+          // End the caller immediately even if an initialization channel reply
+          // is still pending; teardown keeps ownership of the queue lease.
+          cancellation.cancel();
+          if (!result.isCompleted) result.complete(null);
         },
         onLoadStart: (_, url) => inspect(url?.toString()),
         onLoadResource: (_, resource) => inspect(resource.url.toString()),
@@ -556,21 +621,27 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
         onUpdateVisitedHistory: (_, url, _) => inspect(url?.toString()),
         shouldOverrideUrlLoading: (_, action) async {
           final url = action.request.url?.toString();
-          if (!await network.allows(url, RuleUrlPurpose.page)) {
+          if (!active() ||
+              !await network.allows(url, RuleUrlPurpose.page) ||
+              !active()) {
             return NavigationActionPolicy.CANCEL;
           }
           inspect(url);
           return NavigationActionPolicy.ALLOW;
         },
         shouldInterceptRequest: (_, resource) async {
-          if (!await network.allowsResource(resource.url.toString())) {
+          if (!active() ||
+              !await network.allowsResource(resource.url.toString()) ||
+              !active()) {
             return _blockedWebResourceResponse();
           }
           inspect(resource.url.toString());
           return null;
         },
         shouldInterceptAjaxRequest: (_, ajax) async {
-          if (!await network.allowsResource(ajax.url?.toString())) {
+          if (!active() ||
+              !await network.allowsResource(ajax.url?.toString()) ||
+              !active()) {
             ajax.action = AjaxRequestAction.ABORT;
             return ajax;
           }
@@ -587,7 +658,9 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
           return AjaxRequestAction.PROCEED;
         },
         shouldInterceptFetchRequest: (_, fetch) async {
-          if (!await network.allowsResource(fetch.url?.toString())) {
+          if (!active() ||
+              !await network.allowsResource(fetch.url?.toString()) ||
+              !active()) {
             fetch.action = FetchRequestAction.ABORT;
             return fetch;
           }
@@ -596,6 +669,7 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
           return fetch;
         },
         onLoadStop: (controller, url) async {
+          if (!active()) return;
           inspect(url?.toString());
           try {
             final resources = await controller.evaluateJavascript(
@@ -611,25 +685,49 @@ class _NativeAnimekoWebViewSniffer implements AnimekoWebViewSniffer {
           } catch (_) {}
         },
       );
-      timeoutTimer = Timer(
-        request.timeout,
-        () => unawaited(finish(nested: nestedUrl)),
-      );
-      await webView.run();
+      try {
+        await webView.run();
+      } catch (_) {
+        // A native creation error can arrive after partial allocation. The
+        // plugin skips dispose before run acknowledges; do not create peers.
+        _tasks.quarantine();
+        rethrow;
+      }
       return await result.future;
     } catch (_) {
       return null;
     } finally {
-      unlink?.call();
-      timeoutTimer?.cancel();
+      closing = true;
+      unlink();
       nestedSettleTimer?.cancel();
+      // run must settle before dispose: Android's plugin ignores dispose while
+      // its native creation acknowledgement is still pending. Dispose even if
+      // setup is waiting on a callback; then drain setup before releasing the
+      // process-wide storage lease. Every continuation checks active().
+      final controller = webView?.webViewController;
       try {
-        final controller = webView?.webViewController;
-        if (controller != null) {
-          await clearAnimekoWebViewTaskStorage(controller);
+        if (controller != null && !rendererGone && !cancellation.isCancelled) {
+          await clearAnimekoWebViewTaskStorage(
+            controller,
+            javaScriptTimeout: const Duration(milliseconds: 500),
+            skipGlobal: true,
+          );
         }
-        await webView?.dispose();
-      } catch (_) {}
+      } finally {
+        try {
+          await webView?.dispose();
+        } catch (_) {
+          // An unacknowledged teardown must not permit another native instance.
+          _tasks.quarantine();
+        }
+        await setup;
+        if (controller != null) {
+          await clearAnimekoWebViewTaskStorage(
+            controller,
+            skipJavaScript: true,
+          );
+        }
+      }
     }
   }
 }
@@ -697,11 +795,17 @@ WebResourceResponse _blockedWebResourceResponse() => WebResourceResponse(
 
 @visibleForTesting
 Future<void> clearAnimekoWebViewTaskStorage(
-  InAppWebViewController controller,
-) async {
-  try {
-    await controller.callAsyncJavaScript(
-      functionBody: '''
+  InAppWebViewController controller, {
+  bool skipJavaScript = false,
+  bool skipGlobal = false,
+  bool Function()? shouldContinue,
+  Duration? javaScriptTimeout,
+}) async {
+  if (shouldContinue?.call() == false) return;
+  if (!skipJavaScript) {
+    try {
+      final script = controller.callAsyncJavaScript(
+        functionBody: '''
         try { localStorage.clear(); } catch (_) {}
         try { sessionStorage.clear(); } catch (_) {}
         try {
@@ -723,14 +827,25 @@ Future<void> clearAnimekoWebViewTaskStorage(
         } catch (_) {}
         return true;
       ''',
-    );
-  } catch (_) {}
+      );
+      if (javaScriptTimeout == null) {
+        await script;
+      } else {
+        // Bound renderer JS only. Global clear calls below retain the queue lease
+        // until acknowledged, so a late global clear cannot hit the next task.
+        await script.timeout(javaScriptTimeout);
+      }
+    } catch (_) {}
+  }
+  if (skipGlobal || shouldContinue?.call() == false) return;
   try {
     await WebStorageManager.instance().deleteAllData();
   } catch (_) {}
+  if (shouldContinue?.call() == false) return;
   try {
     await CookieManager.instance().deleteAllCookies();
   } catch (_) {}
+  if (shouldContinue?.call() == false) return;
   try {
     await InAppWebViewController.clearAllCache(includeDiskFiles: true);
   } catch (_) {}
