@@ -412,6 +412,12 @@ class _ProfileShortcutSection extends StatelessWidget {
                   value: '${state.rulePlugins.customRules.length}',
                   onTap: () => context.push('/profile/rules'),
                 ),
+                _ShortcutTile(
+                  icon: Icons.system_update_outlined,
+                  title: '版本信息',
+                  value: '应用更新',
+                  onTap: () => context.push('/profile/version'),
+                ),
               ];
               return GridView.count(
                 crossAxisCount: columns,
