@@ -52,7 +52,7 @@ def acceptance_checks(checks, *, no_animeko_vod=False, stable_requested=False):
     problems = []
     if not checks.get('providers_enabled', {}).get('ok'):
         problems.append('providers-disabled')
-    for name in ('anich_episodes', 'animeko_episodes', 'kazumi_episodes'):
+    for name in ('anich_episodes', 'animeko_episodes'):
         if not checks.get(name, {}).get('count', 0):
             problems.append(name + '-empty')
     names = ['anich_vod', 'anich_cached_vod']
@@ -69,8 +69,6 @@ def acceptance_checks(checks, *, no_animeko_vod=False, stable_requested=False):
                 problems.append(name + '-' + field)
     if not checks.get('anich_cached_vod', {}).get('cached', 0):
         problems.append('anich-cache-not-hit')
-    if not checks.get('kazumi_no_playback', {}).get('ok'):
-        problems.append('kazumi-returned-media')
     if not checks.get('anich_media_sample', {}).get('ok'):
         problems.append('anich-media-sample')
     if not no_animeko_vod and not checks.get('animeko_media_sample', {}).get('ok'):
@@ -84,7 +82,7 @@ async def main(args):
         status, meta = await get_json(client, args.base, '/api/v3/status')
         report['checks']['status'] = {**meta, 'enabled_ids': status.get('playback_providers', {}).get('enabled_ids', [])}
         enabled = set(report['checks']['status']['enabled_ids'])
-        report['checks']['providers_enabled'] = {'ok': {'crawler.anich', 'crawler.animeko', 'crawler.kazumi'} <= enabled}
+        report['checks']['providers_enabled'] = {'ok': {'crawler.anich', 'crawler.animeko'} <= enabled}
         episodes, meta = await get_json(client, args.base, '/api/v2/episodes/crawler:anich:32564')
         report['checks']['anich_episodes'] = {**meta, 'count': len(episodes)}
         lines, meta = await get_json(client, args.base, '/api/v2/vod/crawler:anich:32564', params={'episode': 1})
@@ -100,11 +98,6 @@ async def main(args):
             if media:
                 sample = await probe_media(client, media[0]['url'], media[0].get('headers', {}))
                 report['checks']['animeko_media_sample'] = redact_probe(sample)
-        subject = 'crawler:kazumi:akianime::https://www.akianime.cc/bgmplay/dPDDDE-1-1.html'
-        episodes, meta = await get_json(client, args.base, '/api/v2/episodes/' + quote(subject, safe=':/'))
-        report['checks']['kazumi_episodes'] = {**meta, 'count': len(episodes), 'first_titles': [item.get('title', '') for item in episodes[:3]]}
-        media, meta = await get_json(client, args.base, '/api/v2/vod/' + quote(subject, safe=':/'), params={'episode': 1})
-        report['checks']['kazumi_no_playback'] = {**meta, 'lines': len(media), 'ok': len(media) == 0}
         # Prefer a resolver-produced byte CDN destination instead of an arbitrary source.
         samples = [item for item in again if item.get('url') and any(token in (urlparse(item['url']).hostname or '') for token in ('bytecdn.com', 'byteimg.com'))]
         if samples:

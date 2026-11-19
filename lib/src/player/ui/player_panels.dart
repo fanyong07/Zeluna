@@ -726,6 +726,71 @@ class _LinePanelBody extends StatelessWidget {
     final unresolvedCount = cards.length - routeCount;
     final sourceSummary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
+    bool isPassiveInventoryPlaceholder(PlaybackLine line) {
+      if ((line.url?.trim().isNotEmpty ?? false) ||
+          selected?.id == line.id ||
+          line.clientQuerySupported) {
+        return false;
+      }
+      return const {
+        PlaybackDiscoveryStatus.notQueried,
+        PlaybackDiscoveryStatus.sourceDisabled,
+        PlaybackDiscoveryStatus.compatibilityInactive,
+        PlaybackDiscoveryStatus.retired,
+        PlaybackDiscoveryStatus.quarantined,
+      }.contains(line.diagnosticStatus);
+    }
+
+    final activeCards = [
+      for (final card in cards)
+        if (!isPassiveInventoryPlaceholder(card)) card,
+    ];
+    final passivePlaceholders = [
+      for (final card in cards)
+        if (isPassiveInventoryPlaceholder(card)) card,
+    ];
+    Widget buildCardList(List<PlaybackLine> items) {
+      return Material(
+        color: AppColors.theaterPanelHigh,
+        borderRadius: BorderRadius.circular(10),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            for (var i = 0; i < items.length; i++) ...[
+              _LineTile(
+                key: ValueKey(items[i].id),
+                index: i,
+                line: items[i],
+                selected: selected?.id == items[i].id,
+                runtimeFailed: failedLineIds.contains(items[i].id),
+                onQueryLocally:
+                    !localLookupInProgress &&
+                        items[i].clientQuerySupported &&
+                        localQueryCards[items[i].sourceInventoryId] ==
+                            items[i].id &&
+                        onQueryLocally != null
+                    ? () => onQueryLocally!(items[i])
+                    : null,
+                showLocalQuery:
+                    items[i].clientQuerySupported &&
+                    localQueryCards[items[i].sourceInventoryId] ==
+                        items[i].id &&
+                    onQueryLocally != null,
+                onTap: items[i].available ? () => onSelected(items[i]) : null,
+              ),
+              if (i != items.length - 1)
+                const Divider(
+                  height: 1,
+                  indent: 12,
+                  endIndent: 12,
+                  color: AppColors.theaterBorder,
+                ),
+            ],
+          ],
+        ),
+      );
+    }
+
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 110),
       children: [
@@ -757,48 +822,27 @@ class _LinePanelBody extends StatelessWidget {
                 ? '仍在查找中，目前还没有确认可播的线路。'
                 : playbackUnavailableMessage(lines),
           )
-        else
-          Material(
-            color: AppColors.theaterPanelHigh,
-            borderRadius: BorderRadius.circular(10),
-            clipBehavior: Clip.antiAlias,
-            child: Column(
-              children: [
-                for (var i = 0; i < cards.length; i++) ...[
-                  _LineTile(
-                    key: ValueKey(cards[i].id),
-                    index: i,
-                    line: cards[i],
-                    selected: selected?.id == cards[i].id,
-                    runtimeFailed: failedLineIds.contains(cards[i].id),
-                    onQueryLocally:
-                        !localLookupInProgress &&
-                            cards[i].clientQuerySupported &&
-                            localQueryCards[cards[i].sourceInventoryId] ==
-                                cards[i].id &&
-                            onQueryLocally != null
-                        ? () => onQueryLocally!(cards[i])
-                        : null,
-                    showLocalQuery:
-                        cards[i].clientQuerySupported &&
-                        localQueryCards[cards[i].sourceInventoryId] ==
-                            cards[i].id &&
-                        onQueryLocally != null,
-                    onTap: cards[i].available
-                        ? () => onSelected(cards[i])
-                        : null,
-                  ),
-                  if (i != cards.length - 1)
-                    const Divider(
-                      height: 1,
-                      indent: 12,
-                      endIndent: 12,
-                      color: AppColors.theaterBorder,
-                    ),
-                ],
-              ],
+        else ...[
+          if (activeCards.isNotEmpty) buildCardList(activeCards),
+          if (passivePlaceholders.isNotEmpty) ...[
+            if (activeCards.isNotEmpty) const SizedBox(height: 10),
+            Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+                collapsedIconColor: AppColors.theaterMuted,
+                iconColor: AppColors.theaterMuted,
+                title: Text(
+                  '未查询 / 未启用来源（${passivePlaceholders.length}）',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+                ),
+                children: [buildCardList(passivePlaceholders)],
+              ),
             ),
-          ),
+          ],
+        ],
       ],
     );
   }

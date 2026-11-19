@@ -188,7 +188,6 @@ class AggregatorTests(unittest.IsolatedAsyncioTestCase):
                 "age",
                 "anich",
                 "animeko",
-                "kazumi",
                 "girigiri",
                 "jibi",
                 "nivod",
@@ -1550,7 +1549,7 @@ class AniChDiscoveryWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_PROVIDER_SEARCH_TIMEOUTS["anich"], 8.0)
         self.assertEqual(_PROVIDER_SEARCH_ALIAS_BUDGET["anich"], 2)
         self.assertEqual(_PROVIDER_SEARCH_TIMEOUTS["animeko"], 30.0)
-        self.assertEqual(_PROVIDER_SEARCH_TIMEOUTS["kazumi"], 18.0)
+        self.assertNotIn("kazumi", _PROVIDER_SEARCH_TIMEOUTS)
         # 缺省档位保持不变,DIRECT 源排名加成不被 anich 侵占
         self.assertNotIn("anich", DIRECT_SOURCE_PRIORITIES)
 

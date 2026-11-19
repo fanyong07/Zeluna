@@ -83,7 +83,7 @@ void main() {
       );
       const id = 'kazumi:xfdmneo';
       expect(migrated.rulePlugins.installedIds, contains(id));
-      expect(migrated.rulePlugins.enabledIds, isNot(contains(id)));
+      expect(migrated.rulePlugins.enabledIds, contains(id));
       expect(migrated.rulePlugins.enabledIds, contains('kazumi:mxdm'));
       await controller.uninstallRulePlugin(id);
       final restored = await controller.loadForAccount(

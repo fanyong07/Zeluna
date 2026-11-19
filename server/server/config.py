@@ -276,35 +276,6 @@ MANAGED_PLAYBACK_LINES_PROBE_TIMEOUT_SECONDS = max(
 )
 SOURCE_BINDING_HOURS = max(1, int(os.getenv("SOURCE_BINDING_HOURS", "24")))
 
-# Kazumi 规则库(社区维护的 flat JSON 规则,apiLevel 9)。规则原本由客户端
-# WebView 解释执行,服务端只做机械改写 + 明确降级,因此规则目录允许整体替换:
-# 优先读环境变量指定的目录,便于运维跟上游仓库更新而不改代码。
-#   空值 = 用仓库内自带快照(server/scrapers/anime/kazumi_rules_data/)
-#   _data 目录只存规则数据,加载器位于 kazumi_rules.py。
-KAZUMI_RULES_DIR = os.getenv("KAZUMI_RULES_DIR", "").strip()
-# 默认**关闭**,与 crawler.animeko 同一处理:一个 provider 背后是十几个外部
-# 站点,每轮搜索都会并发打到它们,不适合没人确认就默认开。
-# 打开方式:KAZUMI_ENABLED=true 且把 crawler.kazumi 放进 PLAYBACK_PROVIDER_IDS。
-KAZUMI_ENABLED = _env_bool("KAZUMI_ENABLED", False)
-# 单条规则内的请求间隔下限。规则库指向几十个不同站点,同一轮搜索会并发打到
-# 这些站,保底间隔避免被当成扫站。
-KAZUMI_MIN_REQUEST_INTERVAL_SECONDS = max(
-    0.0, min(10.0, float(os.getenv("KAZUMI_MIN_REQUEST_INTERVAL_SECONDS", "0.5")))
-)
-KAZUMI_HTTP_TIMEOUT_SECONDS = max(
-    3.0, min(60.0, float(os.getenv("KAZUMI_HTTP_TIMEOUT_SECONDS", "12")))
-)
-# 一条规则的搜索最多保留多少条结果。作为聚合源,单站前 30 条足够覆盖同一部
-# 番的不同命名(中文名/日文名/别名)。
-KAZUMI_MAX_RESULTS_PER_RULE = max(
-    1, min(100, int(os.getenv("KAZUMI_MAX_RESULTS_PER_RULE", "30")))
-)
-# 每轮全量搜索的总时长上限。规则库里有已知会挂死/TLS 断连的站点,不能让它们
-# 把一次搜索拖成分钟级;超时后返回已拿到的部分结果,而不是整轮失败。
-KAZUMI_SEARCH_DEADLINE_SECONDS = max(
-    1.0, min(60.0, float(os.getenv("KAZUMI_SEARCH_DEADLINE_SECONDS", "15")))
-)
-
 SOURCE_MAX_CONCURRENCY = max(1, min(4, int(os.getenv("SOURCE_MAX_CONCURRENCY", "2"))))
 PLAYBACK_PROVIDER_IDS = _env_csv("PLAYBACK_PROVIDER_IDS")
 M3U8_SEARCH_ENABLED = _env_bool("M3U8_SEARCH_ENABLED", False)

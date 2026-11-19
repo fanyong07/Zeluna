@@ -27,19 +27,16 @@ void main() {
         });
         for (final rule in bundledKazumiRules) {
           expect(state.installedIds, contains(rule.id));
-          final migrated = rule.id != 'kazumi:mxdm';
-          expect(enabled.map((item) => item.id).contains(rule.id), !migrated);
-          expect(rule.executionStatus.isExecutable, !migrated);
-          if (migrated) {
-            expect(rule.unsupportedReason, contains('迁移'));
-            expect(rule.quickSearch, isFalse);
-          }
+          expect(enabled.map((item) => item.id), contains(rule.id));
+          expect(rule.executionStatus.isExecutable, isTrue);
+          expect(rule.quickSearch, isTrue);
           expect(rule.engine, 'native');
           expect(rule.requiresCaptcha, isFalse);
           expect(rule.requiresWebView, isFalse);
           final permissions = rule.effectiveManifest;
-          expect(permissions.javascript, isFalse);
-          expect(permissions.webViewSniffing, isFalse);
+          final dynamicSniff = rule.id != 'kazumi:mxdm';
+          expect(permissions.javascript, dynamicSniff);
+          expect(permissions.webViewSniffing, dynamicSniff);
           expect(permissions.cookiePolicy, RuleCookiePolicy.none);
           expect(permissions.cleartextHttp, isFalse);
           expect(permissions.pageDomains, hasLength(1));
