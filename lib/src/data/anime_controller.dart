@@ -18,6 +18,7 @@ import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
 import '../downloads/download_controller.dart';
 import '../library/library_controller.dart';
+import '../playback/local_route_ranker.dart';
 import '../playback/playback_discovery_controller.dart';
 import '../recommendations/recommendations.dart';
 import '../rules/drpy_runtime.dart';
@@ -496,6 +497,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       store: _HiveRecommendationEventStore(_library),
     );
     await LocalIdentityMigration(settings: _settings, library: _library).run();
+    LocalRouteRanker.instance.loadFromSettings(_settings);
     final cloudService = ref.read(cloudAccountServiceProvider);
     final CloudSyncTransport? cloudTransport =
         cloudService is CloudSyncTransport
@@ -649,6 +651,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ),
       isContextCurrent: _accounts.isContextCurrent,
       clearRuleRuntimeCaches: playbackResolver.resetExecutionScope,
+      createStartupProbeClient: createTrustedMediaProbeHttpClient,
     );
     playbackDiscovery.loadForAccount(
       accountId: activeAccount?.id,
@@ -745,10 +748,10 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ? const SyncStatus(phase: SyncPhase.checking)
           : const SyncStatus.localOnly(),
     );
-    var syncBootstrapCancelled = false;
+    var bootstrapCancelled = false;
     unawaited(
       Future<void>.delayed(Duration.zero, () {
-        if (syncBootstrapCancelled ||
+        if (bootstrapCancelled ||
             !_accounts.isContextCurrent(initialContextVersion)) {
           return;
         }
@@ -757,6 +760,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           contextVersion: initialContextVersion,
           services: services,
         );
+        _sourceDomain.startSubscriptionRefresh();
       }),
     );
     if (!catalogLoad.homeFresh) {
@@ -774,7 +778,8 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       ).onError((_, _) {}),
     );
     ref.onDispose(() {
-      syncBootstrapCancelled = true;
+      bootstrapCancelled = true;
+      _sourceController?.dispose();
       _downloadController?.dispose();
       _libraryController?.dispose();
       _catalogController?.dispose();
@@ -1382,10 +1387,12 @@ class AnimeController extends AsyncNotifier<AnimeState> {
     required String repositoryName,
     required List<RulePlugin> rules,
     String sourceUrl = '',
+    bool enable = false,
   }) => _sourceDomain.importSelectedRulePlugins(
     repositoryName: repositoryName,
     rules: rules,
     sourceUrl: sourceUrl,
+    enable: enable,
   );
 
   Future<void> toggleVideoSource(String id, bool enabled) =>
@@ -1578,6 +1585,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
             : const SyncStatus(phase: SyncPhase.checking),
       ),
     );
+    _sourceDomain.startSubscriptionRefresh();
     _syncDomain.loadForAccount(
       accountId: accountId,
       contextVersion: activation.contextVersion,

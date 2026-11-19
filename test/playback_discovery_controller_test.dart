@@ -2,13 +2,111 @@ import 'dart:async';
 
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/playback/local_route_ranker.dart';
 import 'package:anime/src/playback/playback_discovery_controller.dart';
 import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_playback_resolver.dart';
 import 'package:anime/src/rules/rule_plugin_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'quick playback races at most four verified peers, returning the winner without changing its evidence',
+    () async {
+      final ids = ['slow', 'fast', 'peer-a', 'peer-b', 'fifth', 'ad'];
+      final candidates = [
+        for (final id in ids)
+          _line(id, provider: 'maccms:$id', serverVerified: true),
+      ];
+      LocalRouteRanker.instance.markLineAsAd(candidates.last);
+      addTearDown(LocalRouteRanker.instance.resetForTesting);
+      final pending = <String, Completer<http.StreamedResponse>>{};
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async =>
+              candidates,
+        ),
+        activeVersion: () => 1,
+        createStartupProbeClient: () => MockClient.streaming((request, _) {
+          return (pending[request.url.host] =
+                  Completer<http.StreamedResponse>())
+              .future;
+        }),
+      );
+      addTearDown(() {
+        for (final request in pending.values) {
+          if (!request.isCompleted) {
+            request.complete(http.StreamedResponse(const Stream.empty(), 503));
+          }
+        }
+        controller.dispose();
+      });
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final playback = controller.linesForEpisode(_subject, _episode);
+      await _waitUntil(() => pending.length >= 4);
+      expect(
+        pending.keys,
+        unorderedEquals([
+          'slow.example',
+          'fast.example',
+          'peer-a.example',
+          'peer-b.example',
+        ]),
+      );
+      pending['fast.example']!.complete(
+        http.StreamedResponse(const Stream.empty(), 206),
+      );
+      final routes = await playback;
+      expect(routes.first, same(candidates[1]));
+      expect(routes.first.clientVerified, isFalse);
+      expect(routes.map((line) => line.id), unorderedEquals(ids));
+    },
+  );
+
+  test(
+    'quick playback leaves a remembered ready route alone and survives an unsuccessful race',
+    () async {
+      final first = _line(
+        'first',
+        provider: 'maccms:first',
+        serverVerified: true,
+      );
+      final remembered = _line(
+        'remembered',
+        provider: 'maccms:remembered',
+        serverVerified: true,
+      );
+      var probeRequests = 0;
+      final controller = _controller(
+        backend: _FakePlaybackRepository(
+          load: (_, _, {required expandAll, cancellationToken}) async => [
+            first,
+            remembered,
+          ],
+        ),
+        activeVersion: () => 1,
+        createStartupProbeClient: () => MockClient((_) async {
+          probeRequests++;
+          return http.Response('', 503);
+        }),
+      );
+      addTearDown(controller.dispose);
+      _load(controller, accountId: 'account-a', contextVersion: 1);
+      final preferred = await controller.linesForEpisode(
+        _subject,
+        _episode,
+        preferredProviderId: remembered.providerId,
+      );
+      expect(preferred, [remembered, first]);
+      expect(probeRequests, 0);
+      final fallback = await controller.linesForEpisode(_subject, _episode);
+      expect(fallback, [first, remembered]);
+      expect(probeRequests, 2);
+    },
+  );
+
   test(
     'stale server timings cannot skip concurrent device verification',
     () async {
@@ -3484,6 +3582,7 @@ PlaybackDiscoveryController _controller({
   PlaybackSourceRepository? rule,
   PlaybackLineVerifier? verify,
   void Function()? clearRuleRuntimeCaches,
+  http.Client Function()? createStartupProbeClient,
   Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
 }) => PlaybackDiscoveryController(
   backendRepository: (_) => backend,
@@ -3498,6 +3597,7 @@ PlaybackDiscoveryController _controller({
       }) async => line,
   isContextCurrent: (version) => version == activeVersion(),
   clearRuleRuntimeCaches: clearRuleRuntimeCaches ?? () {},
+  createStartupProbeClient: createStartupProbeClient,
   interactivePreferredHeadStart: interactivePreferredHeadStart,
 );
 

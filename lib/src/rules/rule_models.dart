@@ -988,6 +988,7 @@ class RuleRepositoryRecord {
     required this.url,
     required this.importedAt,
     required this.ruleCount,
+    this.autoRefresh = false,
     this.legacyIds = const [],
   });
 
@@ -996,6 +997,7 @@ class RuleRepositoryRecord {
   final String url;
   final DateTime importedAt;
   final int ruleCount;
+  final bool autoRefresh;
   final List<String> legacyIds;
 
   Map<String, dynamic> toJson() => {
@@ -1004,6 +1006,7 @@ class RuleRepositoryRecord {
     'url': url,
     'importedAt': importedAt.toIso8601String(),
     'ruleCount': ruleCount,
+    if (autoRefresh) 'autoRefresh': true,
     if (legacyIds.isNotEmpty) 'legacyIds': legacyIds,
   };
 
@@ -1014,6 +1017,7 @@ class RuleRepositoryRecord {
       url: json['url']?.toString() ?? '',
       importedAt: _dateTimeFromJson(json['importedAt']),
       ruleCount: _intFromJson(json['ruleCount']),
+      autoRefresh: json['autoRefresh'] == true,
       legacyIds: _stringList(json['legacyIds']),
     );
   }
@@ -1036,11 +1040,13 @@ class RuleImportResult {
     required this.repositoryName,
     required this.ruleCount,
     required this.installedCount,
+    this.enabledCount = 0,
   });
 
   final String repositoryName;
   final int ruleCount;
   final int installedCount;
+  final int enabledCount;
 }
 
 class RulePluginState {

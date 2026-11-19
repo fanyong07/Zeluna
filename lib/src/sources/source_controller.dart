@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../accounts/account_controller.dart';
@@ -92,6 +94,7 @@ final class SourceController {
   final SourceSnapshotPublisher _publishSnapshot;
   final RuleImporter _importer;
   final DateTime Function() _now;
+  static const _subscriptionRefreshInterval = Duration(hours: 6);
 
   SourceSnapshot _snapshot = const SourceSnapshot();
   String? _accountId;
@@ -100,6 +103,7 @@ final class SourceController {
   var _loadVersion = 0;
   var _hydrationVersion = 0;
   Future<void> _mutationQueue = Future<void>.value();
+  Timer? _subscriptionRefreshTimer;
 
   SourceSnapshot get snapshot => _snapshot;
   String? get accountId => _accountId;
@@ -115,6 +119,7 @@ final class SourceController {
     required String? accountId,
     required int contextVersion,
   }) {
+    _subscriptionRefreshTimer?.cancel();
     final loadVersion = ++_loadVersion;
     return _enqueue(() async {
       _loaded = false;
@@ -153,6 +158,33 @@ final class SourceController {
       _loaded = true;
       return _snapshot;
     });
+  }
+
+  /// Start only after the owner has published the loaded account snapshot.
+  void startSubscriptionRefresh() {
+    _subscriptionRefreshTimer?.cancel();
+    final scope = _scope();
+    void refreshDue() {
+      if (!_isCurrent(scope.accountId, scope.contextVersion)) return;
+      unawaited(
+        _refreshRuleRepositories(
+          scope,
+          dueOnly: true,
+        ).then<void>((_) {}, onError: (Object _, StackTrace _) {}),
+      );
+    }
+
+    _subscriptionRefreshTimer = Timer.periodic(
+      const Duration(hours: 1),
+      (_) => refreshDue(),
+    );
+    refreshDue();
+  }
+
+  void dispose() {
+    _subscriptionRefreshTimer?.cancel();
+    _loaded = false;
+    _loadVersion++;
   }
 
   Future<void> installRulePlugin(String id) {
@@ -262,29 +294,43 @@ final class SourceController {
     });
   }
 
-  Future<RuleRepositoryRefreshResult> refreshRuleRepositories() async {
-    final scope = _scope();
-    await _mutate(scope, () async {
-      await _replaceRulePlugins(
-        scope,
-        _installNewRecommendedRules(_snapshot.rulePlugins),
-      );
-    });
+  Future<RuleRepositoryRefreshResult> refreshRuleRepositories() =>
+      _refreshRuleRepositories(_scope(), dueOnly: false);
+
+  Future<RuleRepositoryRefreshResult> _refreshRuleRepositories(
+    ({String? accountId, int contextVersion}) scope, {
+    required bool dueOnly,
+  }) async {
+    if (!dueOnly) {
+      await _mutate(scope, () async {
+        final current = _snapshot.rulePlugins;
+        final updated = _installNewRecommendedRules(current);
+        if (!identical(current, updated)) {
+          await _replaceRulePlugins(scope, updated);
+        }
+      });
+    }
     _ensureScope(scope);
-    final urls = _snapshot.rulePlugins.repositories
-        .map((record) => record.url.trim())
-        .where((url) => url.isNotEmpty)
-        .toSet()
-        .toList(growable: false);
+    final cutoff = _now().subtract(_subscriptionRefreshInterval);
+    final repositories = [
+      for (final record in _snapshot.rulePlugins.repositories)
+        if (record.url.trim().isNotEmpty &&
+            (!dueOnly ||
+                (record.autoRefresh && !record.importedAt.isAfter(cutoff))))
+          record,
+    ];
     var refreshedCount = 0;
     var failedCount = 0;
     var ruleCount = 0;
-    for (final url in urls) {
+    for (final repository in repositories) {
       _ensureScope(scope);
       try {
-        final bundle = await _importer.importFromUrl(url);
-        _ensureScope(scope);
-        final result = await _importRuleBundle(bundle, scope: scope);
+        final bundle = await _importer.importFromUrl(repository.url);
+        final result = await _importRuleBundle(
+          bundle,
+          scope: scope,
+          refreshing: repository,
+        );
         refreshedCount++;
         ruleCount += result.installedCount;
       } on AccountException {
@@ -294,7 +340,7 @@ final class SourceController {
       }
     }
     return RuleRepositoryRefreshResult(
-      repositoryCount: urls.length,
+      repositoryCount: repositories.length,
       refreshedCount: refreshedCount,
       failedCount: failedCount,
       ruleCount: ruleCount,
@@ -377,6 +423,7 @@ final class SourceController {
     required String repositoryName,
     required List<RulePlugin> rules,
     String sourceUrl = '',
+    bool enable = false,
   }) {
     final scope = _scope();
     return _importRuleBundle(
@@ -386,6 +433,7 @@ final class SourceController {
         sourceUrl: sourceUrl,
       ),
       scope: scope,
+      enable: enable,
     );
   }
 
@@ -430,6 +478,8 @@ final class SourceController {
   Future<RuleImportResult> _importRuleBundle(
     RuleImportBundle bundle, {
     required ({String? accountId, int contextVersion}) scope,
+    bool enable = false,
+    RuleRepositoryRecord? refreshing,
   }) async {
     _ensureScope(scope);
     if (bundle.rules.isEmpty) {
@@ -441,52 +491,106 @@ final class SourceController {
     }
     return _mutate(scope, () async {
       final current = _snapshot.rulePlugins;
+      final sourceUrl = bundle.sourceUrl.trim();
+      final recordId = sourceUrl.isEmpty
+          ? 'clipboard:${_stableRuleBundleId(bundle)}'
+          : 'url:${_stableRuleRepositoryId(sourceUrl)}';
+      final previous = current.repositories
+          .where(
+            (record) =>
+                record.id == recordId ||
+                (sourceUrl.isNotEmpty && record.url.trim() == sourceUrl),
+          )
+          .firstOrNull;
+      if (refreshing != null && !identical(previous, refreshing)) {
+        throw StateError('订阅已被更新，请重新刷新');
+      }
+      bool belongsToRepository(RulePlugin rule) =>
+          sourceUrl.isNotEmpty &&
+          (rule.permissionManifest?.sourceRepository ??
+                  rule.effectiveManifest.sourceRepository) ==
+              (previous?.url.trim() ?? sourceUrl);
+      final subscribed =
+          sourceUrl.isNotEmpty && (enable || previous?.autoRefresh == true);
+      final replaceSubscription = subscribed && (enable || refreshing != null);
+      final prior = {for (final rule in current.customRules) rule.id: rule};
       final importedRules = [
         for (final rule in bundle.rules)
-          rule.copyWith(
-            permissionManifest: rule.effectiveManifest.copyWith(
-              sourceRepository: bundle.sourceUrl.trim(),
-              contentHash: '',
-              trustLevel: RuleTrustLevel.untrusted,
+          // Refresh cannot take over a rule owned by another subscription or
+          // add unselected entries to a legacy, install-only repository.
+          if (refreshing == null ||
+              (prior[rule.id] == null
+                  ? subscribed
+                  : belongsToRepository(prior[rule.id]!)))
+            rule.copyWith(
+              permissionManifest: rule.effectiveManifest.copyWith(
+                sourceRepository: sourceUrl,
+                contentHash: '',
+                trustLevel: RuleTrustLevel.untrusted,
+              ),
             ),
-          ),
       ];
-      final existing = {for (final rule in current.customRules) rule.id: rule};
+      final removedIds = <String>{
+        if (replaceSubscription)
+          for (final rule in current.customRules)
+            if (belongsToRepository(rule)) rule.id,
+      };
+      final existing = {...prior}
+        ..removeWhere((id, _) => removedIds.contains(id));
       for (final rule in importedRules) {
         existing[rule.id] = rule;
+        removedIds.remove(rule.id);
       }
       final mergedCustomRules = existing.values.toList(growable: false);
       final mergedRepository = RulePluginRepository(
         extraRules: mergedCustomRules,
       );
+      final matches = mergedRepository.byIds(
+        importedRules.map((rule) => rule.id),
+      );
       final effectiveRuleIds = <String>{};
+      final approvals = {...current.approvedPermissionDigests};
+      final approvedIds = <String>{};
       for (final rule in importedRules) {
-        final effectiveRule = mergedRepository.byId(rule.id);
-        if (effectiveRule != null) effectiveRuleIds.add(effectiveRule.id);
+        final effectiveRule = matches[rule.id];
+        if (effectiveRule == null) continue;
+        effectiveRuleIds.add(effectiveRule.id);
+        final manifest = effectiveRule.effectiveManifest;
+        if (enable &&
+            effectiveRule.canResolveNatively &&
+            manifest.permissionDigest ==
+                rule.effectiveManifest.permissionDigest) {
+          approvals[effectiveRule.id] = manifest.permissionDigest;
+          approvedIds.add(effectiveRule.id);
+        }
+      }
+      if (refreshing != null) {
+        effectiveRuleIds.removeAll(current.uninstalledIds);
       }
       final repositoryRecord = RuleRepositoryRecord(
-        id: bundle.sourceUrl.trim().isEmpty
-            ? 'clipboard:${_stableRuleBundleId(bundle)}'
-            : 'url:${_stableRuleRepositoryId(bundle.sourceUrl)}',
+        id: recordId,
         name: bundle.name,
-        url: bundle.sourceUrl,
+        url: sourceUrl,
         importedAt: _now(),
         ruleCount: effectiveRuleIds.length,
+        autoRefresh: subscribed,
       );
       final repositories = [
         repositoryRecord,
-        ...current.repositories.where(
-          (record) =>
-              record.id != repositoryRecord.id &&
-              (bundle.sourceUrl.trim().isEmpty ||
-                  record.url.trim() != bundle.sourceUrl.trim()),
-        ),
+        ...current.repositories.where((record) => !identical(record, previous)),
       ];
       await _replaceRulePlugins(
         scope,
         current.copyWith(
-          installedIds: {...current.installedIds, ...effectiveRuleIds},
-          enabledIds: {...current.enabledIds},
+          installedIds: {
+            ...current.installedIds.difference(removedIds),
+            ...effectiveRuleIds,
+          },
+          enabledIds: {
+            ...current.enabledIds.difference(removedIds),
+            ...approvedIds,
+          },
+          approvedPermissionDigests: approvals,
           customRules: mergedCustomRules,
           repositories: repositories,
         ),
@@ -495,6 +599,9 @@ final class SourceController {
         repositoryName: bundle.name,
         ruleCount: bundle.rules.length,
         installedCount: effectiveRuleIds.length,
+        enabledCount: _snapshot.rulePlugins.enabledIds
+            .intersection(approvedIds)
+            .length,
       );
     });
   }

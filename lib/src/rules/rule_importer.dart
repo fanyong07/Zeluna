@@ -49,39 +49,15 @@ class RuleImporter {
       maxResponseBytes: maxFileBytes,
       requestTimeout: timeout,
     );
-    policy.ensureUriAllowed(uri);
     final ownedClient = _client == null;
     final client = _client ?? createNetworkHttpClient(policy);
     try {
-      final request = http.Request('GET', uri)
-        ..headers['Accept'] = 'application/json, text/plain;q=0.9';
-      final response = await client.send(request).timeout(timeout);
-      if (response.statusCode >= 300 && response.statusCode < 400) {
-        final location = response.headers['location']?.trim() ?? '';
-        if (location.isNotEmpty) {
-          policy.ensureUriAllowed(uri.resolve(location));
-        }
-        final subscription = response.stream.listen(null);
-        await subscription.cancel();
-        throw const FormatException('规则导入地址发生重定向，已停止访问。');
+      final decoded = await _fetchRuleJson(client, policy, uri);
+      final index = _kazumiIndex(decoded);
+      if (index != null) {
+        return await _loadKazumiIndex(client, policy, uri, index);
       }
-      if (response.statusCode < 200 || response.statusCode >= 400) {
-        throw FormatException('仓库请求失败：HTTP ${response.statusCode}');
-      }
-      _validateRuleResponseType(response.headers['content-type']);
-      final declaredLength = int.tryParse(
-        response.headers['content-length']?.trim() ?? '',
-      );
-      if (declaredLength != null && declaredLength > maxFileBytes) {
-        throw FormatException(
-          '规则文件超过 ${_byteSizeLabel(maxFileBytes)} 读取上限，已停止下载。',
-        );
-      }
-      final text = await _readRuleResponseText(
-        response.stream,
-        maxFileBytes,
-      ).timeout(timeout);
-      return importFromText(text, sourceUrl: uri.toString());
+      return _bundleFromJson(decoded, uri.toString());
     } on NetworkSecurityException catch (error) {
       throw FormatException(error.message);
     } finally {
@@ -89,10 +65,127 @@ class RuleImporter {
     }
   }
 
+  Future<Object?> _fetchRuleJson(
+    http.Client client,
+    NetworkRequestPolicy policy,
+    Uri uri, {
+    int? maxBytes,
+  }) async {
+    final limit = maxBytes ?? maxFileBytes;
+    policy.ensureUriAllowed(uri);
+    final request = http.Request('GET', uri)
+      ..followRedirects = false
+      ..headers['Accept'] = 'application/json, text/plain;q=0.9';
+    final response = await client.send(request).timeout(timeout);
+    if (response.statusCode >= 300 && response.statusCode < 400) {
+      final location = response.headers['location']?.trim() ?? '';
+      if (location.isNotEmpty) policy.ensureUriAllowed(uri.resolve(location));
+      final subscription = response.stream.listen(null);
+      await subscription.cancel();
+      throw const FormatException('规则导入地址发生重定向，已停止访问。');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 400) {
+      throw FormatException('仓库请求失败：HTTP ${response.statusCode}');
+    }
+    _validateRuleResponseType(response.headers['content-type']);
+    final declaredLength = int.tryParse(
+      response.headers['content-length']?.trim() ?? '',
+    );
+    if (declaredLength != null && declaredLength > limit) {
+      throw FormatException('规则文件超过 ${_byteSizeLabel(limit)} 读取上限，已停止下载。');
+    }
+    final text = await _readRuleResponseText(
+      response.stream,
+      limit,
+    ).timeout(timeout);
+    return _decodeRuleJson(text.trim());
+  }
+
+  List<Map<String, dynamic>>? _kazumiIndex(Object? decoded) {
+    if (decoded is! List || decoded.isEmpty) return null;
+    final entries = <Map<String, dynamic>>[];
+    for (final item in decoded) {
+      if (item is! Map<String, dynamic> ||
+          item['name'] is! String ||
+          !item.containsKey('version') ||
+          !item.containsKey('lastUpdate') ||
+          _looksLikeSingleRule(item)) {
+        return null;
+      }
+      entries.add(item);
+    }
+    return entries;
+  }
+
+  Future<RuleImportBundle> _loadKazumiIndex(
+    http.Client client,
+    NetworkRequestPolicy policy,
+    Uri uri,
+    List<Map<String, dynamic>> entries,
+  ) async {
+    if (entries.length > 64) {
+      throw const FormatException('Kazumi 目录超过 64 条规则，请选择较小的订阅。');
+    }
+    final byName = <String, Map<String, dynamic>>{};
+    for (final entry in entries) {
+      final name = (entry['name'] as String).trim();
+      if (name.isEmpty ||
+          name.length > 128 ||
+          name.contains(RegExp(r'[/\\]'))) {
+        throw const FormatException('Kazumi 目录含有无效的规则文件名。');
+      }
+      byName[name] = entry;
+    }
+    final rules = <Map<String, dynamic>>[];
+    final names = byName.keys.toList(growable: false);
+    const ruleLimit = 256 * 1024;
+    final maxRuleBytes = maxFileBytes < ruleLimit ? maxFileBytes : ruleLimit;
+    for (var start = 0; start < names.length; start += 6) {
+      rules.addAll(
+        await Future.wait(
+          names.skip(start).take(6).map((name) async {
+            // Resolve only a sibling JSON file; never forward an index query.
+            final child = uri.resolve('./${Uri.encodeComponent('$name.json')}');
+            final decoded = await _fetchRuleJson(
+              client,
+              policy,
+              child,
+              maxBytes: maxRuleBytes,
+            );
+            if (decoded is! Map<String, dynamic> ||
+                !_looksLikeSingleRule(decoded)) {
+              throw FormatException('Kazumi 目录中的 $name 不是完整的规则。');
+            }
+            return {
+              ...decoded,
+              'name': decoded['name'] ?? name,
+              'version': decoded['version'] ?? byName[name]!['version'],
+              'updatedAt': decoded['updatedAt'] ?? byName[name]!['lastUpdate'],
+              'source': 'kazumi',
+              'rawConfig': decoded,
+            };
+          }),
+          eagerError: true,
+        ),
+      );
+    }
+    return _bundleFromJson({
+      'name': 'Kazumi 规则订阅',
+      'rules': rules,
+    }, uri.toString());
+  }
+
   RuleImportBundle importFromText(String text, {String sourceUrl = ''}) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) throw const FormatException('导入内容为空。');
     final decoded = _decodeRuleJson(trimmed);
+    if (_kazumiIndex(decoded) != null) {
+      throw const FormatException('这是 Kazumi 规则目录，请粘贴目录的订阅地址。');
+    }
+    return _bundleFromJson(decoded, sourceUrl);
+  }
+
+  RuleImportBundle _bundleFromJson(Object? decoded, String sourceUrl) {
     final name = _repositoryName(decoded, sourceUrl);
     final rules = _parseRules(decoded, sourceUrl)
         .where(

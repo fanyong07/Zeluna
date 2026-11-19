@@ -1,8 +1,10 @@
 import 'dart:async';
 
+import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/network/media_request_headers.dart';
+import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
 
 /// Cleanliness tier for automatic route selection.
@@ -25,6 +27,7 @@ final class LocalRouteRanker {
   }) : _now = now ?? DateTime.now;
 
   static final LocalRouteRanker instance = LocalRouteRanker();
+  static const _settingsKey = 'playback.localRouteRanker';
 
   final DateTime Function() _now;
   final double emaAlpha;
@@ -33,6 +36,7 @@ final class LocalRouteRanker {
 
   final Map<String, double> _hostLatencyMs = <String, double>{};
   final Map<String, DateTime> _adReportedKeys = <String, DateTime>{};
+  Box<dynamic>? _settings;
 
   static const _cleanProviderTokens = <String>[
     'local',
@@ -54,6 +58,54 @@ final class LocalRouteRanker {
     return uri?.host.toLowerCase() ?? '';
   }
 
+  void loadFromSettings(Box<dynamic> settings) {
+    _settings = settings;
+    _hostLatencyMs.clear();
+    _adReportedKeys.clear();
+    final saved = settings.get(_settingsKey);
+    if (saved is! Map) return;
+    if (saved['hostLatencyMs'] case final Map hosts) {
+      for (final entry in hosts.entries) {
+        final ms = entry.value;
+        if (entry.key is String && ms is num && ms >= 10 && ms <= 30000) {
+          _hostLatencyMs[entry.key as String] = ms.toDouble();
+        }
+      }
+      _trimHosts();
+    }
+    if (saved['adExpiryMs'] case final Map reports) {
+      final nowMs = _now().millisecondsSinceEpoch;
+      for (final entry in reports.entries) {
+        final expiry = entry.value;
+        if (entry.key is String &&
+            expiry is int &&
+            expiry > nowMs &&
+            expiry <= nowMs + adDemotionTtl.inMilliseconds) {
+          _adReportedKeys[entry.key as String] =
+              DateTime.fromMillisecondsSinceEpoch(expiry);
+        }
+      }
+    }
+  }
+
+  void _persist() {
+    final settings = _settings;
+    if (settings == null || !settings.isOpen) return;
+    final now = _now();
+    _adReportedKeys.removeWhere((_, expiry) => !expiry.isAfter(now));
+    // Store no full playback URL or request headers, and never block playback.
+    unawaited(
+      settings
+          .put(_settingsKey, {
+            'hostLatencyMs': Map<String, double>.of(_hostLatencyMs),
+            'adExpiryMs': _adReportedKeys.map(
+              (key, expiry) => MapEntry(key, expiry.millisecondsSinceEpoch),
+            ),
+          })
+          .onError((_, _) {}),
+    );
+  }
+
   void recordHostLatency(String? rawUrl, Duration latency) {
     final host = hostOf(rawUrl);
     final ms = latency.inMilliseconds.toDouble();
@@ -62,6 +114,11 @@ final class LocalRouteRanker {
     _hostLatencyMs[host] = previous == null
         ? ms
         : previous * (1 - emaAlpha) + ms * emaAlpha;
+    _trimHosts();
+    _persist();
+  }
+
+  void _trimHosts() {
     while (_hostLatencyMs.length > maxHosts) {
       _hostLatencyMs.remove(_hostLatencyMs.keys.first);
     }
@@ -84,6 +141,7 @@ final class LocalRouteRanker {
     if (provider.isNotEmpty) {
       _adReportedKeys['provider:$provider'] = expiry;
     }
+    _persist();
   }
 
   bool isAdDemoted(PlaybackLine line) {
@@ -105,9 +163,13 @@ final class LocalRouteRanker {
     return false;
   }
 
-  void clearAdReports() => _adReportedKeys.clear();
+  void clearAdReports() {
+    _adReportedKeys.clear();
+    _persist();
+  }
 
   void resetForTesting() {
+    _settings = null;
     _hostLatencyMs.clear();
     _adReportedKeys.clear();
   }
@@ -125,92 +187,44 @@ final class LocalRouteRanker {
     return RouteCleanlinessTier.cleanable;
   }
 
-  /// Races up to [maxCandidates] playable candidates directly from the user's
-  /// device network (small byte-range GET) and returns the fastest valid route.
+  /// Compares response times of already verified routes on the device.
+  /// A successful Range request is a timing sample, not media verification.
   Future<PlaybackLine?> raceFastestPlayable(
     Iterable<PlaybackLine> lines, {
     required http.Client client,
     int maxCandidates = 4,
     Duration timeout = const Duration(milliseconds: 2500),
   }) async {
-    final candidates = [
-      for (final line in lines)
-        if ((line.url?.trim().isNotEmpty ?? false) &&
-            (line.url!.trim().startsWith('http://') ||
-                line.url!.trim().startsWith('https://')))
-          line,
-    ].take(maxCandidates).toList(growable: false);
-    if (candidates.isEmpty) return null;
-    if (candidates.length == 1) return candidates.first;
+    final candidates = lines
+        .where(canRace)
+        .take(maxCandidates)
+        .toList(growable: false);
+    if (candidates.length < 2) return null;
 
     final winner = Completer<PlaybackLine?>();
     var remaining = candidates.length;
 
     Future<void> probe(PlaybackLine candidate) async {
-      final uri = Uri.tryParse(candidate.url!.trim());
-      if (uri == null) return;
       final watch = Stopwatch()..start();
       try {
-        final request = http.Request('GET', uri)
+        final request = http.Request('GET', Uri.parse(candidate.url!.trim()))
+          ..followRedirects = false
           ..headers.addAll(effectiveMediaRequestHeaders(candidate.headers))
           ..headers['Range'] = 'bytes=0-4095';
-        final response = await client.send(request).timeout(timeout);
+        final response = await client.send(request);
+        watch.stop();
+        // Upstreams may ignore Range and send a whole movie. Never drain it.
+        final stream = response.stream.listen(null);
+        unawaited(stream.cancel().onError((_, _) {}));
+        if (winner.isCompleted) return;
         final status = response.statusCode;
         final contentType = (response.headers['content-type'] ?? '')
             .toLowerCase();
-        unawaited(response.stream.drain<void>().catchError((_) {}));
-        watch.stop();
         if ((status == 200 || status == 206) &&
-            !contentType.contains('text/html')) {
+            !contentType.contains('html') &&
+            !contentType.contains('json')) {
           recordHostLatency(candidate.url, watch.elapsed);
-          if (!winner.isCompleted) {
-            winner.complete(
-              PlaybackLine(
-                id: candidate.id,
-                episodeId: candidate.episodeId,
-                providerId: candidate.providerId,
-                providerName: candidate.providerName,
-                title: candidate.title,
-                quality: candidate.quality,
-                format: candidate.format,
-                url: candidate.url,
-                headers: candidate.headers,
-                latency: watch.elapsed,
-                sizeLabel: candidate.sizeLabel,
-                sizeBytes: candidate.sizeBytes,
-                sizeEstimated: candidate.sizeEstimated,
-                videoWidth: candidate.videoWidth,
-                videoHeight: candidate.videoHeight,
-                bitrate: candidate.bitrate,
-                codecs: candidate.codecs,
-                isLive: candidate.isLive,
-                adaptive: candidate.adaptive,
-                publicHttpOnly: candidate.publicHttpOnly,
-                serverVerified: candidate.serverVerified,
-                requiresClientProbe: false,
-                clientVerified: true,
-                startupProfile: candidate.startupProfile,
-                cacheState: candidate.cacheState,
-                sourceErrorCategory: candidate.sourceErrorCategory,
-                sourceName: candidate.sourceName,
-                sourceInventoryId: candidate.sourceInventoryId,
-                clientQuerySupported: candidate.clientQuerySupported,
-                queryLocation: candidate.queryLocation,
-                sourceAddress: candidate.sourceAddress,
-                diagnosticStatus: candidate.diagnosticStatus,
-                queried: candidate.queried,
-                aliasesAttempted: candidate.aliasesAttempted,
-                searchHitCount: candidate.searchHitCount,
-                bestMatchScore: candidate.bestMatchScore,
-                matched: candidate.matched,
-                episodeFound: candidate.episodeFound,
-                discoveryElapsed: candidate.discoveryElapsed,
-                expiresAt: candidate.expiresAt,
-                available: true,
-                message: candidate.message,
-              ),
-            );
-          }
+          winner.complete(candidate);
         }
       } catch (_) {
         // Ignore individual probe failure; fastest valid peer wins.
@@ -225,6 +239,25 @@ final class LocalRouteRanker {
     for (final candidate in candidates) {
       unawaited(probe(candidate));
     }
-    return winner.future.timeout(timeout, onTimeout: () => null);
+    return winner.future.timeout(
+      timeout,
+      onTimeout: () {
+        if (!winner.isCompleted) winner.complete(null);
+        return null;
+      },
+    );
+  }
+
+  static bool canRace(PlaybackLine line) {
+    final uri = Uri.tryParse(line.url?.trim() ?? '');
+    return line.available &&
+        (line.clientVerified || line.serverVerified) &&
+        !line.requiresClientProbe &&
+        !line.isLive &&
+        uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host.isNotEmpty &&
+        uri.userInfo.isEmpty &&
+        !line.headers.keys.any(isSensitiveNetworkHeader);
   }
 }

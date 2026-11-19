@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:http/http.dart' as http;
+
 import '../core/identity/stable_identity.dart';
 import '../data/playback_prefetch_cache.dart';
 import '../data/local_maccms_playback.dart';
@@ -154,6 +156,7 @@ final class PlaybackDiscoveryController {
     required PlaybackLineVerifier verifyLine,
     required PlaybackContextGuard isContextCurrent,
     required void Function() clearRuleRuntimeCaches,
+    http.Client Function()? createStartupProbeClient,
     DateTime Function()? now,
     Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
   }) : assert(interactivePreferredHeadStart.inMicroseconds > 0),
@@ -162,6 +165,7 @@ final class PlaybackDiscoveryController {
        _verifyLine = verifyLine,
        _isContextCurrent = isContextCurrent,
        _clearRuleRuntimeCaches = clearRuleRuntimeCaches,
+       _createStartupProbeClient = createStartupProbeClient,
        _now = now ?? DateTime.now,
        _interactivePreferredHeadStart = interactivePreferredHeadStart,
        _backendCache = PlaybackPrefetchCache(now: now),
@@ -176,6 +180,7 @@ final class PlaybackDiscoveryController {
   final PlaybackLineVerifier _verifyLine;
   final PlaybackContextGuard _isContextCurrent;
   final void Function() _clearRuleRuntimeCaches;
+  final http.Client Function()? _createStartupProbeClient;
   final DateTime Function() _now;
   final Duration _interactivePreferredHeadStart;
   final PlaybackPrefetchCache _backendCache;
@@ -382,9 +387,15 @@ final class PlaybackDiscoveryController {
       _quickLookups[key] = operation;
       final owned = operation;
       owned.future =
-          Future<List<PlaybackLine>>.sync(
-            () => discover(owned.token),
-          ).whenComplete(() {
+          Future<List<PlaybackLine>>.sync(() async {
+            final lines = await discover(owned.token);
+            return _rankInteractiveCandidates(
+              scope,
+              lines,
+              preferred,
+              owned.token,
+            );
+          }).whenComplete(() {
             owned.settled = true;
             if (identical(_quickLookups[key], owned)) _quickLookups.remove(key);
           });
@@ -395,6 +406,59 @@ final class PlaybackDiscoveryController {
       lookups: _quickLookups,
       cancellationToken: cancellationToken,
     );
+  }
+
+  Future<List<PlaybackLine>> _rankInteractiveCandidates(
+    _PlaybackDiscoveryScope scope,
+    List<PlaybackLine> lines,
+    String? preferredProviderId,
+    RulePlaybackCancellationToken token,
+  ) async {
+    if (!_isCurrent(scope) || token.isCancelled) return const [];
+    final createClient = _createStartupProbeClient;
+    if (createClient == null || lines.length < 2) return lines;
+    final ranker = LocalRouteRanker.instance;
+    final ranked = rankPlaybackLinesForStartup(lines);
+    final minExpiry = _now().add(const Duration(seconds: 15));
+    final ready = ranked.where(
+      (line) =>
+          _isVerifiedLookupLine(line, minExpiry) &&
+          (line.clientVerified || line.cacheState != 'stale'),
+    );
+    final preferred = ready.where(
+      (line) => line.providerId == preferredProviderId,
+    );
+    final pool = preferred.isEmpty ? ready : preferred;
+    final first = pool.firstOrNull;
+    if (first == null || !LocalRouteRanker.canRace(first)) return ranked;
+    final tier = ranker.cleanlinessTierOf(first);
+    // Only compare peers. A quicker response must not outrank a cleaner line,
+    // an already checked route, or a container that starts more efficiently.
+    final peers = pool.where(
+      (line) =>
+          LocalRouteRanker.canRace(line) &&
+          _startupAvailabilityRank(line) == _startupAvailabilityRank(first) &&
+          ranker.cleanlinessTierOf(line) == tier &&
+          _startupProfileRank(line) == _startupProfileRank(first),
+    );
+    if (peers.take(2).length < 2) return ranked;
+
+    final client = createClient();
+    final unregister = token.register(client.close);
+    try {
+      final winner = await ranker.raceFastestPlayable(
+        peers,
+        client: client,
+        timeout: const Duration(milliseconds: 600),
+      );
+      if (!_isCurrent(scope) || token.isCancelled) return const [];
+      return winner == null
+          ? ranked
+          : [winner, ...ranked.where((line) => !identical(line, winner))];
+    } finally {
+      unregister();
+      if (!token.isCancelled) client.close();
+    }
   }
 
   Future<List<PlaybackLine>> _linesForEpisodeWithoutPreference(

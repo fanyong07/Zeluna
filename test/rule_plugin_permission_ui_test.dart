@@ -4,10 +4,66 @@ import 'package:anime/src/rules/rule_models.dart';
 import 'package:anime/src/rules/rule_plugin_page.dart';
 import 'package:anime/src/rules/rule_security.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets(
+    'a batch preview needs one confirmation and does not enable rules before it',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 840);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async =>
+            call.method == 'Clipboard.getData' ? {'text': _batchJson} : null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      final controller = _PermissionUiAnimeController();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [animeControllerProvider.overrideWith(() => controller)],
+          child: const MaterialApp(home: RuleManagementPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> openPreview() async {
+        await tester.tap(find.byTooltip('添加规则'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('从剪贴板导入'));
+        await tester.pumpAndSettle();
+      }
+
+      await openPreview();
+      expect(find.text('预览规则 · 本地测试合集'), findsOneWidget);
+      expect(find.textContaining('页面域名：media.example'), findsWidgets);
+      expect(controller.confirmedRules, isEmpty);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(controller.confirmedRules, isEmpty);
+
+      await openPreview();
+      await tester.tap(find.text('全部安装并启用'));
+      await tester.pumpAndSettle();
+      expect(controller.confirmations, 1);
+      expect(controller.confirmedRules.map((rule) => rule.name), [
+        '电影测试源',
+        '剧集测试源',
+      ]);
+      expect(find.text('确认规则权限'), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('untrusted rule shows its complete permissions before enabling', (
     tester,
   ) async {
@@ -51,6 +107,28 @@ void main() {
 }
 
 class _PermissionUiAnimeController extends AnimeController {
+  var confirmations = 0;
+  List<RulePlugin> confirmedRules = [];
+
+  @override
+  Future<RuleImportResult> importSelectedRulePlugins({
+    required String repositoryName,
+    required List<RulePlugin> rules,
+    String sourceUrl = '',
+    bool enable = false,
+  }) async {
+    if (enable) {
+      confirmations++;
+      confirmedRules = rules;
+    }
+    return RuleImportResult(
+      repositoryName: repositoryName,
+      ruleCount: rules.length,
+      installedCount: rules.length,
+      enabledCount: enable ? rules.length : 0,
+    );
+  }
+
   @override
   Future<AnimeState> build() async => AnimeState(
     homeFeed: const AnimeHomeFeed(
@@ -67,6 +145,16 @@ class _PermissionUiAnimeController extends AnimeController {
     ),
   );
 }
+
+const _batchJson = '''
+{
+  "name": "本地测试合集",
+  "sites": [
+    {"type":1,"api":"https://media.example/a","name":"电影测试源"},
+    {"type":1,"api":"https://media.example/b","name":"剧集测试源"}
+  ]
+}
+''';
 
 final _rule = RulePlugin(
   id: 'custom:permission-ui',

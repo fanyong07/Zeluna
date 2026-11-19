@@ -90,10 +90,12 @@ class RulePluginRepository {
     );
   }
 
-  RulePlugin? byId(String id) {
+  RulePlugin? byId(String id) => _collection.byId(id);
+
+  /// Resolves a whole import against one canonicalized inventory.
+  Map<String, RulePlugin> byIds(Iterable<String> ids) {
     final collection = _collection;
-    final canonicalId = collection.canonicalIdByAlias[id] ?? id;
-    return collection.byCanonicalId[canonicalId];
+    return {for (final id in ids) id: ?collection.byId(id)};
   }
 
   bool canEnableRule(RulePlugin rule, RulePluginState state) {
@@ -173,6 +175,8 @@ class _RuleCollection {
   final Map<String, String> canonicalIdByAlias;
   final Map<String, Set<String>> aliasesByCanonicalId;
   final Map<String, List<RulePlugin>> rulesByCanonicalId;
+
+  RulePlugin? byId(String id) => byCanonicalId[canonicalIdByAlias[id] ?? id];
 
   bool anyAliasIn(String canonicalId, Set<String> ids) {
     final aliases = aliasesByCanonicalId[canonicalId] ?? {canonicalId};

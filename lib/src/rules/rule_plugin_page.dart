@@ -239,6 +239,8 @@ class _RuleRepositoryPageState extends ConsumerState<RuleRepositoryPage> {
                 repositories: state.rulePlugins.repositories,
                 onSelected: (value) => setState(() => _type = value),
                 onImport: () => _showRepositoryUrlDialog(context, ref),
+                onReviewSubscription: (url) =>
+                    _handleRepositoryAddress(context, ref, url),
               ),
               const SizedBox(height: 16),
               for (final rule in rules) ...[
@@ -889,12 +891,14 @@ class _RepositoryHeader extends StatelessWidget {
     required this.repositories,
     required this.onSelected,
     required this.onImport,
+    required this.onReviewSubscription,
   });
 
   final RuleContentType selected;
   final List<RuleRepositoryRecord> repositories;
   final ValueChanged<RuleContentType> onSelected;
   final VoidCallback onImport;
+  final ValueChanged<String> onReviewSubscription;
 
   @override
   Widget build(BuildContext context) {
@@ -907,7 +911,7 @@ class _RepositoryHeader extends StatelessWidget {
               const Expanded(
                 child: SectionTitle(
                   title: '自定义仓库',
-                  subtitle: '粘贴地址，先看清楚里面有哪些规则，再挑要装的',
+                  subtitle: '预览扩展来源，整组订阅启用或挑选安装',
                 ),
               ),
               OutlinedButton.icon(
@@ -929,7 +933,7 @@ class _RepositoryHeader extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
               child: Text(
-                '用法：① 粘贴 GitHub 仓库地址，或直接粘贴规则文件地址；② 从列出的文件里选一个；③ 勾选要装的规则。装好后默认都是关着的，你自己逐个打开。',
+                '支持 Kazumi、Animeko 和 TVBox 订阅地址。确认订阅后，应用运行时会定期刷新。新增或变更的规则不会自动启用，点订阅名称可整组重新确认。',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                   height: 1.5,
@@ -959,11 +963,21 @@ class _RepositoryHeader extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final repository in repositories.take(4))
-                  SmallBadge(
-                    label: '${repository.name} · ${repository.ruleCount}',
-                    active: true,
-                  ),
+                for (final repository in repositories)
+                  if (repository.url.isEmpty)
+                    SmallBadge(
+                      label: '${repository.name} · ${repository.ruleCount}',
+                      active: true,
+                    )
+                  else
+                    ActionChip(
+                      label: Text(
+                        '${repository.name} · ${repository.ruleCount}'
+                        '${repository.autoRefresh ? ' · 定时刷新' : ''}',
+                      ),
+                      tooltip: '预览订阅并确认权限',
+                      onPressed: () => onReviewSubscription(repository.url),
+                    ),
               ],
             ),
           ],
@@ -1627,7 +1641,7 @@ void _showImportSheet(BuildContext context, WidgetRef ref) {
               _ImportAction(
                 icon: Icons.add_link_rounded,
                 title: '粘贴 GitHub 仓库或规则文件地址',
-                subtitle: '先列出里面的文件给你看，只装你勾选的那些',
+                subtitle: '先预览内容，再整组启用或挑选安装',
                 onTap: () {
                   Navigator.of(sheetContext).pop();
                   _showRepositoryUrlDialog(context, ref);
@@ -1888,16 +1902,52 @@ Future<void> _showRuleSelectionDialog(
   WidgetRef ref,
   RuleImportBundle bundle,
 ) async {
+  final controller = ref.read(animeControllerProvider.notifier);
+  final accountVersion = controller.accountContextVersion;
+  final isRemote = bundle.sourceUrl.trim().isNotEmpty;
   final selectedIds = <String>{};
   var importing = false;
   await showDialog<void>(
     context: context,
+    barrierDismissible: false,
     builder: (dialogContext) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
           final colors = Theme.of(context).colorScheme;
+          Future<void> install({required bool enable}) async {
+            setDialogState(() => importing = true);
+            try {
+              if (!controller.isAccountContextCurrent(accountVersion)) {
+                throw const FormatException('账号已切换，请重新打开规则预览。');
+              }
+              final result = await controller.importSelectedRulePlugins(
+                repositoryName: bundle.name,
+                rules: enable
+                    ? bundle.rules
+                    : bundle.rules
+                          .where((rule) => selectedIds.contains(rule.id))
+                          .toList(),
+                sourceUrl: bundle.sourceUrl,
+                enable: enable,
+              );
+              if (!dialogContext.mounted) return;
+              _showSnack(
+                context,
+                enable
+                    ? '${isRemote ? '已订阅' : '已安装'} ${result.installedCount} 条规则，已启用 ${result.enabledCount} 条'
+                    : '已安装 ${result.installedCount} 条规则，未额外启用',
+              );
+              Navigator.of(dialogContext).pop();
+            } catch (error) {
+              if (dialogContext.mounted) {
+                _showSnack(context, _friendlyImportError(error));
+                setDialogState(() => importing = false);
+              }
+            }
+          }
+
           return AlertDialog(
-            title: Text('选择规则 · ${bundle.name}'),
+            title: Text('预览规则 · ${bundle.name}'),
             content: SizedBox(
               width: 680,
               height: 460,
@@ -1905,7 +1955,7 @@ Future<void> _showRuleSelectionDialog(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '默认一个都不勾。装好之后到扩展来源里自己打开。',
+                    '这些规则来自外部来源。整组启用即批准下列可用规则的当前版本及所列权限；新增或变更后需重新确认。只想安装部分规则，可勾选后选「仅安装所选」。',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: colors.onSurfaceVariant,
                     ),
@@ -1917,21 +1967,36 @@ Future<void> _showRuleSelectionDialog(
                       separatorBuilder: (_, _) => const Divider(height: 1),
                       itemBuilder: (context, index) {
                         final rule = bundle.rules[index];
+                        final manifest = rule.effectiveManifest;
+                        final capabilities = <String>[
+                          if (manifest.javascript) 'JavaScript',
+                          if (manifest.webViewSniffing) 'WebView',
+                          if (manifest.cookiePolicy != RuleCookiePolicy.none)
+                            'Cookie（${manifest.cookiePolicy.label}）',
+                          if (manifest.cleartextHttp) 'HTTP',
+                          if (manifest.customReferer) 'Referer',
+                          if (manifest.customOrigin) 'Origin',
+                          if (manifest.customUserAgent) 'User-Agent',
+                        ];
                         return CheckboxListTile(
                           value: selectedIds.contains(rule.id),
-                          onChanged: (selected) {
-                            setDialogState(() {
-                              if (selected == true) {
-                                selectedIds.add(rule.id);
-                              } else {
-                                selectedIds.remove(rule.id);
-                              }
-                            });
-                          },
+                          onChanged: importing
+                              ? null
+                              : (selected) {
+                                  setDialogState(() {
+                                    if (selected == true) {
+                                      selectedIds.add(rule.id);
+                                    } else {
+                                      selectedIds.remove(rule.id);
+                                    }
+                                  });
+                                },
                           title: Text(rule.name),
                           subtitle: Text(
                             '${rule.contentLabel} · ${_ruleEngineLabel(rule.engine)} · '
-                            '${rule.executionStatus.label}',
+                            '${rule.executionStatus.label} · ${manifest.version}\n'
+                            '页面域名：${_permissionList(manifest.pageDomains)}\n'
+                            '附加权限：${_permissionList(capabilities)}',
                           ),
                           secondary: Icon(
                             Icons.rule_folder_outlined,
@@ -1951,39 +2016,14 @@ Future<void> _showRuleSelectionDialog(
                     : () => Navigator.of(dialogContext).pop(),
                 child: const Text('取消'),
               ),
-              FilledButton.icon(
+              OutlinedButton(
                 onPressed: importing || selectedIds.isEmpty
                     ? null
-                    : () async {
-                        setDialogState(() => importing = true);
-                        final selected = bundle.rules
-                            .where((rule) => selectedIds.contains(rule.id))
-                            .toList(growable: false);
-                        try {
-                          final result = await ref
-                              .read(animeControllerProvider.notifier)
-                              .importSelectedRulePlugins(
-                                repositoryName: bundle.name,
-                                rules: selected,
-                                sourceUrl: bundle.sourceUrl,
-                              );
-                          if (!dialogContext.mounted) return;
-                          Navigator.of(dialogContext).pop();
-                          if (context.mounted) {
-                            _showSnack(
-                              context,
-                              '已安装 ${result.installedCount} 条规则，默认未启用',
-                            );
-                          }
-                        } catch (error) {
-                          if (context.mounted) {
-                            _showSnack(context, _friendlyImportError(error));
-                          }
-                          if (dialogContext.mounted) {
-                            setDialogState(() => importing = false);
-                          }
-                        }
-                      },
+                    : () => install(enable: false),
+                child: const Text('仅安装所选'),
+              ),
+              FilledButton.icon(
+                onPressed: importing ? null : () => install(enable: true),
                 icon: importing
                     ? const SizedBox(
                         width: 16,
@@ -1991,7 +2031,9 @@ Future<void> _showRuleSelectionDialog(
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.download_done_rounded),
-                label: Text(importing ? '安装中' : '安装所选'),
+                label: Text(
+                  importing ? '正在导入' : (isRemote ? '订阅并启用' : '全部安装并启用'),
+                ),
               ),
             ],
           );
@@ -2037,7 +2079,7 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    '导入的内容不会被改动；装好后到扩展来源里自己打开。',
+                    '订阅并启用后会在应用运行时定期刷新；也可只安装所选规则。',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: _surfaceMuted(context),
                     ),

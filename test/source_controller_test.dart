@@ -281,6 +281,168 @@ void main() {
     },
   );
 
+  testWidgets(
+    'one approval subscribes the bundle and only opted-in sources refresh',
+    (tester) async {
+      final storage = _MemorySourceStorage();
+      var now = DateTime.utc(2026, 11, 20);
+      const url = 'https://subscriptions.example/tvbox.json';
+      const legacyUrl = 'https://subscriptions.example/install-only.json';
+      final kept = _subscriptionRule('kept');
+      final changed = _subscriptionRule('changed');
+      final removed = _subscriptionRule('removed');
+      final uninstalled = _subscriptionRule('uninstalled');
+      final disabled = _subscriptionRule('disabled');
+      final unsupported = _subscriptionRule(
+        'unsupported',
+      ).copyWith(engine: 'repository-link');
+      final added = _subscriptionRule('added');
+      final importer = _RefreshRuleImporter(
+        RuleImportBundle(
+          name: '测试订阅',
+          sourceUrl: url,
+          rules: [
+            kept,
+            changed.copyWith(version: '2.0'),
+            uninstalled,
+            disabled,
+            added,
+          ],
+        ),
+      );
+      SourceController openController() => SourceController(
+        storage: storage,
+        catalogRepository: const _EmptyCatalogRepository(),
+        sourceRuleBridge: const SourceRuleBridge(),
+        publishSnapshot: (_) {},
+        now: () => now,
+        importer: importer,
+      );
+      final first = openController();
+      await first.loadForAccount(accountId: 'account-a', contextVersion: 1);
+      await first.importSelectedRulePlugins(
+        repositoryName: '仅安装',
+        rules: [_subscriptionRule('legacy')],
+        sourceUrl: legacyUrl,
+      );
+      final imported = await first.importSelectedRulePlugins(
+        repositoryName: '测试订阅',
+        rules: [kept, changed, removed, uninstalled, disabled, unsupported],
+        sourceUrl: url,
+        enable: true,
+      );
+      expect(imported.installedCount, 6);
+      expect(imported.enabledCount, 5);
+      expect(
+        first.snapshot.rulePlugins.enabledIds,
+        isNot(contains(unsupported.id)),
+      );
+      await first.uninstallRulePlugin(uninstalled.id);
+      await first.toggleRulePlugin(disabled.id, false);
+      first.dispose();
+
+      final controller = openController();
+      addTearDown(controller.dispose);
+      final restored = await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 2,
+      );
+      expect(restored.rulePlugins.repositories.first.autoRefresh, isTrue);
+      expect(
+        restored.rulePlugins.enabledIds,
+        containsAll([kept.id, changed.id]),
+      );
+      controller.startSubscriptionRefresh();
+      now = now.add(const Duration(hours: 5));
+      await tester.pump(const Duration(hours: 5));
+      expect(importer.requests, isEmpty);
+      now = now.add(const Duration(hours: 1));
+      await tester.pump(const Duration(hours: 1));
+      await controller.settleWrites();
+      expect(importer.requests, [url]);
+
+      final state = controller.snapshot.rulePlugins;
+      expect(
+        state.installedIds,
+        containsAll([kept.id, changed.id, disabled.id, added.id]),
+      );
+      expect(state.installedIds, isNot(contains(removed.id)));
+      expect(state.installedIds, isNot(contains(uninstalled.id)));
+      expect(state.uninstalledIds, contains(uninstalled.id));
+      expect(state.enabledIds, contains(kept.id));
+      for (final id in [changed.id, added.id, disabled.id]) {
+        expect(state.enabledIds, isNot(contains(id)));
+      }
+      expect(state.approvedPermissionDigests[changed.id], isNull);
+      expect(
+        state.customRules.singleWhere((rule) => rule.id == changed.id).version,
+        '2.0',
+      );
+      expect(state.repositories.first.importedAt, now);
+
+      importer.fail = true;
+      now = now.add(const Duration(hours: 6));
+      await tester.pump(const Duration(hours: 6));
+      await controller.settleWrites();
+      expect(importer.requests.last, url);
+      expect(controller.snapshot.rulePlugins, same(state));
+      controller.dispose();
+      final requestCount = importer.requests.length;
+      await tester.pump(const Duration(hours: 12));
+      expect(importer.requests, hasLength(requestCount));
+    },
+  );
+
+  test(
+    'a scheduled refresh of the old account cannot publish after switching',
+    () async {
+      final storage = _MemorySourceStorage();
+      final importer = _DeferredRuleImporter();
+      var now = DateTime.utc(2026, 11, 20);
+      final controller = SourceController(
+        storage: storage,
+        catalogRepository: const _EmptyCatalogRepository(),
+        sourceRuleBridge: const SourceRuleBridge(),
+        publishSnapshot: (_) {},
+        importer: importer,
+        now: () => now,
+      );
+      addTearDown(controller.dispose);
+      const url = 'https://subscriptions.example/source.json';
+      final rule = _subscriptionRule('first-account');
+      await controller.loadForAccount(
+        accountId: 'account-a',
+        contextVersion: 1,
+      );
+      await controller.importSelectedRulePlugins(
+        repositoryName: '旧账号订阅',
+        rules: [rule],
+        sourceUrl: url,
+        enable: true,
+      );
+      final saved = storage.values['account.account-a.rulePlugins'];
+      now = now.add(const Duration(hours: 7));
+      controller.startSubscriptionRefresh();
+      await importer.started.future;
+      await controller.loadForAccount(
+        accountId: 'account-b',
+        contextVersion: 2,
+      );
+      importer.response.complete(
+        RuleImportBundle(
+          name: '旧账号的更新',
+          sourceUrl: url,
+          rules: [rule.copyWith(version: '2.0')],
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await controller.settleWrites();
+      expect(storage.values['account.account-a.rulePlugins'], same(saved));
+      expect(storage.values['account.account-b.rulePlugins'], isNull);
+      expect(controller.snapshot.rulePlugins.customRules, isEmpty);
+    },
+  );
+
   test('stale hydration is discarded after an account switch', () async {
     final storage = _MemorySourceStorage();
     final bridge = _DeferredSourceRuleBridge();
@@ -397,6 +559,21 @@ class _MemorySourceStorage implements SourceStorage {
   @override
   Future<void> put(String key, Object? value) async {
     values[key] = value;
+  }
+}
+
+final class _RefreshRuleImporter extends RuleImporter {
+  _RefreshRuleImporter(this.bundle);
+
+  final RuleImportBundle bundle;
+  final requests = <String>[];
+  bool fail = false;
+
+  @override
+  Future<RuleImportBundle> importFromUrl(String url) async {
+    requests.add(url);
+    if (fail) throw const FormatException('模拟订阅离线');
+    return bundle;
   }
 }
 
@@ -558,3 +735,16 @@ RulePlugin _rule({
   filterable: false,
   permissionManifest: manifest,
 );
+
+RulePlugin _subscriptionRule(String name) => _rule(
+  id: 'custom:subscription:$name',
+  manifest: RulePermissionManifest.untrusted(
+    id: 'custom:subscription:$name',
+    name: name,
+    version: '1.0',
+    engine: 'tvbox-json-api',
+    contentTypes: const ['movie'],
+    pageDomains: const ['media.example'],
+    mediaDomains: const ['media.example'],
+  ),
+).copyWith(contentType: RuleContentType.movie);
