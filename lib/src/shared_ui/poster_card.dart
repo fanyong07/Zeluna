@@ -322,21 +322,35 @@ class BackdropArt extends StatelessWidget {
     if (!_isNetworkUrl(poster)) {
       return PosterArt(coverUrl: null, title: title);
     }
+    final isMobile =
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
     return Stack(
       fit: StackFit.expand,
       children: [
-        ImageFiltered(
-          imageFilter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Transform.scale(
-            scale: 1.16,
+        if (isMobile)
+          Transform.scale(
+            scale: 1.08,
             child: PosterArt(
               coverUrl: poster,
               title: title,
               allowHtmlFallback: false,
             ),
+          )
+        else
+          ImageFiltered(
+            imageFilter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Transform.scale(
+              scale: 1.16,
+              child: PosterArt(
+                coverUrl: poster,
+                title: title,
+                allowHtmlFallback: false,
+              ),
+            ),
           ),
-        ),
-        const ColoredBox(color: Color(0x70000000)),
+        ColoredBox(color: isMobile ? const Color(0xA6000000) : const Color(0x70000000)),
         Center(
           child: FractionallySizedBox(
             widthFactor: 0.72,

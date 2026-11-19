@@ -143,10 +143,26 @@ class SecureCloudAccountTokenStore
   static const _refreshExpiryKey = 'zeluna.cloud.account.refresh-expiry.v2';
   final FlutterSecureStorage _storage;
 
+  Future<String?> _safeRead(String key) async {
+    try {
+      return await _storage.read(key: key).timeout(const Duration(seconds: 2));
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> _safeDelete(String key) async {
+    try {
+      await _storage.delete(key: key).timeout(const Duration(seconds: 2));
+    } on Object {
+      // Ignore Android KeyStore / ROM secure-storage deletion failures.
+    }
+  }
+
   @override
   Future<String?> read() async {
-    final access = await _storage.read(key: _accessKey);
-    return access ?? await _storage.read(key: _key);
+    final access = await _safeRead(_accessKey);
+    return access ?? await _safeRead(_key);
   }
 
   @override
@@ -164,7 +180,7 @@ class SecureCloudAccountTokenStore
       _accessExpiryKey,
       _refreshExpiryKey,
     ]) {
-      await _storage.delete(key: key);
+      await _safeDelete(key);
     }
   }
 
@@ -174,13 +190,13 @@ class SecureCloudAccountTokenStore
     if (access.isEmpty) return null;
     return CloudAccountCredentials(
       accessToken: access,
-      refreshToken: (await _storage.read(key: _refreshKey))?.trim(),
-      sessionId: await _storage.read(key: _sessionKey),
-      deviceId: await _storage.read(key: _deviceKey),
-      deviceName: await _storage.read(key: _deviceNameKey),
-      platform: await _storage.read(key: _platformKey),
-      accessExpiresAt: _readDate(await _storage.read(key: _accessExpiryKey)),
-      refreshExpiresAt: _readDate(await _storage.read(key: _refreshExpiryKey)),
+      refreshToken: (await _safeRead(_refreshKey))?.trim(),
+      sessionId: await _safeRead(_sessionKey),
+      deviceId: await _safeRead(_deviceKey),
+      deviceName: await _safeRead(_deviceNameKey),
+      platform: await _safeRead(_platformKey),
+      accessExpiresAt: _readDate(await _safeRead(_accessExpiryKey)),
+      refreshExpiresAt: _readDate(await _safeRead(_refreshExpiryKey)),
     );
   }
 

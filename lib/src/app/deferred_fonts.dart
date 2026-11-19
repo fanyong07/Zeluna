@@ -1,14 +1,20 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Loads the heavy emphasis/display fonts after the first frame.
 ///
-/// Only NotoSansSC w400 stays in the FontManifest, so it is the single font
-/// the web engine blocks startup on. The SemiBold sans and the serif display
-/// family arrive here; FontLoader emits a system-fonts change, so visible
-/// text reflows to the richer faces automatically once each file lands.
+/// Mobile platforms (Android/iOS) rely on system CJK fonts to avoid loading
+/// ~8.2 MB of extra TTF faces right after cold start (which spikes memory and
+/// stalls the UI thread on mid/low-end phones).
 Future<void> loadDeferredFonts() {
+  if (!kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS)) {
+    return Future<void>.value();
+  }
+
   Future<void> load(String family, String asset) async {
     try {
       final loader = FontLoader(family)..addFont(rootBundle.load(asset));

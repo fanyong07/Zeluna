@@ -221,7 +221,18 @@ final class AccountController {
     }
     final cachedAccount =
         recoveredRegistration ?? _localRepository.currentCloudAccount();
-    final restoredAccount = await _cloudService.restoreSession(cachedAccount);
+    LocalAccount? restoredAccount;
+    try {
+      restoredAccount = await _cloudService
+          .restoreSession(cachedAccount)
+          .timeout(
+            const Duration(milliseconds: 1200),
+            onTimeout: () => cachedAccount,
+          );
+    } on Object {
+      // Never let secure-storage or network startup errors crash app launch.
+      restoredAccount = cachedAccount;
+    }
     if (restoredAccount != null) {
       await _localRepository.rememberCloudAccount(restoredAccount);
       if (recoveredRegistration != null) {
