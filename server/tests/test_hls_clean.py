@@ -1,6 +1,7 @@
 import asyncio
+import gzip
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -126,6 +127,57 @@ class CleanPlaylistTests(unittest.TestCase):
             out, report = clean_playlist(raw, "https://cdn.example/v/")
             self.assertFalse(report.changed)
             self.assertIsInstance(out, str)
+
+    def test_midroll_same_duration_ad_island_with_different_path_is_cut(self):
+        # 国内采集站常见片中贴片：5s×3 与正片 6s 时长接近，但路径/文件名骨架突变
+        parts = [_HEAD]
+        parts += [_seg(6.0, f"/202611/ep1/index{i:04d}.ts") for i in range(15)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts += [_seg(5.0, f"/adjump/casino_{i}.ts") for i in range(3)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts += [_seg(6.0, f"/202611/ep1/index{i:04d}.ts") for i in range(15, 30)]
+        parts.append("#EXT-X-ENDLIST\n")
+        out, report = clean_playlist("".join(parts), "https://cdn.example/202611/ep1/index.m3u8")
+        self.assertTrue(report.changed)
+        self.assertEqual(report.segments_cut, 3)
+        self.assertNotIn("casino_0.ts", out)
+        self.assertIn("index0000.ts", out)
+        self.assertIn("index0029.ts", out)
+
+    def test_midroll_unencrypted_ad_island_inside_encrypted_stream_is_cut(self):
+        parts = [_HEAD, '#EXT-X-KEY:METHOD=AES-128,URI="enc.key"\n']
+        parts += [_seg(6.0, f"seg{i:04d}.ts") for i in range(12)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts.append("#EXT-X-KEY:METHOD=NONE\n")
+        parts += [_seg(5.0, f"seg{i:04d}.ts") for i in range(9000, 9003)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts.append('#EXT-X-KEY:METHOD=AES-128,URI="enc.key"\n')
+        parts += [_seg(6.0, f"seg{i:04d}.ts") for i in range(12, 24)]
+        parts.append("#EXT-X-ENDLIST\n")
+        out, report = clean_playlist("".join(parts), "https://cdn.example/v/index.m3u8")
+        self.assertEqual(report.segments_cut, 3)
+        self.assertNotIn("seg9000.ts", out)
+
+    def test_non_ad_discontinuity_between_feature_groups_is_preserved(self):
+        parts = [_HEAD]
+        parts += [_seg(6.0, f"seg{i:04d}.ts") for i in range(10)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts += [_seg(6.0, f"seg{i:04d}.ts") for i in range(10, 20)]
+        parts.append("#EXT-X-ENDLIST\n")
+        out, report = clean_playlist("".join(parts), "https://cdn.example/v/index.m3u8")
+        self.assertFalse(report.changed)
+        self.assertIn("#EXT-X-DISCONTINUITY", out)
+
+    def test_output_segment_uris_stay_public_even_when_local_relay_is_configured(self):
+        with (
+            patch("server.config.ANICH_RELAY_PUBLIC_BASE", "https://relay.example.com"),
+            patch("server.config.ANICH_RELAY_FETCH_BASE", "http://127.0.0.1:9999"),
+        ):
+            out, _ = clean_playlist(
+                _feature_playlist(), "https://relay.example.com/media/v/index.m3u8"
+            )
+        self.assertIn("https://relay.example.com/media/v/main0.ts", out)
+        self.assertNotIn("127.0.0.1", out)
 
 
 class MasterPlaylistTests(unittest.TestCase):
@@ -289,16 +341,34 @@ class CleanUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream.reads, 0)
         self.assertTrue(stream.closed)
 
-    async def test_unexpected_compression_is_refused_without_decompressing(self):
-        stream = _CountingStream([b"must not decode compressed bytes"])
+    async def test_gzip_compressed_playlist_is_decoded_and_bounded(self):
+        compressed = gzip.compress(_feature_playlist().encode("utf-8"))
 
-        def handler(request):
-            self.assertEqual(request.headers["Accept-Encoding"], "identity")
-            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=stream)
+        def ok_handler(request):
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                content=compressed,
+            )
 
-        self.assertIsNone(await self._run(handler, "https://cdn.example/list.m3u8"))
-        self.assertEqual(stream.reads, 0)
-        self.assertTrue(stream.closed)
+        result = await self._run(ok_handler, "https://cdn.example/v/list.m3u8")
+        self.assertIsNotNone(result)
+        self.assertNotIn("ad0.ts", result.playlist)
+        self.assertIn("https://cdn.example/v/main0.ts", result.playlist)
+
+        # 解压后超过 max_bytes 的压缩炸弹必须被中止返回 None
+        bomb = gzip.compress(b"#EXTM3U\n" + b"A" * 4096)
+
+        def bomb_handler(request):
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                content=bomb,
+            )
+
+        self.assertIsNone(
+            await self._run(bomb_handler, "https://cdn.example/v/bomb.m3u8", max_bytes=256)
+        )
 
     async def test_one_timeout_budget_includes_dns_validation(self):
         async def slow_validation(url):

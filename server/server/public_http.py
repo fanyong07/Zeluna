@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import posixpath
+import re
 import socket
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -92,6 +94,82 @@ async def is_public_http_url(url: str) -> bool:
     except UnsafeDestination:
         return False
     return True
+
+
+#: 中继对外交付媒体用的路径前缀。线段与清单都走它,别的路径没有理由放行。
+RELAY_MEDIA_PREFIX = "/media/"
+
+
+def _normalized_path(path: str) -> str:
+    """归一化路径,让前缀判断无法被穿越写法绕过。
+
+    只做字符串 ``startswith`` 会被 ``/media/../../etc/passwd`` 这类写法骗过,
+    百分号编码(``%2e%2e%2f``)同理。所以先解编码、再去掉重复斜杠、最后用
+    ``normpath`` 把 ``..`` 折叠掉,拿归一化后的结果比较。
+
+    两个容易踩的点:
+      * ``posixpath.normpath("")`` 返回 ``"."`` 而不是 ``"/"`` —— 空路径在这里
+        代表根,必须显式处理,否则基址会被拼成 ``/./media/``,判断永远为假;
+      * 结尾斜杠要保留 —— ``/media/`` 掉成 ``/media`` 后,前缀判断就会把
+        ``/media`` 本身也当成命中。
+    """
+    if not path or path == "/":
+        return "/"
+    decoded = unquote(path)
+    collapsed = re.sub(r"/+", "/", decoded)
+    normalized = posixpath.normpath(collapsed)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if collapsed.endswith("/") and not normalized.endswith("/"):
+        normalized += "/"
+    return normalized
+
+
+def is_relay_media_url(url: str, relay_base: str) -> bool:
+    """判断 ``url`` 是否正好是 ``relay_base`` 上的媒体入口。
+
+    精确比较 scheme/host/port,并要求**归一化后**的路径落在 ``/media/`` 之下
+    —— 只放行中继真正会交付的那一类地址,不放行它的其他端点,也不放行同主机
+    的其他服务。``resolve_fetch_url`` 与 ``hls_clean.validate_fetch_url`` 共用
+    它,避免两处规则漂移。
+    """
+    if not relay_base:
+        return False
+    candidate = urlsplit(url)
+    expected = urlsplit(relay_base)
+    if not (candidate.hostname and candidate.port and expected.hostname):
+        return False
+    if (candidate.hostname != expected.hostname
+            or candidate.scheme != expected.scheme
+            or candidate.port != expected.port):
+        return False
+    base_path = _normalized_path(expected.path).rstrip("/")
+    if base_path == "/":
+        base_path = ""
+    prefix = f"{base_path}{RELAY_MEDIA_PREFIX}"
+    return _normalized_path(candidate.path).startswith(prefix)
+
+
+async def resolve_fetch_url(url: str) -> tuple[str, ...]:
+    """``resolve_public_http_url`` 加上自建中继媒体入口这一个例外。
+
+    ``PublicHttpTransport`` 把连接钉到 resolve 返回的地址上 —— 所以 resolve
+    就是**唯一的校验点**,放行什么地址完全由它决定。自建中继在本机,后端取
+    它的清单纯属内部调用,但它的地址是 ``127.0.0.1``,会被公网校验判为非法,
+    于是剪广告功能静默失效。
+
+    只放行**配置里那一个中继地址上的媒体入口**(前缀 ``/media/``),不是整个
+    回环网段、不是中继的任意路径、也不接任意私网地址。返回的仍是"经过校验的
+    地址",调用方照常钉着它连、Host 与 SNI 照常设成原主机名 —— 防 SSRF 的
+    语义没有松动,只是多了一条显式白名单。
+    """
+    from . import config
+
+    local = config.ANICH_RELAY_FETCH_BASE
+    if local and is_relay_media_url(url, local):
+        expected = urlsplit(local)
+        return (str(expected.hostname),)
+    return await resolve_public_http_url(url)
 
 
 class PublicHttpTransport(httpx.AsyncBaseTransport):

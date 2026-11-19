@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .aggregator import (
+    HOST_SPEED_PRIOR,
     CLIENT_PROBE_REQUIRED,
     CONNECT_TIMEOUT,
     DIRECT_SOURCE_PRIORITIES,
@@ -49,6 +50,7 @@ from .config import (
     PLAYBACK_NEGATIVE_CACHE_MINUTES,
     PLAYBACK_PARTIAL_CACHE_MINUTES,
     PLAYBACK_QUICK_LINE_COUNT,
+    PLAYBACK_QUICK_MAX_CONCURRENCY,
     PLAYBACK_QUICK_MAX_IN_FLIGHT_CANDIDATES,
     PLAYBACK_QUICK_TIMEOUT_SECONDS,
     PLAYBACK_STALE_HOURS,
@@ -75,6 +77,7 @@ from .premium_catalog import (
     record_premium_line,
 )
 from .scrapers.hls_clean import needs_clean
+from .scrapers.ad_signals import AD_CARRIER_CACHE
 from .repositories.playback import (
     PlaybackRepository,
     SourceBindingEntry,
@@ -227,8 +230,10 @@ class PlaybackService:
         self._closing = False
         self._refresh_semaphore = asyncio.Semaphore(SOURCE_MAX_CONCURRENCY)
         # Foreground first-route discovery must never wait behind long-running
-        # precache or full-refresh work. Keep one small, dedicated lane for it.
-        self._quick_refresh_semaphore = asyncio.Semaphore(1)
+        # precache or full-refresh work, while still serving concurrent viewers.
+        self._quick_refresh_semaphore = asyncio.Semaphore(
+            PLAYBACK_QUICK_MAX_CONCURRENCY
+        )
         self._refresh_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
         self._quick_tasks: dict[tuple[str, int], asyncio.Task[list[dict]]] = {}
         self._metrics = {
@@ -1576,16 +1581,26 @@ class PlaybackService:
         现在验不通的线路也会列出(客户端网络可能与服务端出口结论不同),所以
         必须保证用户点到的第一条是已验证的那条,否则首播体验会被死线拖垮。
         同一档内按实测首字节延迟升序 —— 快的先给。
+
+        「待客户端验证」档没有本次延迟数据,原先是纯原顺序。这里用
+        ``HOST_SPEED_PRIOR``(同一主机在别处验线得到的起播延迟)破平:
+        同一部作品的十几条未验证线路往往打在不同主机上,谁先给是要紧的。
+        先验样本不足时该键恒为 ``inf``,退化成原来的原顺序,不会更差。
         """
-        def rank(item: tuple[int, AggregatedVideoLine]) -> tuple[int, int, int]:
+        def rank(item: tuple[int, AggregatedVideoLine]) -> tuple[int, float, int]:
             index, line = item
             tier = {
                 SERVER_VERIFIED: 0,
                 CLIENT_PROBE_REQUIRED: 1,
             }.get(line.verification_status, 2)
-            latency = line.startup_latency_ms or 0
+            if tier == 0:
+                return (tier, float(line.startup_latency_ms or 0), index)
+            if tier == 1:
+                prior = HOST_SPEED_PRIOR.predict(line.url)
+                if prior is not None:
+                    return (tier, prior, index)
             # 未验证档没有可信延迟,用原顺序(上游已按其自身排序给出)
-            return (tier, latency if tier == 0 else 0, index)
+            return (tier, float("inf"), index)
 
         return [line for _index, line in sorted(enumerate(lines), key=rank)]
 
@@ -1617,14 +1632,21 @@ class PlaybackService:
         }
 
     def _playable_url(self, line: AggregatedVideoLine) -> str:
-        """线路对外的播放地址;采集站 HLS 换成已剪广告的清单地址。
+        """线路对外的播放地址;需要剪广告的 HLS 换成本服务已剪的清单地址。
 
         客户端不需要知道"广告"这件事,也不需要任何开关:拿到的地址直接播,
         贴片已经在服务端剪掉了。剪裁是即时的清单文本重写,分片仍指向源站
         CDN,服务端不落盘、不代理媒体字节。
 
-        只对命中风险名单的采集站主机替换 —— 自建 CDN 的官方转存通常没有
-        贴片,无谓重写只会白加一跳延迟。
+        判定顺序(从确定到保守):
+
+        1. ``AD_CARRIER_CACHE`` 里**确认干净** → 原样直连。
+           验线时已经读过这条清单,结论是可信的;给它套一层重写只会白加一跳
+           延迟(自建 CDN 与对象存储的官方转存本来就无贴片);
+        2. ``AD_CARRIER_CACHE`` 里**确认携带广告标记** → 走剪裁;
+        3. 缓存里没有记录(未验线/清单不可达)→ 只有命中历史风险名单的
+           采集站主机才走剪裁。这条兜底保证了"验不到"时行为不变坏:
+           已知会插片的站仍然被剪,未知的站不被平白加一跳。
         """
         url = (line.url or "").strip()
         url = anich_direct.lookup(url) or url
@@ -1634,7 +1656,11 @@ class PlaybackService:
             host = (urlparse(url).hostname or "").lower()
         except ValueError:
             return url
-        if not any(token in host for token in AD_RISK_HOST_HINTS):
+        known = AD_CARRIER_CACHE.carries_ads(url)
+        risky_host = any(token in host for token in AD_RISK_HOST_HINTS)
+        if known is False:
+            return url
+        if known is None and not risky_host:
             return url
         base = PUBLIC_BASE_URL.strip().rstrip("/")
         if not base:

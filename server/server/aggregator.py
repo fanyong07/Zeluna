@@ -48,6 +48,8 @@ from .scrapers.anime.kazumi import KazumiScraper
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.anime.yhdmm import YhdmmScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
+from .host_speed import HostSpeedPrior
+from .scrapers.ad_signals import AD_CARRIER_CACHE
 from .scrapers.base import (
     DIRECT_MEDIA_URL,
     INVALID_MEDIA_URL,
@@ -427,6 +429,11 @@ def _strongest_error_category(categories: list[str], fallback: str) -> str:
     return max(values, key=lambda value: _ERROR_CATEGORY_PRIORITY.get(value, 0))
 
 
+#: 进程级主机速度先验(跨作品、跨请求复用验线得到的起播延迟)。
+#  单个聚合器实例持有一份;测试可注入自己的实例替换它。
+HOST_SPEED_PRIOR = HostSpeedPrior()
+
+
 class ContentAggregator:
     """
     内容聚合器
@@ -493,6 +500,7 @@ class ContentAggregator:
         self._enabled_provider_ids = frozenset(requested_provider_ids)
         self._resolver_search_enabled = resolver_search_enabled
         self._line_http_transport = line_http_transport
+        self._line_verify_client: httpx.AsyncClient | None = None
         self._providers = ProviderRegistry()
         self._providers.register(
             provider_id="aggregate.maccms",
@@ -566,7 +574,19 @@ class ContentAggregator:
         return self._providers.metadata
 
     async def aclose(self) -> None:
+        if self._line_verify_client is not None:
+            await self._line_verify_client.aclose()
+            self._line_verify_client = None
         await self._providers.aclose()
+
+    def _get_line_verify_client(self) -> httpx.AsyncClient:
+        if self._line_verify_client is None or self._line_verify_client.is_closed:
+            self._line_verify_client = httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=httpx.Timeout(8, connect=5),
+                transport=self._line_http_transport,
+            )
+        return self._line_verify_client
 
     async def _discover_scraper_matches(
         self,
@@ -1257,6 +1277,10 @@ class ContentAggregator:
                             elif status != SERVER_VERIFIED:
                                 failure_categories.append(check.error_category)
                         if status == SERVER_VERIFIED:
+                            # 验线成功即是一次真实起播延迟观测。按主机聚合它,
+                            # 让同一主机在**其它作品/后续请求**上也能直接复用
+                            # 这份先验(见 server/host_speed.py)。
+                            HOST_SPEED_PRIOR.observe(line.url, check.latency_ms)
                             lines.append(replace(
                                 line,
                                 verification_status=SERVER_VERIFIED,
@@ -1786,12 +1810,8 @@ class ContentAggregator:
             if str(name).lower() in {"referer", "origin"} and str(value):
                 headers[str(name)] = str(value)
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=False,
-                timeout=httpx.Timeout(8, connect=5),
-                headers=headers,
-                transport=self._line_http_transport,
-            ) as c:
+            c = self._get_line_verify_client()
+            if True:
                 client_probe_sentinel = object()
                 unsafe_target_sentinel = object()
                 stale_redirect_sentinel = object()
@@ -1805,7 +1825,7 @@ class ContentAggregator:
                                 if _is_client_probe_candidate_url(current)
                                 else unsafe_target_sentinel
                             )
-                        async with c.stream("GET", current) as resp:
+                        async with c.stream("GET", current, headers=headers) as resp:
                             if resp.status_code in (301, 302, 303, 307, 308):
                                 location = resp.headers.get("location", "").strip()
                                 if not location:
@@ -1876,6 +1896,19 @@ class ContentAggregator:
                     if not body_head.startswith("#EXTM3U"):
                         return finish(UNAVAILABLE, MALFORMED_MANIFEST)
                     manifest_text = body.decode("utf-8", errors="ignore")
+                    is_master = "#EXT-X-STREAM-INF" in manifest_text
+                    truncated = len(body) >= 65536
+                    # 验线本来就读了一次清单:顺手判定它是否携带广告标记/结构特征。
+                    # 64KB 截断样本或主清单(master)不能记为“确认干净”,否则会让片中
+                    # 广告或子清单广告绕过 hls_clean。
+                    carries_ads = AD_CARRIER_CACHE.record_manifest(
+                        response_url,
+                        manifest_text,
+                        truncated=truncated,
+                        is_master=is_master,
+                    )
+                    if carries_ads and response_url != url:
+                        AD_CARRIER_CACHE.record(url, True)
                     media_reference = next(
                         (
                             item.strip()

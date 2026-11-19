@@ -8,13 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..public_http import PublicHttpTransport, is_public_http_url as _is_public_http_url
+from ..public_http import (
+    PublicHttpTransport,
+    is_public_http_url as _is_public_http_url,
+    resolve_fetch_url,
+)
 from ..catalog import parse_stable_id
 from ..dependencies import get_session
 from ..playback import playback_service
 from ..playback_inventory import complete_registered_playback_inventory, local_query_descriptor
 from ..playlist_tokens import PlaylistTokenError, parse_playlist_token
-from ..scrapers.hls_clean import clean_url
+from ..scrapers.hls_clean import clean_url, validate_fetch_url
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,8 @@ def _playlist_client() -> httpx.AsyncClient:
         timeout=_PLAYLIST_TIMEOUT_SECONDS,
         follow_redirects=False,
         trust_env=False,
-        transport=playlist_transport if playlist_transport is not None else PublicHttpTransport(),
+        transport=playlist_transport if playlist_transport is not None else
+        PublicHttpTransport(resolve=resolve_fetch_url),
     )
 
 
@@ -130,7 +135,7 @@ async def cleaned_playlist(token: str) -> PlainTextResponse:
     try:
         # Include initial DNS validation, redirects, and child reads in one budget.
         async with asyncio.timeout(_PLAYLIST_TIMEOUT_SECONDS):
-            if not await _is_public_http_url(target.url):
+            if not await validate_fetch_url(target.url):
                 raise HTTPException(400, "清单地址不在允许范围内")
             headers = {"Referer": target.referer} if target.referer else None
             async with _playlist_client() as client:
@@ -139,7 +144,7 @@ async def cleaned_playlist(token: str) -> PlainTextResponse:
                     client=client,
                     headers=headers,
                     max_bytes=_PLAYLIST_MAX_BYTES,
-                    validate_url=_is_public_http_url,
+                    validate_url=validate_fetch_url,
                     timeout_seconds=_PLAYLIST_TIMEOUT_SECONDS,
                 )
     except TimeoutError:

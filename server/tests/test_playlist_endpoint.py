@@ -74,7 +74,7 @@ class PlaylistEndpointTests(unittest.TestCase):
         self._patchers = [
             patch("server.playlist_tokens.signing_key", return_value=_STRONG_KEY),
             patch(
-                "server.routers.playback._is_public_http_url",
+                "server.routers.playback.validate_fetch_url",
                 new=AsyncMock(return_value=True),
             ),
         ]
@@ -138,7 +138,7 @@ class PlaylistEndpointTests(unittest.TestCase):
 
     def test_private_target_is_refused(self):
         with patch(
-            "server.routers.playback._is_public_http_url",
+            "server.routers.playback.validate_fetch_url",
             new=AsyncMock(return_value=False),
         ):
             response = self.client.get(f"/api/v3/playlist/{self._token()}")
@@ -156,7 +156,7 @@ class PlaylistEndpointTests(unittest.TestCase):
 
         with (
             patch("server.routers.playback.playlist_transport", httpx.MockTransport(handler)),
-            patch("server.routers.playback._is_public_http_url", new=AsyncMock(
+            patch("server.routers.playback.validate_fetch_url", new=AsyncMock(
                 side_effect=lambda url: httpx.URL(url).host == "cdn.example"
             )),
         ):
@@ -178,7 +178,7 @@ class PlaylistEndpointTests(unittest.TestCase):
 
         with (
             patch("server.routers.playback.playlist_transport", httpx.MockTransport(handler)),
-            patch("server.routers.playback._is_public_http_url", new=AsyncMock(
+            patch("server.routers.playback.validate_fetch_url", new=AsyncMock(
                 side_effect=lambda url: httpx.URL(url).host == "cdn.example"
             )),
         ):

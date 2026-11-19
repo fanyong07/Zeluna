@@ -176,11 +176,6 @@ class AniChTransport:
         """是否经由自建中转取数。"""
         return bool(self._relay)
 
-    @property
-    def base(self) -> str | None:
-        """当前工作主域(诊断用;不得写入日志或对外元数据)。"""
-        return self._working_base
-
     async def aclose(self) -> None:
         await self._client.aclose()
 
