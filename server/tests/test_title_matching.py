@@ -254,5 +254,58 @@ class DerivativeContentTests(unittest.TestCase):
         self.assertFalse(analysis.evidence.allows_circuit_recovery)
 
 
+class FilmAndSeriesMatchingTests(unittest.TestCase):
+    def test_traditional_chinese_candidate_matches_simplified_query(self):
+        analysis = analyze_source_match(
+            "進擊的巨人",
+            ["进击的巨人"],
+            candidate_type="anime",
+            expected_type="anime",
+            candidate_year=2013,
+            expected_year=2013,
+        )
+        self.assertTrue(analysis.accepted)
+        self.assertTrue(analysis.evidence.exact_title)
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_traditional_film_matches_simplified_query(self):
+        analysis = analyze_source_match(
+            "奧本海默",
+            ["奥本海默", "Oppenheimer"],
+            candidate_type="movie",
+            expected_type="movie",
+            candidate_year=2023,
+            expected_year=2023,
+        )
+        self.assertTrue(analysis.accepted)
+        self.assertTrue(analysis.evidence.exact_title)
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_chinese_and_english_season_markers_normalize_equivalently(self):
+        analysis = analyze_source_match(
+            "庆余年 S02",
+            ["庆余年 第二季", "庆余年"],
+            candidate_type="tv",
+            expected_type="tv",
+            candidate_year=2024,
+            expected_year=2024,
+        )
+        self.assertTrue(analysis.accepted)
+        self.assertEqual(analysis.evidence.expected_season, 2)
+        self.assertEqual(analysis.evidence.candidate_season, 2)
+        self.assertFalse(analysis.evidence.season_conflict)
+        self.assertTrue(analysis.playback_eligible)
+
+    def test_subtitle_head_fallback_is_generated_for_colon_movie_titles(self):
+        from server.aggregator import _prepare_discovery_aliases
+
+        aliases = _prepare_discovery_aliases(
+            ["疯狂的麦克斯：狂暴女神", "Furiosa: A Mad Max Saga"]
+        )
+        self.assertIn("疯狂的麦克斯：狂暴女神", aliases)
+        self.assertIn("疯狂的麦克斯", aliases)
+        self.assertIn("Furiosa", aliases)
+
+
 if __name__ == "__main__":
     unittest.main()

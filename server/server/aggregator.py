@@ -44,7 +44,6 @@ from .scrapers.anime.html_direct import (
     OriginSearchThrottledError,
     create_html_direct_anime_scrapers,
 )
-from .scrapers.anime.kazumi import KazumiScraper
 from .scrapers.anime.xgcartoon import XgCartoonScraper
 from .scrapers.anime.yhdmm import YhdmmScraper
 from .providers import MediaProvider, ProviderMetadata, ProviderRegistry
@@ -124,7 +123,7 @@ DIRECT_SOURCE_PRIORITIES = {"nivod": 16, "ppnix": 14, "dbku": 12}
 _PROVIDER_SEARCH_TIMEOUTS: dict[str, float] = {
     "anich": 8.0, "xifan": 16.0, "xgcartoon": 6.0, "girigiri": 6.0,
     "yhdmm": 10.0, "jibi": 6.0, "yinghua2": 6.0, "wedm": 6.0,
-    "animeko": 30.0, "kazumi": 18.0,
+    "animeko": 30.0,
 }
 #: 该源对短标题命中良好,对带季号的长关键词几乎全是噪声,所以要多给一个
 #  别名的余量(别名序里基础标题通常排在带季号的之后)。
@@ -136,8 +135,9 @@ def _prepare_discovery_aliases(values: list[str]) -> list[str]:
 
     unique: list[str] = []
     seen: set[str] = set()
-    for raw_value in values:
-        value = (raw_value or "").strip()
+
+    def add_alias(candidate: str) -> None:
+        value = (candidate or "").strip()
         # Alias identity must retain season markers. The looser title matcher
         # intentionally removes some edition suffixes, but using it here would
         # collapse "Title" and "Title 第2季" before the search budget sees the
@@ -146,6 +146,20 @@ def _prepare_discovery_aliases(values: list[str]) -> list[str]:
         if value and key and key not in seen:
             seen.add(key)
             unique.append(value)
+
+    subtitle_fallbacks: list[str] = []
+    for raw_value in values:
+        value = (raw_value or "").strip()
+        add_alias(value)
+        # 电影/剧集常带冒号副标题（如“疯狂的麦克斯：狂暴女神”），补充短主名兜底
+        split = re.split(r"\s*[：:]\s*|\s+-\s+", value, maxsplit=1)
+        if len(split) == 2:
+            head = split[0].strip()
+            cjk_count = sum(1 for c in head if "\u3400" <= c <= "\u9fff")
+            if cjk_count >= 2 or len(head) >= 4:
+                subtitle_fallbacks.append(head)
+    for fallback in subtitle_fallbacks:
+        add_alias(fallback)
 
     def priority(pair: tuple[int, str]) -> tuple[int, int, int]:
         index, value = pair
@@ -470,10 +484,6 @@ class ContentAggregator:
                 # animeko-subs 规则库(21 个站点共用一个 provider)。默认关闭:
                 # 规则库要联网拉,打开方式见 config.ANIMEKO_ENABLED。
                 "animeko": AnimekoScraper(),
-                # Kazumi 规则库(18 条活跃规则共用一个 provider;规则快照随
-                # 仓库走,不再额外联网拉规则)。默认关闭:一个 provider 背后
-                # 是十几个外部站点,打开方式见 config.KAZUMI_ENABLED。
-                "kazumi": KazumiScraper(),
             }
             if crawler_scrapers is None
             else dict(crawler_scrapers)
@@ -529,8 +539,7 @@ class ContentAggregator:
                 family="crawler",
                 display_name=provider_id,
                 adapter=adapter,
-                capabilities=("search", "detail") if provider_id == "kazumi"
-                else ("search", "detail", "resolve", "latest"),
+                capabilities=("search", "detail", "resolve", "latest"),
                 enabled=self._provider_enabled(f"crawler.{provider_id}"),
             )
 
