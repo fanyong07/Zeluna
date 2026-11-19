@@ -467,7 +467,11 @@ typedef NativeMediaPreparer =
 /// their lifetime. UI code may subscribe through [track], but it never disposes
 /// individual native resources itself.
 final class NativeVideoController {
-  NativeVideoController({int Function()? readOpenSerial}) : player = Player() {
+  NativeVideoController({int Function()? readOpenSerial})
+    : player = Player(
+        configuration: const PlayerConfiguration(bufferSize: 64 * 1024 * 1024),
+      ) {
+    unawaited(_configureNativePlayer(player));
     surfaceController = VideoController(
       player,
       configuration: NativeVideoCompatibility.instance.configuration,
@@ -476,6 +480,29 @@ final class NativeVideoController {
       readOpenSerial: readOpenSerial ?? () => 0,
       seek: player.seek,
     );
+  }
+
+  static Future<void> _configureNativePlayer(Player player) async {
+    if (player.platform is! NativePlayer) return;
+    final native = player.platform as dynamic;
+    const properties = <String, String>{
+      'cache': 'yes',
+      'demuxer-max-bytes': '67108864',
+      'demuxer-max-back-bytes': '16777216',
+      'demuxer-readahead-secs': '60',
+      'demuxer-lavf-probesize': '524288',
+      'demuxer-lavf-analyzeduration': '1.5',
+      'hls-bitrate': 'max',
+      'stream-lavf-o':
+          'reconnect=1,reconnect_streamed=1,reconnect_delay_max=2,http_persistent=1,http_multiple=1,rw_timeout=8000000',
+    };
+    for (final entry in properties.entries) {
+      try {
+        await native.setProperty(entry.key, entry.value);
+      } catch (_) {
+        // Ignore unsupported mpv properties on older builds.
+      }
+    }
   }
 
   /// Keeps real subscription/watchdog ownership while replacing only the engine
@@ -621,8 +648,9 @@ final class NativeVideoController {
       readFrame:
           _readDecodedFrame ??
           () async {
-            final bytes = await player.screenshot(format: 'image/jpeg');
-            return bytes != null && bytes.length > 64;
+            final width = player.state.width ?? 0;
+            final height = player.state.height ?? 0;
+            return width > 0 && height > 0;
           },
       onFrame: () {
         _decodedFrame = true;

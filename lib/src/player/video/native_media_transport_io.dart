@@ -20,11 +20,23 @@ class NativeMediaTransport {
   int _generation = 0;
   bool _disposed = false;
 
+  static bool _requiresLocalBridge(Map<String, String> headers) {
+    for (final key in headers.keys) {
+      final lower = key.toLowerCase();
+      if (lower == 'cookie' || lower == 'authorization') {
+        final value = headers[key]?.trim() ?? '';
+        if (value.isNotEmpty) return true;
+      }
+    }
+    return false;
+  }
+
   Future<Media> prepare(
     String resource, {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    bool forceLocalBridge = false,
     void Function(MediaTransportFailure)? onFailure,
   }) async {
     if (_disposed) throw StateError('Media transport is disposed.');
@@ -34,13 +46,17 @@ class NativeMediaTransport {
     await previous?.dispose();
     final uri = Uri.tryParse(resource);
     final effectiveHeaders = effectiveMediaRequestHeaders(headers);
-    // DASH has its own URL templates; do not rewrite it as an HLS playlist.
+    // Direct native playback avoids proxying media bytes through the Flutter UI
+    // isolate (which causes Windows AB-BA freezes and Android jank). Only use
+    // the loopback bridge when sensitive credentials must be isolated or local
+    // playlist rewriting is explicitly requested.
     final relay =
         (Platform.isAndroid || Platform.isWindows) &&
         uri != null &&
         const {'http', 'https'}.contains(uri.scheme) &&
         format.toUpperCase() != 'DASH' &&
-        !uri.path.toLowerCase().endsWith('.mpd');
+        !uri.path.toLowerCase().endsWith('.mpd') &&
+        (forceLocalBridge || _requiresLocalBridge(effectiveHeaders));
     if (_disposed || generation != _generation) {
       throw StateError('Media open was replaced.');
     }
@@ -210,13 +226,18 @@ class NativeMediaBridge {
     try {
       var target = resource.uri;
       var headers = Map<String, String>.from(resource.headers);
-      // Ask for identity encoding so byte-range/content-length semantics survive.
-      headers.removeWhere((name, _) => name.toLowerCase() == 'accept-encoding');
-      headers['Accept-Encoding'] = 'identity';
+      final isPlaylistTarget =
+          resource.playlist || target.path.toLowerCase().endsWith('.m3u8');
+      // Ask for identity encoding only for binary byte-range transfers so
+      // HLS playlists can still benefit from transparent gzip compression.
+      if (!isPlaylistTarget) {
+        headers.removeWhere(
+          (name, _) => name.toLowerCase() == 'accept-encoding',
+        );
+        headers['Accept-Encoding'] = 'identity';
+      }
       final range = request.headers.value('range');
-      if (!resource.playlist &&
-          !target.path.toLowerCase().endsWith('.m3u8') &&
-          range != null) {
+      if (!isPlaylistTarget && range != null) {
         if (!RegExp(r'^bytes=(?:\d+-\d*|-\d+)$').hasMatch(range)) {
           await _reject(request, 416);
           return;
@@ -309,7 +330,6 @@ class NativeMediaBridge {
         while (await reader.moveNext().timeout(_idleTimeout)) {
           if (transfer.cancelled) return;
           request.response.add(reader.current);
-          await request.response.flush();
         }
       }
       upstreamComplete = true;

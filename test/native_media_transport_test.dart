@@ -35,6 +35,18 @@ void main() {
     skip: !Platform.isAndroid && !Platform.isWindows,
   );
 
+  test('public media without sensitive credentials plays directly without loopback bridge', () async {
+    final transport = NativeMediaTransport();
+    addTearDown(transport.dispose);
+    final media = await transport.prepare(
+      'https://cdn.example.test/video.m3u8',
+      format: 'HLS',
+      headers: {'Referer': 'https://site.example.test/'},
+    );
+    expect(media.uri, 'https://cdn.example.test/video.m3u8');
+    expect(media.httpHeaders?['Referer'], 'https://site.example.test/');
+  });
+
   test('local files and DASH keep their existing native path', () async {
     final transport = NativeMediaTransport();
     addTearDown(transport.dispose);

@@ -10,6 +10,7 @@ class NativeMediaTransport {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    bool forceLocalBridge = false,
     void Function(MediaTransportFailure)? onFailure,
   }) async =>
       Media(resource, httpHeaders: effectiveMediaRequestHeaders(headers));
