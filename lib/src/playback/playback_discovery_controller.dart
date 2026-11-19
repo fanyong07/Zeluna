@@ -9,6 +9,7 @@ import '../domain/anime_models.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_controller.dart';
+import 'local_route_ranker.dart';
 
 typedef PlaybackBackendRepositoryFactory =
     PlaybackSourceRepository? Function(ExternalServiceSettings services);
@@ -85,6 +86,7 @@ Future<List<PlaybackLine>> probeSinglePlaybackBackupSequentially(
 }
 
 List<PlaybackLine> rankPlaybackLinesForStartup(Iterable<PlaybackLine> lines) {
+  final ranker = LocalRouteRanker.instance;
   final indexed = lines.indexed.toList(growable: false);
   final sorted = [...indexed]
     ..sort((left, right) {
@@ -92,13 +94,24 @@ List<PlaybackLine> rankPlaybackLinesForStartup(Iterable<PlaybackLine> lines) {
         left.$2,
       ).compareTo(_startupAvailabilityRank(right.$2));
       if (availability != 0) return availability;
+      final cleanliness = ranker
+          .cleanlinessTierOf(left.$2)
+          .index
+          .compareTo(ranker.cleanlinessTierOf(right.$2).index);
+      if (cleanliness != 0) return cleanliness;
       final profile = _startupProfileRank(
         left.$2,
       ).compareTo(_startupProfileRank(right.$2));
       if (profile != 0) return profile;
-      final latency = (left.$2.latency ?? const Duration(days: 1)).compareTo(
-        right.$2.latency ?? const Duration(days: 1),
-      );
+      final leftLatency =
+          ranker.predictedLatency(left.$2.url) ??
+          left.$2.latency ??
+          const Duration(days: 1);
+      final rightLatency =
+          ranker.predictedLatency(right.$2.url) ??
+          right.$2.latency ??
+          const Duration(days: 1);
+      final latency = leftLatency.compareTo(rightLatency);
       if (latency != 0) return latency;
       return left.$1.compareTo(right.$1);
     });

@@ -395,6 +395,7 @@ class PlaybackSourcePanel extends StatefulWidget {
     this.onQueryLocally,
     this.localLookupInProgress = false,
     this.onCopyDiagnostics,
+    this.onReportAd,
   });
 
   final PlaybackLine? selected;
@@ -411,6 +412,7 @@ class PlaybackSourcePanel extends StatefulWidget {
   final Future<void> Function(PlaybackLine source)? onQueryLocally;
   final bool localLookupInProgress;
   final Future<void> Function()? onCopyDiagnostics;
+  final ValueChanged<PlaybackLine>? onReportAd;
 
   @override
   State<PlaybackSourcePanel> createState() => _LinePanelState();
@@ -471,6 +473,7 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         onSelected: widget.onSelected,
         onQueryLocally: widget.onQueryLocally,
         localLookupInProgress: widget.localLookupInProgress,
+        onReportAd: widget.onReportAd,
       ),
       _PlaybackSourceMode.local => _sourceAction(
         context,
@@ -696,6 +699,7 @@ class _LinePanelBody extends StatelessWidget {
     required this.onSelected,
     this.onQueryLocally,
     this.localLookupInProgress = false,
+    this.onReportAd,
   });
 
   final List<PlaybackLine> lines;
@@ -707,6 +711,7 @@ class _LinePanelBody extends StatelessWidget {
   final ValueChanged<PlaybackLine> onSelected;
   final Future<void> Function(PlaybackLine source)? onQueryLocally;
   final bool localLookupInProgress;
+  final ValueChanged<PlaybackLine>? onReportAd;
 
   @override
   Widget build(BuildContext context) {
@@ -776,6 +781,10 @@ class _LinePanelBody extends StatelessWidget {
                     localQueryCards[items[i].sourceInventoryId] ==
                         items[i].id &&
                     onQueryLocally != null,
+                onReportAd:
+                    items[i].available && onReportAd != null
+                    ? () => onReportAd!(items[i])
+                    : null,
                 onTap: items[i].available ? () => onSelected(items[i]) : null,
               ),
               if (i != items.length - 1)
@@ -1221,6 +1230,7 @@ class _LineTile extends StatelessWidget {
     required this.onTap,
     this.onQueryLocally,
     this.showLocalQuery = false,
+    this.onReportAd,
   });
 
   final int index;
@@ -1230,6 +1240,7 @@ class _LineTile extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onQueryLocally;
   final bool showLocalQuery;
+  final VoidCallback? onReportAd;
 
   @override
   Widget build(BuildContext context) {
@@ -1373,6 +1384,23 @@ class _LineTile extends StatelessWidget {
                           : Icons.block_rounded,
                       color: AppColors.theaterFaint,
                       size: 19,
+                    ),
+                  if (onReportAd != null)
+                    IconButton(
+                      key: ValueKey('report-ad-${line.id}'),
+                      tooltip: '标记有广告并换线',
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(
+                        minWidth: 28,
+                        minHeight: 28,
+                      ),
+                      icon: const Icon(
+                        Icons.block_outlined,
+                        size: 16,
+                        color: AppColors.theaterMuted,
+                      ),
+                      onPressed: onReportAd,
                     ),
                 ],
               ),

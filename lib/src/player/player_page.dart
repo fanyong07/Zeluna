@@ -14,6 +14,7 @@ import 'package:screen_brightness/screen_brightness.dart';
 import '../app/anime_app.dart';
 import '../accounts/local_account_repository.dart';
 import '../data/anime_controller.dart';
+import '../playback/local_route_ranker.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
 import '../recommendations/recommendation_playback.dart';
@@ -960,6 +961,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onCopyDiagnostics: _copyPlaybackDiagnostics,
                           onQueryLocally: _querySourceLocally,
                           localLookupInProgress: _localSourceLookupInProgress,
+                          onReportAd: _reportAdAndSwitchLine,
                         ),
                       ),
                     if (_danmakuPanel)
@@ -3019,6 +3021,29 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _playbackFailed = false;
     });
     unawaited(_openLine(line, force: true, resumePosition: resumePosition));
+  }
+
+  void _reportAdAndSwitchLine(PlaybackLine line) {
+    LocalRouteRanker.instance.markLineAsAd(line);
+    final reordered = rankPlaybackLinesForStartup(_lines);
+    PlaybackLine? replacement;
+    for (final candidate in reordered) {
+      if (candidate.id != line.id &&
+          _isPlayableLine(candidate) &&
+          !LocalRouteRanker.instance.isAdDemoted(candidate)) {
+        replacement = candidate;
+        break;
+      }
+    }
+    setState(() {
+      _lines = reordered;
+      _playerMessage = replacement != null
+          ? '已降权该广告线路，正在切换更干净的线路…'
+          : '已记录该线路含广告，后续将优先选择其他干净线路。';
+    });
+    if (replacement != null && _line?.id == line.id) {
+      _selectLine(replacement);
+    }
   }
 
   Future<void> _pickLocalPlaybackFile() async {
