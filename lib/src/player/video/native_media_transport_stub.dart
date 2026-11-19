@@ -10,10 +10,17 @@ class NativeMediaTransport {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    Uri? privateLibraryOrigin,
     bool forceLocalBridge = false,
     void Function(MediaTransportFailure)? onFailure,
-  }) async =>
-      Media(resource, httpHeaders: effectiveMediaRequestHeaders(headers));
+  }) async {
+    if (privateLibraryOrigin != null) {
+      throw UnsupportedError(
+        'Private media libraries require a native client.',
+      );
+    }
+    return Media(resource, httpHeaders: effectiveMediaRequestHeaders(headers));
+  }
 
   Future<void> dispose() async {}
 }

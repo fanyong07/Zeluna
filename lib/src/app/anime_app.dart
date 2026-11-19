@@ -18,6 +18,7 @@ import '../player/open_media_page.dart';
 import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
+import '../sources/media_library_page.dart';
 import '../shared_ui/app_chrome.dart';
 import 'app_theme.dart';
 
@@ -131,6 +132,11 @@ final routerProvider = Provider<GoRouter>((ref) {
     GoRoute(
       path: '/settings/playback',
       builder: (context, state) => const SettingsPage(),
+    ),
+    GoRoute(
+      path: '/settings/media-sources',
+      redirect: (context, state) => kIsWeb ? '/settings' : null,
+      builder: (context, state) => const MediaLibraryPage(),
     ),
     GoRoute(
       path: '/player',

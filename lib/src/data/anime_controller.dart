@@ -27,6 +27,7 @@ import '../rules/rule_playback_resolver.dart';
 import '../rules/rule_plugin_repository.dart';
 import '../rules/tvbox_xbpq_hydrator.dart';
 import '../sources/external_source_adapters.dart';
+import '../sources/media_library_adapter.dart';
 import '../sources/source_catalog_models.dart';
 import '../sources/source_catalog_repository.dart';
 import '../sources/source_controller.dart';
@@ -586,7 +587,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
       storage: HiveDownloadStorage(_library),
       service: ref.read(mediaDownloadServiceProvider),
       resolveLines: (subject, episode) =>
-          linesForEpisodeMode(subject, episode, expandAll: true),
+          playbackDiscovery.downloadLinesForEpisode(subject, episode),
       publishSnapshot: _publishDownloadSnapshot,
     );
     final downloadSnapshot = await _downloadDomain.loadForAccount(
@@ -651,6 +652,7 @@ class AnimeController extends AsyncNotifier<AnimeState> {
           ),
       isContextCurrent: _accounts.isContextCurrent,
       clearRuleRuntimeCaches: playbackResolver.resetExecutionScope,
+      mediaLibrary: ref.read(mediaLibraryAdapterProvider),
       createStartupProbeClient: createTrustedMediaProbeHttpClient,
     );
     playbackDiscovery.loadForAccount(

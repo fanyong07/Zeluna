@@ -444,12 +444,14 @@ final class NativePlaybackRequest {
     required Map<String, String> headers,
     required this.format,
     required this.publicHttpOnly,
+    this.privateLibraryOrigin,
     this.resumePosition = Duration.zero,
   }) : headers = Map.unmodifiable(headers);
   final String url;
   final Map<String, String> headers;
   final String format;
   final bool publicHttpOnly;
+  final Uri? privateLibraryOrigin;
   final Duration resumePosition;
 }
 
@@ -539,14 +541,28 @@ final class NativeVideoController {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    Uri? privateLibraryOrigin,
     void Function(MediaTransportFailure)? onFailure,
-  }) => (_prepareMediaForTesting ?? _mediaTransport.prepare)(
-    resource,
-    headers: headers,
-    format: format,
-    publicHttpOnly: publicHttpOnly,
-    onFailure: onFailure,
-  );
+  }) {
+    final prepareForTesting = _prepareMediaForTesting;
+    if (prepareForTesting != null && privateLibraryOrigin == null) {
+      return prepareForTesting(
+        resource,
+        headers: headers,
+        format: format,
+        publicHttpOnly: publicHttpOnly,
+        onFailure: onFailure,
+      );
+    }
+    return _mediaTransport.prepare(
+      resource,
+      headers: headers,
+      format: format,
+      publicHttpOnly: publicHttpOnly,
+      privateLibraryOrigin: privateLibraryOrigin,
+      onFailure: onFailure,
+    );
+  }
 
   /// The page requests an open; transport, ownership, play permission and
   /// resume seek form one operation here rather than independent UI futures.
@@ -567,6 +583,7 @@ final class NativeVideoController {
       headers: request.headers,
       format: request.format,
       publicHttpOnly: request.publicHttpOnly,
+      privateLibraryOrigin: request.privateLibraryOrigin,
       onFailure: (failure) {
         if (!_disposed && isCurrent()) onTransportFailure?.call(failure);
       },

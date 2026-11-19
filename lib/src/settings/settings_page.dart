@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -53,6 +54,13 @@ class SettingsHubPage extends ConsumerWidget {
             value: '偏好',
             onTap: () => context.push('/settings/playback'),
           ),
+          if (!kIsWeb)
+            _SettingsHubTile(
+              icon: Icons.video_library_outlined,
+              title: '媒体源',
+              value: '私有媒体库',
+              onTap: () => context.push('/settings/media-sources'),
+            ),
           _SettingsHubTile(
             icon: Icons.dns_outlined,
             title: '在线服务',
@@ -251,7 +259,7 @@ class _SettingsHubRail extends StatelessWidget {
             children: [
               SectionTitle(title: '说明'),
               SizedBox(height: 12),
-              _SettingsHubNote(text: '番剧、电视剧和电影的资料与播放由在线服务统一提供'),
+              _SettingsHubNote(text: '在线服务提供番剧、电视剧和电影的资料，也可添加私有播放源'),
               _SettingsHubNote(text: '日常使用无需自行添加或配置播放来源'),
             ],
           ),

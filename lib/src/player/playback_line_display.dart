@@ -1,4 +1,5 @@
 import '../domain/anime_models.dart';
+import '../sources/media_library_adapter.dart';
 
 enum PlaybackLineValidationAction { keep, open, stop }
 
@@ -97,6 +98,9 @@ class PlaybackLineValidationDecision {
 }
 
 bool playbackLineNeedsPreDisplayVerification(PlaybackLine line) {
+  // A matched private file is tried via the credential-aware native path,
+  // not through the public HTTP verifier.
+  if (line is MediaLibraryPlaybackLine) return false;
   if (!line.available) return false;
   // Rule resolution and next-episode warmup already verified these requests.
   // Do not repeat the manifest/segment probe on the first-frame critical path.

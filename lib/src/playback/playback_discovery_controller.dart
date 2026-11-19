@@ -11,6 +11,7 @@ import '../domain/anime_models.dart';
 import '../rules/rule_models.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_controller.dart';
+import '../sources/media_library_adapter.dart';
 import 'local_route_ranker.dart';
 
 typedef PlaybackBackendRepositoryFactory =
@@ -121,6 +122,11 @@ List<PlaybackLine> rankPlaybackLinesForStartup(Iterable<PlaybackLine> lines) {
 }
 
 int _startupAvailabilityRank(PlaybackLine line) {
+  if (line is MediaLibraryPlaybackLine &&
+      line.available &&
+      !LocalRouteRanker.instance.isAdDemoted(line)) {
+    return -1;
+  }
   if (line.available && line.clientVerified) return 0;
   if (line.available && line.serverVerified) return 1;
   if (line.available) return 2;
@@ -156,6 +162,7 @@ final class PlaybackDiscoveryController {
     required PlaybackLineVerifier verifyLine,
     required PlaybackContextGuard isContextCurrent,
     required void Function() clearRuleRuntimeCaches,
+    MediaLibraryAdapter? mediaLibrary,
     http.Client Function()? createStartupProbeClient,
     DateTime Function()? now,
     Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
@@ -165,6 +172,7 @@ final class PlaybackDiscoveryController {
        _verifyLine = verifyLine,
        _isContextCurrent = isContextCurrent,
        _clearRuleRuntimeCaches = clearRuleRuntimeCaches,
+       _mediaLibrary = mediaLibrary,
        _createStartupProbeClient = createStartupProbeClient,
        _now = now ?? DateTime.now,
        _interactivePreferredHeadStart = interactivePreferredHeadStart,
@@ -180,6 +188,7 @@ final class PlaybackDiscoveryController {
   final PlaybackLineVerifier _verifyLine;
   final PlaybackContextGuard _isContextCurrent;
   final void Function() _clearRuleRuntimeCaches;
+  final MediaLibraryAdapter? _mediaLibrary;
   final http.Client Function()? _createStartupProbeClient;
   final DateTime Function() _now;
   final Duration _interactivePreferredHeadStart;
@@ -326,6 +335,7 @@ final class PlaybackDiscoveryController {
     RulePlaybackCancellationToken? cancellationToken,
   }) async {
     final scope = _scope();
+    if (line is MediaLibraryPlaybackLine) return line;
     final verified = await _verifyLine(
       line,
       enrichMetadata: enrichMetadata,
@@ -349,7 +359,9 @@ final class PlaybackDiscoveryController {
     final scope = _scope();
     if (cancellationToken?.isCancelled ?? false) return const [];
     final preferred = preferredProviderId?.trim();
-    Future<List<PlaybackLine>> discover(RulePlaybackCancellationToken? token) {
+    Future<List<PlaybackLine>> discoverOnline(
+      RulePlaybackCancellationToken? token,
+    ) {
       // Full discovery is an inventory, not the two-route startup shortlist.
       if (expandAll ||
           ((preferred == null || preferred.isEmpty) &&
@@ -373,6 +385,61 @@ final class PlaybackDiscoveryController {
         lookupIntent: lookupIntent,
         cancellationToken: token,
       );
+    }
+
+    Future<List<PlaybackLine>> discover(
+      RulePlaybackCancellationToken? token,
+    ) async {
+      final adapter = _mediaLibrary;
+      if (adapter == null || !_usesBackendPlayback(subject)) {
+        return discoverOnline(token);
+      }
+      bool isCurrent() => _isCurrent(scope) && token?.isCancelled != true;
+      final local = adapter.lookup(
+        subject,
+        episode,
+        forceRefresh: forceRefresh,
+      );
+      if (expandAll) {
+        final results = await Future.wait([
+          local.toList(),
+          discoverOnline(token),
+        ]);
+        return isCurrent()
+            ? mergePlaybackLines(results.expand((lines) => lines))
+            : const [];
+      }
+      // Give Tier 0 a short head start, not the full DAV indexing/API budget.
+      // If no online line works, allow that original private lookup to finish.
+      var privateLines = const <MediaLibraryPlaybackLine>[];
+      final privateLookup = local
+          .take(1)
+          .toList()
+          .then((lines) => privateLines = lines);
+      await privateLookup.timeout(
+        _interactivePreferredHeadStart,
+        onTimeout: () => const [],
+      );
+      if (!isCurrent()) return const [];
+      if (privateLines.any(
+        (line) =>
+            !LocalRouteRanker.instance.isAdDemoted(line) &&
+            (preferred == null ||
+                preferred.isEmpty ||
+                preferred == line.providerId),
+      )) {
+        return privateLines;
+      }
+      final online = await discoverOnline(token);
+      if (isCurrent() &&
+          privateLines.isEmpty &&
+          !online.any((line) => line.available)) {
+        privateLines = await privateLookup;
+      }
+      if (!isCurrent()) return const [];
+      return privateLines.isEmpty
+          ? online
+          : mergePlaybackLines([...privateLines, ...online]);
     }
 
     if (expandAll || lookupIntent != PlaybackLookupIntent.interactive) {
@@ -407,6 +474,18 @@ final class PlaybackDiscoveryController {
       cancellationToken: cancellationToken,
     );
   }
+
+  /// Offline jobs persist routes. Only search the public/rule inventory here.
+  Future<List<PlaybackLine>> downloadLinesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) => _linesForEpisodeWithoutPreference(
+    _scope(),
+    subject,
+    episode,
+    expandAll: true,
+    forceRefresh: false,
+  );
 
   Future<List<PlaybackLine>> _rankInteractiveCandidates(
     _PlaybackDiscoveryScope scope,
@@ -1133,11 +1212,21 @@ final class PlaybackDiscoveryController {
         yield* probes(checked);
       }
 
+      Stream<(List<PlaybackLine>?, PlaybackLine?)>
+      privateLibraryEvents() async* {
+        await for (final line in _mediaLibrary!.lookup(subject, episode)) {
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          yield ([line], null);
+        }
+      }
+
       // Quick candidates can be checked immediately; neither a slow full scan
       // nor a slow quick probe may hold the other producer's usable routes.
       final iterators = [
         StreamIterator(probes(baseLines)),
         StreamIterator(expandedEvents()),
+        if (_mediaLibrary != null && _usesBackendPlayback(subject))
+          StreamIterator(privateLibraryEvents()),
       ];
       final next = <int, Future<(int, bool)>>{
         for (var i = 0; i < iterators.length; i++)
@@ -1976,7 +2065,9 @@ List<PlaybackLine> mergePlaybackLines(Iterable<PlaybackLine> lines) {
     final url = line.url ?? '';
     // A URL is playable only in its request and verification context. This
     // ephemeral key must not normalize signed URLs or replace persistent IDs.
-    final Object key = url.isNotEmpty
+    final Object key = line is MediaLibraryPlaybackLine
+        ? (MediaLibraryPlaybackLine, line.id)
+        : url.isNotEmpty
         ? (
             line.sourceInventoryId.isEmpty
                 ? ''

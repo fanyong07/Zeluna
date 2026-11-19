@@ -17,6 +17,7 @@ import '../data/anime_controller.dart';
 import '../playback/local_route_ranker.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
+import '../sources/media_library_adapter.dart';
 import '../recommendations/recommendation_playback.dart';
 import '../rules/rule_playback_resolver.dart';
 import '../settings/settings_page.dart';
@@ -2295,12 +2296,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           );
         },
       );
+      final privateRequest = line is MediaLibraryPlaybackLine
+          ? ref.read(mediaLibraryAdapterProvider)!.playbackRequestFor(line)
+          : null;
       final opened = await _nativeVideo.openRequest(
         NativePlaybackRequest(
           url: url,
-          headers: line.headers,
+          headers: privateRequest?.headers ?? line.headers,
           format: line.format,
           publicHttpOnly: line.publicHttpOnly,
+          privateLibraryOrigin: privateRequest?.origin,
           resumePosition: requestedResumePosition,
         ),
         serial: serial,
@@ -2847,7 +2852,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       PlaybackSessionEvent.episodeChanged(episode.id),
     );
     final controller = ref.read(animeControllerProvider.notifier);
-    final preparedBundle = _currentSettings.rememberLine
+    // A prefetched public route should not replace a user's current library
+    // before the next episode has been looked up there.
+    final preparedBundle =
+        _currentSettings.rememberLine && _line is! MediaLibraryPlaybackLine
         ? controller.prefetchedWarmupBundleForEpisode(
             widget.request.subject,
             episode,

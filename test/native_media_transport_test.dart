@@ -90,6 +90,97 @@ void main() {
     },
   );
 
+  test(
+    'private original streams keep their range request and auth on the configured origin',
+    () async {
+      final origin = Uri.parse('https://library.local:8443/dav/');
+      final requests = <Uri>[];
+      final b = await NativeMediaBridge.start(
+        origin.resolve('Movie.mp4'),
+        privateLibraryOrigin: origin,
+        headers: {'Authorization': 'Basic fixture'},
+        clientFactory: () => MockClient((request) async {
+          requests.add(request.url);
+          expect(request.headers['authorization'], 'Basic fixture');
+          expect(request.headers['range'], 'bytes=0-31');
+          expect(request.followRedirects, isFalse);
+          if (requests.length == 1) {
+            return http.Response(
+              '',
+              302,
+              headers: {'location': '/dav/target.mp4'},
+            );
+          }
+          return http.Response(
+            'original media bytes',
+            206,
+            headers: {'content-type': 'video/mp4'},
+          );
+        }),
+      );
+      addTearDown(b.dispose);
+      final client = http.Client();
+      addTearDown(client.close);
+      final response = await client.get(
+        b.uri,
+        headers: {'Range': 'bytes=0-31'},
+      );
+      expect(response.statusCode, 206);
+      expect(response.body, 'original media bytes');
+      expect(requests, [
+        origin.resolve('Movie.mp4'),
+        origin.resolve('target.mp4'),
+      ]);
+    },
+  );
+
+  test(
+    'private media rejects cross-origin redirects without sending any second request',
+    () async {
+      final origin = Uri.parse('https://library.local/');
+      final calls = <Uri>[];
+      final failures = <Map<String, Object?>>[];
+      final b = await NativeMediaBridge.start(
+        origin.resolve('Videos/42/stream?static=true'),
+        privateLibraryOrigin: origin,
+        headers: {'X-Emby-Token': 'fixture'},
+        clientFactory: () => MockClient((request) async {
+          calls.add(request.url);
+          return http.Response(
+            '',
+            302,
+            headers: {'location': 'https://outside.invalid/video.mp4'},
+          );
+        }),
+        onFailure: (failure) => failures.add(failure.safeFields),
+      );
+      addTearDown(b.dispose);
+      final client = http.Client();
+      addTearDown(client.close);
+      expect((await client.get(b.uri)).statusCode, 502);
+      expect(calls, [origin.resolve('Videos/42/stream?static=true')]);
+      expect(failures.single, {
+        'reason_code': 'policy',
+        'resource_type': 'media',
+      });
+      await expectLater(
+        NativeMediaBridge.start(origin.resolve('Movie.mp4')),
+        throwsA(isA<NetworkSecurityException>()),
+      );
+
+      final transport = NativeMediaTransport();
+      addTearDown(transport.dispose);
+      final media = await transport.prepare(
+        origin.resolve('Movie.mp4').toString(),
+        headers: {'X-Emby-Token': 'fixture'},
+        privateLibraryOrigin: origin,
+      );
+      expect(Uri.parse(media.uri).host, '127.0.0.1');
+      expect(media.httpHeaders ?? {}, isEmpty);
+      expect(media.uri, isNot(contains('library.local')));
+    },
+  );
+
   final root = Uri.parse('https://media.example.test/start.m3u8');
   late http.Client local;
   setUp(() => local = http.Client());

@@ -33,7 +33,22 @@ class NetworkRequestPolicy {
     this.allowSyntheticDns = false,
     this.allowLiteralBenchmarkAddress = false,
     this.rejectRedirects = true,
-  });
+  }) : _privateMediaOrigin = null;
+
+  /// Only for a user-configured private library, never a public rule result.
+  const NetworkRequestPolicy.privateMediaLibrary({
+    required Uri origin,
+    required this.maxResponseBytes,
+    required this.requestTimeout,
+    this.rejectRedirects = true,
+  }) : _privateMediaOrigin = origin,
+       service = NetworkServiceKind.mediaResource,
+       httpsOnly = true,
+       allowPrivateNetwork = true,
+       allowSyntheticDns = false,
+       allowLiteralBenchmarkAddress = false;
+
+  final Uri? _privateMediaOrigin;
 
   factory NetworkRequestPolicy.forService(
     NetworkServiceKind service, {
@@ -113,6 +128,12 @@ class NetworkRequestPolicy {
     }
     if (httpsOnly && scheme != 'https') {
       throw NetworkSecurityException('${service.name} requires HTTPS.');
+    }
+    final privateOrigin = _privateMediaOrigin;
+    if (privateOrigin != null && !_sameOrigin(privateOrigin, uri)) {
+      throw const NetworkSecurityException(
+        'Private library requests must stay on the configured origin.',
+      );
     }
     final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.$'), '');
     if (host == 'localhost' ||

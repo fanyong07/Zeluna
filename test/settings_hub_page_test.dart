@@ -5,6 +5,8 @@ import 'package:anime/src/profile/profile_page.dart';
 import 'package:anime/src/settings/settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -105,6 +107,52 @@ void main() {
     expect(find.textContaining('AppSecret'), findsNothing);
     expect(find.text('启用 Bilibili 弹幕'), findsOneWidget);
     expect(find.text('启用自建弹幕库'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('media sources settings can add and remove a private library', (
+    tester,
+  ) async {
+    await _setViewport(tester);
+    FlutterSecureStorage.setMockInitialValues({});
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          animeControllerProvider.overrideWith(_FakeAnimeController.new),
+        ],
+        child: const AnimeApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(AnimeApp)),
+    );
+    container.read(routerProvider).go('/settings');
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('媒体源'));
+    await tester.tap(find.text('媒体源'));
+    await tester.pumpAndSettle();
+    expect(find.text('还没有添加媒体库'), findsOneWidget);
+
+    await tester.tap(find.text('添加媒体库'));
+    await tester.pumpAndSettle();
+    final fields = find.byType(TextField);
+    expect(fields, findsNWidgets(3));
+    expect(tester.widget<TextField>(fields.at(2)).obscureText, isTrue);
+    await tester.enterText(fields.at(0), '我的片库');
+    await tester.enterText(fields.at(1), 'https://nas.local/emby');
+    await tester.enterText(fields.at(2), 'fixture-emby-ui');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(find.text('我的片库'), findsOneWidget);
+    expect(find.text('fixture-emby-ui'), findsNothing);
+
+    await tester.tap(find.byTooltip('移除媒体库'));
+    await tester.pumpAndSettle();
+    expect(find.text('移除媒体库？'), findsOneWidget);
+    await tester.tap(find.text('移除'));
+    await tester.pumpAndSettle();
+    expect(find.text('还没有添加媒体库'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

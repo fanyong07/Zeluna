@@ -37,6 +37,7 @@ class NativeMediaTransport {
     required Map<String, String> headers,
     String format = '',
     bool publicHttpOnly = false,
+    Uri? privateLibraryOrigin,
     bool forceLocalBridge = false,
     void Function(MediaTransportFailure)? onFailure,
   }) async {
@@ -52,21 +53,24 @@ class NativeMediaTransport {
     // the loopback bridge when sensitive credentials must be isolated or local
     // playlist rewriting is explicitly requested.
     final relay =
-        (Platform.isAndroid || Platform.isWindows) &&
-        uri != null &&
-        const {'http', 'https'}.contains(uri.scheme) &&
-        format.toUpperCase() != 'DASH' &&
-        !uri.path.toLowerCase().endsWith('.mpd') &&
-        (forceLocalBridge || _requiresLocalBridge(effectiveHeaders));
+        privateLibraryOrigin != null ||
+        ((Platform.isAndroid || Platform.isWindows) &&
+            uri != null &&
+            const {'http', 'https'}.contains(uri.scheme) &&
+            format.toUpperCase() != 'DASH' &&
+            !uri.path.toLowerCase().endsWith('.mpd') &&
+            (forceLocalBridge || _requiresLocalBridge(effectiveHeaders)));
     if (_disposed || generation != _generation) {
       throw StateError('Media open was replaced.');
     }
     if (!relay) return Media(resource, httpHeaders: effectiveHeaders);
+    if (uri == null) throw const FormatException('Invalid media URL.');
     final bridge = await NativeMediaBridge.start(
       uri,
       headers: effectiveHeaders,
       playlist: const {'HLS', 'M3U8'}.contains(format.toUpperCase()),
       publicHttpOnly: publicHttpOnly,
+      privateLibraryOrigin: privateLibraryOrigin,
       onFailure: onFailure,
     );
     if (_disposed || generation != _generation) {
@@ -95,6 +99,7 @@ class NativeMediaBridge {
     this._policy,
     this._clientFactory,
     this._onFailure,
+    this._originalFileOnly,
   );
 
   static const maxPlaylistBytes = 4 * 1024 * 1024;
@@ -102,6 +107,7 @@ class NativeMediaBridge {
   static const maxConcurrentRequests = 12;
   static const _idleTimeout = Duration(seconds: 30);
   final HttpServer _server;
+  final bool _originalFileOnly;
   final void Function(MediaTransportFailure)? _onFailure;
   void _reportFailure(MediaTransportFailure failure) {
     if (_disposed) return;
@@ -133,21 +139,32 @@ class NativeMediaBridge {
     Map<String, String> headers = const {},
     bool playlist = false,
     bool publicHttpOnly = false,
+    Uri? privateLibraryOrigin,
     http.Client Function()? clientFactory,
     void Function(MediaTransportFailure)? onFailure,
   }) async {
-    final policy = NetworkRequestPolicy(
-      service: NetworkServiceKind.mediaResource,
-      httpsOnly: false,
-      allowPrivateNetwork: false,
-      maxResponseBytes: mediaDownloadMaxResponseBytes,
-      requestTimeout: _idleTimeout,
-      // A validated HTTPS hostname may resolve through a device VPN. This
-      // does not relax publicHttpOnly's literal-IP or cleartext restrictions.
-      allowSyntheticDns: true,
-      allowLiteralBenchmarkAddress: !publicHttpOnly,
-      rejectRedirects: false,
-    );
+    if (privateLibraryOrigin != null && publicHttpOnly) {
+      throw const NetworkSecurityException('Incompatible media trust policy.');
+    }
+    final policy = privateLibraryOrigin != null
+        ? NetworkRequestPolicy.privateMediaLibrary(
+            origin: privateLibraryOrigin,
+            maxResponseBytes: mediaDownloadMaxResponseBytes,
+            requestTimeout: _idleTimeout,
+            rejectRedirects: false,
+          )
+        : NetworkRequestPolicy(
+            service: NetworkServiceKind.mediaResource,
+            httpsOnly: false,
+            allowPrivateNetwork: false,
+            maxResponseBytes: mediaDownloadMaxResponseBytes,
+            requestTimeout: _idleTimeout,
+            // A validated HTTPS hostname may resolve through a device VPN. This
+            // does not relax publicHttpOnly's literal-IP or cleartext restrictions.
+            allowSyntheticDns: true,
+            allowLiteralBenchmarkAddress: !publicHttpOnly,
+            rejectRedirects: false,
+          );
     policy.ensureUriAllowed(source);
     policy.ensureHeadersAllowed(source, headers);
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -157,6 +174,7 @@ class NativeMediaBridge {
       policy,
       clientFactory,
       onFailure,
+      privateLibraryOrigin != null,
     );
     bridge.uri = bridge._register(source, headers, playlist: playlist);
     server.listen(bridge._handle, onError: (Object _) {});
@@ -302,6 +320,13 @@ class NativeMediaBridge {
           .replaceFirst('\uFEFF', '')
           .trimLeft();
       final hls = textPrefix.startsWith('#EXTM3U');
+      if (_originalFileOnly &&
+          (hls ||
+              response.headers['content-type']?.contains('dash+xml') == true)) {
+        throw const FormatException(
+          'Private library requires an original file.',
+        );
+      }
       if (hls) {
         final bytes = <int>[...prefix];
         if (bytes.length > maxPlaylistBytes) {
@@ -326,11 +351,25 @@ class NativeMediaBridge {
         }
         request.response.statusCode = response.statusCode;
         _copyMediaHeaders(response, request.response);
-        request.response.add(prefix);
-        await request.response.flush();
-        while (await reader.moveNext().timeout(_idleTimeout)) {
-          if (transfer.cancelled) return;
-          request.response.add(reader.current);
+        if (_originalFileOnly) {
+          // The client controls the pace for large originals; don't enqueue
+          // the whole file into the loopback socket's output buffer.
+          Stream<List<int>> chunks() async* {
+            yield prefix;
+            while (!transfer.cancelled &&
+                await reader.moveNext().timeout(_idleTimeout)) {
+              yield reader.current;
+            }
+          }
+
+          await request.response.addStream(chunks());
+        } else {
+          request.response.add(prefix);
+          await request.response.flush();
+          while (await reader.moveNext().timeout(_idleTimeout)) {
+            if (transfer.cancelled) return;
+            request.response.add(reader.current);
+          }
         }
       }
       upstreamComplete = true;

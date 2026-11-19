@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../core/network/media_request_headers.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
+import '../sources/media_library_adapter.dart';
 
 /// Cleanliness tier for automatic route selection.
 ///
@@ -133,7 +134,7 @@ final class LocalRouteRanker {
 
   void markLineAsAd(PlaybackLine line) {
     final expiry = _now().add(adDemotionTtl);
-    final host = hostOf(line.url);
+    final host = line is MediaLibraryPlaybackLine ? '' : hostOf(line.url);
     if (host.isNotEmpty) {
       _adReportedKeys['host:$host'] = expiry;
     }
@@ -156,7 +157,7 @@ final class LocalRouteRanker {
       return true;
     }
 
-    final host = hostOf(line.url);
+    final host = line is MediaLibraryPlaybackLine ? '' : hostOf(line.url);
     if (host.isNotEmpty && active('host:$host')) return true;
     final provider = line.providerId.trim().toLowerCase();
     if (provider.isNotEmpty && active('provider:$provider')) return true;
@@ -176,6 +177,7 @@ final class LocalRouteRanker {
 
   RouteCleanlinessTier cleanlinessTierOf(PlaybackLine line) {
     if (isAdDemoted(line)) return RouteCleanlinessTier.adHeavy;
+    if (line is MediaLibraryPlaybackLine) return RouteCleanlinessTier.clean;
     final rawUrl = (line.url ?? '').trim().toLowerCase();
     if (rawUrl.startsWith('file://')) return RouteCleanlinessTier.clean;
     final idTokens =
@@ -249,6 +251,7 @@ final class LocalRouteRanker {
   }
 
   static bool canRace(PlaybackLine line) {
+    if (line is MediaLibraryPlaybackLine) return false;
     final uri = Uri.tryParse(line.url?.trim() ?? '');
     return line.available &&
         (line.clientVerified || line.serverVerified) &&

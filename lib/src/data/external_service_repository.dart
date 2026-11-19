@@ -949,6 +949,8 @@ class ExternalServiceRepository {
             subjectId: subject.id,
             number: globalNumber,
             title: '第$seasonNumber季 第$episodeNumber集',
+            seasonNumber: seasonNumber,
+            seasonEpisodeNumber: episodeNumber,
             airdate: episodeNumber == 1 ? seasonDate : null,
             duration: runtime,
             description: seasonSummary.isEmpty
