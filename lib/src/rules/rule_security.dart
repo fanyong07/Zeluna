@@ -268,11 +268,14 @@ class RuleUrlPolicy {
 
     final host = uri.host.toLowerCase().trim().replaceFirst(RegExp(r'\.$'), '');
     if (_isForbiddenHost(host)) return false;
-    final domains = purpose == RuleUrlPurpose.page
-        ? manifest.pageDomains
-        : manifest.mediaDomains;
+    // Public media CDNs rotate domains frequently (e.g. play-cdn19 -> play-cdn27).
+    // Keep strict SSRF host blocking and cross-origin credential stripping,
+    // without killing live sources on static compile-time mediaDomains lists.
+    if (purpose == RuleUrlPurpose.media) {
+      return true;
+    }
     return normalizeRuleDomains(
-      domains,
+      manifest.pageDomains,
     ).any((domain) => _matchesDomain(host, domain));
   }
 }

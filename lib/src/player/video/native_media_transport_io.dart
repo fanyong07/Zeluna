@@ -10,6 +10,7 @@ import '../../core/network/media_request_headers.dart';
 import '../../core/network/network_http_client.dart';
 import '../../core/network/network_security.dart';
 import '../../rules/rule_http_policy.dart';
+import 'hls_ad_cleaner.dart';
 import 'media_transport_failure.dart';
 
 /// Native FFmpeg networking can disagree with the verified Dart media probe.
@@ -380,6 +381,7 @@ class NativeMediaBridge {
   }
 
   String _rewritePlaylist(String text, Uri base, Map<String, String> headers) {
+    final cleaned = cleanHlsPlaylist(text, baseUri: base).playlist;
     var nextIsPlaylist = false;
     String child(String value, {required bool playlist}) {
       final target = base.resolve(value);
@@ -390,7 +392,7 @@ class NativeMediaBridge {
       ).toString();
     }
 
-    return text
+    return cleaned
         .split('\n')
         .map((line) {
           final trimmed = line.trim();

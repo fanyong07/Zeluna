@@ -31,8 +31,15 @@ class AnimeTheme {
     final primary = dark ? Colors.white : Colors.black;
     final onPrimary = dark ? Colors.black : Colors.white;
     final textAccent = primary;
+    final errorColor = dark ? const Color(0xFFEF6B6B) : const Color(0xFFC62828);
+    final onErrorColor = dark ? const Color(0xFF1A0707) : Colors.white;
+    final errorContainerColor =
+        dark ? const Color(0xFF3B1515) : const Color(0xFFFDEAEA);
+    final onErrorContainerColor =
+        dark ? const Color(0xFFFFD6D6) : const Color(0xFF6B1111);
     // Explicit neutral slots avoid Material's seeded color tint in dialogs,
-    // chips, selections and surface elevations.
+    // chips, selections and surface elevations, while retaining readable red
+    // semantics for errors.
     final scheme = ColorScheme(
       brightness: brightness,
       primary: primary,
@@ -47,10 +54,10 @@ class AnimeTheme {
       onTertiary: onPrimary,
       tertiaryContainer: colors.panelHigh,
       onTertiaryContainer: colors.text,
-      error: primary,
-      onError: onPrimary,
-      errorContainer: colors.panelHigh,
-      onErrorContainer: colors.text,
+      error: errorColor,
+      onError: onErrorColor,
+      errorContainer: errorContainerColor,
+      onErrorContainer: onErrorContainerColor,
       surface: colors.surface,
       onSurface: colors.text,
       onSurfaceVariant: colors.muted,
