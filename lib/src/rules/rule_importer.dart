@@ -48,16 +48,23 @@ class RuleImporter {
       allowPrivateNetwork: false,
       maxResponseBytes: maxFileBytes,
       requestTimeout: timeout,
+      rejectRedirects: false,
     );
     final ownedClient = _client == null;
     final client = _client ?? createNetworkHttpClient(policy);
     try {
-      final decoded = await _fetchRuleJson(client, policy, uri);
-      final index = _kazumiIndex(decoded);
+      final fetched = await _fetchRuleJson(client, policy, uri);
+      final index = _kazumiIndex(fetched.decoded);
       if (index != null) {
-        return await _loadKazumiIndex(client, policy, uri, index);
+        return await _loadKazumiIndex(
+          client,
+          policy,
+          fetched.finalUri,
+          uri.toString(),
+          index,
+        );
       }
-      return _bundleFromJson(decoded, uri.toString());
+      return _bundleFromJson(fetched.decoded, uri.toString());
     } on NetworkSecurityException catch (error) {
       throw FormatException(error.message);
     } finally {
@@ -65,26 +72,41 @@ class RuleImporter {
     }
   }
 
-  Future<Object?> _fetchRuleJson(
+  Future<({Object? decoded, Uri finalUri})> _fetchRuleJson(
     http.Client client,
     NetworkRequestPolicy policy,
     Uri uri, {
     int? maxBytes,
   }) async {
     final limit = maxBytes ?? maxFileBytes;
-    policy.ensureUriAllowed(uri);
-    final request = http.Request('GET', uri)
-      ..followRedirects = false
-      ..headers['Accept'] = 'application/json, text/plain;q=0.9';
-    final response = await client.send(request).timeout(timeout);
-    if (response.statusCode >= 300 && response.statusCode < 400) {
-      final location = response.headers['location']?.trim() ?? '';
-      if (location.isNotEmpty) policy.ensureUriAllowed(uri.resolve(location));
-      final subscription = response.stream.listen(null);
-      await subscription.cancel();
-      throw const FormatException('规则导入地址发生重定向，已停止访问。');
+    var current = uri;
+    late http.StreamedResponse response;
+    for (var redirects = 0; ; redirects++) {
+      policy.ensureUriAllowed(current);
+      final request = http.Request('GET', current)
+        ..followRedirects = false
+        ..headers['Accept'] = 'application/json, text/plain;q=0.9';
+      response = await client.send(request).timeout(timeout);
+      if (response.statusCode >= 300 && response.statusCode < 400) {
+        final location = response.headers['location']?.trim() ?? '';
+        final subscription = response.stream.listen(null);
+        await subscription.cancel();
+        if (location.isEmpty) {
+          throw const FormatException('规则导入地址发生无效重定向。');
+        }
+        if (redirects >= 5) {
+          throw const FormatException('规则导入地址重定向次数过多。');
+        }
+        final next = current.resolve(location);
+        policy.ensureUriAllowed(next);
+        current = next;
+        continue;
+      }
+      break;
     }
     if (response.statusCode < 200 || response.statusCode >= 400) {
+      final subscription = response.stream.listen(null);
+      await subscription.cancel();
       throw FormatException('仓库请求失败：HTTP ${response.statusCode}');
     }
     _validateRuleResponseType(response.headers['content-type']);
@@ -98,7 +120,7 @@ class RuleImporter {
       response.stream,
       limit,
     ).timeout(timeout);
-    return _decodeRuleJson(text.trim());
+    return (decoded: _decodeRuleJson(text.trim()), finalUri: current);
   }
 
   List<Map<String, dynamic>>? _kazumiIndex(Object? decoded) {
@@ -120,11 +142,12 @@ class RuleImporter {
   Future<RuleImportBundle> _loadKazumiIndex(
     http.Client client,
     NetworkRequestPolicy policy,
-    Uri uri,
+    Uri baseUri,
+    String sourceUrl,
     List<Map<String, dynamic>> entries,
   ) async {
-    if (entries.length > 64) {
-      throw const FormatException('Kazumi 目录超过 64 条规则，请选择较小的订阅。');
+    if (entries.length > 256) {
+      throw const FormatException('Kazumi 目录超过 256 条规则，请选择较小的订阅。');
     }
     final byName = <String, Map<String, dynamic>>{};
     for (final entry in entries) {
@@ -140,21 +163,25 @@ class RuleImporter {
     final names = byName.keys.toList(growable: false);
     const ruleLimit = 256 * 1024;
     final maxRuleBytes = maxFileBytes < ruleLimit ? maxFileBytes : ruleLimit;
+    var transientFailures = 0;
     for (var start = 0; start < names.length; start += 6) {
-      rules.addAll(
-        await Future.wait(
-          names.skip(start).take(6).map((name) async {
-            // Resolve only a sibling JSON file; never forward an index query.
-            final child = uri.resolve('./${Uri.encodeComponent('$name.json')}');
-            final decoded = await _fetchRuleJson(
+      final batch = await Future.wait(
+        names.skip(start).take(6).map((name) async {
+          // Resolve only a sibling JSON file; never forward an index query.
+          final child = baseUri.resolve(
+            './${Uri.encodeComponent('$name.json')}',
+          );
+          try {
+            final fetched = await _fetchRuleJson(
               client,
               policy,
               child,
               maxBytes: maxRuleBytes,
             );
+            final decoded = fetched.decoded;
             if (decoded is! Map<String, dynamic> ||
                 !_looksLikeSingleRule(decoded)) {
-              throw FormatException('Kazumi 目录中的 $name 不是完整的规则。');
+              return null;
             }
             return {
               ...decoded,
@@ -164,15 +191,35 @@ class RuleImporter {
               'source': 'kazumi',
               'rawConfig': decoded,
             };
-          }),
-          eagerError: true,
-        ),
+          } on NetworkSecurityException {
+            rethrow;
+          } on FormatException catch (error) {
+            // Skip missing (404) or malformed individual files so one stale
+            // index entry does not break an entire community repo, but track
+            // upstream server errors to avoid wiping a subscription on outages.
+            if (error.message.contains('HTTP 5')) {
+              transientFailures++;
+            }
+            return null;
+          } catch (_) {
+            transientFailures++;
+            return null;
+          }
+        }),
       );
+      for (final item in batch) {
+        if (item != null) rules.add(item);
+      }
+    }
+    // Protect existing subscriptions from accidental wipes during upstream outages.
+    if (rules.isEmpty ||
+        (transientFailures > 0 && transientFailures * 5 >= names.length)) {
+      throw const FormatException('Kazumi 订阅拉取不完整，请稍后重试。');
     }
     return _bundleFromJson({
       'name': 'Kazumi 规则订阅',
       'rules': rules,
-    }, uri.toString());
+    }, sourceUrl);
   }
 
   RuleImportBundle importFromText(String text, {String sourceUrl = ''}) {

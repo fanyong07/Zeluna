@@ -94,6 +94,37 @@ void main() {
   );
 
   test(
+    'Kazumi skips individual missing 404 files and follows safe public redirects',
+    () async {
+      final client = MockClient((request) async {
+        if (request.url.host == 'mirror.example') {
+          return http.Response(
+            '',
+            302,
+            headers: {
+              'location': 'https://rules.example/sub/index.json',
+            },
+          );
+        }
+        return switch (request.url.pathSegments.last) {
+          'index.json' => _json([
+            _kazumiEntry('Available'),
+            _kazumiEntry('DeletedRule'),
+          ]),
+          'Available.json' => _json(_kazumiRule('Available')),
+          _ => http.Response('', 404),
+        };
+      });
+      addTearDown(client.close);
+      final bundle = await RuleImporter(
+        client: client,
+      ).importFromUrl('https://mirror.example/kazumi');
+      expect(bundle.sourceUrl, 'https://mirror.example/kazumi');
+      expect(bundle.rules.map((rule) => rule.name), ['Available']);
+    },
+  );
+
+  test(
     'Animeko and TVBox imports retain subscription URL and declared content types',
     () async {
       final client = MockClient((request) async {
