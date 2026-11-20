@@ -31,7 +31,7 @@ void main() {
           try {
             if (request.url.path != '/selected.mp4') {
               backgroundStarted++;
-              if (backgroundStarted == 3) inventoryStarted.complete();
+              if (backgroundStarted == 9) inventoryStarted.complete();
               await inventoryGate.future;
             }
             return http.Response.bytes(
@@ -45,7 +45,7 @@ void main() {
         }),
       );
       final background = [
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < 12; i++)
           resolver.verifyPlaybackLine(
             line: _networkLine('https://cdn.example.com/scan-$i.mp4'),
             enrichMetadata: false,
@@ -62,7 +62,7 @@ void main() {
         final result = await selected.timeout(const Duration(seconds: 1));
         expect(result.clientVerified, isTrue);
         expect(inventoryGate.isCompleted, isFalse);
-        expect(maxActive, lessThanOrEqualTo(4));
+        expect(maxActive, lessThanOrEqualTo(10));
       } finally {
         inventoryGate.complete();
         await Future.wait([...background, ?selected]);
@@ -1350,13 +1350,15 @@ void main() {
   });
 
   test(
-    'inventory probes leave one of the four wire slots for playback',
+    'inventory probes leave one of the wire slots for playback',
     () async {
       final firstWaveStarted = Completer<void>();
       final releaseFirstWave = Completer<void>();
       var started = 0;
       var active = 0;
       var maxActive = 0;
+      const expectedBackgroundSlots = 9;
+      const totalRoads = 11;
       final client = MockClient((request) async {
         if (request.url.path == '/vod/search.html') {
           return _html('''
@@ -1369,7 +1371,7 @@ void main() {
         if (request.url.path == '/detail/limited.html') {
           return _html(
             List.generate(
-              5,
+              totalRoads,
               (index) =>
                   '<ul class="line"><li><a href="/play/$index.html">第1集</a></li></ul>',
             ).join(),
@@ -1386,7 +1388,7 @@ void main() {
           started++;
           active++;
           if (active > maxActive) maxActive = active;
-          if (started == 3) firstWaveStarted.complete();
+          if (started == expectedBackgroundSlots) firstWaveStarted.complete();
           await releaseFirstWave.future;
           active--;
           return http.Response.bytes(
@@ -1398,21 +1400,27 @@ void main() {
         return http.Response('not found', 404);
       });
 
-      final resolving = RulePlaybackResolver(client: client).resolveRule(
-        rule: _kazumiRule,
-        subject: _animeSubject,
-        episode: _episode,
-      );
+      // Spawn multiple concurrent road resolves on the same resolver so we
+      // actually saturate the global background probe limiter (9 slots).
+      final resolver = RulePlaybackResolver(client: client);
+      final resolving = Future.wait([
+        for (var i = 0; i < 3; i++)
+          resolver.resolveRule(
+            rule: _kazumiRule,
+            subject: _animeSubject,
+            episode: _episode,
+          ),
+      ]);
       await firstWaveStarted.future.timeout(const Duration(seconds: 1));
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(started, 3);
+      expect(started, expectedBackgroundSlots);
       releaseFirstWave.complete();
 
-      final lines = await resolving;
-      expect(lines, hasLength(5));
-      expect(lines.every((line) => line.available), isTrue);
-      expect(started, 5);
-      expect(maxActive, 3);
+      final allLines = await resolving;
+      expect(allLines.first, hasLength(totalRoads));
+      expect(allLines.first.every((line) => line.available), isTrue);
+      expect(started, greaterThanOrEqualTo(totalRoads));
+      expect(maxActive, expectedBackgroundSlots);
     },
   );
 

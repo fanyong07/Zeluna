@@ -2,18 +2,18 @@ part of '../rule_playback_resolver.dart';
 
 // Bounded media probes, redirect handling, and probe caching.
 
-const _playableProbeTimeout = Duration(seconds: 6);
-const _playlistMetadataTimeout = Duration(seconds: 3);
+const _playableProbeTimeout = Duration(seconds: 8);
+const _playlistMetadataTimeout = Duration(seconds: 6);
 const _metadataEnrichmentBudget = Duration(seconds: 2);
-const _probeChunkIdleTimeout = Duration(milliseconds: 300);
+const _probeChunkIdleTimeout = Duration(milliseconds: 1200);
 const _initialProbeRangeEnd = 2048;
 const _maxBinaryProbeSampleBytes = 64 * 1024;
 const _maxManifestProbeSampleBytes = 512 * 1024;
 const _minimumBinaryProbeBytes = 4 * 1024;
 const _maxDrpyMediaRedirects = 3;
 const _maxRuleRedirects = 5;
-const _maxConcurrentPlayableProbes = 4;
-const _maxConcurrentMetadataProbes = 4;
+const _maxConcurrentPlayableProbes = 10;
+const _maxConcurrentMetadataProbes = 8;
 const _availableProbeCacheTtl = Duration(minutes: 2);
 const _failedProbeCacheTtl = Duration(seconds: 20);
 const _maxProbeCacheEntries = 256;

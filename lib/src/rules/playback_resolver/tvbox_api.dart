@@ -136,7 +136,9 @@ extension _TvBoxApiResolution on RulePlaybackResolver {
           ),
       ],
       verifyPlayable: verifyPlayable,
-      candidateTimeout: timeout,
+      candidateTimeout: timeout >= const Duration(seconds: 5)
+          ? timeout + const Duration(seconds: 5)
+          : timeout,
       pendingCandidate: (index) {
         final group = groups[index];
         final selected = _pickTvBoxEpisode(group.episodes, episode);
@@ -385,12 +387,13 @@ int _tvBoxMatchScore(
   final candidateYear = _tvBoxYear(item['vod_year'] ?? item['year']);
   if (expectedYear != null &&
       candidateYear != null &&
-      expectedYear != candidateYear) {
+      (expectedYear - candidateYear).abs() > 1) {
     return 0;
   }
-  return score +
-      (candidateType == targetType ? 8 : 0) +
-      (expectedYear != null && expectedYear == candidateYear ? 10 : 0);
+  final yearBonus = expectedYear != null && candidateYear != null
+      ? (expectedYear == candidateYear ? 10 : 4)
+      : 0;
+  return score + (candidateType == targetType ? 8 : 0) + yearBonus;
 }
 
 int? _tvBoxYear(Object? value) => int.tryParse(
@@ -461,25 +464,44 @@ List<_TvBoxPlayGroup> _tvBoxPlayGroups(Map<String, dynamic>? item) {
       ),
     );
   }
+  // MacCMS feeds almost always publish both an HTML share/player route
+  // (`/share/...`, `/play/...`) and a direct `.m3u8` route separated by `$$$`.
+  // Drop HTML player groups whenever direct media routes exist so dead web
+  // pages never starve the probe limiter.
+  bool isDirectMediaGroup(_TvBoxPlayGroup group) =>
+      group.episodes.any((ep) => _isExplicitPlayableUrl(ep.url));
+  final directGroups = result.where(isDirectMediaGroup).toList(growable: false);
+  if (directGroups.isNotEmpty) return directGroups;
   return result;
 }
+
+final _tvBoxEpisodeNumRe = RegExp(
+  r'(?:第\s*0*(\d+)\s*[集话話回期]|(?:ep|e)\s*0*(\d+)|^0*(\d+)$)',
+  caseSensitive: false,
+);
 
 _TvBoxEpisode? _pickTvBoxEpisode(
   List<_TvBoxEpisode> candidates,
   AnimeEpisode episode,
 ) {
   if (candidates.isEmpty) return null;
-  final number = episode.number.toString();
+  final targetNumber = episode.seasonEpisodeNumber ?? episode.number;
+  final numberText = targetNumber.toString();
   for (final candidate in candidates) {
     final title = _cleanText(candidate.title).toLowerCase();
-    if (title == number ||
-        title.contains('第$number') ||
-        title.contains('ep$number') ||
-        title.contains('e$number')) {
+    final match = _tvBoxEpisodeNumRe.firstMatch(title);
+    if (match != null) {
+      final raw = match.group(1) ?? match.group(2) ?? match.group(3);
+      if (int.tryParse(raw ?? '') == targetNumber) return candidate;
+    }
+    if (title == numberText ||
+        title.contains('第$numberText') ||
+        title.contains('ep$numberText') ||
+        title.contains('e$numberText')) {
       return candidate;
     }
   }
-  final index = episode.number - 1;
+  final index = targetNumber - 1;
   if (index >= 0 && index < candidates.length) return candidates[index];
   return candidates.first;
 }
