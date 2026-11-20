@@ -933,7 +933,7 @@ class _RepositoryHeader extends StatelessWidget {
             child: Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
               child: Text(
-                '支持 Kazumi、Animeko 和 TVBox 订阅地址。确认订阅后，应用运行时会定期刷新。新增或变更的规则不会自动启用，点订阅名称可整组重新确认。',
+                '支持 Kazumi、Animeko、TVBox 及 MoonTV / LunaTV 订阅地址。确认订阅后，应用运行时会定期刷新。新增或变更的规则不会自动启用，点订阅名称可整组重新确认。',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                   height: 1.5,
@@ -2043,6 +2043,33 @@ Future<void> _showRuleSelectionDialog(
   );
 }
 
+const _communityRuleSubscriptionPresets =
+    <({String label, String hint, String url})>[
+      (
+        label: 'LunaTV 影视/剧集/番剧（全年龄）',
+        hint: '28 个每日巡检三栖 JSON 源',
+        url:
+            'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/jin18.json',
+      ),
+      (
+        label: 'Kazumi 官方番剧规则',
+        hint: 'GitHub Actions 持续维护目录',
+        url:
+            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
+      ),
+      (
+        label: 'Animeko 社区聚合番剧',
+        hint: '60+ 在线番剧解析源',
+        url:
+            'https://raw.githubusercontent.com/MajoSissi/animeko-source/main/dist/online.json',
+      ),
+      (
+        label: 'Creamycake Animeko 番剧',
+        hint: '独立域名直连订阅',
+        url: 'https://sub.creamycake.org/v1/css1.json',
+      ),
+    ];
+
 void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
   final controller = TextEditingController();
   var importing = false;
@@ -2056,35 +2083,61 @@ void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
             title: const Text('添加自定义仓库'),
             content: SizedBox(
               width: 520,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '粘贴仓库地址会先列出里面的文件；直接粘贴规则文件地址就会跳到规则预览。',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: _surfaceMuted(context),
-                      height: 1.5,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '粘贴仓库地址会先列出里面的文件；直接粘贴规则文件地址就会跳到规则预览。',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: _surfaceMuted(context),
+                        height: 1.5,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: controller,
-                    autofocus: true,
-                    keyboardType: TextInputType.url,
-                    decoration: const InputDecoration(
-                      labelText: 'GitHub 仓库或规则文件地址',
-                      hintText: 'https://github.com/owner/repo',
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      keyboardType: TextInputType.url,
+                      decoration: const InputDecoration(
+                        labelText: 'GitHub 仓库或规则文件地址',
+                        hintText: 'https://github.com/owner/repo',
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                  Text(
-                    '订阅并启用后会在应用运行时定期刷新；也可只安装所选规则。',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: _surfaceMuted(context),
+                    const SizedBox(height: 12),
+                    Text(
+                      '常用开源社区订阅（点击填入，仍需你预览确认）',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: _surfaceMuted(context),
+                      ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final preset in _communityRuleSubscriptionPresets)
+                          ActionChip(
+                            label: Text(preset.label),
+                            tooltip: '${preset.hint}\n${preset.url}',
+                            onPressed: importing
+                                ? null
+                                : () {
+                                    controller.text = preset.url;
+                                  },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '订阅并启用后会在应用运行时定期刷新；也可只安装所选规则。',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: _surfaceMuted(context),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             actions: [

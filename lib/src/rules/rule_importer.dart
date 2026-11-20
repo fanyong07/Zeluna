@@ -254,7 +254,13 @@ class RuleImporter {
       if (name != null && name.trim().isNotEmpty) return name.trim();
     }
     final uri = Uri.tryParse(sourceUrl);
-    if (uri != null && uri.host.isNotEmpty) return uri.host;
+    if (uri != null && uri.host.isNotEmpty) {
+      if (uri.host.toLowerCase() == 'raw.githubusercontent.com' &&
+          uri.pathSegments.length >= 2) {
+        return '${uri.pathSegments[0]}/${uri.pathSegments[1]}';
+      }
+      return uri.host;
+    }
     return '用户规则仓库';
   }
 
@@ -267,6 +273,8 @@ class RuleImporter {
     final animekoRules = _parseAnimekoMediaSources(map, sourceUrl);
     if (animekoRules.isNotEmpty) return animekoRules;
     if (map['sites'] is List) return _parseTvBoxSites(map, sourceUrl);
+    final apiSiteRules = _parseApiSiteCatalog(map, sourceUrl);
+    if (apiSiteRules.isNotEmpty) return apiSiteRules;
     for (final key in const ['rules', 'plugins', 'items', 'data']) {
       final value = map[key];
       if (value is List) return _parseRuleList(value, sourceUrl);
@@ -278,6 +286,59 @@ class RuleImporter {
       return rule == null ? const [] : [rule];
     }
     return const [];
+  }
+
+  /// Parses MoonTV / LunaTV (`api_site` map) and LibreTV (`sources` list)
+  /// MacCMS JSON catalogs into native `tvbox-json-api` rules.
+  List<RulePlugin> _parseApiSiteCatalog(
+    Map<String, dynamic> root,
+    String sourceUrl,
+  ) {
+    final syntheticSites = <Map<String, dynamic>>[];
+    final apiSite = root['api_site'];
+    if (apiSite is Map) {
+      for (final entry in apiSite.entries) {
+        final key = entry.key.toString().trim();
+        final value = entry.value;
+        if (value is! Map) continue;
+        final item = value.cast<String, dynamic>();
+        final api = (item['api'] ?? item['url'] ?? '').toString().trim();
+        if (!api.startsWith('http://') && !api.startsWith('https://')) continue;
+        final name = (item['name'] ?? key).toString().trim();
+        if (name.isEmpty) continue;
+        syntheticSites.add({
+          'key': key.isEmpty ? name : key,
+          'name': name,
+          'type': 1,
+          'api': api,
+          'searchable': 1,
+          if (item['detail'] != null) 'detail': item['detail'],
+        });
+      }
+    }
+    final sources = root['sources'];
+    if (syntheticSites.isEmpty && sources is List) {
+      for (var index = 0; index < sources.length; index++) {
+        final value = sources[index];
+        if (value is! Map) continue;
+        final item = value.cast<String, dynamic>();
+        final api = (item['api'] ?? item['url'] ?? '').toString().trim();
+        if (!api.startsWith('http://') && !api.startsWith('https://')) continue;
+        final name = (item['name'] ?? item['key'] ?? '采集源 ${index + 1}')
+            .toString()
+            .trim();
+        if (name.isEmpty) continue;
+        syntheticSites.add({
+          'key': (item['key'] ?? item['id'] ?? 'source_$index').toString(),
+          'name': name,
+          'type': 1,
+          'api': api,
+          'searchable': 1,
+        });
+      }
+    }
+    if (syntheticSites.isEmpty) return const [];
+    return _parseTvBoxSites({'sites': syntheticSites}, sourceUrl);
   }
 
   List<RulePlugin> _parseAnimekoMediaSources(

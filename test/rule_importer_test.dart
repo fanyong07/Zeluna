@@ -149,6 +149,65 @@ void main() {
       expect(tvBox.rules.every((rule) => rule.canResolveNatively), isTrue);
     },
   );
+
+  test(
+    'MoonTV / LunaTV api_site and LibreTV sources catalogs import as native 3-type rules',
+    () async {
+      final client = MockClient((request) async {
+        if (request.url.path.endsWith('jin18.json')) {
+          return _json({
+            'cache_time': 7200,
+            'api_site': {
+              'ikunzy.com': {
+                'api': 'https://ikunzyapi.com/api.php/provide/vod',
+                'name': 'iKun资源',
+              },
+              'dyttzyapi.com': {
+                'api': 'http://caiji.dyttzyapi.com/api.php/provide/vod',
+                'name': '电影天堂',
+              },
+            },
+          });
+        }
+        return _json({
+          'name': 'LibreTV 精选源',
+          'sources': [
+            {
+              'name': '极速资源',
+              'url': 'https://jszyapi.com/api.php/provide/vod',
+            },
+          ],
+        });
+      });
+      addTearDown(client.close);
+      final importer = RuleImporter(client: client);
+
+      const lunaUrl =
+          'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/jin18.json';
+      final luna = await importer.importFromUrl(lunaUrl);
+      expect(luna.name, 'hafrey1/LunaTV-config');
+      expect(luna.sourceUrl, lunaUrl);
+      // iKun资源 -> 3 content types (anime/series/movie), 电影天堂 -> movie.
+      expect(luna.rules, hasLength(4));
+      expect(
+        luna.rules.every(
+          (rule) => rule.engine == 'tvbox-json-api' && rule.canResolveNatively,
+        ),
+        isTrue,
+      );
+      expect(
+        luna.rules.map((rule) => rule.contentType).toSet(),
+        unorderedEquals(RuleContentType.values),
+      );
+
+      final libre = await importer.importFromUrl(
+        'https://rules.example/libretv.json',
+      );
+      expect(libre.name, 'LibreTV 精选源');
+      expect(libre.rules, hasLength(3));
+      expect(libre.rules.every((r) => r.engine == 'tvbox-json-api'), isTrue);
+    },
+  );
 }
 
 http.Response _json(Object body) => http.Response.bytes(
