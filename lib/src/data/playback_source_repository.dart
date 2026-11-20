@@ -1203,6 +1203,18 @@ class RulePlaybackSourceRepository
       }
       groupOffset++;
     }
+    // Keep per-group fairness above when several subscriptions compete, but do
+    // not leave quick-lookup slots unused when only one large subscription
+    // (such as a MacCMS catalog) is active for this content type.
+    if (selected.length < _maxRulesPerQuickLookup) {
+      final selectedIds = selected.map((rule) => rule.id).toSet();
+      for (final rule in sorted) {
+        if (selected.length >= _maxRulesPerQuickLookup) break;
+        if (selectedIds.add(rule.id)) {
+          selected.add(rule);
+        }
+      }
+    }
     if (preferred != null && preferred.isNotEmpty) {
       final preferredRule = sorted
           .where((rule) => rule.id == preferred)

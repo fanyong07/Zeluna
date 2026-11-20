@@ -433,6 +433,98 @@ void main() {
       expect(streamCancelled, isTrue);
     });
 
+    test('follows same-brand TLD mirror redirect without leaking cookies and allows its detail links in scope', () async {
+      final seen = <http.Request>[];
+      final didaRule = _kazumiRule.copyWith(
+        id: 'kazumi:dida-mirror',
+        baseUrl: 'https://www.didahd.pro/',
+        searchUrl: 'https://www.didahd.pro/search?wd=@keyword',
+        permissionManifest: _kazumiRule.effectiveManifest.copyWith(
+          pageDomains: const ['www.didahd.pro'],
+        ),
+      );
+      final client = MockClient((request) async {
+        seen.add(request);
+        if (request.url.host == 'www.didahd.pro') {
+          return http.Response(
+            '',
+            301,
+            headers: {
+              'location':
+                  'https://www.didahd.xyz${request.url.path}?${request.url.query}',
+            },
+          );
+        }
+        if (request.url.path == '/search') {
+          return _html(
+            '<div class="item"><strong>Test Anime</strong>'
+            '<a class="detail" href="https://www.didahd.xyz/detail/1">go</a></div>',
+          );
+        }
+        if (request.url.path == '/detail/1') {
+          return _html(
+            '<ul class="line"><li><a href="https://www.didahd.xyz/play/1-1">EP1</a></li></ul>',
+          );
+        }
+        if (request.url.path == '/play/1-1') {
+          return _html('<script>var u="https://cdn.example.com/ok.m3u8";</script>');
+        }
+        return http.Response('#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n', 200);
+      });
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: didaRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+      expect(lines.any((l) => l.available), isTrue);
+      final redirected = seen.firstWhere((r) => r.url.host == 'www.didahd.xyz');
+      expect(
+        redirected.headers.keys.map((k) => k.toLowerCase()),
+        isNot(contains('cookie')),
+      );
+    });
+
+    test('upgrades same-host http links embedded inside an https search page to https', () async {
+      final seenUris = <Uri>[];
+      final ageRule = _kazumiRule.copyWith(
+        id: 'kazumi:age-https-upgrade',
+        baseUrl: 'https://www.agedm.io/',
+        searchUrl: 'https://www.agedm.io/search?query=@keyword',
+        permissionManifest: _kazumiRule.effectiveManifest.copyWith(
+          pageDomains: const ['www.agedm.io'],
+          cleartextHttp: false,
+        ),
+      );
+      final client = MockClient((request) async {
+        seenUris.add(request.url);
+        if (request.url.path == '/search') {
+          return _html(
+            '<div class="item"><strong>Test Anime</strong>'
+            '<a class="detail" href="http://www.agedm.io/detail/20230207">go</a></div>',
+          );
+        }
+        if (request.url.path == '/detail/20230207') {
+          return _html(
+            '<ul class="line"><li><a href="http://www.agedm.io/play/20230207/1/1">EP1</a></li></ul>',
+          );
+        }
+        if (request.url.path == '/play/20230207/1/1') {
+          return _html('<script>var u="https://cdn.example.com/ok.m3u8";</script>');
+        }
+        return http.Response('#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n', 200);
+      });
+      final lines = await RulePlaybackResolver(client: client).resolveRule(
+        rule: ageRule,
+        subject: _equivalentTitleSubject,
+        episode: _episode,
+        verifyPlayable: false,
+      );
+      expect(lines.any((l) => l.available), isTrue);
+      expect(seenUris.every((u) => u.scheme == 'https'), isTrue);
+      expect(seenUris.any((u) => u.path == '/detail/20230207'), isTrue);
+    });
+
     test('reuses cached pages until clearCaches', () async {
       var requests = 0;
       final client = MockClient((request) async {

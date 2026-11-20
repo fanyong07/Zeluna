@@ -15,10 +15,20 @@ const _maxRuleRedirects = 5;
 /// Explicit lookup scope: cancellation and approved domains travel together.
 /// Distinct scopes never share in-flight requests, even for identical URLs.
 class RulePageRequestScope {
-  const RulePageRequestScope(this.cancellationToken, {this.rule});
+  RulePageRequestScope(this.cancellationToken, {this.rule});
 
   final RulePlaybackCancellationToken? cancellationToken;
   final RulePlugin? rule;
+  final Set<String> _verifiedRedirectDomains = <String>{};
+
+  Iterable<String> get verifiedRedirectDomains => _verifiedRedirectDomains;
+
+  void rememberVerifiedRedirectHost(String host) {
+    final normalized = host.trim().toLowerCase();
+    if (normalized.isNotEmpty) {
+      _verifiedRedirectDomains.add(normalized);
+    }
+  }
 }
 
 /// Buffered rule-page requests, with bounded caching and guarded redirects.
@@ -159,7 +169,7 @@ class RulePageClient {
           throw StateError('这个来源的网页一直在跳转，已停下。');
         }
         final nextUri = currentUri.resolve(location.trim());
-        _ensureAllowed(scope, nextUri);
+        _ensureRedirectAllowed(scope, currentUri, nextUri);
         currentHeaders = ruleChildHeaders(currentUri, nextUri, currentHeaders);
         if (response.statusCode == 303 ||
             ((response.statusCode == 301 || response.statusCode == 302) &&
@@ -194,8 +204,33 @@ void _throwIfCancelled(RulePageRequestScope? scope, Uri uri) {
 void _ensureAllowed(RulePageRequestScope? scope, Uri uri) {
   final rule = scope?.rule;
   if (rule == null) return;
-  if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, RuleUrlPurpose.page)) {
+  if (!RuleUrlPolicy(rule.effectiveManifest).allows(
+    uri,
+    RuleUrlPurpose.page,
+    extraAllowedPageDomains: scope?.verifiedRedirectDomains ?? const [],
+  )) {
     throw StateError('这个来源想访问未授权的网站，已拦下。');
+  }
+}
+
+void _ensureRedirectAllowed(
+  RulePageRequestScope? scope,
+  Uri from,
+  Uri to,
+) {
+  final rule = scope?.rule;
+  if (rule == null) return;
+  final policy = RuleUrlPolicy(rule.effectiveManifest);
+  final extraDomains = scope?.verifiedRedirectDomains ?? const <String>[];
+  if (!policy.allowsPageRedirect(
+    from: from,
+    to: to,
+    extraAllowedPageDomains: extraDomains,
+  )) {
+    throw StateError('这个来源想访问未授权的网站，已拦下。');
+  }
+  if (!policy.allows(to, RuleUrlPurpose.page)) {
+    scope?.rememberVerifiedRedirectHost(to.host);
   }
 }
 

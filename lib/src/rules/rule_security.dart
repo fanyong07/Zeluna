@@ -257,26 +257,68 @@ class RuleUrlPolicy {
 
   final RulePermissionManifest manifest;
 
-  bool allows(Uri uri, RuleUrlPurpose purpose) {
+  bool allows(
+    Uri uri,
+    RuleUrlPurpose purpose, {
+    Iterable<String> extraAllowedPageDomains = const [],
+  }) {
     if (purpose == RuleUrlPurpose.page && uri.toString() == 'about:blank') {
       return true;
     }
-    final scheme = uri.scheme.toLowerCase();
-    if (scheme != 'https' && scheme != 'http') return false;
-    if (scheme == 'http' && !manifest.cleartextHttp) return false;
-    if (uri.userInfo.isNotEmpty || uri.host.trim().isEmpty) return false;
-
-    final host = uri.host.toLowerCase().trim().replaceFirst(RegExp(r'\.$'), '');
-    if (_isForbiddenHost(host)) return false;
+    final host = _validatedPublicHost(uri);
+    if (host == null) return false;
     // Public media CDNs rotate domains frequently (e.g. play-cdn19 -> play-cdn27).
     // Keep strict SSRF host blocking and cross-origin credential stripping,
     // without killing live sources on static compile-time mediaDomains lists.
     if (purpose == RuleUrlPurpose.media) {
       return true;
     }
-    return normalizeRuleDomains(
-      manifest.pageDomains,
-    ).any((domain) => _matchesDomain(host, domain));
+    return normalizeRuleDomains([
+      ...manifest.pageDomains,
+      ...extraAllowedPageDomains,
+    ]).any((domain) => _matchesDomain(host, domain));
+  }
+
+  /// Validates an HTTP redirect between two rule pages.
+  ///
+  /// Allows destinations already approved by [allows], plus same-brand TLD
+  /// mirror migrations (e.g. `www.didahd.pro` -> `www.didahd.xyz`) initiated
+  /// from an already-allowed origin while keeping SSRF, cleartext, and
+  /// unrelated cross-domain protections strict.
+  bool allowsPageRedirect({
+    required Uri from,
+    required Uri to,
+    Iterable<String> extraAllowedPageDomains = const [],
+  }) {
+    final toHost = _validatedPublicHost(to);
+    if (toHost == null) return false;
+    if (allows(
+      to,
+      RuleUrlPurpose.page,
+      extraAllowedPageDomains: extraAllowedPageDomains,
+    )) {
+      return true;
+    }
+    final fromHost = _validatedPublicHost(from);
+    if (fromHost == null ||
+        !allows(
+          from,
+          RuleUrlPurpose.page,
+          extraAllowedPageDomains: extraAllowedPageDomains,
+        )) {
+      return false;
+    }
+    return _isSameBrandTldMirror(fromHost, toHost);
+  }
+
+  String? _validatedPublicHost(Uri uri) {
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'https' && scheme != 'http') return null;
+    if (scheme == 'http' && !manifest.cleartextHttp) return null;
+    if (uri.userInfo.isNotEmpty || uri.host.trim().isEmpty) return null;
+    final host = uri.host.toLowerCase().trim().replaceFirst(RegExp(r'\.$'), '');
+    if (_isForbiddenHost(host)) return null;
+    return host;
   }
 }
 
@@ -350,8 +392,87 @@ List<String> ruleDomainsFromUrls(Iterable<String> values) {
   ]);
 }
 
+const _multiPartPublicSuffixes = <String>{
+  'co.uk',
+  'org.uk',
+  'gov.uk',
+  'ac.uk',
+  'com.cn',
+  'net.cn',
+  'org.cn',
+  'gov.cn',
+  'edu.cn',
+  'com.hk',
+  'org.hk',
+  'com.tw',
+  'org.tw',
+  'idv.tw',
+  'co.jp',
+  'ne.jp',
+  'or.jp',
+  'go.jp',
+  'com.au',
+  'net.au',
+  'org.au',
+  'co.kr',
+  'or.kr',
+  'com.sg',
+  'com.my',
+  'com.br',
+  'com.mx',
+};
+
+const _genericMirrorSlds = <String>{
+  'github',
+  'githubusercontent',
+  'pages',
+  'vercel',
+  'netlify',
+  'workers',
+  'cloudfront',
+  'amazonaws',
+  'blogspot',
+  'wordpress',
+  'appspot',
+  'herokuapp',
+  'firebaseapp',
+  'cloudflare',
+  'jsdelivr',
+  'unpkg',
+};
+
 bool _matchesDomain(String host, String domain) {
-  return host == domain || host.endsWith('.$domain');
+  if (host == domain || host.endsWith('.$domain')) return true;
+  // Many Kazumi/Animeko rules only declare `www.site.tld` from their baseUrl.
+  // Allow the site's own apex (`site.tld`) and sibling subdomains (`m.site.tld`,
+  // `api.site.tld`) without relaxing non-www pinned subdomains like `video.example.com`.
+  if (domain.startsWith('www.')) {
+    final apex = domain.substring(4);
+    if (apex.contains('.') && !_multiPartPublicSuffixes.contains(apex)) {
+      return host == apex || host.endsWith('.$apex');
+    }
+  }
+  return false;
+}
+
+String? _registrableSingleTldBrand(String host) {
+  if (host.contains(':') || _parseIpv4(host) != null) return null;
+  final labels = host.split('.').where((part) => part.isNotEmpty).toList();
+  if (labels.length < 2) return null;
+  final suffix2 = '${labels[labels.length - 2]}.${labels.last}';
+  if (_multiPartPublicSuffixes.contains(suffix2)) return null;
+  final tld = labels.last;
+  if (tld.length < 2 || !RegExp(r'^[a-z]+$').hasMatch(tld)) return null;
+  final sld = labels[labels.length - 2];
+  if (sld.length < 4 || _genericMirrorSlds.contains(sld)) return null;
+  return sld;
+}
+
+bool _isSameBrandTldMirror(String fromHost, String toHost) {
+  final fromBrand = _registrableSingleTldBrand(fromHost);
+  if (fromBrand == null) return false;
+  final toBrand = _registrableSingleTldBrand(toHost);
+  return toBrand != null && fromBrand == toBrand;
 }
 
 bool _isForbiddenHeader(String name) {

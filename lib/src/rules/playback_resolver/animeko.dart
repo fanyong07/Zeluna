@@ -197,7 +197,7 @@ extension _AnimekoResolution on RulePlaybackResolver {
         ),
         matchVideo: matchVideo,
         matchNested: matchNested,
-        manifest: rule.effectiveManifest,
+        manifest: _effectiveScopeManifest(rule),
         timeout: const Duration(seconds: 8),
       ),
     );

@@ -444,7 +444,7 @@ void main() {
   test('rule playback source uses quick and expanded lookup modes', () async {
     final requestedHosts = <String>[];
     final rules = List.generate(
-      10,
+      14,
       (index) => _animekoLookupRule(
         id: 'custom:animeko:bulk$index',
         name: 'Bulk $index',
@@ -468,18 +468,13 @@ void main() {
     final quickLines = await source.linesForEpisode(_animeSubject, _episode);
 
     final quickHosts = requestedHosts.toSet().toList(growable: false);
-    expect(quickHosts, hasLength(6));
+    expect(quickHosts, hasLength(12));
     expect(quickHosts, [
-      'rule0.example',
-      'rule1.example',
-      'rule2.example',
-      'rule3.example',
-      'rule4.example',
-      'rule5.example',
+      for (var index = 0; index < 12; index++) 'rule$index.example',
     ]);
     expect(
       quickLines.map((line) => line.providerName),
-      isNot(contains('Bulk 6')),
+      isNot(contains('Bulk 12')),
     );
 
     requestedHosts.clear();
@@ -490,20 +485,62 @@ void main() {
     );
 
     final expandedHosts = requestedHosts.toSet().toList(growable: false);
-    expect(expandedHosts, hasLength(10));
+    expect(expandedHosts, hasLength(14));
     expect(expandedHosts, [
-      for (var index = 0; index < 10; index++) 'rule$index.example',
+      for (var index = 0; index < 14; index++) 'rule$index.example',
     ]);
-    expect(expandedHosts.last, 'rule9.example');
-    expect(expandedLines.map((line) => line.providerName), contains('Bulk 9'));
+    expect(expandedHosts.last, 'rule13.example');
+    expect(expandedLines.map((line) => line.providerName), contains('Bulk 13'));
   });
+
+  test(
+    'quick lookup preserves per-group fairness when multiple subscriptions compete',
+    () async {
+      final requestedHosts = <String>[];
+      final rules = [
+        for (var index = 0; index < 8; index++)
+          _animekoLookupRule(
+            id: 'custom:animeko:groupA-$index',
+            name: 'Group A $index',
+            host: 'groupa-$index.example',
+            groupId: 'repo:group-a',
+            priority: index,
+          ),
+        for (var index = 0; index < 8; index++)
+          _animekoLookupRule(
+            id: 'custom:animeko:groupB-$index',
+            name: 'Group B $index',
+            host: 'groupb-$index.example',
+            groupId: 'repo:group-b',
+            priority: 100 + index,
+          ),
+      ];
+      final source = RulePlaybackSourceRepository(
+        repository: RulePluginRepository(extraRules: rules),
+        ruleState: _approvedRuleState(rules),
+        resolver: RulePlaybackResolver(
+          client: MockClient((request) async {
+            requestedHosts.add(request.url.host);
+            return http.Response('not found', 404);
+          }),
+        ),
+      );
+
+      await source.linesForEpisode(_animeSubject, _episode);
+
+      final hosts = requestedHosts.toSet();
+      expect(hosts, hasLength(12));
+      expect(hosts.where((h) => h.startsWith('groupa-')), hasLength(6));
+      expect(hosts.where((h) => h.startsWith('groupb-')), hasLength(6));
+    },
+  );
 
   test(
     'rule playback source puts the remembered provider inside quick lookup',
     () async {
       final requestedHosts = <String>[];
       final rules = List.generate(
-        10,
+        14,
         (index) => _animekoLookupRule(
           id: 'custom:animeko:preferred-$index',
           name: 'Preferred $index',
@@ -529,7 +566,7 @@ void main() {
         preferredProviderId: rules.last.id,
       );
 
-      expect(requestedHosts, contains('preferred-9.example'));
+      expect(requestedHosts, contains('preferred-13.example'));
     },
   );
 

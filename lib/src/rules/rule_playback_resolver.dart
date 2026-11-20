@@ -316,10 +316,25 @@ class RulePlaybackResolver {
     scope: _activeRulePlaybackResolveContext,
   );
 
+  RulePermissionManifest _effectiveScopeManifest(RulePlugin rule) {
+    final manifest = rule.effectiveManifest;
+    final extraDomains =
+        _activeRulePlaybackResolveContext?.verifiedRedirectDomains;
+    if (extraDomains == null || extraDomains.isEmpty) return manifest;
+    return manifest.copyWith(
+      pageDomains: [...manifest.pageDomains, ...extraDomains],
+    );
+  }
+
   void _ensureSandboxedRuleUri(Uri uri, RuleUrlPurpose purpose) {
-    final rule = _activeRulePlaybackResolveContext?.rule;
+    final scope = _activeRulePlaybackResolveContext;
+    final rule = scope?.rule;
     if (rule == null) return;
-    if (!RuleUrlPolicy(rule.effectiveManifest).allows(uri, purpose)) {
+    if (!RuleUrlPolicy(rule.effectiveManifest).allows(
+      uri,
+      purpose,
+      extraAllowedPageDomains: scope?.verifiedRedirectDomains ?? const [],
+    )) {
       throw StateError('这个来源想访问未授权的网站，已拦下。');
     }
   }

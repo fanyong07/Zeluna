@@ -267,7 +267,7 @@ extension _PageSourceResolution on RulePlaybackResolver {
       ).resolve(
         page: Uri.parse(page),
         body: body,
-        manifest: rule.effectiveManifest,
+        manifest: _effectiveScopeManifest(rule),
         allowSniffing: !rule.requiresCaptcha,
         cancellationToken: _activeRulePlaybackResolveContext?.cancellationToken,
         budget: timeout,
@@ -854,9 +854,21 @@ String _absoluteUrl(String value, String baseUrl) {
   final text = _decodePlayerUrl(value).trim();
   if (text.isEmpty) return '';
   if (text.startsWith('//')) return 'https:$text';
-  final uri = Uri.tryParse(text);
-  if (uri != null && uri.hasScheme) return text;
   final base = Uri.tryParse(baseUrl);
+  final uri = Uri.tryParse(text);
+  if (uri != null && uri.hasScheme) {
+    // Some reverse-proxied HTTPS sites (e.g. AGE) emit `http://` links for
+    // their own host inside HTTPS pages. Upgrade same-host default-port links
+    // to HTTPS instead of tripping the cleartext policy or sending plaintext.
+    if (uri.scheme.toLowerCase() == 'http' &&
+        !uri.hasPort &&
+        base != null &&
+        base.scheme.toLowerCase() == 'https' &&
+        uri.host.toLowerCase() == base.host.toLowerCase()) {
+      return uri.replace(scheme: 'https').toString();
+    }
+    return text;
+  }
   if (base == null) return text;
   return base.resolve(text).toString();
 }

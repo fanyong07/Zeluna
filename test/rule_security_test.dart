@@ -151,6 +151,96 @@ void main() {
         isTrue,
       );
     });
+
+    test('www pageDomain matches same-site apex and sibling subdomains only', () {
+      final wwwPolicy = RuleUrlPolicy(
+        manifest.copyWith(pageDomains: const ['www.agedm.io']),
+      );
+      expect(
+        wwwPolicy.allows(
+          Uri.parse('https://agedm.io/detail/1'),
+          RuleUrlPurpose.page,
+        ),
+        isTrue,
+      );
+      expect(
+        wwwPolicy.allows(
+          Uri.parse('https://m.agedm.io/detail/1'),
+          RuleUrlPurpose.page,
+        ),
+        isTrue,
+      );
+      expect(
+        wwwPolicy.allows(
+          Uri.parse('https://evil-agedm.io/detail/1'),
+          RuleUrlPurpose.page,
+        ),
+        isFalse,
+      );
+      // Non-www pinned subdomain must remain pinned (video.example.com != example.com).
+      expect(
+        policy.allows(
+          Uri.parse('https://example.com/watch'),
+          RuleUrlPurpose.page,
+        ),
+        isFalse,
+      );
+      // Multi-part public suffix must never expand to the suffix itself.
+      final suffixPolicy = RuleUrlPolicy(
+        manifest.copyWith(pageDomains: const ['www.co.uk']),
+      );
+      expect(
+        suffixPolicy.allows(
+          Uri.parse('https://attacker.co.uk/watch'),
+          RuleUrlPurpose.page,
+        ),
+        isFalse,
+      );
+    });
+
+    test('allowsPageRedirect permits same-brand TLD mirrors while rejecting unrelated or unsafe targets', () {
+      final didaPolicy = RuleUrlPolicy(
+        manifest.copyWith(pageDomains: const ['www.didahd.pro']),
+      );
+      expect(
+        didaPolicy.allowsPageRedirect(
+          from: Uri.parse('https://www.didahd.pro/search'),
+          to: Uri.parse('https://www.didahd.xyz/search'),
+        ),
+        isTrue,
+      );
+      expect(
+        didaPolicy.allowsPageRedirect(
+          from: Uri.parse('https://www.didahd.pro/search'),
+          to: Uri.parse('https://attacker.test/search'),
+        ),
+        isFalse,
+      );
+      expect(
+        didaPolicy.allowsPageRedirect(
+          from: Uri.parse('https://www.didahd.pro/search'),
+          to: Uri.parse('http://www.didahd.xyz/search'),
+        ),
+        isFalse,
+      );
+      expect(
+        didaPolicy.allowsPageRedirect(
+          from: Uri.parse('https://www.didahd.pro/search'),
+          to: Uri.parse('https://didahd.local/search'),
+        ),
+        isFalse,
+      );
+      final genericPolicy = RuleUrlPolicy(
+        manifest.copyWith(pageDomains: const ['demo.github.io']),
+      );
+      expect(
+        genericPolicy.allowsPageRedirect(
+          from: Uri.parse('https://demo.github.io/a'),
+          to: Uri.parse('https://other.github.com/b'),
+        ),
+        isFalse,
+      );
+    });
   });
 
   test('header policy is case-insensitive and permission gated', () {
