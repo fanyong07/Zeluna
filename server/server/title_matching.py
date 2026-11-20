@@ -151,11 +151,21 @@ class SourceMatchAnalysis:
         return self.accepted and not self.evidence.has_explicit_identity_conflict
 
 
+def _canonicalize_season_marker(match: re.Match[str]) -> str:
+    raw = next((group for group in match.groups() if group is not None), "")
+    number = _chinese_number(raw)
+    return f"s{number}" if number is not None else match.group(0)
+
+
 def _normalized_match_title(value: str) -> str:
     cleaned = to_simplified_title(value).casefold()
-    cleaned = re.sub(r"第\s*[一二三四五六七八九十百两\d]+\s*[季部期]", "", cleaned)
-    cleaned = re.sub(r"\bseason\s*0*\d+\b", "", cleaned)
-    cleaned = re.sub(r"\bs\s*0*\d+\b", "", cleaned)
+    cleaned = re.sub(
+        r"(?:第\s*([一二三四五六七八九十两\d]+)\s*[季部期]"
+        r"|\bseason\s*0*(\d+)\b"
+        r"|\bs\s*0*(\d+)\b)",
+        _canonicalize_season_marker,
+        cleaned,
+    )
     return "".join(char for char in cleaned if char.isalnum())
 
 

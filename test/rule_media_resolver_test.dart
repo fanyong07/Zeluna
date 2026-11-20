@@ -80,8 +80,8 @@ void main() {
     expect(result, isNull);
     expect(sniffer.calls, 0);
   });
-  test('sniffed media outside granted domains is rejected', () async {
-    final sniffer = _Sniffer();
+  test('sniffed media targeting private/loopback host is rejected', () async {
+    final sniffer = _Sniffer('http://127.0.0.1/ep1.m3u8');
     final result = await resolver((_, _) async => '', sniffer).resolve(
       page: Uri.parse('https://page.test/start'),
       body: '<script>player()</script>',
@@ -93,6 +93,9 @@ void main() {
 }
 
 class _Sniffer implements AnimekoWebViewSniffer {
+  _Sniffer([this.videoUrl = 'https://unknown.test/ep1.m3u8']);
+
+  final String videoUrl;
   int calls = 0;
   @override
   bool get supported => true;
@@ -101,8 +104,8 @@ class _Sniffer implements AnimekoWebViewSniffer {
     AnimekoWebViewSniffRequest request,
   ) async {
     calls++;
-    return const AnimekoWebViewSniffResult(
-      videoUrl: 'https://unknown.test/ep1.m3u8',
+    return AnimekoWebViewSniffResult(
+      videoUrl: videoUrl,
       cookieHeader: 'secret',
     );
   }

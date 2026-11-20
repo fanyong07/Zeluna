@@ -37,7 +37,7 @@ void main() {
         );
         for (final other in ['$host.attacker.test', 'evil-$host']) {
           expect(
-            policy.allows(Uri.https(other, '/video'), RuleUrlPurpose.media),
+            policy.allows(Uri.https(other, '/player'), RuleUrlPurpose.page),
             isFalse,
           );
         }
@@ -47,14 +47,18 @@ void main() {
         '10.0.0.1',
         '169.254.169.254',
         'localhost',
-        'unlisted.example',
-        'gsuus.com',
-        'other.gsuus.com',
       ]) {
         expect(
           policy.allows(Uri.https(host, '/video'), RuleUrlPurpose.media),
           isFalse,
-          reason: 'Not an audited public media endpoint',
+          reason: 'Private/loopback SSRF target must always be blocked',
+        );
+      }
+      for (final host in ['unlisted.example', 'gsuus.com', 'other.gsuus.com']) {
+        expect(
+          policy.allows(Uri.https(host, '/player'), RuleUrlPurpose.page),
+          isFalse,
+          reason: 'Unlisted hosts never receive page/script privileges',
         );
       }
     });

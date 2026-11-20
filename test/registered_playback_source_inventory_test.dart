@@ -150,7 +150,10 @@ void main() {
           ),
         );
         expect(find.text('来源状态：共 118 个来源，已检查 0 个'), findsOneWidget);
-        expect(find.byType(ExpansionTile), findsNothing);
+        expect(find.byType(ExpansionTile), findsOneWidget);
+        expect(find.byKey(const ValueKey('inventory-0')), findsNothing);
+        await tester.tap(find.byType(ExpansionTile));
+        await tester.pumpAndSettle();
         expect(find.text('该来源仅为候选，尚未接入查询；本集没有播放验证结果。'), findsNWidgets(80));
         for (var i = 0; i < 118; i++) {
           expect(find.byKey(ValueKey('inventory-$i')), findsOneWidget);

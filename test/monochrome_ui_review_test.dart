@@ -28,11 +28,13 @@ void main() {
         scheme.onSurface,
         scheme.onSurfaceVariant,
         scheme.outline,
-        scheme.error,
       ]) {
         expect(color.r, color.g);
         expect(color.g, color.b);
       }
+      // Semantic red is preserved for error states.
+      expect(scheme.error.r, greaterThan(scheme.error.g));
+      expect(scheme.error.r, greaterThan(scheme.error.b));
       const selected = {WidgetState.selected};
       expect(theme.switchTheme.thumbColor!.resolve(selected), scheme.onPrimary);
       expect(theme.switchTheme.trackColor!.resolve(selected), scheme.primary);

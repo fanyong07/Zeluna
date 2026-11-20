@@ -341,9 +341,12 @@ void main() {
       expect(find.text('共 1 条线路，1 条可以播放 · 3 个来源暂无线路'), findsOneWidget);
       expect(find.text('在线服务 · iKun'), findsOneWidget);
       expect(find.text('在线服务 · 线路失败源'), findsOneWidget);
-      expect(find.byType(ExpansionTile), findsNothing);
-
       expect(find.text('在线服务 · 无结果源'), findsOneWidget);
+      // Passive unqueried/disabled placeholders are collapsed by default.
+      expect(find.byType(ExpansionTile), findsOneWidget);
+      expect(find.text('在线服务 · 未查询源'), findsNothing);
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pumpAndSettle();
       expect(find.text('在线服务 · 未查询源'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },

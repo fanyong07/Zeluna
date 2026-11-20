@@ -145,11 +145,11 @@ void main() {
     );
   }
   test(
-    'a denied TVBox media domain remains visible without being requested',
+    'a denied private TVBox media domain remains visible without being requested',
     () async {
       var forbiddenRequests = 0;
       final client = MockClient((request) async {
-        if (request.url.host == 'unapproved.example') forbiddenRequests++;
+        if (request.url.host == '127.0.0.1') forbiddenRequests++;
         return http.Response(
           jsonEncode({
             'list': [
@@ -157,7 +157,7 @@ void main() {
                 'vod_id': 7,
                 'vod_name': _subject.title,
                 'vod_play_from': '未授权线路',
-                'vod_play_url': r'第2集$https://unapproved.example/2.m3u8',
+                'vod_play_url': r'第2集$https://127.0.0.1/2.m3u8',
               },
             ],
           }),
@@ -170,7 +170,7 @@ void main() {
       ).resolveRule(rule: _jsonApiRule, subject: _subject, episode: _episode);
       expect(forbiddenRequests, 0);
       expect(lines.single.available, isFalse);
-      expect(lines.single.url, 'https://unapproved.example/2.m3u8');
+      expect(lines.single.url, 'https://127.0.0.1/2.m3u8');
       expect(lines.single.message, contains('未授权'));
     },
   );

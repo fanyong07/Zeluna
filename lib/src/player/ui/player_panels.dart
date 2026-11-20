@@ -739,6 +739,7 @@ class _LinePanelBody extends StatelessWidget {
       }
       return const {
         PlaybackDiscoveryStatus.notQueried,
+        PlaybackDiscoveryStatus.candidateUnadmitted,
         PlaybackDiscoveryStatus.sourceDisabled,
         PlaybackDiscoveryStatus.compatibilityInactive,
         PlaybackDiscoveryStatus.retired,

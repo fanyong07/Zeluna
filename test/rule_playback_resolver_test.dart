@@ -805,7 +805,7 @@ void main() {
   });
 
   for (final destination in <String, String>{
-    'denied': 'https://attacker.test/video.m3u8',
+    'denied': 'https://127.0.0.1/video.m3u8',
     'malformed': 'https://[invalid/video.m3u8',
   }.entries) {
     test('CORE-001 ${destination.key} media redirect releases once', () async {
@@ -855,7 +855,7 @@ void main() {
         episode: _episode,
       );
       expect(lines.single.available, isFalse);
-      expect(seen.map((uri) => uri.host), isNot(contains('attacker.test')));
+      expect(seen.map((uri) => uri.host), isNot(contains('127.0.0.1')));
       expect(seen.where((uri) => uri.path == '/cleanup.m3u8'), hasLength(1));
       expect(cancellations, 1);
       expect(client.closeCalls, 0);
@@ -865,22 +865,22 @@ void main() {
     });
   }
 
-  test('media redirect cannot escape approved rule domains', () async {
-    var attackerRequests = 0;
+  test('media redirect cannot escape into private SSRF hosts', () async {
+    var forbiddenRequests = 0;
     final line = await _resolveSinglePlayableLine(
       'https://cdn.example.com/redirect.m3u8',
       probe: (request) {
-        if (request.url.host == 'attacker.test') attackerRequests++;
+        if (request.url.host == '169.254.169.254') forbiddenRequests++;
         return http.Response(
           '',
           302,
-          headers: {'location': 'https://attacker.test/video.m3u8'},
+          headers: {'location': 'https://169.254.169.254/video.m3u8'},
         );
       },
     );
 
     expect(line.available, isFalse);
-    expect(attackerRequests, 0);
+    expect(forbiddenRequests, 0);
   });
 
   test('quick lookup rejects a dead explicit media url', () async {

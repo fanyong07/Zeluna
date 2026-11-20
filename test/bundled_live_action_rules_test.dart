@@ -82,8 +82,8 @@ void main() {
           );
           expect(
             policy.allows(
-              Uri.https('$host.attacker.test', '/media'),
-              RuleUrlPurpose.media,
+              Uri.https('$host.attacker.test', '/page'),
+              RuleUrlPurpose.page,
             ),
             isFalse,
           );
@@ -91,13 +91,21 @@ void main() {
         for (final host in [
           '127.0.0.1',
           '169.254.169.254',
-          'unlisted.example',
+          '10.0.0.1',
+          'localhost',
         ]) {
           expect(
             policy.allows(Uri.https(host, '/media'), RuleUrlPurpose.media),
             isFalse,
           );
         }
+        expect(
+          policy.allows(
+            Uri.https('unlisted.example', '/page'),
+            RuleUrlPurpose.page,
+          ),
+          isFalse,
+        );
       },
     );
   }
