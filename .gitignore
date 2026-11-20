@@ -54,9 +54,9 @@ app.*.map.json
 /_branch_log.txt
 .claude/
 .codex/
-.codex_tmp/
-.codex_tmp_readme_check.txt
+.codex_tmp*
 *codex_tmp_readme_check.txt
+*_probe_*.json
 .playwright-cli/
 scratchpad/
 artifacts/
@@ -82,13 +82,17 @@ assets/brand/splash/**
 android/.gradle/
 android/build/
 
-# Local server runtime data
+# Local database and server runtime data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/server/data/integration_release/*.tar.gz
 server/**/__pycache__/
 server/**/*.pyc
 server/.venv/
 server/.pytest_cache/
 server/.ruff_cache/
-server/**/*.db
 server/.env
 server/.env.*
 !server/.env.example
