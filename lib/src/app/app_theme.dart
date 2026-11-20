@@ -33,10 +33,12 @@ class AnimeTheme {
     final textAccent = primary;
     final errorColor = dark ? const Color(0xFFEF6B6B) : const Color(0xFFC62828);
     final onErrorColor = dark ? const Color(0xFF1A0707) : Colors.white;
-    final errorContainerColor =
-        dark ? const Color(0xFF3B1515) : const Color(0xFFFDEAEA);
-    final onErrorContainerColor =
-        dark ? const Color(0xFFFFD6D6) : const Color(0xFF6B1111);
+    final errorContainerColor = dark
+        ? const Color(0xFF3B1515)
+        : const Color(0xFFFDEAEA);
+    final onErrorContainerColor = dark
+        ? const Color(0xFFFFD6D6)
+        : const Color(0xFF6B1111);
     // Explicit neutral slots avoid Material's seeded color tint in dialogs,
     // chips, selections and surface elevations, while retaining readable red
     // semantics for errors.

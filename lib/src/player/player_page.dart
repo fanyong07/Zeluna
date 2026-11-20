@@ -36,6 +36,7 @@ import 'lines/playback_recovery_controller.dart';
 import 'local_media.dart';
 import 'playback_continuity.dart';
 import 'playback_line_display.dart';
+import 'ui/playback_line_tile.dart';
 import 'playback_performance_trace.dart';
 import 'session/playback_session_controller.dart';
 import 'session/playback_session_event.dart';
@@ -108,11 +109,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   String? _loadedUrl;
   String? _playerMessage;
   String? _lineLookupMessage;
-  RulePlaybackCancellationToken? _localSourceLookupToken;
-  bool _localSourceLookupInProgress = false;
+  RulePlaybackCancellationToken? _metadataProbeToken;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   Duration _buffer = Duration.zero;
+  // Native timeline events keep recovery/watchdog state current without
+  // rebuilding mobile metadata, episode grids or sorting every route again.
+  final _timelineRevision = ValueNotifier<int>(0);
   double _volume = 100;
   double _lastNonZeroVolume = 100;
   double? _appliedRate;
@@ -358,6 +361,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recordRecommendationFirstFrame();
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
     _loadEnabledDanmakuAfterFirstFrame();
+    final inventoryEpisodeId = _episode.id;
+    final metadataOpenSerial = _openLineSerial;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _leaving ||
+          _episode.id != inventoryEpisodeId ||
+          _openLineSerial != metadataOpenSerial) {
+        return;
+      }
+      // Fill the visible route inventory only after the first frame; discovery
+      // does not replace a healthy selection or block native startup.
+      _startExpandedLineLookup(autoplay: false);
+      unawaited(_enrichSelectedLineMetadata(line, metadataOpenSerial));
+    });
     _playbackTrace.recordBufferingChanged(
       buffering: false,
       fields: <String, Object?>{
@@ -400,6 +417,56 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (line.id == _warmupTransitionPrimaryLineId ||
         line.id == _warmupTransitionFallbackLineId) {
       _clearWarmupTransitionState();
+    }
+  }
+
+  Future<void> _enrichSelectedLineMetadata(
+    PlaybackLine line,
+    int openSerial,
+  ) async {
+    final uri = Uri.tryParse(line.url ?? '');
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme) ||
+        widget.request.offlineOnly ||
+        (line.sizeBytes != null &&
+            line.videoWidth != null &&
+            line.videoHeight != null)) {
+      return;
+    }
+    _metadataProbeToken?.cancel();
+    final token = RulePlaybackCancellationToken();
+    _metadataProbeToken = token;
+    try {
+      final metadata = await ref
+          .read(animeControllerProvider.notifier)
+          .verifyPlaybackLine(
+            line,
+            enrichMetadata: true,
+            cancellationToken: token,
+          )
+          .timeout(const Duration(seconds: 12));
+      if (!mounted ||
+          _leaving ||
+          token.isCancelled ||
+          _openLineSerial != openSerial ||
+          _line?.id != line.id ||
+          _line?.url != line.url) {
+        return;
+      }
+      final current = _line!;
+      final enriched = mergePlaybackLineMediaMetadata(
+        current: current,
+        metadata: metadata,
+      );
+      setState(() {
+        _line = enriched;
+        _lines = upsertPlaybackLine(_lines, enriched);
+      });
+    } catch (_) {
+      // Optional information must never pause, reopen or fail active playback.
+    } finally {
+      token.cancel();
+      if (identical(_metadataProbeToken, token)) _metadataProbeToken = null;
     }
   }
 
@@ -726,8 +793,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   @override
   void dispose() {
+    _metadataProbeToken?.cancel();
     _openProbeToken?.cancel();
-    _localSourceLookupToken?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _subtitleStoreEpoch++;
     _supplementalSubtitles?.dispose();
@@ -750,6 +817,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _danmakuController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
+    _timelineRevision.dispose();
     super.dispose();
   }
 
@@ -838,99 +906,103 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                       onEpisodeSelected: _selectEpisode,
                       onLinePanel: _toggleLinePanel,
                       onLineSelected: _selectLine,
-                      player: _PlayerCanvas(
-                        controller: _controller,
-                        webPlayerController: _webPlayerController,
-                        playbackGeneration: playbackGeneration,
-                        subject: widget.request.subject,
-                        episodes: widget.request.episodes,
-                        episode: _episode,
-                        line: _line,
-                        settings: effectiveSettings,
-                        superResolutionActive: _anime4kController.isActive,
-                        services: state.services,
-                        danmaku: state.danmaku,
-                        remoteDanmaku: _danmakuController.remoteComments,
-                        localDanmaku: _danmakuController.localComments,
-                        theaterMode: _theaterMode,
-                        position: _position,
-                        duration: _duration,
-                        buffer: _buffer,
-                        volume: _volume,
-                        playing: _playing,
-                        buffering: _buffering,
-                        loadingLine: _loadingLine,
-                        lineLookupInProgress: _lineLookupInProgress,
-                        playbackFailed: _playbackFailed,
-                        fullscreen: _fullscreen,
-                        muted: _muted,
-                        controlsVisible: _controlsVisible,
-                        autoHideChrome: _shouldAutoHidePlayerControls,
-                        playerMessage: _surfaceMessage,
-                        onToggleControls: _togglePlayerControls,
-                        onChromeHotZoneChanged:
-                            _handlePlayerChromeHotZoneChanged,
-                        onBack: _handleBack,
-                        onReload: _reloadCurrentLine,
-                        onScreenshot: _captureScreenshot,
-                        onTheaterMode: _toggleTheaterMode,
-                        onCast: _showExternalPlayback,
-                        onPlayPause: _playing
-                            ? _pausePlayback
-                            : _resumePlayback,
-                        onPreviousEpisode: _canPlayPreviousEpisode
-                            ? _playPreviousEpisode
-                            : null,
-                        onNextEpisode: _canPlayNextEpisode
-                            ? _playNextEpisode
-                            : null,
-                        onTemporaryDoubleSpeedStart: _startTemporaryDoubleSpeed,
-                        onTemporaryDoubleSpeedEnd: _endTemporaryDoubleSpeed,
-                        onVideoViewportSize: _handleVideoViewportSize,
-                        onRewind: () => _seekBy(
-                          Duration(seconds: -state.settings.rewindSeconds),
-                        ),
-                        onForward: () => _seekBy(
-                          Duration(seconds: state.settings.forwardSeconds),
-                        ),
-                        onSeek: _seekTo,
-                        onMute: _toggleMute,
-                        onVolumeChanged: _setVolume,
-                        onGestureVolumeChanged: _setGestureVolume,
-                        onSpeedSelected: _selectSpeed,
-                        onControlMenuChanged: _handleControlMenuChanged,
-                        onFullscreen: () => _setFullscreen(!_fullscreen),
-                        onEpisodePanel: _toggleEpisodePanel,
-                        onEpisodeSelected: _selectEpisode,
-                        onLinePanel: _toggleLinePanel,
-                        onDanmakuPanel: _toggleDanmakuPanel,
-                        onDanmakuEnabledChanged: _setDanmakuEnabled,
-                        danmakuInput: _danmakuController.input,
-                        danmakuInputFocus: _danmakuInputFocus,
-                        onSendDanmaku: (text) => unawaited(
-                          _sendDanmaku(
-                            text,
-                            settings: state.danmaku,
-                            loggedIn:
-                                state
-                                    .accountSession
-                                    .current
-                                    ?.cloudAuthenticated ==
-                                true,
+                      player: AnimatedBuilder(
+                        animation: _timelineRevision,
+                        builder: (context, _) => _PlayerCanvas(
+                          controller: _controller,
+                          webPlayerController: _webPlayerController,
+                          playbackGeneration: playbackGeneration,
+                          subject: widget.request.subject,
+                          episodes: widget.request.episodes,
+                          episode: _episode,
+                          line: _line,
+                          settings: effectiveSettings,
+                          superResolutionActive: _anime4kController.isActive,
+                          services: state.services,
+                          danmaku: state.danmaku,
+                          remoteDanmaku: _danmakuController.remoteComments,
+                          localDanmaku: _danmakuController.localComments,
+                          theaterMode: _theaterMode,
+                          position: _position,
+                          duration: _duration,
+                          buffer: _buffer,
+                          volume: _volume,
+                          playing: _playing,
+                          buffering: _buffering,
+                          loadingLine: _loadingLine,
+                          lineLookupInProgress: _lineLookupInProgress,
+                          playbackFailed: _playbackFailed,
+                          fullscreen: _fullscreen,
+                          muted: _muted,
+                          controlsVisible: _controlsVisible,
+                          autoHideChrome: _shouldAutoHidePlayerControls,
+                          playerMessage: _surfaceMessage,
+                          onToggleControls: _togglePlayerControls,
+                          onChromeHotZoneChanged:
+                              _handlePlayerChromeHotZoneChanged,
+                          onBack: _handleBack,
+                          onReload: _reloadCurrentLine,
+                          onScreenshot: _captureScreenshot,
+                          onTheaterMode: _toggleTheaterMode,
+                          onCast: _showExternalPlayback,
+                          onPlayPause: _playing
+                              ? _pausePlayback
+                              : _resumePlayback,
+                          onPreviousEpisode: _canPlayPreviousEpisode
+                              ? _playPreviousEpisode
+                              : null,
+                          onNextEpisode: _canPlayNextEpisode
+                              ? _playNextEpisode
+                              : null,
+                          onTemporaryDoubleSpeedStart:
+                              _startTemporaryDoubleSpeed,
+                          onTemporaryDoubleSpeedEnd: _endTemporaryDoubleSpeed,
+                          onVideoViewportSize: _handleVideoViewportSize,
+                          onRewind: () => _seekBy(
+                            Duration(seconds: -state.settings.rewindSeconds),
                           ),
+                          onForward: () => _seekBy(
+                            Duration(seconds: state.settings.forwardSeconds),
+                          ),
+                          onSeek: _seekTo,
+                          onMute: _toggleMute,
+                          onVolumeChanged: _setVolume,
+                          onGestureVolumeChanged: _setGestureVolume,
+                          onSpeedSelected: _selectSpeed,
+                          onControlMenuChanged: _handleControlMenuChanged,
+                          onFullscreen: () => _setFullscreen(!_fullscreen),
+                          onEpisodePanel: _toggleEpisodePanel,
+                          onEpisodeSelected: _selectEpisode,
+                          onLinePanel: _toggleLinePanel,
+                          onDanmakuPanel: _toggleDanmakuPanel,
+                          onDanmakuEnabledChanged: _setDanmakuEnabled,
+                          danmakuInput: _danmakuController.input,
+                          danmakuInputFocus: _danmakuInputFocus,
+                          onSendDanmaku: (text) => unawaited(
+                            _sendDanmaku(
+                              text,
+                              settings: state.danmaku,
+                              loggedIn:
+                                  state
+                                      .accountSession
+                                      .current
+                                      ?.cloudAuthenticated ==
+                                  true,
+                            ),
+                          ),
+                          onWebReady: () => _handleWebReady(playbackGeneration),
+                          onWebError: () => _handleWebError(playbackGeneration),
+                          onWebPosition: (value) =>
+                              _handleWebPosition(playbackGeneration, value),
+                          onWebDuration: (value) =>
+                              _handleWebDuration(playbackGeneration, value),
+                          onWebPlaying: (value) =>
+                              _handleWebPlaying(playbackGeneration, value),
+                          onWebEnded: () => _handleWebEnded(playbackGeneration),
+                          onSettingsPanel: _toggleSettingsPanel,
+                          onSubtitlePanel: _toggleSubtitlePanel,
+                          supplementalSubtitles: _supplementalSubtitles,
                         ),
-                        onWebReady: () => _handleWebReady(playbackGeneration),
-                        onWebError: () => _handleWebError(playbackGeneration),
-                        onWebPosition: (value) =>
-                            _handleWebPosition(playbackGeneration, value),
-                        onWebDuration: (value) =>
-                            _handleWebDuration(playbackGeneration, value),
-                        onWebPlaying: (value) =>
-                            _handleWebPlaying(playbackGeneration, value),
-                        onWebEnded: () => _handleWebEnded(playbackGeneration),
-                        onSettingsPanel: _toggleSettingsPanel,
-                        onSubtitlePanel: _toggleSubtitlePanel,
-                        supplementalSubtitles: _supplementalSubtitles,
                       ),
                     ),
                     if (_episodePanel)
@@ -960,8 +1032,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onOpenNetwork: _openNetworkPlayback,
                           onSearch: _searchPlaybackLines,
                           onCopyDiagnostics: _copyPlaybackDiagnostics,
-                          onQueryLocally: _querySourceLocally,
-                          localLookupInProgress: _localSourceLookupInProgress,
                           onReportAd: _reportAdAndSwitchLine,
                         ),
                       ),
@@ -1295,7 +1365,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             previousPosition: previousPosition,
             currentPosition: value,
           );
-          setState(() => _position = value);
+          _position = value;
+          _timelineRevision.value++;
           if (reachedFirstFrame) _confirmNativeFirstFrame();
           _maybeRefreshNextEpisodePrefetch();
         }),
@@ -1326,7 +1397,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           )) {
             return;
           }
-          setState(() => _buffer = value);
+          if (_buffer == value) return;
+          _buffer = value;
+          _timelineRevision.value++;
         }),
       )
       ..track(
@@ -1455,7 +1528,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         .read(animeControllerProvider.notifier)
         .accountContextVersion;
     if (accountContextVersion != _accountContextVersion) {
-      _localSourceLookupToken?.cancel();
       _accountContextVersion = accountContextVersion;
       unawaited(_initializeSupplementalSubtitles());
       _resetRecommendationTracking();
@@ -1522,7 +1594,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
-    _cancelLocalSourceLookup();
     final recoveryEpoch = _automaticRecoveryEpoch;
     final preserveActivePlayback = _isPlayableLine(_line) && !_playbackFailed;
     if (!preserveActivePlayback) {
@@ -1882,84 +1953,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _lineRepository.cancelSingleBackupLookup();
   }
 
-  void _cancelLocalSourceLookup() {
-    _localSourceLookupToken?.cancel();
-    _localSourceLookupToken = null;
-    _localSourceLookupInProgress = false;
-  }
-
-  Future<void> _querySourceLocally(PlaybackLine source) async {
-    if (_localSourceLookupInProgress || !source.clientQuerySupported) return;
-    final episode = _episode;
-    final notifier = ref.read(animeControllerProvider.notifier);
-    final accountVersion = notifier.accountContextVersion;
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('通过本机网络重查'),
-        content: Text(
-          '将向「${source.providerName}」发送当前作品的名称，并由本机搜索、解析和验证本集。\n\n实际出口取决于设备网络、代理或 VPN；不保证避开 IP 限制。仅对这一次查询生效，不修改规则权限。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('本机查询'),
-          ),
-        ],
-      ),
-    );
-    if (accepted != true ||
-        !mounted ||
-        _episode.id != episode.id ||
-        _localSourceLookupInProgress ||
-        notifier.accountContextVersion != accountVersion) {
-      return;
-    }
-    _localSourceLookupToken?.cancel();
-    final token = RulePlaybackCancellationToken();
-    _localSourceLookupToken = token;
-    setState(() => _localSourceLookupInProgress = true);
-    try {
-      await _lineRepository.cancelLookup();
-      if (token.isCancelled) return;
-      final local = await notifier.playbackDiscovery.lookupSourceOnDevice(
-        subject: widget.request.subject,
-        episode: episode,
-        source: source,
-        cancellationToken: token,
-      );
-      if (!mounted ||
-          token.isCancelled ||
-          _episode.id != episode.id ||
-          notifier.accountContextVersion != accountVersion) {
-        return;
-      }
-      if (local.isEmpty) {
-        _showPlayerToast('本机未取得新的线路');
-        return;
-      }
-      final retained = _lines.where(
-        (line) =>
-            line.sourceInventoryId != source.sourceInventoryId ||
-            line.id == _line?.id,
-      );
-      setState(() => _lineRepository.replaceLines([...retained, ...local]));
-      _showPlayerToast(
-        '本机查询完成，${local.where((line) => line.available).length} 条通过媒体验证；请选择线路播放',
-      );
-    } catch (_) {
-      if (mounted && !token.isCancelled) _showPlayerToast('本机查询失败，当前播放未切换');
-    } finally {
-      if (mounted && identical(_localSourceLookupToken, token)) {
-        setState(() => _localSourceLookupInProgress = false);
-      }
-    }
-  }
-
   void _startExpandedLineLookup({bool autoplay = false}) {
     final recoveryEpoch = _automaticRecoveryEpoch;
     if (!mounted ||
@@ -1977,7 +1970,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
     }
     if (_lineScanInProgress || _hasExpandedLineLookup) return;
-    _cancelLocalSourceLookup();
     _cancelSingleBackupLookup();
     final started = _lineRepository.startExpandedLookup(
       subject: widget.request.subject,
@@ -2128,6 +2120,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
     _nativeVideo.resumeSeek.cancel();
     final serial = ++_openLineSerial;
+    _metadataProbeToken?.cancel();
+    _metadataProbeToken = null;
     _openProbeToken?.cancel();
     _openProbeToken = null;
     _startupTransportFailures = 0;
@@ -2886,8 +2880,6 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _nativeVideo.cancelFirstFrameWatchdog();
     _cancelSingleBackupLookup();
     unawaited(_lineRepository.cancelLookup());
-    _localSourceLookupToken?.cancel();
-    _localSourceLookupInProgress = false;
     _lineRepository.resetForEpisode(
       episodeId: episode.id,
       initialLines: preparedLines,
@@ -3453,7 +3445,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           'app_version': '${version.version}+${version.buildNumber}',
         'platform': defaultTargetPlatform.name,
         'playback_phase': _sessionController.state.phase.name,
-        'decoded_video': _nativeVideo.hasDecodedFrame,
+        ..._nativeVideo.frameDiagnostics,
         'line_count': _lines.length,
         'verified_count': _lines
             .where((l) => l.available && (l.clientVerified || l.serverVerified))
@@ -3670,7 +3662,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _scheduleNextEpisodePrefetch();
     }
     _notePlaybackProgress(value);
-    setState(() => _position = value);
+    _position = value;
+    _timelineRevision.value++;
     _maybeRefreshNextEpisodePrefetch();
   }
 

@@ -1,11 +1,14 @@
 import 'dart:io';
 
 import 'connection_race.dart';
+import 'network_address_cache.dart';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
 import 'network_security.dart';
+
+final _addressCache = NetworkAddressCache();
 
 http.Client createNetworkHttpClient(NetworkRequestPolicy policy) {
   final ioClient = HttpClient()
@@ -64,7 +67,13 @@ http.Client createNetworkHttpClient(NetworkRequestPolicy policy) {
             },
         ],
       );
-      return ConnectionTask.fromSocket(race.value, race.cancel);
+      final connected = race.value.onError((Object error, StackTrace stack) {
+        // A VPN/network/CDN answer can change within the short cache window.
+        // Evict on a failed address race so the next attempt asks system DNS.
+        _addressCache.evict(uri.host);
+        Error.throwWithStackTrace(error, stack);
+      });
+      return ConnectionTask.fromSocket(connected, race.cancel);
     };
   }
   return PolicyHttpClient(inner: IOClient(ioClient), policy: policy);
@@ -77,12 +86,13 @@ Future<List<InternetAddress>> _publicAddresses(
   final host = uri.host;
   final literal = InternetAddress.tryParse(host);
   final addresses = literal == null
-      ? await InternetAddress.lookup(host).timeout(const Duration(seconds: 3))
+      ? await _addressCache.resolve(host)
       : [literal];
   if (addresses.isEmpty ||
       addresses.any(
         (address) => !isResolvedNetworkAddressAllowed(uri, policy, address),
       )) {
+    _addressCache.evict(host);
     throw const NetworkSecurityException(
       'DNS resolved to a private or special-purpose address.',
     );

@@ -216,10 +216,7 @@ class RuleImporter {
         (transientFailures > 0 && transientFailures * 5 >= names.length)) {
       throw const FormatException('Kazumi 订阅拉取不完整，请稍后重试。');
     }
-    return _bundleFromJson({
-      'name': 'Kazumi 规则订阅',
-      'rules': rules,
-    }, sourceUrl);
+    return _bundleFromJson({'name': 'Kazumi 规则订阅', 'rules': rules}, sourceUrl);
   }
 
   RuleImportBundle importFromText(String text, {String sourceUrl = ''}) {

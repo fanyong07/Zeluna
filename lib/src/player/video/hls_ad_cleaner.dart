@@ -158,7 +158,8 @@ HlsCleanResult cleanHlsPlaylist(String text, {Uri? baseUri}) {
       cut = true;
     } else if (dominantHost.isNotEmpty &&
         meta.hosts.any(
-          (host) => host != dominantHost && (hostCount[host] ?? 0) <= oddHostLimit,
+          (host) =>
+              host != dominantHost && (hostCount[host] ?? 0) <= oddHostLimit,
         )) {
       cut = true;
     } else if (groups.length >= 2 &&
@@ -191,8 +192,7 @@ HlsCleanResult cleanHlsPlaylist(String text, {Uri? baseUri}) {
 
   final flat = <({int groupIndex, _PlaylistEntry entry})>[
     for (final kept in keptGroups)
-      for (final entry in kept.entries)
-        (groupIndex: kept.index, entry: entry),
+      for (final entry in kept.entries) (groupIndex: kept.index, entry: entry),
   ];
   final allowMicroShortStreak = globalMedian >= 5.0;
   final isShort = <bool>[
@@ -414,9 +414,7 @@ String? _extractKeySignature(List<String> tags, Uri? baseUri) {
       continue;
     }
     final match = _uriAttrRe.firstMatch(tag);
-    keySig = match != null
-        ? _resolveUri(baseUri, match.group(1)!)
-        : tag.trim();
+    keySig = match != null ? _resolveUri(baseUri, match.group(1)!) : tag.trim();
   }
   return keySig;
 }

@@ -480,11 +480,8 @@ final class MediaLibraryAdapter {
     MediaLibraryConfig library,
     Future<T> Function(http.Client) run, {
     Duration overallTimeout = const Duration(seconds: 12),
-  }) => _withOriginClient(
-    library.endpoint,
-    run,
-    overallTimeout: overallTimeout,
-  );
+  }) =>
+      _withOriginClient(library.endpoint, run, overallTimeout: overallTimeout);
 
   Future<T> _withOriginClient<T>(
     Uri origin,
@@ -959,7 +956,10 @@ int? _parseSeasonNumberText(String raw) {
 
 ({int? season, int episode})? _extractDavEpisodeNumber(String stem) {
   final stripped = stem.replaceFirst(_davLeadingTags, '').trim();
-  final sxe = RegExp(r'S(\d+)E(\d+)', caseSensitive: false).firstMatch(stripped);
+  final sxe = RegExp(
+    r'S(\d+)E(\d+)',
+    caseSensitive: false,
+  ).firstMatch(stripped);
   if (sxe != null) {
     final s = int.tryParse(sxe.group(1)!);
     final e = int.tryParse(sxe.group(2)!);

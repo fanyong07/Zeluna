@@ -271,6 +271,12 @@ class RuleUrlPolicy {
     // Keep strict SSRF host blocking and cross-origin credential stripping,
     // without killing live sources on static compile-time mediaDomains lists.
     if (purpose == RuleUrlPurpose.media) {
+      // Backend chapter bridges carry a server-scoped explicit media host grant.
+      if (manifest.engine == 'backend-chapter') {
+        return normalizeRuleDomains(
+          manifest.mediaDomains,
+        ).any((domain) => _matchesDomain(host, domain));
+      }
       return true;
     }
     return normalizeRuleDomains([

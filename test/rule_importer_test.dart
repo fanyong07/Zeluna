@@ -101,9 +101,7 @@ void main() {
           return http.Response(
             '',
             302,
-            headers: {
-              'location': 'https://rules.example/sub/index.json',
-            },
+            headers: {'location': 'https://rules.example/sub/index.json'},
           );
         }
         return switch (request.url.pathSegments.last) {
@@ -172,10 +170,7 @@ void main() {
         return _json({
           'name': 'LibreTV 精选源',
           'sources': [
-            {
-              'name': '极速资源',
-              'url': 'https://jszyapi.com/api.php/provide/vod',
-            },
+            {'name': '极速资源', 'url': 'https://jszyapi.com/api.php/provide/vod'},
           ],
         });
       });

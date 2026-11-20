@@ -17,6 +17,61 @@ The Windows WebView integration is a reviewed local override under
 `third_party/flutter_inappwebview_windows`; it is not a private provider
 implementation.
 
+### Local media_kit 1.2.6 patch
+
+- Upstream: [media-kit/media-kit](https://github.com/media-kit/media-kit),
+  published [media_kit 1.2.6](https://pub.dev/packages/media_kit/versions/1.2.6).
+- Copyright (c) 2021 & onwards Hitesh Kumar Saini; MIT license retained in
+  [third_party/media_kit/LICENSE](third_party/media_kit/LICENSE).
+- Runtime source and web runtime asset are vendored under
+  [third_party/media_kit](third_party/media_kit), with the original package
+  version and dependency constraints unchanged. No dependency upgrade is implied.
+- The local patch fixes native screenshot command pointer-array allocation,
+  explicit NULL termination and exception-safe resource cleanup. A native-only
+  decoded-frame probe returns a bool without JPEG encoding or transferring raw
+  pixels between isolates; the public screenshot formats remain unchanged.
+- Exact published archive/source hashes, locking review, regression tests and
+  remaining device-validation limits are recorded in
+  [PATCHES.md](third_party/media_kit/PATCHES.md).
+
+#### Embedded Dart FFI utilities (BSD-3-Clause)
+
+The media_kit fork includes Dart FFI utilities derived from
+[ffi 1.2.1](https://pub.dev/packages/ffi/versions/1.2.1), as identified by its
+[embedded README](third_party/media_kit/lib/ffi/README.txt). Their license is
+independent of media_kit's MIT license. The full upstream license is retained in
+[lib/ffi/LICENSE](third_party/media_kit/lib/ffi/LICENSE) and reproduced here so
+it accompanies the application through this bundled notices asset. Exact
+published-archive and license hashes are recorded in the patch provenance.
+
+> Copyright 2019, the Dart project authors.
+>
+> Redistribution and use in source and binary forms, with or without
+> modification, are permitted provided that the following conditions are
+> met:
+>
+> * Redistributions of source code must retain the above copyright
+>   notice, this list of conditions and the following disclaimer.
+> * Redistributions in binary form must reproduce the above
+>   copyright notice, this list of conditions and the following
+>   disclaimer in the documentation and/or other materials provided
+>   with the distribution.
+> * Neither the name of Google LLC nor the names of its
+>   contributors may be used to endorse or promote products derived
+>   from this software without specific prior written permission.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+> "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+> LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+> A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+> OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+> SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+> LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+> DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+> THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+> (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+> OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 ## Direct server dependencies
 
 The server declares FastAPI/Uvicorn, Pydantic, SQLAlchemy/Alembic, HTTPX,

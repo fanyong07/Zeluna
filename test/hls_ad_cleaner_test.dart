@@ -7,31 +7,44 @@ String _seg(double seconds, String name) =>
     '#EXTINF:${seconds.toStringAsFixed(3)},\n$name\n';
 
 void main() {
-  test('cuts domestic mid-roll ad island with matching duration but divergent path', () {
-    final buf = StringBuffer(_head);
-    for (var i = 0; i < 15; i++) {
-      buf.write(_seg(6.0, '/202611/ep1/index${i.toString().padLeft(4, '0')}.ts'));
-    }
-    buf.write('#EXT-X-DISCONTINUITY\n');
-    for (var i = 0; i < 3; i++) {
-      buf.write(_seg(5.0, '/adjump/casino_$i.ts'));
-    }
-    buf.write('#EXT-X-DISCONTINUITY\n');
-    for (var i = 15; i < 30; i++) {
-      buf.write(_seg(6.0, '/202611/ep1/index${i.toString().padLeft(4, '0')}.ts'));
-    }
-    buf.write('#EXT-X-ENDLIST\n');
+  test(
+    'cuts domestic mid-roll ad island with matching duration but divergent path',
+    () {
+      final buf = StringBuffer(_head);
+      for (var i = 0; i < 15; i++) {
+        buf.write(
+          _seg(6.0, '/202611/ep1/index${i.toString().padLeft(4, '0')}.ts'),
+        );
+      }
+      buf.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 0; i < 3; i++) {
+        buf.write(_seg(5.0, '/adjump/casino_$i.ts'));
+      }
+      buf.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 15; i < 30; i++) {
+        buf.write(
+          _seg(6.0, '/202611/ep1/index${i.toString().padLeft(4, '0')}.ts'),
+        );
+      }
+      buf.write('#EXT-X-ENDLIST\n');
 
-    final result = cleanHlsPlaylist(
-      buf.toString(),
-      baseUri: Uri.parse('https://cdn.example.com/202611/ep1/index.m3u8'),
-    );
-    expect(result.report.changed, isTrue);
-    expect(result.report.segmentsCut, 3);
-    expect(result.playlist, isNot(contains('casino_0.ts')));
-    expect(result.playlist, contains('https://cdn.example.com/202611/ep1/index0000.ts'));
-    expect(result.playlist, contains('https://cdn.example.com/202611/ep1/index0029.ts'));
-  });
+      final result = cleanHlsPlaylist(
+        buf.toString(),
+        baseUri: Uri.parse('https://cdn.example.com/202611/ep1/index.m3u8'),
+      );
+      expect(result.report.changed, isTrue);
+      expect(result.report.segmentsCut, 3);
+      expect(result.playlist, isNot(contains('casino_0.ts')));
+      expect(
+        result.playlist,
+        contains('https://cdn.example.com/202611/ep1/index0000.ts'),
+      );
+      expect(
+        result.playlist,
+        contains('https://cdn.example.com/202611/ep1/index0029.ts'),
+      );
+    },
+  );
 
   test('cuts unencrypted ad island inside an encrypted feature playlist', () {
     final buf = StringBuffer(_head)
@@ -57,7 +70,10 @@ void main() {
     );
     expect(result.report.segmentsCut, 3);
     expect(result.playlist, isNot(contains('seg9000.ts')));
-    expect(result.playlist, contains('URI="https://cdn.example.com/v/enc.key"'));
+    expect(
+      result.playlist,
+      contains('URI="https://cdn.example.com/v/enc.key"'),
+    );
   });
 
   test('preserves non-ad DISCONTINUITY between normal feature groups', () {
@@ -100,32 +116,60 @@ void main() {
     expect(result.playlist, contains('main11.ts'));
   });
 
-  test('does not false-cut normal 2s-3s GOP feature segments while still cutting ad islands', () {
-    final buf = StringBuffer('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n');
-    final normalDurations = [2.2, 1.8, 1.5, 2.5, 1.9, 1.4, 2.3, 2.1, 1.7, 1.6, 2.4, 2.2];
-    for (var i = 0; i < normalDurations.length; i++) {
-      buf.write(_seg(normalDurations[i], '/202611/movie/seg${i.toString().padLeft(4, '0')}.ts'));
-    }
-    buf.write('#EXT-X-DISCONTINUITY\n');
-    for (var i = 0; i < 3; i++) {
-      buf.write(_seg(4.0, '/ad/promo_$i.ts'));
-    }
-    buf.write('#EXT-X-DISCONTINUITY\n');
-    for (var i = 0; i < normalDurations.length; i++) {
-      buf.write(_seg(normalDurations[i], '/202611/movie/seg${(i + 12).toString().padLeft(4, '0')}.ts'));
-    }
-    buf.write('#EXT-X-ENDLIST\n');
+  test(
+    'does not false-cut normal 2s-3s GOP feature segments while still cutting ad islands',
+    () {
+      final buf = StringBuffer(
+        '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n',
+      );
+      final normalDurations = [
+        2.2,
+        1.8,
+        1.5,
+        2.5,
+        1.9,
+        1.4,
+        2.3,
+        2.1,
+        1.7,
+        1.6,
+        2.4,
+        2.2,
+      ];
+      for (var i = 0; i < normalDurations.length; i++) {
+        buf.write(
+          _seg(
+            normalDurations[i],
+            '/202611/movie/seg${i.toString().padLeft(4, '0')}.ts',
+          ),
+        );
+      }
+      buf.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 0; i < 3; i++) {
+        buf.write(_seg(4.0, '/ad/promo_$i.ts'));
+      }
+      buf.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 0; i < normalDurations.length; i++) {
+        buf.write(
+          _seg(
+            normalDurations[i],
+            '/202611/movie/seg${(i + 12).toString().padLeft(4, '0')}.ts',
+          ),
+        );
+      }
+      buf.write('#EXT-X-ENDLIST\n');
 
-    final result = cleanHlsPlaylist(
-      buf.toString(),
-      baseUri: Uri.parse('https://cdn.example.com/202611/movie/index.m3u8'),
-    );
-    expect(result.report.groupsCut, 1);
-    expect(result.report.segmentsCut, 3);
-    expect(result.report.microCut, 0);
-    expect(result.report.segmentsKept, 24);
-    expect(result.playlist, isNot(contains('promo_0.ts')));
-    expect(result.playlist, contains('seg0002.ts'));
-    expect(result.playlist, contains('seg0023.ts'));
-  });
+      final result = cleanHlsPlaylist(
+        buf.toString(),
+        baseUri: Uri.parse('https://cdn.example.com/202611/movie/index.m3u8'),
+      );
+      expect(result.report.groupsCut, 1);
+      expect(result.report.segmentsCut, 3);
+      expect(result.report.microCut, 0);
+      expect(result.report.segmentsKept, 24);
+      expect(result.playlist, isNot(contains('promo_0.ts')));
+      expect(result.playlist, contains('seg0002.ts'));
+      expect(result.playlist, contains('seg0023.ts'));
+    },
+  );
 }

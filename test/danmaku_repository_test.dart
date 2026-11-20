@@ -11,6 +11,432 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  group('bounded timeline cache', () {
+    const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+
+    test(
+      'entry limit evicts the least recently used timeline after hot hits',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 100,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(number, commentCount: 1);
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        final second = await load(2);
+        expect(await load(1), same(first));
+        final third = await load(3);
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(await load(1), same(first));
+        expect(await load(3), same(third));
+        expect(attempts, {1: 1, 2: 1, 3: 1});
+        expect(await load(2), isNot(same(second)));
+        expect(attempts, {1: 1, 2: 2, 3: 1});
+      },
+    );
+
+    test(
+      'oversized timelines are shared and returned intact but not retained',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 2,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: number == 1 ? 1 : 3,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final small = await load(1);
+        final pending = load(2);
+        expect(
+          load(2),
+          same(pending),
+          reason: 'oversized loads still single-flight',
+        );
+        final large = await pending;
+        expect(large.comments.map((comment) => comment.text), [
+          'episode-2-comment-0',
+          'episode-2-comment-1',
+          'episode-2-comment-2',
+        ]);
+        expect(large.sources.map((source) => source.provider), [
+          'Zeluna',
+          '弹弹play',
+        ]);
+        expect(large.sources.map((source) => source.commentCount), [2, 1]);
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 1);
+        final reloaded = await load(2);
+        expect(reloaded, isNot(same(large)));
+        expect(reloaded.comments, hasLength(3));
+        expect(reloaded.sources, hasLength(2));
+        expect(
+          await load(1),
+          same(small),
+          reason: 'oversized loads do not evict small entries',
+        );
+        expect(attempts, {1: 1, 2: 2});
+        expect(repository.debugCachedCommentCount, 1);
+      },
+    );
+
+    test(
+      'sum budget evicts multiple cold timelines and accepts the exact budget',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 8,
+          maxCachedComments: 6,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: switch (number) {
+                3 => 1,
+                4 => 4,
+                _ => 2,
+              },
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        await load(2);
+        final third = await load(3);
+        expect(repository.debugCachedCommentCount, 5);
+        expect(await load(1), same(first));
+        final fourth = await load(4);
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 6);
+        expect(await load(1), same(first));
+        expect(await load(4), same(fourth));
+        expect(attempts, {1: 1, 2: 1, 3: 1, 4: 1});
+        expect(await load(3), isNot(same(third)));
+        expect(repository.debugCachedCommentCount, 5);
+        expect(await load(4), same(fourth));
+        expect(attempts[3], 2);
+      },
+    );
+
+    test(
+      'access prunes an unrelated transient failure without refreshing its TTL',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        var failing = true;
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          now: () => now,
+          maxCachedTimelines: 4,
+          maxCachedComments: 4,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: 2,
+              transientFailure: number == 2 && failing,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        final failed = await load(2);
+        expect(failed.sources.last, isA<TransientDanmakuFailure>());
+        expect(attempts[2], 3);
+        now = now.add(const Duration(seconds: 29));
+        expect(await load(2), same(failed));
+        now = now.add(const Duration(seconds: 1));
+        expect(await load(1), same(first));
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(attempts, {1: 1, 2: 3});
+        failing = false;
+        expect(
+          (await load(2)).sources.every((source) => source.available),
+          isTrue,
+        );
+        expect(attempts[2], 4);
+      },
+    );
+
+    test(
+      'insertion prunes entries that expired while a different load was pending',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        final response = Completer<http.Response>();
+        final started = Completer<void>();
+        final repository = DanmakuRepository(
+          now: () => now,
+          maxCachedTimelines: 4,
+          maxCachedComments: 4,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            if (number == 2) {
+              started.complete();
+              return response.future;
+            }
+            return _cacheTimelineResponse(number, commentCount: 1);
+          }),
+        );
+        final first = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        now = now.add(const Duration(minutes: 29));
+        final pending = repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        addTearDown(() async {
+          if (!response.isCompleted) {
+            response.complete(_cacheTimelineResponse(2, commentCount: 2));
+          }
+          await pending;
+          repository.close();
+        });
+        await started.future;
+        expect(repository.debugCachedTimelineCount, 1);
+        now = now.add(const Duration(minutes: 1));
+        response.complete(_cacheTimelineResponse(2, commentCount: 2));
+        final second = await pending;
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(
+          await repository.timelineForEpisode(
+            _subject,
+            _cacheEpisode(2),
+            settings,
+          ),
+          same(second),
+        );
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          isNot(same(first)),
+        );
+      },
+    );
+
+    test(
+      'empty timelines retain their two minute TTL and hits do not extend it',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          now: () => now,
+          officialClient: MockClient((_) async {
+            attempts++;
+            return _cacheTimelineResponse(1, commentCount: 0);
+          }),
+        );
+        addTearDown(repository.close);
+        final first = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        now = now.add(const Duration(seconds: 119));
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          same(first),
+        );
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 0);
+        now = now.add(const Duration(seconds: 1));
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          isNot(same(first)),
+        );
+        expect(attempts, 2);
+      },
+    );
+
+    test(
+      'force refresh and invalidation release their retained comment budgets',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 3,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            final attempt = attempts.update(
+              number,
+              (count) => count + 1,
+              ifAbsent: () => 1,
+            );
+            return _cacheTimelineResponse(
+              number,
+              commentCount: number == 1 && attempt == 1 ? 2 : 1,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        final second = await repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        expect(repository.debugCachedCommentCount, 3);
+        await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+          forceRefresh: true,
+        );
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(
+          await repository.timelineForEpisode(
+            _subject,
+            _cacheEpisode(2),
+            settings,
+          ),
+          same(second),
+        );
+        repository.invalidate();
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        await repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(attempts, {1: 3, 2: 2});
+      },
+    );
+
+    test(
+      'close clears retention and a late completion cannot repopulate it',
+      () async {
+        final response = Completer<http.Response>();
+        final started = Completer<void>();
+        var attempts = 0;
+        final client = _CloseTrackingClient();
+        final officialClient = _CloseTrackingClient((request) async {
+          attempts++;
+          final number = int.parse(
+            request.url.queryParameters['episode_number']!,
+          );
+          if (number == 2) {
+            started.complete();
+            return response.future;
+          }
+          return _cacheTimelineResponse(number, commentCount: 1);
+        });
+        final repository = DanmakuRepository(
+          client: client,
+          officialClient: officialClient,
+        );
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        final pending = repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        addTearDown(() async {
+          if (!response.isCompleted) {
+            response.complete(_cacheTimelineResponse(2, commentCount: 2));
+          }
+          await pending;
+          repository.close();
+          client.close();
+          officialClient.close();
+        });
+        await started.future;
+        expect(repository.debugCachedCommentCount, 1);
+        repository.close();
+        repository.close();
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        expect(client.closeCount, 0);
+        expect(officialClient.closeCount, 0);
+        response.complete(_cacheTimelineResponse(2, commentCount: 2));
+        expect((await pending).comments, hasLength(2));
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        await expectLater(
+          repository.timelineForEpisode(_subject, _episode, settings),
+          throwsStateError,
+        );
+        expect(attempts, 2);
+      },
+    );
+
+    for (final disabled in ['entries', 'comments']) {
+      test(
+        'a zero $disabled limit disables retention without dropping comments',
+        () async {
+          var attempts = 0;
+          final repository = DanmakuRepository(
+            maxCachedTimelines: disabled == 'entries' ? 0 : 8,
+            maxCachedComments: disabled == 'comments' ? 0 : 50000,
+            officialClient: MockClient((_) async {
+              attempts++;
+              return _cacheTimelineResponse(1, commentCount: 2);
+            }),
+          );
+          addTearDown(repository.close);
+          for (var index = 0; index < 2; index++) {
+            final timeline = await repository.timelineForEpisode(
+              _subject,
+              _episode,
+              settings,
+            );
+            expect(timeline.comments, hasLength(2));
+            expect(timeline.sources, hasLength(2));
+            expect(repository.debugCachedTimelineCount, 0);
+            expect(repository.debugCachedCommentCount, 0);
+          }
+          expect(attempts, 2);
+        },
+      );
+    }
+  });
+
   for (final order in ['new first', 'old first', 'old before new request']) {
     test(
       'invalidation detaches old account future and protects new cache ($order)',
@@ -26,6 +452,8 @@ void main() {
             (_) async => throw StateError('unexpected public request'),
           ),
           officialTokenProvider: () async => token,
+          maxCachedTimelines: 1,
+          maxCachedComments: 1,
           officialClient: MockClient((request) async {
             attempts++;
             expect(request.url.path, endsWith('/danmaku/mine'));
@@ -111,6 +539,8 @@ void main() {
         );
         expect(identical(cached, latest), isTrue);
         expect(cached.comments.single.isMine, isFalse);
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 1);
         expect(attempts, 2);
       },
     );
@@ -1039,6 +1469,60 @@ void main() {
       expect(visible.map((item) => item.text), ['保留']);
     },
   );
+}
+
+AnimeEpisode _cacheEpisode(int number) => AnimeEpisode(
+  id: 100 + number,
+  subjectId: _subject.id,
+  number: number,
+  title: '',
+  airdate: _episode.airdate,
+  duration: _episode.duration,
+  description: 'Episode $number',
+);
+
+http.Response _cacheTimelineResponse(
+  int number, {
+  required int commentCount,
+  bool transientFailure = false,
+}) => _jsonResponse({
+  'comments': [
+    for (var index = 0; index < commentCount; index++)
+      {
+        'id': 'episode-$number-comment-$index',
+        'provider': index.isEven ? 'Zeluna' : '弹弹play',
+        'text': 'episode-$number-comment-$index',
+        'time_seconds': index + 1,
+        'color': 16777215,
+      },
+  ],
+  'sources': [
+    {
+      'provider': 'Zeluna',
+      'available': true,
+      'comment_count': (commentCount + 1) ~/ 2,
+    },
+    {
+      'provider': '弹弹play',
+      'available': !transientFailure,
+      'comment_count': commentCount ~/ 2,
+      if (transientFailure) 'error_code': 'timeout',
+      if (transientFailure) 'retryable': true,
+    },
+  ],
+});
+
+class _CloseTrackingClient extends MockClient {
+  _CloseTrackingClient([Future<http.Response> Function(http.Request)? handler])
+    : super(handler ?? ((_) async => http.Response('', 404)));
+
+  var closeCount = 0;
+
+  @override
+  void close() {
+    closeCount++;
+    super.close();
+  }
 }
 
 http.Response _ownedTimelineResponse({required bool isMine}) => _jsonResponse({

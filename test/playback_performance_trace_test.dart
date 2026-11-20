@@ -19,12 +19,22 @@ void main() {
       final report = trace.diagnosticReport(
         summary: {
           'platform': 'android',
+          'video_output': 'mediacodec_embed',
+          'surface_frames': 217,
+          'surface_width': 640,
+          'surface_height': 360,
+          'frame_probe': 'image_submitted',
+          'decoded_video': true,
           'authorization': 'Bearer secret',
           'source': 'https://private.test',
         },
       );
       expect(report, contains('tls'));
       expect(report, contains('android'));
+      expect(report, contains('mediacodec_embed'));
+      expect(report, contains('"surface_frames": 217'));
+      expect(report, contains('image_submitted'));
+      expect(report, contains('"decoded_video": true'));
       expect(report, isNot(contains('secret')));
       expect(report, isNot(contains('private.test')));
       expect(report, isNot(contains('ignored')));

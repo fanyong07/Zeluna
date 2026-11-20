@@ -749,6 +749,67 @@ String? _extractByWildcardRule(String source, String rule) {
   return value.isEmpty ? null : value;
 }
 
+/// The chapter bridge may inspect the current player, not arbitrary URLs from
+/// the page (which often include preroll adverts and next-episode prefetch).
+String? _extractCurrentChapterMedia(String body, String baseUrl) {
+  String? media(Object? raw) {
+    final text = raw?.toString().trim() ?? '';
+    if (text.isEmpty) return null;
+    final normalized = _normalizePlayableUrl(text, baseUrl);
+    return _isExplicitPlayableUrl(normalized) ? normalized : null;
+  }
+
+  final text = body.trim();
+  if (text.startsWith('https://') || text.startsWith('http://')) {
+    if (!RegExp(r'[\s<>]').hasMatch(text)) return media(text);
+  }
+  final player = RegExp(r'\bplayer_\w+\s*=\s*').firstMatch(text);
+  if (player != null) {
+    final start = text.indexOf('{', player.end);
+    if (start < 0) return null;
+    var depth = 0;
+    var quoted = false;
+    var escaped = false;
+    for (var i = start; i < text.length; i++) {
+      final char = text[i];
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (char == r'\') {
+          escaped = true;
+        } else if (char == '"') {
+          quoted = false;
+        }
+      } else if (char == '"') {
+        quoted = true;
+      } else if (char == '{') {
+        depth++;
+      } else if (char == '}' && --depth == 0) {
+        return media(_playerJsonUrl(text.substring(start, i + 1)));
+      }
+    }
+    return null;
+  }
+  if (text.startsWith('{')) {
+    try {
+      final json = jsonDecode(text);
+      if (json is Map) {
+        return media(_decodePlayerUrl(json['url'], json['encrypt']));
+      }
+    } on FormatException {
+      return null;
+    }
+  }
+  final document = html_parser.parse(body);
+  for (final element in document.querySelectorAll(
+    'video[src], video source[src]',
+  )) {
+    final found = media(element.attributes['src']);
+    if (found != null) return found;
+  }
+  return null;
+}
+
 String? _extractPlayableUrl(String html, String baseUrl) {
   for (final match in RegExp(
     r'var\s+player_\w+\s*=\s*(\{.*?\})\s*(?:;|</script)',

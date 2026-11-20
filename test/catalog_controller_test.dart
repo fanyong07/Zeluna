@@ -8,6 +8,276 @@ import 'package:anime/src/recommendations/recommendations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('many concurrent details keep a bounded immutable cache', () async {
+    final sizes = <int>[];
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      publish: (snapshot) => sizes.add(snapshot.selectedSubjects.length),
+      loadDetail: (subject, _) async => _detailForSubject(subject),
+    );
+    addTearDown(controller.dispose);
+    await controller.loadForAccount(
+      accountId: 'one',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    final count = CatalogController.detailCacheLimit * 4;
+    final details = await Future.wait([
+      for (var id = 1; id <= count; id++)
+        controller.detail(_numberedSubject(id)),
+    ]);
+    expect(details, hasLength(count));
+    expect(sizes, hasLength(count));
+    expect(
+      sizes.every((size) => size <= CatalogController.detailCacheLimit),
+      isTrue,
+    );
+    expect(
+      controller.snapshot.selectedSubjects,
+      hasLength(CatalogController.detailCacheLimit),
+    );
+    expect(
+      () => controller.snapshot.selectedSubjects.clear(),
+      throwsUnsupportedError,
+    );
+  });
+
+  test(
+    'cache hits keep hot details without publishing and evictions reload',
+    () async {
+      final requests = <int, int>{};
+      var publications = 0;
+      final controller = _controller(
+        _MemoryCatalogStorage(),
+        publish: (_) => publications++,
+        loadDetail: (subject, _) async {
+          requests.update(subject.id, (count) => count + 1, ifAbsent: () => 1);
+          return _detailForSubject(subject);
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'one',
+        contextVersion: 1,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      for (var id = 1; id <= CatalogController.detailCacheLimit; id++) {
+        await controller.detail(_numberedSubject(id));
+      }
+      final before = controller.snapshot;
+      final publishedBefore = publications;
+      final hot = await controller.detail(_numberedSubject(1));
+      for (var hit = 0; hit < 100; hit++) {
+        expect(
+          identical(await controller.detail(_numberedSubject(1)), hot),
+          isTrue,
+        );
+      }
+      expect(identical(controller.snapshot, before), isTrue);
+      expect(publications, publishedBefore);
+      await controller.detail(
+        _numberedSubject(CatalogController.detailCacheLimit + 1),
+      );
+      expect(
+        controller.snapshot.selectedSubjects.values.map(
+          (bundle) => bundle.subject.id,
+        ),
+        contains(1),
+      );
+      expect(
+        controller.snapshot.selectedSubjects.values.map(
+          (bundle) => bundle.subject.id,
+        ),
+        isNot(contains(2)),
+      );
+      // Published snapshots stay immutable, even after internal recency changes.
+      expect(
+        before.selectedSubjects.values.map((bundle) => bundle.subject.id),
+        contains(2),
+      );
+      await controller.detail(_numberedSubject(2));
+      expect(requests[1], 1);
+      expect(requests[2], 2);
+      expect(
+        controller.snapshot.selectedSubjects,
+        hasLength(CatalogController.detailCacheLimit),
+      );
+    },
+  );
+
+  for (final reload in [false, true]) {
+    test(
+      'late enrichment stays revoked after eviction (reload: $reload)',
+      () async {
+        final oldExtra = Completer<AnimeDetailBundle>();
+        final newExtra = Completer<AnimeDetailBundle>();
+        var enrichments = 0;
+        var publications = 0;
+        final controller = _controller(
+          _MemoryCatalogStorage(),
+          publish: (_) => publications++,
+          // Deliberately reuse the same object: identity alone must not let the
+          // old enrichment replace a fresh load after eviction.
+          loadDetail: (subject, _) async =>
+              subject.id == 1 ? _detailBundle : _detailForSubject(subject),
+          enrichDetail: (bundle, _) {
+            if (bundle.subject.id != 1) return Future.value(bundle);
+            return ++enrichments == 1 ? oldExtra.future : newExtra.future;
+          },
+        );
+        addTearDown(() {
+          if (!oldExtra.isCompleted) oldExtra.complete(_detailBundle);
+          if (!newExtra.isCompleted) newExtra.complete(_detailBundle);
+          controller.dispose();
+        });
+        await controller.loadForAccount(
+          accountId: 'one',
+          contextVersion: 1,
+          services: const ExternalServiceSettings(),
+          fallbackHomeFeed: _feed,
+        );
+        for (var id = 1; id <= CatalogController.detailCacheLimit + 1; id++) {
+          await controller.detail(_numberedSubject(id));
+        }
+        expect(
+          controller.snapshot.selectedSubjects.values.map(
+            (bundle) => bundle.subject.id,
+          ),
+          isNot(contains(1)),
+        );
+        if (reload) await controller.detail(_numberedSubject(1));
+        final before = publications;
+        oldExtra.complete(
+          _detailForSubject(_subject.copyWith(summary: 'stale extras')),
+        );
+        await _flushAsync();
+        expect(publications, before);
+        expect(
+          controller.snapshot.selectedSubjects,
+          hasLength(CatalogController.detailCacheLimit),
+        );
+        if (reload) {
+          expect(
+            controller.snapshot.selectedSubjects.values
+                .where((bundle) => bundle.subject.id == 1)
+                .single,
+            same(_detailBundle),
+          );
+          final fresh = _detailForSubject(
+            _subject.copyWith(summary: 'fresh extras'),
+          );
+          newExtra.complete(fresh);
+          await _flushAsync();
+          expect(
+            controller.snapshot.selectedSubjects.values
+                .where((bundle) => bundle.subject.id == 1)
+                .single,
+            same(fresh),
+          );
+          expect(publications, before + 1);
+        } else {
+          expect(
+            controller.snapshot.selectedSubjects.values.map(
+              (bundle) => bundle.subject.id,
+            ),
+            isNot(contains(1)),
+          );
+        }
+      },
+    );
+  }
+
+  test('optional enrichment does not promote an unread cold detail', () async {
+    final extra = Completer<AnimeDetailBundle>();
+    final controller = _controller(
+      _MemoryCatalogStorage(),
+      loadDetail: (subject, _) async => _detailForSubject(subject),
+      enrichDetail: (bundle, _) =>
+          bundle.subject.id == 1 ? extra.future : Future.value(bundle),
+    );
+    addTearDown(() {
+      if (!extra.isCompleted) extra.complete(_detailBundle);
+      controller.dispose();
+    });
+    await controller.loadForAccount(
+      accountId: 'one',
+      contextVersion: 1,
+      services: const ExternalServiceSettings(),
+      fallbackHomeFeed: _feed,
+    );
+    for (var id = 1; id <= CatalogController.detailCacheLimit; id++) {
+      await controller.detail(_numberedSubject(id));
+    }
+    extra.complete(_detailForSubject(_subject.copyWith(summary: 'rich')));
+    await _flushAsync();
+    await controller.detail(
+      _numberedSubject(CatalogController.detailCacheLimit + 1),
+    );
+    expect(
+      controller.snapshot.selectedSubjects.values.map(
+        (bundle) => bundle.subject.id,
+      ),
+      isNot(contains(1)),
+    );
+  });
+
+  test(
+    'account switch resets LRU and preserves the new scope single flight',
+    () async {
+      final old = Completer<AnimeDetailBundle>();
+      final current = Completer<AnimeDetailBundle>();
+      var requests = 0;
+      final controller = _controller(
+        _MemoryCatalogStorage(),
+        loadDetail: (subject, _) {
+          if (subject.id != 1) return Future.value(_detailForSubject(subject));
+          return ++requests == 1 ? old.future : current.future;
+        },
+      );
+      addTearDown(controller.dispose);
+      await controller.loadForAccount(
+        accountId: 'old',
+        contextVersion: 1,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      for (var id = 2; id <= CatalogController.detailCacheLimit + 1; id++) {
+        await controller.detail(_numberedSubject(id));
+      }
+      final obsolete = controller.detail(_subject);
+      final rejected = expectLater(obsolete, throwsA(isA<AccountException>()));
+      await controller.loadForAccount(
+        accountId: 'new',
+        contextVersion: 2,
+        services: const ExternalServiceSettings(),
+        fallbackHomeFeed: _feed,
+      );
+      final first = controller.detail(_subject);
+      old.complete(_detailBundle);
+      await rejected;
+      final second = controller.detail(_subject);
+      expect(identical(first, second), isTrue);
+      current.complete(_detailBundle);
+      await Future.wait([first, second]);
+      for (var id = 2; id <= CatalogController.detailCacheLimit; id++) {
+        await controller.detail(_numberedSubject(id));
+      }
+      expect(requests, 2);
+      expect(
+        controller.snapshot.selectedSubjects,
+        hasLength(CatalogController.detailCacheLimit),
+      );
+      expect(
+        controller.snapshot.selectedSubjects.values
+            .map((bundle) => bundle.subject.id)
+            .toSet(),
+        {for (var id = 1; id <= CatalogController.detailCacheLimit; id++) id},
+      );
+    },
+  );
+
   test(
     'clearing details revokes in-flight entries instead of resurrecting cache',
     () async {
@@ -659,6 +929,21 @@ void main() {
     },
   );
 }
+
+AnimeSubject _numberedSubject(int id) => AnimeSubject.fromJson({
+  ..._subject.toJson(),
+  'id': id,
+  'title': 'Show $id',
+  'stableKey': 'bangumi:$id',
+});
+
+AnimeDetailBundle _detailForSubject(AnimeSubject subject) => AnimeDetailBundle(
+  subject: subject,
+  episodes: const [_episode],
+  characters: const [],
+  staff: const [],
+  recommendations: const [],
+);
 
 CatalogController _controller(
   _MemoryCatalogStorage storage, {

@@ -198,49 +198,52 @@ void main() {
       );
     });
 
-    test('allowsPageRedirect permits same-brand TLD mirrors while rejecting unrelated or unsafe targets', () {
-      final didaPolicy = RuleUrlPolicy(
-        manifest.copyWith(pageDomains: const ['www.didahd.pro']),
-      );
-      expect(
-        didaPolicy.allowsPageRedirect(
-          from: Uri.parse('https://www.didahd.pro/search'),
-          to: Uri.parse('https://www.didahd.xyz/search'),
-        ),
-        isTrue,
-      );
-      expect(
-        didaPolicy.allowsPageRedirect(
-          from: Uri.parse('https://www.didahd.pro/search'),
-          to: Uri.parse('https://attacker.test/search'),
-        ),
-        isFalse,
-      );
-      expect(
-        didaPolicy.allowsPageRedirect(
-          from: Uri.parse('https://www.didahd.pro/search'),
-          to: Uri.parse('http://www.didahd.xyz/search'),
-        ),
-        isFalse,
-      );
-      expect(
-        didaPolicy.allowsPageRedirect(
-          from: Uri.parse('https://www.didahd.pro/search'),
-          to: Uri.parse('https://didahd.local/search'),
-        ),
-        isFalse,
-      );
-      final genericPolicy = RuleUrlPolicy(
-        manifest.copyWith(pageDomains: const ['demo.github.io']),
-      );
-      expect(
-        genericPolicy.allowsPageRedirect(
-          from: Uri.parse('https://demo.github.io/a'),
-          to: Uri.parse('https://other.github.com/b'),
-        ),
-        isFalse,
-      );
-    });
+    test(
+      'allowsPageRedirect permits same-brand TLD mirrors while rejecting unrelated or unsafe targets',
+      () {
+        final didaPolicy = RuleUrlPolicy(
+          manifest.copyWith(pageDomains: const ['www.didahd.pro']),
+        );
+        expect(
+          didaPolicy.allowsPageRedirect(
+            from: Uri.parse('https://www.didahd.pro/search'),
+            to: Uri.parse('https://www.didahd.xyz/search'),
+          ),
+          isTrue,
+        );
+        expect(
+          didaPolicy.allowsPageRedirect(
+            from: Uri.parse('https://www.didahd.pro/search'),
+            to: Uri.parse('https://attacker.test/search'),
+          ),
+          isFalse,
+        );
+        expect(
+          didaPolicy.allowsPageRedirect(
+            from: Uri.parse('https://www.didahd.pro/search'),
+            to: Uri.parse('http://www.didahd.xyz/search'),
+          ),
+          isFalse,
+        );
+        expect(
+          didaPolicy.allowsPageRedirect(
+            from: Uri.parse('https://www.didahd.pro/search'),
+            to: Uri.parse('https://didahd.local/search'),
+          ),
+          isFalse,
+        );
+        final genericPolicy = RuleUrlPolicy(
+          manifest.copyWith(pageDomains: const ['demo.github.io']),
+        );
+        expect(
+          genericPolicy.allowsPageRedirect(
+            from: Uri.parse('https://demo.github.io/a'),
+            to: Uri.parse('https://other.github.com/b'),
+          ),
+          isFalse,
+        );
+      },
+    );
   });
 
   test('header policy is case-insensitive and permission gated', () {

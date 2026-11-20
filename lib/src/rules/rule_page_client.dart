@@ -213,11 +213,7 @@ void _ensureAllowed(RulePageRequestScope? scope, Uri uri) {
   }
 }
 
-void _ensureRedirectAllowed(
-  RulePageRequestScope? scope,
-  Uri from,
-  Uri to,
-) {
+void _ensureRedirectAllowed(RulePageRequestScope? scope, Uri from, Uri to) {
   final rule = scope?.rule;
   if (rule == null) return;
   final policy = RuleUrlPolicy(rule.effectiveManifest);

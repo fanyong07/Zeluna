@@ -463,28 +463,48 @@ void main() {
           return switch (path) {
             '/dav/' => _dav([
               _davEntry('/dav/', directory: true),
-              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/', directory: true),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('葬送的芙莉莲')}/',
+                directory: true,
+              ),
               _davEntry('/dav/${Uri.encodeComponent('庆余年')}/', directory: true),
-              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/', directory: true),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('奥本海默 (2023)')}/',
+                directory: true,
+              ),
               _davEntry(
                 '/dav/${Uri.encodeComponent('[LoliHouse] 葬送的芙莉莲 - 05 [1080p].mkv')}',
               ),
             ]),
             '/dav/葬送的芙莉莲/' => _dav([
-              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/', directory: true),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/',
+                directory: true,
+              ),
             ]),
             '/dav/葬送的芙莉莲/Season 1/' => _dav([
-              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/03.mkv'),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/03.mkv',
+              ),
             ]),
             '/dav/庆余年/' => _dav([
-              _davEntry('/dav/${Uri.encodeComponent('庆余年')}/S02/', directory: true),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('庆余年')}/S02/',
+                directory: true,
+              ),
             ]),
             '/dav/庆余年/S02/' => _dav([
-              _davEntry('/dav/${Uri.encodeComponent('庆余年')}/S02/${Uri.encodeComponent('第04集.mp4')}'),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('庆余年')}/S02/${Uri.encodeComponent('第04集.mp4')}',
+              ),
             ]),
             '/dav/奥本海默 (2023)/' => _dav([
-              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.trailer.mp4'),
-              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.2160p.mkv'),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.trailer.mp4',
+              ),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.2160p.mkv',
+              ),
             ]),
             _ => http.Response('', 404),
           };
@@ -499,7 +519,10 @@ void main() {
       final ep3 = await adapter.lookup(frieren, _episode(number: 3)).single;
       expect(Uri.decodeComponent(ep3.url!), endsWith('/Season 1/03.mkv'));
       final ep5 = await adapter.lookup(frieren, _episode(number: 5)).single;
-      expect(Uri.decodeComponent(ep5.url!), contains('[LoliHouse] 葬送的芙莉莲 - 05'));
+      expect(
+        Uri.decodeComponent(ep5.url!),
+        contains('[LoliHouse] 葬送的芙莉莲 - 05'),
+      );
 
       final qyn = _subject('庆余年', source: 'tmdb:tv:99');
       final s2e4 = await adapter

@@ -530,7 +530,11 @@ class RulePlaybackSourceRepository
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
   }) {
-    final sessionToken = cancellationToken ?? RulePlaybackCancellationToken();
+    // A producer owns its child cancellation. StreamController invokes onCancel
+    // even after normal close: using the caller's token there would cancel the
+    // parallel backend producer and prevent the page's final scan update.
+    final sessionToken = RulePlaybackCancellationToken();
+    final unlinkSession = cancellationToken?.register(sessionToken.cancel);
     late final StreamController<PlaybackLineLookupUpdate> controller;
     var started = false;
 
@@ -621,6 +625,7 @@ class RulePlaybackSourceRepository
           controller.addError(error, stackTrace);
         }
       } finally {
+        unlinkSession?.call();
         if (!controller.isClosed) await controller.close();
       }
     }
@@ -631,7 +636,10 @@ class RulePlaybackSourceRepository
         started = true;
         unawaited(run());
       },
-      onCancel: sessionToken.cancel,
+      onCancel: () {
+        unlinkSession?.call();
+        sessionToken.cancel();
+      },
     );
     return controller.stream;
   }
@@ -1392,6 +1400,7 @@ List<PlaybackLine> _withFallbackLatency(
                 quality: line.quality,
                 format: line.format,
                 url: line.url,
+                clientResolver: line.clientResolver,
                 headers: line.headers,
                 latency: lookupLatency,
                 sizeLabel: line.sizeLabel,
@@ -1410,6 +1419,19 @@ List<PlaybackLine> _withFallbackLatency(
                 startupProfile: line.startupProfile,
                 cacheState: line.cacheState,
                 sourceErrorCategory: line.sourceErrorCategory,
+                sourceName: line.sourceName,
+                sourceInventoryId: line.sourceInventoryId,
+                clientQuerySupported: line.clientQuerySupported,
+                queryLocation: line.queryLocation,
+                sourceAddress: line.sourceAddress,
+                diagnosticStatus: line.diagnosticStatus,
+                queried: line.queried,
+                aliasesAttempted: line.aliasesAttempted,
+                searchHitCount: line.searchHitCount,
+                bestMatchScore: line.bestMatchScore,
+                matched: line.matched,
+                episodeFound: line.episodeFound,
+                discoveryElapsed: line.discoveryElapsed,
                 expiresAt: line.expiresAt,
                 available: line.available,
                 message: line.message,

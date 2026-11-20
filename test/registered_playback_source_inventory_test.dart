@@ -40,13 +40,12 @@ String _inventoryId(int i) =>
 void main() {
   for (final width in [360.0, 1280.0]) {
     testWidgets(
-      'local action is capability-gated and one per source ($width)',
+      'client query metadata keeps diagnostics without manual retry ($width)',
       (tester) async {
         tester.view.physicalSize = Size(width, 760);
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
-        var localQueries = 0;
         var selections = 0;
         PlaybackLine line(String id, bool supported, String inventoryId) =>
             PlaybackLine(
@@ -84,16 +83,29 @@ void main() {
                 onPickLocal: () async {},
                 onOpenNetwork: (_, _) async {},
                 onSearch: () async {},
-                onQueryLocally: (_) async => localQueries++,
               ),
             ),
           ),
         );
         await tester.pump();
-        expect(find.text('本机重查（本集）'), findsOneWidget);
-        await tester.tap(find.text('本机重查（本集）'));
+        expect(find.text('本机重查（本集）'), findsNothing);
+        expect(find.text('通过本机网络重查'), findsNothing);
+        expect(find.byKey(const ValueKey('local-query-first')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('copy-line-url-first')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('copy-line-url-second')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('copy-line-url-unsupported')),
+          findsNothing,
+        );
+        expect(find.textContaining('线路失败'), findsNWidgets(3));
+        await tester.tap(find.byKey(const ValueKey('line-name-first')));
         await tester.pump();
-        expect(localQueries, 1);
         expect(selections, 0);
         expect(find.text('搜索与解析：本机网络'), findsNWidgets(3));
         expect(tester.takeException(), isNull);

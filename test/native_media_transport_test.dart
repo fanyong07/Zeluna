@@ -728,7 +728,9 @@ void main() {
         '#EXT-X-MAP:URI="init.mp4"\n',
       );
       for (var i = 0; i < 12; i++) {
-        mediaPlaylist.write('#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n');
+        mediaPlaylist.write(
+          '#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n',
+        );
       }
       mediaPlaylist.write('#EXT-X-DISCONTINUITY\n');
       for (var i = 0; i < 3; i++) {
@@ -736,7 +738,9 @@ void main() {
       }
       mediaPlaylist.write('#EXT-X-DISCONTINUITY\n');
       for (var i = 12; i < 24; i++) {
-        mediaPlaylist.write('#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n');
+        mediaPlaylist.write(
+          '#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n',
+        );
       }
       mediaPlaylist.write('#EXT-X-ENDLIST\n');
 
@@ -756,7 +760,9 @@ void main() {
           if (request.url.path.endsWith('/mixed.m3u8')) {
             return http.Response(mediaPlaylist.toString(), 200);
           }
-          fail('manifest-only bridge must never proxy media bytes: ${request.url}');
+          fail(
+            'manifest-only bridge must never proxy media bytes: ${request.url}',
+          );
         }),
       );
       addTearDown(b.dispose);
@@ -780,10 +786,26 @@ void main() {
       expect(mediaResp.statusCode, 200);
       final body = mediaResp.body;
       expect(body, isNot(contains('casino_0.ts')));
-      expect(body, contains('https://cdn.example.test/202611/movie/2000k/hls/seg0000.ts'));
-      expect(body, contains('https://cdn.example.test/202611/movie/2000k/hls/seg0023.ts'));
-      expect(body, contains('URI="https://cdn.example.test/202611/movie/2000k/hls/enc.key"'));
-      expect(body, contains('URI="https://cdn.example.test/202611/movie/2000k/hls/init.mp4"'));
+      expect(
+        body,
+        contains('https://cdn.example.test/202611/movie/2000k/hls/seg0000.ts'),
+      );
+      expect(
+        body,
+        contains('https://cdn.example.test/202611/movie/2000k/hls/seg0023.ts'),
+      );
+      expect(
+        body,
+        contains(
+          'URI="https://cdn.example.test/202611/movie/2000k/hls/enc.key"',
+        ),
+      );
+      expect(
+        body,
+        contains(
+          'URI="https://cdn.example.test/202611/movie/2000k/hls/init.mp4"',
+        ),
+      );
       expect(body, isNot(contains('127.0.0.1')));
       expect(upstreamRequests, [
         'https://cdn.example.test/202611/movie/index.m3u8',

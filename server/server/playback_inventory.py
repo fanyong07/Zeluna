@@ -177,8 +177,13 @@ def complete_registered_playback_inventory(
             else:
                 item["inventory_source_id"] = source.inventory_id
                 item["inventory_group"] = source.group
+            chapter_task = (
+                item.get("status") == "client_resolver_required"
+                and isinstance(item.get("client_resolver"), dict)
+                and item["client_resolver"].get("kind") == "kazumi_page_v1"
+            )
             item["client_query_supported"] = source.inventory_id in local_supported
-            item["query_location"] = "vps"
+            item["query_location"] = "hybrid" if chapter_task else "vps"
             represented.add(source.inventory_id)
         result.append(item)
     for source in sources:

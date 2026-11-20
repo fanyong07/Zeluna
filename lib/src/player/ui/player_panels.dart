@@ -392,8 +392,6 @@ class PlaybackSourcePanel extends StatefulWidget {
     required this.onPickLocal,
     required this.onOpenNetwork,
     required this.onSearch,
-    this.onQueryLocally,
-    this.localLookupInProgress = false,
     this.onCopyDiagnostics,
     this.onReportAd,
   });
@@ -409,8 +407,6 @@ class PlaybackSourcePanel extends StatefulWidget {
   final Future<void> Function(String url, Map<String, String> headers)
   onOpenNetwork;
   final Future<void> Function() onSearch;
-  final Future<void> Function(PlaybackLine source)? onQueryLocally;
-  final bool localLookupInProgress;
   final Future<void> Function()? onCopyDiagnostics;
   final ValueChanged<PlaybackLine>? onReportAd;
 
@@ -471,8 +467,6 @@ class _LinePanelState extends State<PlaybackSourcePanel> {
         completedRules: widget.completedRules,
         totalRules: widget.totalRules,
         onSelected: widget.onSelected,
-        onQueryLocally: widget.onQueryLocally,
-        localLookupInProgress: widget.localLookupInProgress,
         onReportAd: widget.onReportAd,
       ),
       _PlaybackSourceMode.local => _sourceAction(
@@ -697,8 +691,6 @@ class _LinePanelBody extends StatelessWidget {
     required this.completedRules,
     required this.totalRules,
     required this.onSelected,
-    this.onQueryLocally,
-    this.localLookupInProgress = false,
     this.onReportAd,
   });
 
@@ -709,8 +701,6 @@ class _LinePanelBody extends StatelessWidget {
   final int completedRules;
   final int totalRules;
   final ValueChanged<PlaybackLine> onSelected;
-  final Future<void> Function(PlaybackLine source)? onQueryLocally;
-  final bool localLookupInProgress;
   final ValueChanged<PlaybackLine>? onReportAd;
 
   @override
@@ -721,13 +711,11 @@ class _LinePanelBody extends StatelessWidget {
       selectedLineId: selected?.id,
     );
     final cards = [...groups.primary, ...groups.other];
-    final localQueryCards = <String, String>{};
-    for (final card in cards.where((line) => line.clientQuerySupported)) {
-      localQueryCards.putIfAbsent(card.sourceInventoryId, () => card.id);
-    }
     final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
     final routeCount = routes.length;
-    final playableCount = routes.where((line) => line.available).length;
+    final playableCount = routes
+        .where((line) => line.available && !failedLineIds.contains(line.id))
+        .length;
     final unresolvedCount = cards.length - routeCount;
     final sourceSummary = summarizePlaybackSourceDiagnostics(displayLines);
     final progress = totalRules <= 0 ? '' : '（$completedRules/$totalRules）';
@@ -761,6 +749,7 @@ class _LinePanelBody extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         clipBehavior: Clip.antiAlias,
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var i = 0; i < items.length; i++) ...[
               _LineTile(
@@ -769,21 +758,7 @@ class _LinePanelBody extends StatelessWidget {
                 line: items[i],
                 selected: selected?.id == items[i].id,
                 runtimeFailed: failedLineIds.contains(items[i].id),
-                onQueryLocally:
-                    !localLookupInProgress &&
-                        items[i].clientQuerySupported &&
-                        localQueryCards[items[i].sourceInventoryId] ==
-                            items[i].id &&
-                        onQueryLocally != null
-                    ? () => onQueryLocally!(items[i])
-                    : null,
-                showLocalQuery:
-                    items[i].clientQuerySupported &&
-                    localQueryCards[items[i].sourceInventoryId] ==
-                        items[i].id &&
-                    onQueryLocally != null,
-                onReportAd:
-                    items[i].available && onReportAd != null
+                onReportAd: items[i].available && onReportAd != null
                     ? () => onReportAd!(items[i])
                     : null,
                 onTap: items[i].available ? () => onSelected(items[i]) : null,
@@ -810,7 +785,7 @@ class _LinePanelBody extends StatelessWidget {
             text: scanning
                 ? '正在查找全部线路$progress · 已找到 $routeCount 条'
                 : '共 $routeCount 条线路，$playableCount 条可以播放'
-                      '${unresolvedCount > 0 ? ' · $unresolvedCount 个来源暂无线路' : ''}',
+                      '${unresolvedCount > 0 ? ' · $unresolvedCount 项待解析或暂无线路' : ''}',
           ),
           if (unresolvedCount > 0) ...[
             const SizedBox(height: 6),
@@ -837,16 +812,18 @@ class _LinePanelBody extends StatelessWidget {
           if (passivePlaceholders.isNotEmpty) ...[
             if (activeCards.isNotEmpty) const SizedBox(height: 10),
             Theme(
-              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              data: Theme.of(
+                context,
+              ).copyWith(dividerColor: Colors.transparent),
               child: ExpansionTile(
                 tilePadding: const EdgeInsets.symmetric(horizontal: 8),
                 collapsedIconColor: AppColors.theaterMuted,
                 iconColor: AppColors.theaterMuted,
                 title: Text(
                   '未查询 / 未启用来源（${passivePlaceholders.length}）',
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.theaterMuted,
+                  ),
                 ),
                 children: [buildCardList(passivePlaceholders)],
               ),
@@ -1229,8 +1206,6 @@ class _LineTile extends StatelessWidget {
     required this.selected,
     required this.runtimeFailed,
     required this.onTap,
-    this.onQueryLocally,
-    this.showLocalQuery = false,
     this.onReportAd,
   });
 
@@ -1239,176 +1214,17 @@ class _LineTile extends StatelessWidget {
   final bool selected;
   final bool runtimeFailed;
   final VoidCallback? onTap;
-  final VoidCallback? onQueryLocally;
-  final bool showLocalQuery;
   final VoidCallback? onReportAd;
 
   @override
   Widget build(BuildContext context) {
-    final latency = runtimeFailed
-        ? '可重试'
-        : line.available
-        ? playbackLineLatencyLabel(line)
-        : line.requiresClientProbe
-        ? playbackLineLatencyLabel(line)
-        : playbackLineFailureLabel(line);
-    final latencyColor = line.requiresClientProbe
-        ? AppStatusColors.probing
-        : line.available && !runtimeFailed
-        ? line.latency == null
-              ? AppStatusColors.probing
-              : AppStatusColors.available
-        : runtimeFailed
-        ? AppStatusColors.probing
-        : AppStatusColors.failed;
-    final accent = AppStatusColors.selected;
-    final provider = playbackLineProviderLabel(line);
-    final detail = line.title.trim();
-    final metadata = playbackLineMediaLabel(line);
-    return Material(
-      color: selected ? accent.withValues(alpha: 0.12) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 30,
-                child: Text(
-                  '${index + 1}',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: selected ? accent : AppColors.theaterMuted,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      provider,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                        color: selected ? accent : AppColors.theaterInk,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    if (detail.isNotEmpty && detail != provider)
-                      Text(
-                        detail,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    Text(
-                      latency,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: latencyColor,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      // Available lines show where they point; failed ones show
-                      // a sanitized reason rather than the resolver's own text.
-                      line.available
-                          ? line.url ?? '没有可播放的地址'
-                          : line.sourceInventoryId.isNotEmpty
-                          ? playbackSourceStateExplanation(line)
-                          : playbackLineFailureLabel(line),
-                      maxLines:
-                          line.sourceInventoryId.isNotEmpty && !line.available
-                          ? 3
-                          : 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppColors.theaterFaint,
-                      ),
-                    ),
-                    if (line.queryLocation.isNotEmpty && line.queried == true)
-                      Text(
-                        line.queryLocation == 'local'
-                            ? '搜索与解析：本机网络'
-                            : '搜索与解析：VPS',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    if (showLocalQuery)
-                      TextButton.icon(
-                        key: ValueKey('local-query-${line.id}'),
-                        onPressed: onQueryLocally,
-                        icon: const Icon(Icons.devices_rounded, size: 16),
-                        label: const Text('本机重查（本集）'),
-                      ),
-                    if (line.available && metadata.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        metadata,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: AppColors.theaterMuted,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (selected)
-                    Text(
-                      '当前',
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: accent,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    )
-                  else
-                    Icon(
-                      line.requiresClientProbe
-                          ? Icons.schedule_rounded
-                          : line.available
-                          ? Icons.chevron_right_rounded
-                          : Icons.block_rounded,
-                      color: AppColors.theaterFaint,
-                      size: 19,
-                    ),
-                  if (onReportAd != null)
-                    IconButton(
-                      key: ValueKey('report-ad-${line.id}'),
-                      tooltip: '标记有广告并换线',
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(
-                        minWidth: 28,
-                        minHeight: 28,
-                      ),
-                      icon: const Icon(
-                        Icons.block_outlined,
-                        size: 16,
-                        color: AppColors.theaterMuted,
-                      ),
-                      onPressed: onReportAd,
-                    ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
+    return PlaybackLineTile(
+      line: line,
+      index: index,
+      selected: selected,
+      runtimeFailed: runtimeFailed,
+      onTap: onTap,
+      onReportAd: onReportAd,
     );
   }
 }

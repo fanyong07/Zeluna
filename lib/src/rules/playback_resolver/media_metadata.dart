@@ -97,9 +97,8 @@ _ProbeMediaMetadata _mediaMetadataFromSample(
   }
   if (format == 'DASH') return _dashProbeMetadata(sourceUri, text);
 
-  final dimensions = format == 'MP4'
-      ? _mp4Dimensions(sample.sample) ?? _resolutionDimensionsForUrl(sourceUri)
-      : _resolutionDimensionsForUrl(sourceUri);
+  // URL quality tokens are source labels, never measured pixel dimensions.
+  final dimensions = format == 'MP4' ? _mp4Dimensions(sample.sample) : null;
   return _ProbeMediaMetadata(
     format: format,
     startupProfile: format == 'MP4'
@@ -329,7 +328,6 @@ _ProbeMediaMetadata _hlsProbeMetadata(
       mediaSegmentCount > 0 &&
       rangedMediaSegmentCount == mediaSegmentCount &&
       byteRangeBytes > 0;
-  final dimensions = _resolutionDimensionsForUrl(sourceUri);
   final orderedSegmentUris = hasEndList
       ? sampleSegmentUris
       : sampleSegmentUris.reversed.toList(growable: false);
@@ -340,8 +338,8 @@ _ProbeMediaMetadata _hlsProbeMetadata(
   return _ProbeMediaMetadata(
     format: 'HLS',
     sizeBytes: hasEndList && hasExactByteRangeTotal ? byteRangeBytes : null,
-    videoWidth: dimensions?.width,
-    videoHeight: dimensions?.height,
+    // Declared segment ranges omit initialization/container overhead.
+    sizeEstimated: hasEndList && hasExactByteRangeTotal,
     isLive: sampleComplete && !hasEndList,
     durationSeconds: hasEndList && durationSeconds > 0 ? durationSeconds : null,
     sampleSegmentUri: sampleSegmentUri,
@@ -444,7 +442,6 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
             bitrate > 0
         ? (bitrate * durationSeconds / 8).round()
         : null;
-    final fallbackDimensions = _resolutionDimensionsForUrl(sourceUri);
     final resources = selected == null
         ? const <_DashProbeResource>[]
         : _dashProbeResources(sourceUri, selected);
@@ -452,8 +449,8 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
       format: 'DASH',
       sizeBytes: estimatedBytes,
       sizeEstimated: estimatedBytes != null,
-      videoWidth: width ?? fallbackDimensions?.width,
-      videoHeight: height ?? fallbackDimensions?.height,
+      videoWidth: width,
+      videoHeight: height,
       bitrate: bitrate,
       codecs: codecs.isEmpty ? null : codecs,
       isLive: isDynamic,
@@ -462,12 +459,7 @@ _ProbeMediaMetadata _dashProbeMetadata(Uri sourceUri, String manifest) {
       dashResources: resources,
     );
   } catch (_) {
-    final dimensions = _resolutionDimensionsForUrl(sourceUri);
-    return _ProbeMediaMetadata(
-      format: 'DASH',
-      videoWidth: dimensions?.width,
-      videoHeight: dimensions?.height,
-    );
+    return const _ProbeMediaMetadata(format: 'DASH');
   }
 }
 

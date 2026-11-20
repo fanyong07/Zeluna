@@ -50,6 +50,10 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
         !displayLines.any((line) => line.id == selectedLine.id)) {
       displayLines.insert(0, selectedLine);
     }
+    final routeCount = displayLines
+        .where((line) => line.url?.trim().isNotEmpty ?? false)
+        .length;
+    final pendingCount = displayLines.length - routeCount;
     final playableCount = selectablePlaybackLinesForDisplay(
       displayLines,
       failedLineIds: widget.failedLineIds,
@@ -180,7 +184,8 @@ class _PortraitPlayerDetailsState extends State<_PortraitPlayerDetails> {
                       title: '播放线路',
                       trailing: displayLines.isEmpty
                           ? (widget.loadingLines ? '查找中' : '暂无')
-                          : '${displayLines.length} 条 · $playableCount 可播',
+                          : '$routeCount 条 · $playableCount 可播'
+                                '${pendingCount > 0 ? ' · $pendingCount 项待查' : ''}',
                       onTap: widget.onLinePanel,
                     ),
                     const Divider(height: 21, color: AppColors.theaterBorder),
@@ -252,7 +257,7 @@ class PortraitPlaybackLineList extends StatelessWidget {
   Widget build(BuildContext context) {
     final visible = allPlaybackLinesForDisplay(lines);
     return SizedBox(
-      height: math.min(visible.length * 57.0, 285),
+      height: math.min(visible.length * 168.0, 420),
       child: ListView.separated(
         primary: false,
         itemCount: visible.length,
@@ -489,72 +494,12 @@ class _PortraitPlaybackLineRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final quality = playbackQualityChipLabel(line);
-    final details = <String>[
-      if (line.title.trim().isNotEmpty) line.title.trim(),
-      if (failed)
-        '播放失败'
-      else if (!line.available && !line.requiresClientProbe)
-        playbackLineFailureLabel(line)
-      else
-        playbackLineLatencyLabel(line),
-      ?quality,
-    ].join(' · ');
-    return InkWell(
+    return PlaybackLineTile(
+      line: line,
+      selected: selected,
+      runtimeFailed: failed,
       onTap: onTap,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(minHeight: 56),
-        child: Row(
-          children: [
-            Icon(
-              selected ? Icons.play_circle_fill_rounded : Icons.route_rounded,
-              size: 21,
-              color: selected ? AppColors.primary2 : AppColors.theaterMuted,
-            ),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    playbackLineProviderLabel(line),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: selected
-                          ? AppColors.primary2
-                          : AppColors.theaterInk,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    details,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: AppColors.theaterMuted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (selected)
-              const Icon(
-                Icons.check_rounded,
-                size: 19,
-                color: AppColors.primary2,
-              )
-            else
-              const Icon(
-                Icons.chevron_right_rounded,
-                size: 19,
-                color: AppColors.theaterFaint,
-              ),
-          ],
-        ),
-      ),
+      compact: true,
     );
   }
 }

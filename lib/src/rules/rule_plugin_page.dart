@@ -2043,32 +2043,31 @@ Future<void> _showRuleSelectionDialog(
   );
 }
 
-const _communityRuleSubscriptionPresets =
-    <({String label, String hint, String url})>[
-      (
-        label: 'LunaTV 影视/剧集/番剧（全年龄）',
-        hint: '28 个每日巡检三栖 JSON 源',
-        url:
-            'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/jin18.json',
-      ),
-      (
-        label: 'Kazumi 官方番剧规则',
-        hint: 'GitHub Actions 持续维护目录',
-        url:
-            'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
-      ),
-      (
-        label: 'Animeko 社区聚合番剧',
-        hint: '60+ 在线番剧解析源',
-        url:
-            'https://raw.githubusercontent.com/MajoSissi/animeko-source/main/dist/online.json',
-      ),
-      (
-        label: 'Creamycake Animeko 番剧',
-        hint: '独立域名直连订阅',
-        url: 'https://sub.creamycake.org/v1/css1.json',
-      ),
-    ];
+const _communityRuleSubscriptionPresets = <({String label, String hint, String url})>[
+  (
+    label: 'LunaTV 影视/剧集/番剧（全年龄）',
+    hint: '28 个每日巡检三栖 JSON 源',
+    url:
+        'https://raw.githubusercontent.com/hafrey1/LunaTV-config/main/jin18.json',
+  ),
+  (
+    label: 'Kazumi 官方番剧规则',
+    hint: 'GitHub Actions 持续维护目录',
+    url:
+        'https://raw.githubusercontent.com/Predidit/KazumiRules/main/index.json',
+  ),
+  (
+    label: 'Animeko 社区聚合番剧',
+    hint: '60+ 在线番剧解析源',
+    url:
+        'https://raw.githubusercontent.com/MajoSissi/animeko-source/main/dist/online.json',
+  ),
+  (
+    label: 'Creamycake Animeko 番剧',
+    hint: '独立域名直连订阅',
+    url: 'https://sub.creamycake.org/v1/css1.json',
+  ),
+];
 
 void _showRepositoryUrlDialog(BuildContext context, WidgetRef ref) {
   final controller = TextEditingController();

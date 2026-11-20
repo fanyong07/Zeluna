@@ -4,7 +4,6 @@ import 'package:http/http.dart' as http;
 
 import '../core/identity/stable_identity.dart';
 import '../data/playback_prefetch_cache.dart';
-import '../data/local_maccms_playback.dart';
 import '../data/playback_source_repository.dart';
 import '../data/zeluna_backend_playback_repository.dart';
 import '../domain/anime_models.dart';
@@ -53,21 +52,89 @@ Stream<PlaybackLine> probePlaybackLinesProgressively(
         pending.length < maxConcurrent &&
         cancellationToken?.isCancelled != true) {
       final index = nextIndex++;
-      pending[index] = verify(
-        lines[index],
-      ).then((line) => (index: index, line: line));
+      final original = lines[index];
+      pending[index] = Future<PlaybackLine>.sync(() => verify(original))
+          .onError(
+            (error, _) => _failedPlaybackProbe(
+              original,
+              timedOut: error is TimeoutException,
+            ),
+          )
+          .then((line) => (index: index, line: line));
     }
   }
 
-  fillWindow();
-  while (pending.isNotEmpty && cancellationToken?.isCancelled != true) {
-    final completed = await Future.any(pending.values);
-    pending.remove(completed.index);
-    if (cancellationToken?.isCancelled == true) return;
-    yield completed.line;
+  final cancelled = Completer<({int index, PlaybackLine line})?>();
+  final unlink = cancellationToken?.register(() {
+    if (!cancelled.isCompleted) cancelled.complete(null);
+  });
+  try {
     fillWindow();
+    while (pending.isNotEmpty && cancellationToken?.isCancelled != true) {
+      final completed = await Future.any<({int index, PlaybackLine line})?>([
+        ...pending.values,
+        if (cancellationToken != null) cancelled.future,
+      ]);
+      if (completed == null || cancellationToken?.isCancelled == true) return;
+      pending.remove(completed.index);
+      yield completed.line;
+      fillWindow();
+    }
+  } finally {
+    unlink?.call();
   }
 }
+
+/// Preserve the route, request context and measured metadata when one probe
+/// fails. A timed-out route remains visible; another full search retries it.
+PlaybackLine _failedPlaybackProbe(
+  PlaybackLine line, {
+  required bool timedOut,
+}) => PlaybackLine(
+  id: line.id,
+  episodeId: line.episodeId,
+  providerId: line.providerId,
+  providerName: line.providerName,
+  title: line.title,
+  quality: line.quality,
+  format: line.format,
+  url: line.url,
+  clientResolver: line.clientResolver,
+  headers: line.headers,
+  latency: line.latency,
+  sizeLabel: line.sizeLabel,
+  sizeBytes: line.sizeBytes,
+  sizeEstimated: line.sizeEstimated,
+  videoWidth: line.videoWidth,
+  videoHeight: line.videoHeight,
+  bitrate: line.bitrate,
+  codecs: line.codecs,
+  isLive: line.isLive,
+  adaptive: line.adaptive,
+  publicHttpOnly: line.publicHttpOnly,
+  serverVerified: line.serverVerified,
+  requiresClientProbe: true,
+  clientVerified: false,
+  startupProfile: line.startupProfile,
+  cacheState: line.cacheState,
+  sourceErrorCategory: timedOut ? 'probe_timeout' : 'probe_error',
+  sourceName: line.sourceName,
+  sourceInventoryId: line.sourceInventoryId,
+  clientQuerySupported: line.clientQuerySupported,
+  queryLocation: line.queryLocation,
+  sourceAddress: line.sourceAddress,
+  diagnosticStatus: PlaybackDiscoveryStatus.routeUnavailable,
+  queried: line.queried,
+  aliasesAttempted: line.aliasesAttempted,
+  searchHitCount: line.searchHitCount,
+  bestMatchScore: line.bestMatchScore,
+  matched: line.matched,
+  episodeFound: line.episodeFound,
+  discoveryElapsed: line.discoveryElapsed,
+  expiresAt: line.expiresAt,
+  available: false,
+  message: timedOut ? '本次线路验证超时，可重新搜索全部线路。' : '本次线路验证失败，可重新搜索全部线路。',
+);
 
 Future<List<PlaybackLine>> probeSinglePlaybackBackupSequentially(
   Iterable<PlaybackLine> candidates, {
@@ -166,7 +233,13 @@ final class PlaybackDiscoveryController {
     http.Client Function()? createStartupProbeClient,
     DateTime Function()? now,
     Duration interactivePreferredHeadStart = const Duration(milliseconds: 750),
+    Duration backendFullRefreshDelay = const Duration(seconds: 2),
+    int backendFullRefreshAttempts = 8,
+    Duration backgroundProbeTimeout = const Duration(seconds: 12),
   }) : assert(interactivePreferredHeadStart.inMicroseconds > 0),
+       assert(!backendFullRefreshDelay.isNegative),
+       assert(backendFullRefreshAttempts > 0),
+       assert(backgroundProbeTimeout.inMicroseconds > 0),
        _backendRepository = backendRepository,
        _ruleRepository = ruleRepository,
        _verifyLine = verifyLine,
@@ -176,6 +249,9 @@ final class PlaybackDiscoveryController {
        _createStartupProbeClient = createStartupProbeClient,
        _now = now ?? DateTime.now,
        _interactivePreferredHeadStart = interactivePreferredHeadStart,
+       _backendFullRefreshDelay = backendFullRefreshDelay,
+       _backendFullRefreshAttempts = backendFullRefreshAttempts,
+       _backgroundProbeTimeout = backgroundProbeTimeout,
        _backendCache = PlaybackPrefetchCache(now: now),
        _episodeWarmupCache = NextEpisodeWarmupCache(
          ttl: const Duration(minutes: 45),
@@ -192,6 +268,9 @@ final class PlaybackDiscoveryController {
   final http.Client Function()? _createStartupProbeClient;
   final DateTime Function() _now;
   final Duration _interactivePreferredHeadStart;
+  final Duration _backendFullRefreshDelay;
+  final int _backendFullRefreshAttempts;
+  final Duration _backgroundProbeTimeout;
   final PlaybackPrefetchCache _backendCache;
   final NextEpisodeWarmupCache _episodeWarmupCache;
   final Map<String, _PlaybackLookupOperation> _backendLookups =
@@ -285,48 +364,6 @@ final class PlaybackDiscoveryController {
     cancellationToken: cancellationToken,
     lookupIntent: lookupIntent,
   );
-
-  /// Device-only search for an explicitly selected admitted protocol source.
-  /// Neither result nor route preference is persisted into normal VPS caches.
-  Future<List<PlaybackLine>> lookupSourceOnDevice({
-    required AnimeSubject subject,
-    required AnimeEpisode episode,
-    required PlaybackLine source,
-    RulePlaybackCancellationToken? cancellationToken,
-  }) async {
-    final scope = _scope();
-    if (cancellationToken?.isCancelled == true) return const [];
-    if (!source.clientQuerySupported) throw StateError('此来源暂不支持本机查询');
-    final repository = _backendRepository(_services);
-    if (repository is! ZelunaBackendPlaybackRepository) {
-      throw StateError('在线服务未启用');
-    }
-    final token = RulePlaybackCancellationToken();
-    _activeLookupTokens.add(token);
-    final unlink = cancellationToken?.register(token.cancel);
-    final unregisterClient = token.register(repository.dispose);
-    final adapter = LocalMacCmsPlayback();
-    try {
-      final descriptor = await repository.localSourceDescriptor(
-        source.sourceInventoryId,
-      );
-      if (!_isCurrent(scope) || token.isCancelled) return const [];
-      final lines = await adapter.lookup(
-        descriptor: descriptor,
-        source: source,
-        subject: subject,
-        episode: episode,
-        cancellationToken: token,
-      );
-      return _isCurrent(scope) && !token.isCancelled ? lines : const [];
-    } finally {
-      unlink?.call();
-      unregisterClient();
-      _activeLookupTokens.remove(token);
-      adapter.dispose();
-      repository.dispose();
-    }
-  }
 
   Future<PlaybackLine> verifyPlaybackLine(
     PlaybackLine line, {
@@ -1173,20 +1210,51 @@ final class PlaybackDiscoveryController {
       var checked = baseLines;
       final scheduled = <Object, PlaybackLine>{};
       var completed = 0;
+      var discoveryPending = false;
       final inFlightProbes = <Future<void>>{};
       Future<PlaybackLine> verify(PlaybackLine line) async {
         while (inFlightProbes.length >= 4) {
           await Future.any(inFlightProbes);
+          if (token.isCancelled || !_isCurrent(scope)) return line;
         }
+        if (token.isCancelled || !_isCurrent(scope)) return line;
         final done = Completer<void>();
         inFlightProbes.add(done.future);
+        final child = RulePlaybackCancellationToken();
+        final cancelled = Completer<PlaybackLine>();
+        final unlink = token.register(() {
+          child.cancel();
+          if (!cancelled.isCompleted) cancelled.complete(line);
+        });
+        final unlinkChild = child.register(() {
+          if (!cancelled.isCompleted) cancelled.complete(line);
+        });
+        _activeLookupTokens.add(child);
         try {
-          return await verifyPlaybackLine(
+          // One stuck chapter, metadata request or probe must not keep the
+          // complete inventory spinning forever or monopolize its four slots.
+          final work = verifyPlaybackLine(
             line,
-            enrichMetadata: false,
-            cancellationToken: token,
+            enrichMetadata: true,
+            cancellationToken: child,
+          );
+          return await Future.any([work, cancelled.future]).timeout(
+            _backgroundProbeTimeout,
+            onTimeout: () {
+              child.cancel();
+              return _failedPlaybackProbe(line, timedOut: true);
+            },
+          );
+        } catch (error) {
+          return _failedPlaybackProbe(
+            line,
+            timedOut: error is TimeoutException,
           );
         } finally {
+          unlink();
+          unlinkChild();
+          child.cancel();
+          _activeLookupTokens.remove(child);
           inFlightProbes.remove(done.future);
           done.complete();
         }
@@ -1214,15 +1282,30 @@ final class PlaybackDiscoveryController {
       }
 
       Stream<(List<PlaybackLine>?, PlaybackLine?)> expandedEvents() async* {
-        final expanded = await _backendLinesForEpisode(
-          scope,
-          subject,
-          episode,
-          expandAll: true,
-          cancellationToken: token,
-        );
-        if (!_isCurrent(scope) || token.isCancelled) return;
-        yield (expanded, null);
+        // A bounded HTTP response may precede the shared server scan finishing.
+        // Keep collecting its snapshots; partial data is never a complete list.
+        for (
+          var attempt = 0;
+          attempt < _backendFullRefreshAttempts;
+          attempt++
+        ) {
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          final expanded = await _backendLinesForEpisode(
+            scope,
+            subject,
+            episode,
+            expandAll: true,
+            cancellationToken: token,
+          );
+          if (!_isCurrent(scope) || token.isCancelled) return;
+          discoveryPending = expanded.any(
+            (line) => line.cacheState == 'partial',
+          );
+          yield (expanded, null);
+          if (!discoveryPending) break;
+          // Do not let slow candidate probes postpone the next server snapshot.
+          await _waitForBackendRefresh(token);
+        }
         yield* probes(checked);
       }
 
@@ -1291,6 +1374,7 @@ final class PlaybackDiscoveryController {
         completedRules: scheduled.isEmpty ? 1 : scheduled.length,
         totalRules: scheduled.isEmpty ? 1 : scheduled.length,
         phase: PlaybackLineLookupPhase.complete,
+        timedOut: discoveryPending,
       );
     }
 
@@ -1378,6 +1462,25 @@ final class PlaybackDiscoveryController {
     }
     if (!_isCurrent(scope) || token.isCancelled) return;
     yield combined(complete: true);
+  }
+
+  Future<void> _waitForBackendRefresh(
+    RulePlaybackCancellationToken token,
+  ) async {
+    if (token.isCancelled || _backendFullRefreshDelay == Duration.zero) return;
+    final done = Completer<void>();
+    final timer = Timer(_backendFullRefreshDelay, () {
+      if (!done.isCompleted) done.complete();
+    });
+    final unlink = token.register(() {
+      if (!done.isCompleted) done.complete();
+    });
+    try {
+      await done.future;
+    } finally {
+      timer.cancel();
+      unlink();
+    }
   }
 
   void prefetchPlayback(AnimeSubject subject, List<AnimeEpisode> episodes) {
@@ -1581,7 +1684,8 @@ final class PlaybackDiscoveryController {
               (line) =>
                   !line.clientVerified &&
                   (line.serverVerified || line.requiresClientProbe) &&
-                  (line.url?.trim().isNotEmpty ?? false) &&
+                  ((line.url?.trim().isNotEmpty ?? false) ||
+                      line.clientResolver != null) &&
                   (line.expiresAt == null ||
                       line.expiresAt!.isAfter(refreshThreshold)),
             )
@@ -1819,7 +1923,8 @@ final class PlaybackDiscoveryController {
         .where(
           (line) =>
               line.requiresClientProbe &&
-              (line.url?.trim().isNotEmpty ?? false) &&
+              ((line.url?.trim().isNotEmpty ?? false) ||
+                  line.clientResolver != null) &&
               (line.expiresAt == null ||
                   line.expiresAt!.isAfter(
                     now.add(const Duration(seconds: 15)),
@@ -1945,7 +2050,8 @@ final class PlaybackDiscoveryController {
     return lines
         .where(
           (line) =>
-              (line.url?.trim().isNotEmpty ?? false) &&
+              ((line.url?.trim().isNotEmpty ?? false) ||
+                  line.clientResolver != null) &&
               (line.requiresClientProbe ||
                   (line.serverVerified &&
                       !line.clientVerified &&
@@ -2033,13 +2139,16 @@ final class PlaybackDiscoveryController {
 
 // Verification flags describe a version of one backend route, but are still
 // security distinctions between independent routes in mergePlaybackLines.
-Object _backendRouteRequestKey(PlaybackLine line) => (
-  line.providerId,
-  line.episodeId,
-  line.id,
-  line.url ?? '',
-  stableHeaderFingerprint(line.headers),
-);
+Object _backendRouteRequestKey(PlaybackLine line) =>
+    line.clientResolver != null || line.id.startsWith('client-resolver:')
+    ? (line.providerId, line.episodeId, line.id)
+    : (
+        line.providerId,
+        line.episodeId,
+        line.id,
+        line.url ?? '',
+        stableHeaderFingerprint(line.headers),
+      );
 
 List<PlaybackLine> _mergeBackendRouteUpdates(
   Iterable<PlaybackLine> previous,

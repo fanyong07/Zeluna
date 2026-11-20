@@ -1499,6 +1499,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       title: '搜索：$_keyword',
       searchController: _queryController,
       onSearch: _submit,
+      onOpenSuggestion: (subject) => Navigator.of(context).push(
+        MaterialPageRoute(builder: (context) => DetailPage(subject: subject)),
+      ),
       onBack: () => safeNavigateBack(context),
       // _SearchRightRail is gone: its "热门搜索" panel was the current keyword
       // plus five hardcoded words, and its "类型筛选" chips had no onTap. Real

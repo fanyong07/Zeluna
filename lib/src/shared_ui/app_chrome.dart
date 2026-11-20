@@ -1248,6 +1248,10 @@ class _SearchFieldState extends ConsumerState<_SearchField> {
                     _focus.unfocus();
                   },
                   child: TextField(
+                    // Include the overlay in EditableText's own tap region.
+                    // Otherwise mouse down unfocuses and disposes the menu
+                    // before a suggestion/history row receives mouse up.
+                    groupId: this,
                     controller: _controller,
                     focusNode: _focus,
                     textInputAction: TextInputAction.search,

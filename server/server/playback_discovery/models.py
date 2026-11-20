@@ -17,6 +17,7 @@ class SourceDiscoveryStatus(StrEnum):
     CIRCUIT_SUPPRESSED = "circuit_suppressed"
     ROUTE_UNAVAILABLE = "route_unavailable"
     CLIENT_PROBE_REQUIRED = "client_probe_required"
+    CLIENT_RESOLVER_REQUIRED = "client_resolver_required"
     SERVER_VERIFIED = "server_verified"
     QUARANTINED = "quarantined"
     RETIRED = "retired"

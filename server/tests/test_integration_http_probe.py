@@ -10,10 +10,10 @@ def good_checks():
     lines = {'lines': 2, 'cached': 2, 'wrappers': 0, 'private_urls': 0,
              'media_proxy_urls': 0, 'internal_label_leaks': 0, 'private_cache_keys': 0}
     return {'providers_enabled': {'ok': True}, 'anich_episodes': {'count': 12},
-            'animeko_episodes': {'count': 28},
+            'animeko_episodes': {'count': 28}, 'kazumi_episodes': {'count': 84},
             'anich_vod': dict(lines), 'anich_cached_vod': dict(lines),
             'animeko_vod': dict(lines), 'stable_v3': dict(lines),
-            'anich_media_sample': {'ok': True},
+            'kazumi_no_playback': {'ok': True}, 'anich_media_sample': {'ok': True},
             'animeko_media_sample': {'ok': True}}
 
 
@@ -38,14 +38,16 @@ def test_any_route_leak_fails_gate(field):
         assert any(field in failure for failure in acceptance_checks(broken))
 
 
-def test_empty_anich_regression():
+def test_empty_anich_and_unexpected_kazumi_media_regression():
     broken = good_checks()
     broken['anich_vod']['lines'] = 0
     broken['anich_cached_vod']['lines'] = 0
     broken['anich_cached_vod']['cached'] = 0
+    broken['kazumi_no_playback']['ok'] = False
     failures = acceptance_checks(broken, no_animeko_vod=True)
     assert 'anich_vod-empty' in failures
     assert 'anich-cache-not-hit' in failures
+    assert 'kazumi-returned-media' in failures
 
 
 def test_skip_animeko_media_only_skips_its_vod_and_sample():

@@ -350,7 +350,9 @@ class BackdropArt extends StatelessWidget {
               ),
             ),
           ),
-        ColoredBox(color: isMobile ? const Color(0xA6000000) : const Color(0x70000000)),
+        ColoredBox(
+          color: isMobile ? const Color(0xA6000000) : const Color(0x70000000),
+        ),
         Center(
           child: FractionallySizedBox(
             widthFactor: 0.72,

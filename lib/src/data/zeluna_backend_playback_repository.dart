@@ -7,6 +7,7 @@ import '../core/identity/stable_identity.dart';
 import '../core/network/network_http_client.dart';
 import '../core/network/network_security.dart';
 import '../domain/anime_models.dart';
+import '../domain/client_media_resolver.dart';
 import '../domain/subject_content_type.dart';
 import '../rules/rule_playback_resolver.dart';
 import 'playback_source_repository.dart';
@@ -223,6 +224,13 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
         if (item is! Map) continue;
         final json = item.cast<Object?, Object?>();
         final inventoryEntry = json['source_inventory_entry'] == true;
+        final clientResolver =
+            inventoryEntry ||
+                json['status'] != 'client_resolver_required' ||
+                (json['url']?.toString().trim().isNotEmpty ?? false) ||
+                json['available'] != false
+            ? null
+            : ClientMediaResolverDescriptor.fromJson(json['client_resolver']);
         final rawUrl = inventoryEntry
             ? ''
             : json['url']?.toString().trim() ?? '';
@@ -237,7 +245,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             (mediaUri.scheme == 'http' || mediaUri.scheme == 'https');
         final status = json['status']?.toString().trim().toLowerCase() ?? '';
         final requiresClientProbe =
-            status == 'client_probe_required' && hasPlayableUrl;
+            (status == 'client_probe_required' && hasPlayableUrl) ||
+            clientResolver != null;
         final serverVerified =
             hasPlayableUrl &&
             (status == 'server_verified' ||
@@ -294,7 +303,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           maxLength: 200,
         );
         var diagnosticStatus = _diagnosticStatusFromJson(
-          json['diagnostic_status'] ?? status,
+          hasPlayableUrl || clientResolver != null
+              ? json['route_status'] ?? status
+              : json['diagnostic_status'] ?? status,
         );
         if (inventoryEntry &&
             !const {
@@ -324,12 +335,23 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             ? null
             : _nullableBool(json['episode_found']);
         final discoveryElapsedMs = _nullableInt(json['elapsed_ms']);
-        final sourceLatencyMs = int.tryParse(
-          json['source_latency_ms']?.toString() ?? '',
+        final sourceLatencyMs = _nonNegativeInt(
+          json['source_latency_ms'] ?? json['sourceLatencyMs'],
         );
-        final startupLatencyMs = int.tryParse(
-          json['startup_latency_ms']?.toString() ?? '',
+        final startupLatencyMs = _nonNegativeInt(
+          json['startup_latency_ms'] ?? json['startupLatencyMs'],
         );
+        final sizeBytes = _nonNegativeInt(
+          json['size_bytes'] ?? json['sizeBytes'],
+        );
+        final videoWidth = _nonNegativeInt(
+          json['video_width'] ?? json['videoWidth'] ?? json['width'],
+        );
+        final videoHeight = _nonNegativeInt(
+          json['video_height'] ?? json['videoHeight'] ?? json['height'],
+        );
+        final bitrate = _nonNegativeInt(json['bitrate'] ?? json['bitrate_bps']);
+        final codecs = _metadataCodecs(json['codecs']);
         final startupProfile = _startupProfileFromJson(json['startup_profile']);
         final serverProviderId = _trustedServerText(
           json['provider_id'],
@@ -352,7 +374,9 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
           subjectKey: stableId,
           normalizedNumber: episode.number,
         );
-        final lineId = serverLineId.isNotEmpty
+        final lineId = clientResolver != null
+            ? 'client-resolver:${stableDigest('$providerId|$episodeKey|$serverLineId|${clientResolver.ruleId}|${clientResolver.pageUrl}')}'
+            : serverLineId.isNotEmpty
             ? serverLineId
             : hasPlayableUrl
             ? stablePlaybackLineKey(
@@ -380,16 +404,30 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             quality: json['quality']?.toString().trim() ?? '',
             format: json['format']?.toString().trim() ?? 'auto',
             url: hasPlayableUrl ? url : null,
+            clientResolver: clientResolver,
             headers: Map<String, String>.unmodifiable(headers),
             latency: startupLatencyMs != null && startupLatencyMs > 0
                 ? Duration(milliseconds: startupLatencyMs)
                 : sourceLatencyMs != null && sourceLatencyMs > 0
                 ? Duration(milliseconds: sourceLatencyMs)
                 : null,
+            sizeBytes: sizeBytes,
+            sizeEstimated:
+                sizeBytes != null &&
+                (_nullableBool(
+                      json['size_estimated'] ?? json['sizeEstimated'],
+                    ) ??
+                    false),
+            videoWidth: videoWidth,
+            videoHeight: videoHeight,
+            bitrate: bitrate,
+            codecs: codecs.isEmpty ? null : codecs,
+            isLive: _nullableBool(json['is_live'] ?? json['isLive']) ?? false,
+            adaptive: _nullableBool(json['adaptive']) ?? false,
             // Server-verified lines crossed the trusted backend boundary.
             // Candidate-only lines must repeat public-address, manifest and
             // first-segment validation from the user's own network.
-            publicHttpOnly: requiresClientProbe,
+            publicHttpOnly: requiresClientProbe || clientResolver != null,
             serverVerified: serverVerified,
             requiresClientProbe: requiresClientProbe,
             startupProfile: startupProfile,
@@ -405,7 +443,14 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
             sourceAddress: sourceAddress,
             sourceInventoryId: sourceInventoryId,
             clientQuerySupported: json['client_query_supported'] == true,
-            queryLocation: json['query_location'] == 'vps' ? 'vps' : '',
+            queryLocation:
+                const {
+                  'vps',
+                  'hybrid',
+                  'local',
+                }.contains(json['query_location'])
+                ? json['query_location'].toString()
+                : '',
             diagnosticStatus: diagnosticStatus,
             queried: queried,
             aliasesAttempted: aliasesAttempted,
@@ -426,6 +471,8 @@ class ZelunaBackendPlaybackRepository implements PlaybackSourceRepository {
                     sourceHost: sourceHost,
                     sourceAddress: sourceAddress,
                   )
+                : clientResolver != null
+                ? '已找到本集章节，正在本机解析媒体'
                 : requiresClientProbe
                 ? '正在用你的网络确认是否可播'
                 : (json['message']?.toString().trim().isNotEmpty == true
@@ -524,6 +571,10 @@ String _diagnosticStatusFromJson(Object? value) {
       PlaybackDiscoveryStatus.candidateUnadmitted,
     PlaybackDiscoveryStatus.compatibilityInactive =>
       PlaybackDiscoveryStatus.compatibilityInactive,
+    PlaybackDiscoveryStatus.unsupportedContentType =>
+      PlaybackDiscoveryStatus.unsupportedContentType,
+    PlaybackDiscoveryStatus.clientResolverRequired =>
+      PlaybackDiscoveryStatus.clientResolverRequired,
     PlaybackDiscoveryStatus.searching => PlaybackDiscoveryStatus.searching,
     PlaybackDiscoveryStatus.searchTimeout =>
       PlaybackDiscoveryStatus.searchTimeout,
@@ -560,6 +611,32 @@ bool? _nullableBool(Object? value) {
 int? _nullableInt(Object? value) {
   if (value == null) return null;
   return int.tryParse(value.toString());
+}
+
+// JSON numbers may arrive as integral doubles or decimal strings. Reject
+// fractions, booleans, negatives and values beyond the cross-platform JSON
+// integer range rather than truncating or overflowing them into real metadata.
+int? _nonNegativeInt(Object? value) {
+  const maxJsonInteger = 9007199254740991;
+  if (value is bool || value == null) return null;
+  if (value is int) {
+    return value >= 0 && value <= maxJsonInteger ? value : null;
+  }
+  if (value is double) {
+    if (!value.isFinite || value < 0 || value > maxJsonInteger) return null;
+    return value == value.truncateToDouble() ? value.toInt() : null;
+  }
+  if (value is! String || !RegExp(r'^\d+$').hasMatch(value.trim())) return null;
+  final parsed = int.tryParse(value.trim());
+  return parsed != null && parsed <= maxJsonInteger ? parsed : null;
+}
+
+String _metadataCodecs(Object? value) {
+  if (value is List) {
+    if (value.any((item) => item is! String)) return '';
+    return _trustedServerText(value.join(', '), maxLength: 512);
+  }
+  return value is String ? _trustedServerText(value, maxLength: 512) : '';
 }
 
 DateTime? _epochDateTime(Object? value) {

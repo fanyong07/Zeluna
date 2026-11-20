@@ -433,97 +433,115 @@ void main() {
       expect(streamCancelled, isTrue);
     });
 
-    test('follows same-brand TLD mirror redirect without leaking cookies and allows its detail links in scope', () async {
-      final seen = <http.Request>[];
-      final didaRule = _kazumiRule.copyWith(
-        id: 'kazumi:dida-mirror',
-        baseUrl: 'https://www.didahd.pro/',
-        searchUrl: 'https://www.didahd.pro/search?wd=@keyword',
-        permissionManifest: _kazumiRule.effectiveManifest.copyWith(
-          pageDomains: const ['www.didahd.pro'],
-        ),
-      );
-      final client = MockClient((request) async {
-        seen.add(request);
-        if (request.url.host == 'www.didahd.pro') {
+    test(
+      'follows same-brand TLD mirror redirect without leaking cookies and allows its detail links in scope',
+      () async {
+        final seen = <http.Request>[];
+        final didaRule = _kazumiRule.copyWith(
+          id: 'kazumi:dida-mirror',
+          baseUrl: 'https://www.didahd.pro/',
+          searchUrl: 'https://www.didahd.pro/search?wd=@keyword',
+          permissionManifest: _kazumiRule.effectiveManifest.copyWith(
+            pageDomains: const ['www.didahd.pro'],
+          ),
+        );
+        final client = MockClient((request) async {
+          seen.add(request);
+          if (request.url.host == 'www.didahd.pro') {
+            return http.Response(
+              '',
+              301,
+              headers: {
+                'location':
+                    'https://www.didahd.xyz${request.url.path}?${request.url.query}',
+              },
+            );
+          }
+          if (request.url.path == '/search') {
+            return _html(
+              '<div class="item"><strong>Test Anime</strong>'
+              '<a class="detail" href="https://www.didahd.xyz/detail/1">go</a></div>',
+            );
+          }
+          if (request.url.path == '/detail/1') {
+            return _html(
+              '<ul class="line"><li><a href="https://www.didahd.xyz/play/1-1">EP1</a></li></ul>',
+            );
+          }
+          if (request.url.path == '/play/1-1') {
+            return _html(
+              '<script>var u="https://cdn.example.com/ok.m3u8";</script>',
+            );
+          }
           return http.Response(
-            '',
-            301,
-            headers: {
-              'location':
-                  'https://www.didahd.xyz${request.url.path}?${request.url.query}',
-            },
+            '#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n',
+            200,
           );
-        }
-        if (request.url.path == '/search') {
-          return _html(
-            '<div class="item"><strong>Test Anime</strong>'
-            '<a class="detail" href="https://www.didahd.xyz/detail/1">go</a></div>',
-          );
-        }
-        if (request.url.path == '/detail/1') {
-          return _html(
-            '<ul class="line"><li><a href="https://www.didahd.xyz/play/1-1">EP1</a></li></ul>',
-          );
-        }
-        if (request.url.path == '/play/1-1') {
-          return _html('<script>var u="https://cdn.example.com/ok.m3u8";</script>');
-        }
-        return http.Response('#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n', 200);
-      });
-      final lines = await RulePlaybackResolver(client: client).resolveRule(
-        rule: didaRule,
-        subject: _equivalentTitleSubject,
-        episode: _episode,
-        verifyPlayable: false,
-      );
-      expect(lines.any((l) => l.available), isTrue);
-      final redirected = seen.firstWhere((r) => r.url.host == 'www.didahd.xyz');
-      expect(
-        redirected.headers.keys.map((k) => k.toLowerCase()),
-        isNot(contains('cookie')),
-      );
-    });
+        });
+        final lines = await RulePlaybackResolver(client: client).resolveRule(
+          rule: didaRule,
+          subject: _equivalentTitleSubject,
+          episode: _episode,
+          verifyPlayable: false,
+        );
+        expect(lines.any((l) => l.available), isTrue);
+        final redirected = seen.firstWhere(
+          (r) => r.url.host == 'www.didahd.xyz',
+        );
+        expect(
+          redirected.headers.keys.map((k) => k.toLowerCase()),
+          isNot(contains('cookie')),
+        );
+      },
+    );
 
-    test('upgrades same-host http links embedded inside an https search page to https', () async {
-      final seenUris = <Uri>[];
-      final ageRule = _kazumiRule.copyWith(
-        id: 'kazumi:age-https-upgrade',
-        baseUrl: 'https://www.agedm.io/',
-        searchUrl: 'https://www.agedm.io/search?query=@keyword',
-        permissionManifest: _kazumiRule.effectiveManifest.copyWith(
-          pageDomains: const ['www.agedm.io'],
-          cleartextHttp: false,
-        ),
-      );
-      final client = MockClient((request) async {
-        seenUris.add(request.url);
-        if (request.url.path == '/search') {
-          return _html(
-            '<div class="item"><strong>Test Anime</strong>'
-            '<a class="detail" href="http://www.agedm.io/detail/20230207">go</a></div>',
+    test(
+      'upgrades same-host http links embedded inside an https search page to https',
+      () async {
+        final seenUris = <Uri>[];
+        final ageRule = _kazumiRule.copyWith(
+          id: 'kazumi:age-https-upgrade',
+          baseUrl: 'https://www.agedm.io/',
+          searchUrl: 'https://www.agedm.io/search?query=@keyword',
+          permissionManifest: _kazumiRule.effectiveManifest.copyWith(
+            pageDomains: const ['www.agedm.io'],
+            cleartextHttp: false,
+          ),
+        );
+        final client = MockClient((request) async {
+          seenUris.add(request.url);
+          if (request.url.path == '/search') {
+            return _html(
+              '<div class="item"><strong>Test Anime</strong>'
+              '<a class="detail" href="http://www.agedm.io/detail/20230207">go</a></div>',
+            );
+          }
+          if (request.url.path == '/detail/20230207') {
+            return _html(
+              '<ul class="line"><li><a href="http://www.agedm.io/play/20230207/1/1">EP1</a></li></ul>',
+            );
+          }
+          if (request.url.path == '/play/20230207/1/1') {
+            return _html(
+              '<script>var u="https://cdn.example.com/ok.m3u8";</script>',
+            );
+          }
+          return http.Response(
+            '#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n',
+            200,
           );
-        }
-        if (request.url.path == '/detail/20230207') {
-          return _html(
-            '<ul class="line"><li><a href="http://www.agedm.io/play/20230207/1/1">EP1</a></li></ul>',
-          );
-        }
-        if (request.url.path == '/play/20230207/1/1') {
-          return _html('<script>var u="https://cdn.example.com/ok.m3u8";</script>');
-        }
-        return http.Response('#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n', 200);
-      });
-      final lines = await RulePlaybackResolver(client: client).resolveRule(
-        rule: ageRule,
-        subject: _equivalentTitleSubject,
-        episode: _episode,
-        verifyPlayable: false,
-      );
-      expect(lines.any((l) => l.available), isTrue);
-      expect(seenUris.every((u) => u.scheme == 'https'), isTrue);
-      expect(seenUris.any((u) => u.path == '/detail/20230207'), isTrue);
-    });
+        });
+        final lines = await RulePlaybackResolver(client: client).resolveRule(
+          rule: ageRule,
+          subject: _equivalentTitleSubject,
+          episode: _episode,
+          verifyPlayable: false,
+        );
+        expect(lines.any((l) => l.available), isTrue);
+        expect(seenUris.every((u) => u.scheme == 'https'), isTrue);
+        expect(seenUris.any((u) => u.path == '/detail/20230207'), isTrue);
+      },
+    );
 
     test('reuses cached pages until clearCaches', () async {
       var requests = 0;
@@ -1441,80 +1459,77 @@ void main() {
     expect(probeRequests, 2);
   });
 
-  test(
-    'inventory probes leave one of the wire slots for playback',
-    () async {
-      final firstWaveStarted = Completer<void>();
-      final releaseFirstWave = Completer<void>();
-      var started = 0;
-      var active = 0;
-      var maxActive = 0;
-      const expectedBackgroundSlots = 9;
-      const totalRoads = 11;
-      final client = MockClient((request) async {
-        if (request.url.path == '/vod/search.html') {
-          return _html('''
+  test('inventory probes leave one of the wire slots for playback', () async {
+    final firstWaveStarted = Completer<void>();
+    final releaseFirstWave = Completer<void>();
+    var started = 0;
+    var active = 0;
+    var maxActive = 0;
+    const expectedBackgroundSlots = 9;
+    const totalRoads = 11;
+    final client = MockClient((request) async {
+      if (request.url.path == '/vod/search.html') {
+        return _html('''
           <div class="item">
             <strong>测试番剧</strong>
             <a class="detail" href="/detail/limited.html">详情</a>
           </div>
         ''');
-        }
-        if (request.url.path == '/detail/limited.html') {
-          return _html(
-            List.generate(
-              totalRoads,
-              (index) =>
-                  '<ul class="line"><li><a href="/play/$index.html">第1集</a></li></ul>',
-            ).join(),
-          );
-        }
-        if (request.url.path.startsWith('/play/')) {
-          final index = request.url.pathSegments[1].split('.').first;
-          return _html('''
+      }
+      if (request.url.path == '/detail/limited.html') {
+        return _html(
+          List.generate(
+            totalRoads,
+            (index) =>
+                '<ul class="line"><li><a href="/play/$index.html">第1集</a></li></ul>',
+          ).join(),
+        );
+      }
+      if (request.url.path.startsWith('/play/')) {
+        final index = request.url.pathSegments[1].split('.').first;
+        return _html('''
           <script>var player={"url":"https://cdn.example.com/probe-$index.mp4"};</script>
         ''');
-        }
-        if (request.url.path.startsWith('/probe-')) {
-          expect(request.headers['Range'], 'bytes=0-2048');
-          started++;
-          active++;
-          if (active > maxActive) maxActive = active;
-          if (started == expectedBackgroundSlots) firstWaveStarted.complete();
-          await releaseFirstWave.future;
-          active--;
-          return http.Response.bytes(
-            _mp4ProbeSample(),
-            200,
-            headers: {'content-type': 'video/mp4'},
-          );
-        }
-        return http.Response('not found', 404);
-      });
+      }
+      if (request.url.path.startsWith('/probe-')) {
+        expect(request.headers['Range'], 'bytes=0-2048');
+        started++;
+        active++;
+        if (active > maxActive) maxActive = active;
+        if (started == expectedBackgroundSlots) firstWaveStarted.complete();
+        await releaseFirstWave.future;
+        active--;
+        return http.Response.bytes(
+          _mp4ProbeSample(),
+          200,
+          headers: {'content-type': 'video/mp4'},
+        );
+      }
+      return http.Response('not found', 404);
+    });
 
-      // Spawn multiple concurrent road resolves on the same resolver so we
-      // actually saturate the global background probe limiter (9 slots).
-      final resolver = RulePlaybackResolver(client: client);
-      final resolving = Future.wait([
-        for (var i = 0; i < 3; i++)
-          resolver.resolveRule(
-            rule: _kazumiRule,
-            subject: _animeSubject,
-            episode: _episode,
-          ),
-      ]);
-      await firstWaveStarted.future.timeout(const Duration(seconds: 1));
-      await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(started, expectedBackgroundSlots);
-      releaseFirstWave.complete();
+    // Spawn multiple concurrent road resolves on the same resolver so we
+    // actually saturate the global background probe limiter (9 slots).
+    final resolver = RulePlaybackResolver(client: client);
+    final resolving = Future.wait([
+      for (var i = 0; i < 3; i++)
+        resolver.resolveRule(
+          rule: _kazumiRule,
+          subject: _animeSubject,
+          episode: _episode,
+        ),
+    ]);
+    await firstWaveStarted.future.timeout(const Duration(seconds: 1));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(started, expectedBackgroundSlots);
+    releaseFirstWave.complete();
 
-      final allLines = await resolving;
-      expect(allLines.first, hasLength(totalRoads));
-      expect(allLines.first.every((line) => line.available), isTrue);
-      expect(started, greaterThanOrEqualTo(totalRoads));
-      expect(maxActive, expectedBackgroundSlots);
-    },
-  );
+    final allLines = await resolving;
+    expect(allLines.first, hasLength(totalRoads));
+    expect(allLines.first.every((line) => line.available), isTrue);
+    expect(started, greaterThanOrEqualTo(totalRoads));
+    expect(maxActive, expectedBackgroundSlots);
+  });
 
   test(
     'playable probe cancels an open stream after a bounded sample',
@@ -1955,6 +1970,30 @@ segment-2.ts
     expect(line.sizeBytes, 10 * 1024 * 1024);
     expect(line.sizeLabel, '约 10.0 MB');
   });
+
+  test(
+    'HLS ranges are estimates and URL quality is not measured resolution',
+    () async {
+      final line = await _resolveSinglePlayableLine(
+        'https://cdn.example.com/1080p/ranges.m3u8',
+        probe: (request) {
+          if (request.url.path.endsWith('ranges.m3u8')) {
+            return http.Response(
+              '#EXTM3U\n#EXTINF:10,\n#EXT-X-BYTERANGE:1024@0\nshared.ts\n#EXTINF:10,\n#EXT-X-BYTERANGE:1024@1024\nshared.ts\n#EXT-X-ENDLIST\n',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          return _playableSegment();
+        },
+      );
+      expect(line.available, isTrue);
+      expect(line.sizeBytes, 2048);
+      expect(line.sizeEstimated, isTrue);
+      expect(line.videoWidth, isNull);
+      expect(line.videoHeight, isNull);
+    },
+  );
 
   test(
     'mixed HLS byte ranges are not reported as an exact total size',

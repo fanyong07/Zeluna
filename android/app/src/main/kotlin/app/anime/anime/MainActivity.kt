@@ -5,14 +5,17 @@ import android.os.Bundle
 import android.view.View
 import app.anime.anime.csp.CspMethodChannel
 import app.anime.anime.storage.StorageMethodChannel
+import app.anime.anime.update.AppUpdateMethodChannel
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 open class MainActivity : FlutterActivity() {
     private var videoCompatibilityChannel: MethodChannel? = null
+    private var nativeVideoSurfaceChannel: NativeVideoSurfaceChannel? = null
     private var cspMethodChannel: CspMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
+    private var appUpdateMethodChannel: AppUpdateMethodChannel? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,6 +44,15 @@ open class MainActivity : FlutterActivity() {
                     result.success(VideoDecodeCompatibility.requiresSoftwareDecode(
                         Build.SUPPORTED_ABIS.firstOrNull(),
                     ))
+                } else if (call.method == "requiresDirectVideoSurface") {
+                    result.success(VideoDecodeCompatibility.requiresDirectSurface(
+                        Build.VERSION.SDK_INT,
+                        Build.SUPPORTED_ABIS.firstOrNull(),
+                        Build.HARDWARE,
+                        Build.FINGERPRINT,
+                        Build.PRODUCT,
+                        Build.MODEL,
+                    ))
                 } else if (call.method == "playbackDiagnostics") {
                     // Local, user-requested diagnostics only. No device identifier.
                     result.success(mapOf(
@@ -52,6 +64,10 @@ open class MainActivity : FlutterActivity() {
                 }
             }
         }
+        nativeVideoSurfaceChannel = NativeVideoSurfaceChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            flutterEngine.renderer,
+        )
         cspMethodChannel = CspMethodChannel(
             applicationContext,
             flutterEngine.dartExecutor.binaryMessenger,
@@ -59,15 +75,29 @@ open class MainActivity : FlutterActivity() {
         storageMethodChannel = StorageMethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
         )
+        appUpdateMethodChannel = AppUpdateMethodChannel(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         videoCompatibilityChannel?.setMethodCallHandler(null)
         videoCompatibilityChannel = null
+        nativeVideoSurfaceChannel?.close()
+        nativeVideoSurfaceChannel = null
         cspMethodChannel?.close()
         cspMethodChannel = null
         storageMethodChannel?.close()
         storageMethodChannel = null
+        appUpdateMethodChannel?.close()
+        appUpdateMethodChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    override fun onDestroy() {
+        appUpdateMethodChannel?.close()
+        appUpdateMethodChannel = null
+        super.onDestroy()
     }
 }
