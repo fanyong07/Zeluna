@@ -35,17 +35,73 @@ void main() {
     skip: !Platform.isAndroid && !Platform.isWindows,
   );
 
-  test('public media without sensitive credentials plays directly without loopback bridge', () async {
-    final transport = NativeMediaTransport();
-    addTearDown(transport.dispose);
-    final media = await transport.prepare(
-      'https://cdn.example.test/video.m3u8',
-      format: 'HLS',
-      headers: {'Referer': 'https://site.example.test/'},
-    );
-    expect(media.uri, 'https://cdn.example.test/video.m3u8');
-    expect(media.httpHeaders?['Referer'], 'https://site.example.test/');
-  });
+  test(
+    'public non-HLS media, opted-out HLS, Origin-gated HLS and server-cleaned HLS play directly without loopback bridge',
+    () async {
+      final transport = NativeMediaTransport();
+      addTearDown(transport.dispose);
+
+      final mp4 = await transport.prepare(
+        'https://cdn.example.test/video.mp4',
+        format: 'MP4',
+        headers: {'Referer': 'https://site.example.test/'},
+      );
+      expect(mp4.uri, 'https://cdn.example.test/video.mp4');
+      expect(mp4.httpHeaders?['Referer'], 'https://site.example.test/');
+
+      final optedOut = await transport.prepare(
+        'https://cdn.example.test/video.m3u8',
+        format: 'HLS',
+        cleanHlsManifest: false,
+        headers: {'Referer': 'https://site.example.test/'},
+      );
+      expect(optedOut.uri, 'https://cdn.example.test/video.m3u8');
+      expect(optedOut.httpHeaders?['Referer'], 'https://site.example.test/');
+
+      final originGated = await transport.prepare(
+        'https://cdn.example.test/video.m3u8',
+        format: 'HLS',
+        headers: {
+          'Referer': 'https://site.example.test/',
+          'Origin': 'https://site.example.test',
+        },
+      );
+      expect(originGated.uri, 'https://cdn.example.test/video.m3u8');
+      expect(originGated.httpHeaders?['Origin'], 'https://site.example.test');
+
+      final serverCleaned = await transport.prepare(
+        'https://api.example.test/api/v3/playlist/token123',
+        format: 'HLS',
+        headers: {'Referer': 'https://site.example.test/'},
+      );
+      expect(
+        serverCleaned.uri,
+        'https://api.example.test/api/v3/playlist/token123',
+      );
+    },
+  );
+
+  test(
+    'public HLS without credentials uses manifest-only loopback cleaner while forwarding safe headers for direct segments',
+    () async {
+      final transport = NativeMediaTransport();
+      addTearDown(transport.dispose);
+      final media = await transport.prepare(
+        'https://cdn.example.test/video.m3u8',
+        format: 'HLS',
+        headers: {'Referer': 'https://site.example.test/'},
+      );
+      final local = Uri.parse(media.uri);
+      expect(local.host, InternetAddress.loopbackIPv4.address);
+      expect(local.scheme, 'http');
+      expect(media.httpHeaders?['Referer'], 'https://site.example.test/');
+      expect(media.httpHeaders?['User-Agent'], defaultMediaUserAgent);
+      expect(media.httpHeaders?.containsKey('Origin'), isFalse);
+      expect(media.httpHeaders?.containsKey('Cookie'), isFalse);
+      expect(media.httpHeaders?.containsKey('Authorization'), isFalse);
+    },
+    skip: !Platform.isAndroid && !Platform.isWindows,
+  );
 
   test('local files and DASH keep their existing native path', () async {
     final transport = NativeMediaTransport();
@@ -659,6 +715,116 @@ void main() {
       await cancelled.future.timeout(const Duration(seconds: 2));
       await reading.cancel();
       await bytes.close();
+    },
+  );
+
+  test(
+    'manifest-only bridge cleans HLS ads while leaving media segments, keys and init maps as direct HTTPS URLs',
+    () async {
+      final upstreamRequests = <String>[];
+      final mediaPlaylist = StringBuffer(
+        '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n'
+        '#EXT-X-KEY:METHOD=AES-128,URI="enc.key"\n'
+        '#EXT-X-MAP:URI="init.mp4"\n',
+      );
+      for (var i = 0; i < 12; i++) {
+        mediaPlaylist.write('#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n');
+      }
+      mediaPlaylist.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 0; i < 3; i++) {
+        mediaPlaylist.write('#EXTINF:5.000,\n/ad/casino_$i.ts\n');
+      }
+      mediaPlaylist.write('#EXT-X-DISCONTINUITY\n');
+      for (var i = 12; i < 24; i++) {
+        mediaPlaylist.write('#EXTINF:4.000,\nseg${i.toString().padLeft(4, '0')}.ts\n');
+      }
+      mediaPlaylist.write('#EXT-X-ENDLIST\n');
+
+      final b = await NativeMediaBridge.start(
+        Uri.parse('https://cdn.example.test/202611/movie/index.m3u8'),
+        manifestOnly: true,
+        headers: {'Referer': 'https://site.example.test/'},
+        clientFactory: () => MockClient((request) async {
+          upstreamRequests.add(request.url.toString());
+          if (request.url.path.endsWith('/index.m3u8')) {
+            return http.Response(
+              '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080\n'
+              '2000k/hls/mixed.m3u8\n',
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/mixed.m3u8')) {
+            return http.Response(mediaPlaylist.toString(), 200);
+          }
+          fail('manifest-only bridge must never proxy media bytes: ${request.url}');
+        }),
+      );
+      addTearDown(b.dispose);
+
+      // 1. Master playlist rewrites variant .m3u8 through loopback.
+      final masterResp = await local.get(
+        b.uri,
+        headers: {'Referer': 'https://site.example.test/'},
+      );
+      expect(masterResp.statusCode, 200);
+      final variantLine = masterResp.body
+          .split('\n')
+          .map((l) => l.trim())
+          .firstWhere((l) => l.isNotEmpty && !l.startsWith('#'));
+      final variantUri = Uri.parse(variantLine);
+      expect(variantUri.host, InternetAddress.loopbackIPv4.address);
+      expect(variantUri.port, b.uri.port);
+
+      // 2. Variant playlist strips mid-roll ad island and emits direct public HTTPS URLs.
+      final mediaResp = await local.get(variantUri);
+      expect(mediaResp.statusCode, 200);
+      final body = mediaResp.body;
+      expect(body, isNot(contains('casino_0.ts')));
+      expect(body, contains('https://cdn.example.test/202611/movie/2000k/hls/seg0000.ts'));
+      expect(body, contains('https://cdn.example.test/202611/movie/2000k/hls/seg0023.ts'));
+      expect(body, contains('URI="https://cdn.example.test/202611/movie/2000k/hls/enc.key"'));
+      expect(body, contains('URI="https://cdn.example.test/202611/movie/2000k/hls/init.mp4"'));
+      expect(body, isNot(contains('127.0.0.1')));
+      expect(upstreamRequests, [
+        'https://cdn.example.test/202611/movie/index.m3u8',
+        'https://cdn.example.test/202611/movie/2000k/hls/mixed.m3u8',
+      ]);
+    },
+  );
+
+  test(
+    'manifest-only bridge rejects private segment SSRF and non-playlist binary responses',
+    () async {
+      final failures = <Map<String, Object?>>[];
+      final ssrfBridge = await NativeMediaBridge.start(
+        Uri.parse('https://cdn.example.test/evil.m3u8'),
+        manifestOnly: true,
+        clientFactory: () => MockClient(
+          (_) async => http.Response(
+            '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n'
+            '#EXTINF:6.0,\nhttp://127.0.0.1:8080/internal.ts\n#EXT-X-ENDLIST\n',
+            200,
+          ),
+        ),
+        onFailure: (f) => failures.add(f.safeFields),
+      );
+      addTearDown(ssrfBridge.dispose);
+      final ssrfResp = await local.get(ssrfBridge.uri);
+      expect(ssrfResp.statusCode, 502);
+      expect(failures.last['reason_code'], 'policy');
+
+      final binaryBridge = await NativeMediaBridge.start(
+        Uri.parse('https://cdn.example.test/fake.m3u8'),
+        manifestOnly: true,
+        clientFactory: () => MockClient(
+          (_) async => http.Response('NOT_A_PLAYLIST_BINARY_PAYLOAD', 200),
+        ),
+        onFailure: (f) => failures.add(f.safeFields),
+      );
+      addTearDown(binaryBridge.dispose);
+      final binaryResp = await local.get(binaryBridge.uri);
+      expect(binaryResp.statusCode, 502);
+      expect(failures.last['reason_code'], 'manifest');
     },
   );
 }

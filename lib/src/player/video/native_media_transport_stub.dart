@@ -12,6 +12,7 @@ class NativeMediaTransport {
     bool publicHttpOnly = false,
     Uri? privateLibraryOrigin,
     bool forceLocalBridge = false,
+    bool cleanHlsManifest = true,
     void Function(MediaTransportFailure)? onFailure,
   }) async {
     if (privateLibraryOrigin != null) {

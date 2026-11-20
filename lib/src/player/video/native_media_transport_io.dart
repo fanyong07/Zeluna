@@ -32,6 +32,43 @@ class NativeMediaTransport {
     return false;
   }
 
+  static bool _hasOriginOrSensitiveHeader(Map<String, String> headers) {
+    for (final entry in headers.entries) {
+      if (entry.value.trim().isEmpty) continue;
+      final lower = entry.key.toLowerCase();
+      if (lower == 'origin' || isSensitiveNetworkHeader(entry.key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  static bool _isHlsResource(Uri uri, String format) {
+    final upperFormat = format.trim().toUpperCase();
+    if (upperFormat == 'DASH') return false;
+    final path = uri.path.toLowerCase();
+    if (path.endsWith('.mpd')) return false;
+    // Server-cleaned playlists are already rewritten; avoid a redundant hop.
+    if (path.contains('/api/v3/playlist/')) return false;
+    return upperFormat == 'HLS' ||
+        upperFormat == 'M3U8' ||
+        path.endsWith('.m3u8');
+  }
+
+  static Map<String, String> _directMediaHeaders(Map<String, String> headers) {
+    final safe = <String, String>{};
+    for (final entry in headers.entries) {
+      final lower = entry.key.toLowerCase();
+      if (lower == 'origin' ||
+          lower == 'host' ||
+          isSensitiveNetworkHeader(entry.key)) {
+        continue;
+      }
+      safe[entry.key] = entry.value;
+    }
+    return safe;
+  }
+
   Future<Media> prepare(
     String resource, {
     required Map<String, String> headers,
@@ -39,6 +76,7 @@ class NativeMediaTransport {
     bool publicHttpOnly = false,
     Uri? privateLibraryOrigin,
     bool forceLocalBridge = false,
+    bool cleanHlsManifest = true,
     void Function(MediaTransportFailure)? onFailure,
   }) async {
     if (_disposed) throw StateError('Media transport is disposed.');
@@ -48,27 +86,46 @@ class NativeMediaTransport {
     await previous?.dispose();
     final uri = Uri.tryParse(resource);
     final effectiveHeaders = effectiveMediaRequestHeaders(headers);
-    // Direct native playback avoids proxying media bytes through the Flutter UI
-    // isolate (which causes Windows AB-BA freezes and Android jank). Only use
-    // the loopback bridge when sensitive credentials must be isolated or local
-    // playlist rewriting is explicitly requested.
-    final relay =
+    final supportedPlatform = Platform.isAndroid || Platform.isWindows;
+    final isHttp =
+        uri != null &&
+        const {'http', 'https'}.contains(uri.scheme.toLowerCase());
+    final isDash =
+        format.trim().toUpperCase() == 'DASH' ||
+        (uri != null && uri.path.toLowerCase().endsWith('.mpd'));
+    // Full loopback byte proxying is reserved for private libraries and
+    // credential-bearing streams so Windows/Android never bottleneck video
+    // bytes through the Flutter UI isolate.
+    final fullRelay =
         privateLibraryOrigin != null ||
-        ((Platform.isAndroid || Platform.isWindows) &&
-            uri != null &&
-            const {'http', 'https'}.contains(uri.scheme) &&
-            format.toUpperCase() != 'DASH' &&
-            !uri.path.toLowerCase().endsWith('.mpd') &&
+        (supportedPlatform &&
+            isHttp &&
+            !isDash &&
             (forceLocalBridge || _requiresLocalBridge(effectiveHeaders)));
+    // Public HLS playlists use a manifest-only bridge: only the small .m3u8
+    // text is fetched and ad-cleaned in Dart, while all .ts/.key URLs stay
+    // direct public HTTPS links fetched natively by mpv.
+    final manifestOnlyRelay =
+        !fullRelay &&
+        cleanHlsManifest &&
+        supportedPlatform &&
+        isHttp &&
+        _isHlsResource(uri, format) &&
+        !_hasOriginOrSensitiveHeader(effectiveHeaders);
     if (_disposed || generation != _generation) {
       throw StateError('Media open was replaced.');
     }
-    if (!relay) return Media(resource, httpHeaders: effectiveHeaders);
+    if (!fullRelay && !manifestOnlyRelay) {
+      return Media(resource, httpHeaders: effectiveHeaders);
+    }
     if (uri == null) throw const FormatException('Invalid media URL.');
     final bridge = await NativeMediaBridge.start(
       uri,
       headers: effectiveHeaders,
-      playlist: const {'HLS', 'M3U8'}.contains(format.toUpperCase()),
+      playlist:
+          manifestOnlyRelay ||
+          const {'HLS', 'M3U8'}.contains(format.trim().toUpperCase()),
+      manifestOnly: manifestOnlyRelay,
       publicHttpOnly: publicHttpOnly,
       privateLibraryOrigin: privateLibraryOrigin,
       onFailure: onFailure,
@@ -78,6 +135,14 @@ class NativeMediaTransport {
       throw StateError('Media open was replaced.');
     }
     _bridge = bridge;
+    if (manifestOnlyRelay) {
+      // No credentials are present; forward non-sensitive headers (User-Agent,
+      // Referer) so mpv includes them when fetching direct public .ts segments.
+      return Media(
+        bridge.uri.toString(),
+        httpHeaders: _directMediaHeaders(effectiveHeaders),
+      );
+    }
     // Never send source credentials to the local HTTP listener.
     return Media(bridge.uri.toString());
   }
@@ -100,6 +165,7 @@ class NativeMediaBridge {
     this._clientFactory,
     this._onFailure,
     this._originalFileOnly,
+    this._manifestOnly,
   );
 
   static const maxPlaylistBytes = 4 * 1024 * 1024;
@@ -108,6 +174,7 @@ class NativeMediaBridge {
   static const _idleTimeout = Duration(seconds: 30);
   final HttpServer _server;
   final bool _originalFileOnly;
+  final bool _manifestOnly;
   final void Function(MediaTransportFailure)? _onFailure;
   void _reportFailure(MediaTransportFailure failure) {
     if (_disposed) return;
@@ -138,6 +205,7 @@ class NativeMediaBridge {
     Uri source, {
     Map<String, String> headers = const {},
     bool playlist = false,
+    bool manifestOnly = false,
     bool publicHttpOnly = false,
     Uri? privateLibraryOrigin,
     http.Client Function()? clientFactory,
@@ -145,6 +213,11 @@ class NativeMediaBridge {
   }) async {
     if (privateLibraryOrigin != null && publicHttpOnly) {
       throw const NetworkSecurityException('Incompatible media trust policy.');
+    }
+    if (manifestOnly && privateLibraryOrigin != null) {
+      throw const NetworkSecurityException(
+        'Private media libraries cannot use manifest-only mode.',
+      );
     }
     final policy = privateLibraryOrigin != null
         ? NetworkRequestPolicy.privateMediaLibrary(
@@ -177,8 +250,13 @@ class NativeMediaBridge {
       clientFactory,
       onFailure,
       privateLibraryOrigin != null,
+      manifestOnly,
     );
-    bridge.uri = bridge._register(source, headers, playlist: playlist);
+    bridge.uri = bridge._register(
+      source,
+      headers,
+      playlist: playlist || manifestOnly,
+    );
     server.listen(bridge._handle, onError: (Object _) {});
     return bridge;
   }
@@ -188,6 +266,11 @@ class NativeMediaBridge {
     Map<String, String> headers, {
     bool playlist = false,
   }) {
+    if (_manifestOnly && !playlist) {
+      throw const NetworkSecurityException(
+        'Manifest-only bridge does not proxy media segments.',
+      );
+    }
     _policy.ensureUriAllowed(target);
     _policy.ensureHeadersAllowed(target, headers);
     final sorted = headers.entries.toList()
@@ -333,7 +416,11 @@ class NativeMediaBridge {
           }
           bytes.addAll(reader.current);
         }
-        final rewritten = _rewritePlaylist(utf8.decode(bytes), target, headers);
+        final rewritten = _rewritePlaylist(
+          utf8.decode(bytes).replaceFirst('\uFEFF', ''),
+          target,
+          headers,
+        );
         request.response.statusCode = 200;
         request.response.headers.contentType = ContentType(
           'application',
@@ -341,7 +428,7 @@ class NativeMediaBridge {
         );
         request.response.add(utf8.encode(rewritten));
       } else {
-        if (resource.playlist) {
+        if (resource.playlist || _manifestOnly) {
           throw const FormatException('Expected HLS playlist.');
         }
         request.response.statusCode = response.statusCode;
@@ -419,6 +506,10 @@ class NativeMediaBridge {
     var nextIsPlaylist = false;
     String child(String value, {required bool playlist}) {
       final target = base.resolve(value);
+      if (_manifestOnly && !playlist) {
+        _policy.ensureUriAllowed(target);
+        return target.toString();
+      }
       return _register(
         target,
         _childHeaders(base, target, headers),
