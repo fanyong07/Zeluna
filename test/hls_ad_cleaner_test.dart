@@ -99,4 +99,33 @@ void main() {
     expect(result.playlist, isNot(contains('sponsor0.ts')));
     expect(result.playlist, contains('main11.ts'));
   });
+
+  test('does not false-cut normal 2s-3s GOP feature segments while still cutting ad islands', () {
+    final buf = StringBuffer('#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n');
+    final normalDurations = [2.2, 1.8, 1.5, 2.5, 1.9, 1.4, 2.3, 2.1, 1.7, 1.6, 2.4, 2.2];
+    for (var i = 0; i < normalDurations.length; i++) {
+      buf.write(_seg(normalDurations[i], '/202611/movie/seg${i.toString().padLeft(4, '0')}.ts'));
+    }
+    buf.write('#EXT-X-DISCONTINUITY\n');
+    for (var i = 0; i < 3; i++) {
+      buf.write(_seg(4.0, '/ad/promo_$i.ts'));
+    }
+    buf.write('#EXT-X-DISCONTINUITY\n');
+    for (var i = 0; i < normalDurations.length; i++) {
+      buf.write(_seg(normalDurations[i], '/202611/movie/seg${(i + 12).toString().padLeft(4, '0')}.ts'));
+    }
+    buf.write('#EXT-X-ENDLIST\n');
+
+    final result = cleanHlsPlaylist(
+      buf.toString(),
+      baseUri: Uri.parse('https://cdn.example.com/202611/movie/index.m3u8'),
+    );
+    expect(result.report.groupsCut, 1);
+    expect(result.report.segmentsCut, 3);
+    expect(result.report.microCut, 0);
+    expect(result.report.segmentsKept, 24);
+    expect(result.playlist, isNot(contains('promo_0.ts')));
+    expect(result.playlist, contains('seg0002.ts'));
+    expect(result.playlist, contains('seg0023.ts'));
+  });
 }

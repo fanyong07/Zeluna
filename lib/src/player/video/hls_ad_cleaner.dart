@@ -61,9 +61,9 @@ HlsCleanResult cleanHlsPlaylist(String text, {Uri? baseUri}) {
   ];
   final totalDuration = allDurations.fold<double>(0, (a, b) => a + b);
   final globalMedian = _median(allDurations);
-  final shortThreshold = globalMedian > 0
-      ? math.max(2.0, globalMedian / 3.0)
-      : 0.0;
+  // Scale strictly with the playlist's own median GOP duration. A fixed 2.0s
+  // floor destroys real feature segments on modern 2s-4s MacCMS HLS encodes.
+  final shortThreshold = globalMedian > 0 ? globalMedian / 3.0 : 0.0;
 
   final totalEntries = groups.fold<int>(0, (sum, g) => sum + g.length);
   final hostCount = <String, int>{};
@@ -194,9 +194,10 @@ HlsCleanResult cleanHlsPlaylist(String text, {Uri? baseUri}) {
       for (final entry in kept.entries)
         (groupIndex: kept.index, entry: entry),
   ];
+  final allowMicroShortStreak = globalMedian >= 5.0;
   final isShort = <bool>[
     for (final item in flat)
-      globalMedian > 0 &&
+      allowMicroShortStreak &&
           item.entry.duration != null &&
           item.entry.duration! <= shortThreshold,
   ];

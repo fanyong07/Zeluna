@@ -179,6 +179,35 @@ class CleanPlaylistTests(unittest.TestCase):
         self.assertIn("https://relay.example.com/media/v/main0.ts", out)
         self.assertNotIn("127.0.0.1", out)
 
+    def test_short_gop_movie_stream_is_not_overcut_by_micro_streak(self):
+        # 现代 2~3s 短 GOP 影视流中存在大量 1.3~1.9s 正常场景切分，绝不能误删正片；
+        # 同时仍能准确切除 DISCONTINUITY 隔开的异路径广告孤岛。
+        head = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n"
+        normal_durs = [2.2, 1.8, 1.5, 2.5, 1.9, 1.4, 2.3, 2.1, 1.7, 1.6, 2.4, 2.2]
+        parts = [head]
+        parts += [
+            _seg(d, f"/202611/movie/seg{i:04d}.ts")
+            for i, d in enumerate(normal_durs)
+        ]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts += [_seg(4.0, f"/ad/promo_{i}.ts") for i in range(3)]
+        parts.append("#EXT-X-DISCONTINUITY\n")
+        parts += [
+            _seg(d, f"/202611/movie/seg{i + 12:04d}.ts")
+            for i, d in enumerate(normal_durs)
+        ]
+        parts.append("#EXT-X-ENDLIST\n")
+        out, report = clean_playlist(
+            "".join(parts), "https://cdn.example/202611/movie/index.m3u8"
+        )
+        self.assertEqual(report.groups_cut, 1)
+        self.assertEqual(report.segments_cut, 3)
+        self.assertEqual(report.micro_cut, 0)
+        self.assertEqual(report.segments_kept, 24)
+        self.assertNotIn("promo_0.ts", out)
+        self.assertIn("seg0002.ts", out)
+        self.assertIn("seg0023.ts", out)
+
 
 class MasterPlaylistTests(unittest.TestCase):
     _MASTER = (

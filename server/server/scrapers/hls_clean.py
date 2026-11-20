@@ -34,8 +34,8 @@ import httpx
 from ..public_http import is_public_http_url
 from .ad_signals import AdSignals, analyze_manifest
 
-#: 组级判据:短分片簇的时长上限 = max(此值, 全局中位数/3)
-_MIN_SHORT_THRESHOLD_SECONDS = 2.0
+#: 仅当全局正片分片中位数达到此值时,才启用无 DISCONTINUITY 边界的组内短分片连串剪裁
+_MICRO_SHORT_STREAK_MIN_MEDIAN_SECONDS = 5.0
 #: 首尾小簇判据:总时长上限,且中位数须低于全局中位数的此比例
 _EDGE_CLUSTER_MAX_SECONDS = 60.0
 _EDGE_CLUSTER_MEDIAN_RATIO = 0.7
@@ -280,11 +280,8 @@ def clean_playlist(
     ]
     total_duration = sum(durations)
     global_median = statistics.median(durations) if durations else 0.0
-    threshold = (
-        max(_MIN_SHORT_THRESHOLD_SECONDS, global_median / 3.0)
-        if global_median
-        else 0.0
-    )
+    # 严格按当前流自身中位时长按比例缩放，避免 2~4s 短 GOP 影视流被固定 2s 阈值误剪正片
+    threshold = (global_median / 3.0) if global_median else 0.0
 
     host_count: dict[str, int] = {}
     dir_count: dict[str, int] = {}
@@ -410,9 +407,12 @@ def clean_playlist(
         for group_idx, group in kept_groups
         for entry in group
     ]
+    allow_micro_short_streak = (
+        global_median >= _MICRO_SHORT_STREAK_MIN_MEDIAN_SECONDS
+    )
     is_short = [
         bool(
-            global_median
+            allow_micro_short_streak
             and entry["duration"] is not None
             and entry["duration"] <= threshold
         )
