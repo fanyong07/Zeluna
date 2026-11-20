@@ -151,6 +151,8 @@ class NativeMediaBridge {
             origin: privateLibraryOrigin,
             maxResponseBytes: mediaDownloadMaxResponseBytes,
             requestTimeout: _idleTimeout,
+            httpsOnly: false,
+            allowCrossOriginPublicRedirect: true,
             rejectRedirects: false,
           )
         : NetworkRequestPolicy(
@@ -320,13 +322,6 @@ class NativeMediaBridge {
           .replaceFirst('\uFEFF', '')
           .trimLeft();
       final hls = textPrefix.startsWith('#EXTM3U');
-      if (_originalFileOnly &&
-          (hls ||
-              response.headers['content-type']?.contains('dash+xml') == true)) {
-        throw const FormatException(
-          'Private library requires an original file.',
-        );
-      }
       if (hls) {
         final bytes = <int>[...prefix];
         if (bytes.length > maxPlaylistBytes) {

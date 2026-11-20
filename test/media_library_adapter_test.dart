@@ -350,13 +350,184 @@ void main() {
     expect(await _save(writeFailure, endpoint: 'https://nas.local/'), isFalse);
     expect(await writeFailure.libraries(), isEmpty);
     for (final url in [
-      'http://nas.local/',
+      'ftp://nas.local/',
       'https://viewer:fixture@nas.local/',
       'https://nas.local/?api_key=fixture',
     ]) {
       expect(() => _save(writeFailure, endpoint: url), throwsFormatException);
     }
   });
+
+  test(
+    'supports LAN HTTP Emby username/password auth, anonymous WebDAV, and testConnection',
+    () async {
+      final seenRequests = <http.Request>[];
+      final adapter = MediaLibraryAdapter(
+        createClient: () => MockClient((request) async {
+          seenRequests.add(request);
+          if (request.url.path == '/Users/AuthenticateByName') {
+            expect(request.method, 'POST');
+            expect(
+              request.headers['x-emby-authorization'],
+              contains('Client="Zeluna"'),
+            );
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            if (body['Pw'] != 'pass123') return http.Response('', 401);
+            return http.Response(
+              jsonEncode({
+                'AccessToken': 'issued-token-99',
+                'User': {'Id': 'u42'},
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
+          if (request.url.path == '/Users/u42/Items') {
+            expect(request.headers['x-emby-token'], 'issued-token-99');
+            return _items([
+              {
+                'Id': 'lan-movie',
+                'Type': 'Movie',
+                'ProviderIds': {'Tmdb': '42'},
+              },
+            ]);
+          }
+          if (request.method == 'PROPFIND' && request.url.path == '/dav/') {
+            expect(request.headers['authorization'], isNull);
+            return _dav([
+              _davEntry('/dav/', directory: true),
+              _davEntry('/dav/Sample.Film.2024.mkv'),
+            ]);
+          }
+          return http.Response('', 404);
+        }),
+      );
+
+      final auth = await adapter.authenticateApiUser(
+        kind: MediaLibraryKind.emby,
+        endpoint: 'http://192.168.1.10:8096',
+        username: 'alice',
+        password: 'pass123',
+      );
+      expect(auth.token, 'issued-token-99');
+      expect(auth.userId, 'u42');
+
+      expect(
+        await adapter.saveLibrary(
+          name: '家庭 Emby',
+          kind: MediaLibraryKind.emby,
+          endpoint: 'http://192.168.1.10:8096',
+          secret: auth.token,
+          userId: auth.userId,
+        ),
+        isTrue,
+      );
+      expect(
+        await adapter.saveLibrary(
+          name: '本地 Alist',
+          kind: MediaLibraryKind.webdav,
+          endpoint: 'http://127.0.0.1:5244/dav',
+          username: '',
+          secret: '',
+        ),
+        isTrue,
+      );
+      expect(
+        await adapter.testConnection(
+          kind: MediaLibraryKind.webdav,
+          endpoint: 'http://127.0.0.1:5244/dav',
+          secret: '',
+        ),
+        contains('成功'),
+      );
+      final lines = await adapter.lookup(_movie(), _episode()).toList();
+      expect(lines, hasLength(2));
+      expect(
+        lines.map((l) => l.url),
+        unorderedEquals([
+          'http://192.168.1.10:8096/Videos/lan-movie/stream?static=true',
+          'http://127.0.0.1:5244/dav/Sample.Film.2024.mkv',
+        ]),
+      );
+      final davLine = lines.firstWhere((l) => l.url!.contains('127.0.0.1'));
+      expect(adapter.playbackRequestFor(davLine).headers, isEmpty);
+    },
+  );
+
+  test(
+    'WebDAV matches folder-based Chinese/fansub anime, series, and movie layouts',
+    () async {
+      final adapter = MediaLibraryAdapter(
+        createClient: () => MockClient((request) async {
+          final path = Uri.decodeComponent(request.url.path);
+          return switch (path) {
+            '/dav/' => _dav([
+              _davEntry('/dav/', directory: true),
+              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/', directory: true),
+              _davEntry('/dav/${Uri.encodeComponent('庆余年')}/', directory: true),
+              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/', directory: true),
+              _davEntry(
+                '/dav/${Uri.encodeComponent('[LoliHouse] 葬送的芙莉莲 - 05 [1080p].mkv')}',
+              ),
+            ]),
+            '/dav/葬送的芙莉莲/' => _dav([
+              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/', directory: true),
+            ]),
+            '/dav/葬送的芙莉莲/Season 1/' => _dav([
+              _davEntry('/dav/${Uri.encodeComponent('葬送的芙莉莲')}/Season%201/03.mkv'),
+            ]),
+            '/dav/庆余年/' => _dav([
+              _davEntry('/dav/${Uri.encodeComponent('庆余年')}/S02/', directory: true),
+            ]),
+            '/dav/庆余年/S02/' => _dav([
+              _davEntry('/dav/${Uri.encodeComponent('庆余年')}/S02/${Uri.encodeComponent('第04集.mp4')}'),
+            ]),
+            '/dav/奥本海默 (2023)/' => _dav([
+              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.trailer.mp4'),
+              _davEntry('/dav/${Uri.encodeComponent('奥本海默 (2023)')}/Oppenheimer.2160p.mkv'),
+            ]),
+            _ => http.Response('', 404),
+          };
+        }),
+      );
+      await _add(
+        adapter,
+        kind: MediaLibraryKind.webdav,
+        endpoint: 'http://192.168.1.2:5244/dav',
+      );
+      final frieren = _subject('葬送的芙莉莲', source: 'bangumi');
+      final ep3 = await adapter.lookup(frieren, _episode(number: 3)).single;
+      expect(Uri.decodeComponent(ep3.url!), endsWith('/Season 1/03.mkv'));
+      final ep5 = await adapter.lookup(frieren, _episode(number: 5)).single;
+      expect(Uri.decodeComponent(ep5.url!), contains('[LoliHouse] 葬送的芙莉莲 - 05'));
+
+      final qyn = _subject('庆余年', source: 'tmdb:tv:99');
+      final s2e4 = await adapter
+          .lookup(qyn, _episode(number: 50, season: 2, seasonEpisode: 4))
+          .single;
+      expect(Uri.decodeComponent(s2e4.url!), endsWith('/S02/第04集.mp4'));
+
+      final oppenheimer = AnimeSubject(
+        id: 2,
+        title: '奥本海默',
+        originalTitle: 'Oppenheimer',
+        source: 'tmdb:movie:872585',
+        summary: '',
+        coverUrl: null,
+        bannerUrl: null,
+        date: '2023-07-21',
+        platform: '',
+        language: '',
+        region: '',
+        status: '',
+        categories: const [],
+        tags: const [],
+        totalEpisodes: 1,
+      );
+      final film = await adapter.lookup(oppenheimer, _episode()).single;
+      expect(Uri.decodeComponent(film.url!), endsWith('Oppenheimer.2160p.mkv'));
+    },
+  );
 
   test(
     'discovery surfaces a private line in quick and full playback, but not offline download lookup',

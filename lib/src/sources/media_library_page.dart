@@ -163,8 +163,13 @@ class _LibraryEditorState extends State<_LibraryEditor> {
   );
   final _username = TextEditingController();
   final _secret = TextEditingController();
+  bool _usePasswordAuth = false;
   String? _error;
+  String? _testMessage;
+  bool _testing = false;
   bool _saving = false;
+
+  bool get _busy => _saving || _testing;
 
   @override
   void dispose() {
@@ -174,20 +179,69 @@ class _LibraryEditorState extends State<_LibraryEditor> {
     super.dispose();
   }
 
-  Future<void> _save() async {
-    if (_saving) return;
+  Future<void> _testConnection() async {
+    if (_busy) return;
     setState(() {
       _error = null;
+      _testMessage = null;
+      _testing = true;
+    });
+    try {
+      final message = await widget.adapter.testConnection(
+        kind: _kind,
+        endpoint: _endpoint.text,
+        username: _username.text,
+        secret: _secret.text,
+        usePasswordAuth: _kind != MediaLibraryKind.webdav && _usePasswordAuth,
+      );
+      if (!mounted) return;
+      setState(() {
+        _testMessage = message;
+        _testing = false;
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.message;
+        _testing = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = '连接测试失败，请检查地址和网络。';
+        _testing = false;
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    if (_busy) return;
+    setState(() {
+      _error = null;
+      _testMessage = null;
       _saving = true;
     });
     try {
+      var secret = _secret.text;
+      var userId = '';
+      if (_kind != MediaLibraryKind.webdav && _usePasswordAuth) {
+        final auth = await widget.adapter.authenticateApiUser(
+          kind: _kind,
+          endpoint: _endpoint.text,
+          username: _username.text,
+          password: _secret.text,
+        );
+        secret = auth.token;
+        userId = auth.userId;
+      }
       final saved = await widget.adapter.saveLibrary(
         replaceId: widget.library?.id,
         name: _name.text,
         kind: _kind,
         endpoint: _endpoint.text,
         username: _kind == MediaLibraryKind.webdav ? _username.text : '',
-        secret: _secret.text,
+        secret: secret,
+        userId: userId,
       );
       if (!mounted) return;
       if (saved) {
@@ -197,6 +251,8 @@ class _LibraryEditorState extends State<_LibraryEditor> {
       _error = '无法写入本机安全存储，请重试。';
     } on FormatException catch (error) {
       _error = error.message;
+    } catch (_) {
+      _error = '保存失败，请检查服务器连接与输入内容。';
     }
     if (mounted) setState(() => _saving = false);
   }
@@ -204,6 +260,7 @@ class _LibraryEditorState extends State<_LibraryEditor> {
   @override
   Widget build(BuildContext context) {
     final isDav = _kind == MediaLibraryKind.webdav;
+    final showUsername = isDav || _usePasswordAuth;
     return AlertDialog(
       scrollable: true,
       title: Text(widget.library == null ? '添加媒体库' : '编辑媒体库'),
@@ -219,67 +276,111 @@ class _LibraryEditorState extends State<_LibraryEditor> {
                 for (final kind in MediaLibraryKind.values)
                   DropdownMenuItem(value: kind, child: Text(kind.label)),
               ],
-              onChanged: _saving
+              onChanged: _busy
                   ? null
                   : (kind) => setState(() {
                       _kind = kind!;
+                      _error = null;
+                      _testMessage = null;
                       _secret.clear();
                     }),
             ),
+            if (!isDav) ...[
+              const SizedBox(height: 10),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('API 密钥')),
+                  ButtonSegment(value: true, label: Text('账号密码登录')),
+                ],
+                selected: {_usePasswordAuth},
+                onSelectionChanged: _busy
+                    ? null
+                    : (selection) => setState(() {
+                        _usePasswordAuth = selection.first;
+                        _error = null;
+                        _testMessage = null;
+                        _secret.clear();
+                      }),
+              ),
+            ],
             TextField(
               controller: _name,
-              enabled: !_saving,
+              enabled: !_busy,
               decoration: const InputDecoration(labelText: '名称'),
             ),
             TextField(
               controller: _endpoint,
-              enabled: !_saving,
+              enabled: !_busy,
               keyboardType: TextInputType.url,
               autocorrect: false,
               decoration: InputDecoration(
                 labelText: isDav ? 'WebDAV 目录地址' : '服务器地址',
                 hintText: isDav
-                    ? 'https://nas.example/dav/影视/'
-                    : 'https://nas.example/',
+                    ? 'http://192.168.1.2:5244/dav/影视/'
+                    : 'http://192.168.1.2:8096/',
               ),
             ),
-            if (isDav)
+            if (showUsername)
               TextField(
                 controller: _username,
-                enabled: !_saving,
+                enabled: !_busy,
                 autocorrect: false,
-                decoration: const InputDecoration(labelText: '用户名'),
+                decoration: InputDecoration(
+                  labelText: isDav ? '用户名（匿名可留空）' : '用户名',
+                ),
               ),
             TextField(
               controller: _secret,
-              enabled: !_saving,
+              enabled: !_busy,
               obscureText: true,
               autocorrect: false,
               enableSuggestions: false,
-              decoration: InputDecoration(labelText: isDav ? '密码' : 'API 密钥'),
+              decoration: InputDecoration(
+                labelText: isDav
+                    ? '密码（匿名可留空）'
+                    : (_usePasswordAuth ? '密码' : 'API 密钥'),
+              ),
             ),
             const SizedBox(height: 12),
             Text(
               isDav
-                  ? '需要可信的 HTTPS 证书；Alist 须从同一站点提供文件。文件名示例：剧名.S01E01.mkv、电影名.2024.mp4。'
-                  : '需要可信的 HTTPS 证书。请使用服务器上为此应用创建的 API 密钥。',
+                  ? '支持局域网 HTTP 或 HTTPS，支持 Alist 网盘 302 直链。支持「剧名/Season 1/01.mkv」、「[字幕组] 剧名 - 01.mkv」、「剧名.S01E01.mkv」等命名。'
+                  : '支持局域网 HTTP 或 HTTPS，支持 Emby 302 直链。账号密码登录仅保存服务端签发的令牌，不保存密码。',
             ),
             if (widget.library != null) const Text('编辑时需重新输入凭据。'),
+            if (_testMessage case final ok?)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  ok,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
             if (_error case final error?)
-              Text(
-                error,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  error,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
               ),
           ],
         ),
       ),
       actions: [
         TextButton(
-          onPressed: _saving ? null : () => Navigator.pop(context),
+          onPressed: _busy ? null : _testConnection,
+          child: Text(_testing ? '测试中…' : '测试连接'),
+        ),
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
           child: const Text('取消'),
         ),
         FilledButton(
-          onPressed: _saving ? null : _save,
+          onPressed: _busy ? null : _save,
           child: Text(_saving ? '保存中…' : '保存'),
         ),
       ],

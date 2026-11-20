@@ -409,37 +409,51 @@ final class PlaybackDiscoveryController {
             ? mergePlaybackLines(results.expand((lines) => lines))
             : const [];
       }
-      // Give Tier 0 a short head start, not the full DAV indexing/API budget.
-      // If no online line works, allow that original private lookup to finish.
+      // Run online lookup concurrently so watching titles absent from a private
+      // library never pays a 750ms serial penalty; cancel online immediately if
+      // a Tier-0 private match arrives within the head start.
+      final onlineToken = RulePlaybackCancellationToken();
+      final unlinkOnline = token?.register(onlineToken.cancel);
+      final onlineFuture = discoverOnline(
+        onlineToken,
+      ).catchError((Object _, StackTrace _) => const <PlaybackLine>[]);
       var privateLines = const <MediaLibraryPlaybackLine>[];
       final privateLookup = local
           .take(1)
           .toList()
           .then((lines) => privateLines = lines);
-      await privateLookup.timeout(
-        _interactivePreferredHeadStart,
-        onTimeout: () => const [],
-      );
-      if (!isCurrent()) return const [];
-      if (privateLines.any(
-        (line) =>
-            !LocalRouteRanker.instance.isAdDemoted(line) &&
-            (preferred == null ||
-                preferred.isEmpty ||
-                preferred == line.providerId),
-      )) {
-        return privateLines;
+      try {
+        await privateLookup.timeout(
+          _interactivePreferredHeadStart,
+          onTimeout: () => const [],
+        );
+        if (!isCurrent()) {
+          onlineToken.cancel();
+          return const [];
+        }
+        if (privateLines.any(
+          (line) =>
+              !LocalRouteRanker.instance.isAdDemoted(line) &&
+              (preferred == null ||
+                  preferred.isEmpty ||
+                  preferred == line.providerId),
+        )) {
+          onlineToken.cancel();
+          return privateLines;
+        }
+        final online = await onlineFuture;
+        if (isCurrent() &&
+            privateLines.isEmpty &&
+            !online.any((line) => line.available)) {
+          privateLines = await privateLookup;
+        }
+        if (!isCurrent()) return const [];
+        return privateLines.isEmpty
+            ? online
+            : mergePlaybackLines([...privateLines, ...online]);
+      } finally {
+        unlinkOnline?.call();
       }
-      final online = await discoverOnline(token);
-      if (isCurrent() &&
-          privateLines.isEmpty &&
-          !online.any((line) => line.available)) {
-        privateLines = await privateLookup;
-      }
-      if (!isCurrent()) return const [];
-      return privateLines.isEmpty
-          ? online
-          : mergePlaybackLines([...privateLines, ...online]);
     }
 
     if (expandAll || lookupIntent != PlaybackLookupIntent.interactive) {

@@ -135,12 +135,50 @@ void main() {
   );
 
   test(
-    'private media rejects cross-origin redirects without sending any second request',
+    'private media follows public 302 CDN redirects without leaking auth and blocks SSRF redirects',
     () async {
-      final origin = Uri.parse('https://library.local/');
+      final origin = Uri.parse('http://192.168.1.10:5244/dav/');
+      final cdnUrl = Uri.parse('https://cdn.cloud.example/signed-video.mkv');
+      final requests = <http.BaseRequest>[];
+      final b = await NativeMediaBridge.start(
+        origin.resolve('Movie.mkv'),
+        privateLibraryOrigin: origin,
+        headers: {'Authorization': 'Basic fixture'},
+        clientFactory: () => MockClient((request) async {
+          requests.add(request);
+          if (request.url == origin.resolve('Movie.mkv')) {
+            expect(request.headers['authorization'], 'Basic fixture');
+            return http.Response(
+              '',
+              302,
+              headers: {'location': cdnUrl.toString()},
+            );
+          }
+          expect(request.url, cdnUrl);
+          expect(request.headers['authorization'], isNull);
+          expect(request.headers['range'], 'bytes=0-15');
+          return http.Response(
+            'cloud 4k bytes!!',
+            206,
+            headers: {'content-type': 'video/x-matroska'},
+          );
+        }),
+      );
+      addTearDown(b.dispose);
+      final client = http.Client();
+      addTearDown(client.close);
+      final response = await client.get(
+        b.uri,
+        headers: {'Range': 'bytes=0-15'},
+      );
+      expect(response.statusCode, 206);
+      expect(response.body, 'cloud 4k bytes!!');
+      expect(requests.map((r) => r.url), [origin.resolve('Movie.mkv'), cdnUrl]);
+
+      // Cross-origin redirect to a private/SSRF host must still be blocked.
       final calls = <Uri>[];
       final failures = <Map<String, Object?>>[];
-      final b = await NativeMediaBridge.start(
+      final ssrfBridge = await NativeMediaBridge.start(
         origin.resolve('Videos/42/stream?static=true'),
         privateLibraryOrigin: origin,
         headers: {'X-Emby-Token': 'fixture'},
@@ -149,15 +187,13 @@ void main() {
           return http.Response(
             '',
             302,
-            headers: {'location': 'https://outside.invalid/video.mp4'},
+            headers: {'location': 'http://169.254.169.254/latest/meta-data'},
           );
         }),
         onFailure: (failure) => failures.add(failure.safeFields),
       );
-      addTearDown(b.dispose);
-      final client = http.Client();
-      addTearDown(client.close);
-      expect((await client.get(b.uri)).statusCode, 502);
+      addTearDown(ssrfBridge.dispose);
+      expect((await client.get(ssrfBridge.uri)).statusCode, 502);
       expect(calls, [origin.resolve('Videos/42/stream?static=true')]);
       expect(failures.single, {
         'reason_code': 'policy',
@@ -177,7 +213,7 @@ void main() {
       );
       expect(Uri.parse(media.uri).host, '127.0.0.1');
       expect(media.httpHeaders ?? {}, isEmpty);
-      expect(media.uri, isNot(contains('library.local')));
+      expect(media.uri, isNot(contains('192.168.1.10')));
     },
   );
 

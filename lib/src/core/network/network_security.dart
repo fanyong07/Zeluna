@@ -33,22 +33,25 @@ class NetworkRequestPolicy {
     this.allowSyntheticDns = false,
     this.allowLiteralBenchmarkAddress = false,
     this.rejectRedirects = true,
-  }) : _privateMediaOrigin = null;
+  }) : _privateMediaOrigin = null,
+       allowCrossOriginPublicRedirect = false;
 
   /// Only for a user-configured private library, never a public rule result.
   const NetworkRequestPolicy.privateMediaLibrary({
     required Uri origin,
     required this.maxResponseBytes,
     required this.requestTimeout,
+    this.httpsOnly = false,
+    this.allowCrossOriginPublicRedirect = false,
     this.rejectRedirects = true,
   }) : _privateMediaOrigin = origin,
        service = NetworkServiceKind.mediaResource,
-       httpsOnly = true,
        allowPrivateNetwork = true,
-       allowSyntheticDns = false,
+       allowSyntheticDns = true,
        allowLiteralBenchmarkAddress = false;
 
   final Uri? _privateMediaOrigin;
+  final bool allowCrossOriginPublicRedirect;
 
   factory NetworkRequestPolicy.forService(
     NetworkServiceKind service, {
@@ -130,12 +133,28 @@ class NetworkRequestPolicy {
       throw NetworkSecurityException('${service.name} requires HTTPS.');
     }
     final privateOrigin = _privateMediaOrigin;
-    if (privateOrigin != null && !_sameOrigin(privateOrigin, uri)) {
-      throw const NetworkSecurityException(
-        'Private library requests must stay on the configured origin.',
-      );
-    }
     final host = uri.host.toLowerCase().replaceFirst(RegExp(r'\.$'), '');
+    if (privateOrigin != null) {
+      if (_sameOrigin(privateOrigin, uri)) {
+        return;
+      }
+      if (!allowCrossOriginPublicRedirect) {
+        throw const NetworkSecurityException(
+          'Private library requests must stay on the configured origin.',
+        );
+      }
+      // Cross-origin redirects from a private library (e.g. Alist / Emby 302
+      // cloud-drive CDNs) must strip credentials and only target public hosts.
+      if (host == 'localhost' ||
+          host.endsWith('.localhost') ||
+          host.endsWith('.local') ||
+          _isBlockedLiteralHost(host, allowBenchmarkAddress: false)) {
+        throw const NetworkSecurityException(
+          'Private library redirects cannot target local or private addresses.',
+        );
+      }
+      return;
+    }
     if (host == 'localhost' ||
         host.endsWith('.localhost') ||
         host.endsWith('.local')) {
@@ -158,6 +177,10 @@ class NetworkRequestPolicy {
 
   void ensureHeadersAllowed(Uri uri, Map<String, String> headers) {
     if (uri.scheme.toLowerCase() != 'http') return;
+    // Allow credentials over cleartext HTTP strictly when targeting the exact
+    // user-configured private media library origin (e.g. LAN Emby/Jellyfin/Alist).
+    final privateOrigin = _privateMediaOrigin;
+    if (privateOrigin != null && _sameOrigin(privateOrigin, uri)) return;
     final sensitive = headers.keys.where(isSensitiveNetworkHeader).toList();
     if (sensitive.isNotEmpty) {
       throw const NetworkSecurityException(
