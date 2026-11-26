@@ -1,0 +1,216 @@
+name: Quality Gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.41.3
+  UV_VERSION: 0.11.32
+
+jobs:
+  flutter:
+    name: Flutter analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Resolve locked Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+      - name: Build Linux JavaScript runtime for VM tests
+        run: |
+          jsf_root="$(python3 -c 'import json, pathlib, urllib.parse; data=json.load(open(".dart_tool/package_config.json", encoding="utf-8")); uri=next(item["rootUri"] for item in data["packages"] if item["name"] == "jsf"); print(pathlib.Path(urllib.parse.urlparse(uri).path))')"
+          cmake -S "$jsf_root/src" -B "$RUNNER_TEMP/jsf-linux" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/jsf-linux" --config Release --parallel 2
+          test -f "$RUNNER_TEMP/jsf-linux/libjsf.so"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/jsf-linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Verify Dart formatting
+        # The vendored WebView fork stays byte-comparable to its upstream
+        # archive and is validated separately by the Windows job.
+        run: dart format --output=none --set-exit-if-changed lib test integration_test tool
+      - name: Analyze Flutter sources
+        run: flutter analyze --suppress-analytics
+      - name: Run Flutter tests
+        run: flutter test --reporter compact
+
+  android:
+    name: Android build and emulator smoke
+    # Pin the Android host to avoid ubuntu-latest image drift.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Reserve disk space for Android native libraries and emulator
+        shell: bash
+        run: |
+          # Only disposable GitHub-hosted images; never touch workspace data,
+          # Android SDKs, Java, Flutter, or any self-hosted runner installation.
+          test "${RUNNER_ENVIRONMENT}" = "github-hosted"
+          df -h /
+          for unused in /usr/share/dotnet /usr/local/share/boost /opt/ghc /opt/hostedtoolcache/CodeQL; do
+            if [ -d "$unused" ]; then sudo rm -rf -- "$unused"; fi
+          done
+          df -h /
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build apk --debug --suppress-analytics
+      - name: Run Android native unit tests
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest --no-daemon
+      - name: Enable KVM
+        shell: bash
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Launch debug APK on Android 35
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          cores: 2
+          ram-size: 3072M
+          emulator-boot-timeout: 300
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -camera-front none
+          disable-animations: true
+          script: |
+            adb shell wm size 1080x2400
+            adb shell wm density 420
+            adb install -r build/app/outputs/flutter-apk/app-debug.apk
+            adb shell monkey -p app.anime.anime -c android.intent.category.LAUNCHER 1 > app-launch.txt
+            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui.xml --timeout 90 || { result=$?; timeout --kill-after=1s 3s adb logcat -d --pid="$(timeout --kill-after=1s 3s adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat.txt || true; timeout --kill-after=1s 3s adb exec-out screencap -p > android-startup-failure.png || true; exit "$result"; }'
+            adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity.txt
+            grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity.txt
+            adb shell dumpsys package app.anime.anime | grep -E 'versionName|versionCode' > app-version.txt
+            adb shell pidof app.anime.anime | tr -d '\r' > app-pid.txt
+            grep -Eq '[0-9]+' app-pid.txt
+            bash -lc 'app_pid="$(tr -d "\r\n" < app-pid.txt)"; adb logcat -d --pid="$app_pid" > android-app-logcat.txt || true'
+            bash -lc '! grep -E "FATAL EXCEPTION|ANR in app\\.anime\\.anime" android-app-logcat.txt'
+            adb exec-out screencap -p > zeluna-android-emulator.png
+            test -s zeluna-android-emulator.png
+            adb shell settings put system accelerometer_rotation 0
+            adb shell settings put system user_rotation 1
+            sleep 3
+            bash -lc 'python3 tool/ci/android_ui_ready.py --output android-ui-landscape.xml --timeout 90 || { result=$?; timeout --kill-after=1s 3s adb logcat -d --pid="$(timeout --kill-after=1s 3s adb shell pidof app.anime.anime | tr -d "\r\n")" > android-app-logcat-landscape.txt || true; timeout --kill-after=1s 3s adb exec-out screencap -p > android-startup-failure-landscape.png || true; exit "$result"; }'
+            adb shell dumpsys activity activities | grep -m 3 -E 'mResumedActivity|topResumedActivity' > resumed-activity-landscape.txt
+            grep -Fq 'app.anime.anime/.SplashActivity' resumed-activity-landscape.txt
+            adb exec-out screencap -p > zeluna-android-emulator-landscape.png
+            test -s zeluna-android-emulator-landscape.png
+            bash -lc 'app_pid="$(tr -d "\r\n" < app-pid.txt)"; adb logcat -d --pid="$app_pid" > android-app-logcat-landscape.txt || true'
+            bash -lc '! grep -E "FATAL EXCEPTION|ANR in app\\.anime\\.anime" android-app-logcat-landscape.txt'
+      - name: Upload Android runtime evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-emulator-runtime
+          path: |
+            app-launch.txt
+            resumed-activity.txt
+            app-version.txt
+            app-pid.txt
+            android-app-logcat.txt
+            android-ui.xml
+            android-startup-failure.png
+            zeluna-android-emulator.png
+            resumed-activity-landscape.txt
+            android-app-logcat-landscape.txt
+            android-ui-landscape.xml
+            android-startup-failure-landscape.png
+            zeluna-android-emulator-landscape.png
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows:
+    name: Windows build and WebView fork
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build windows --suppress-analytics
+      - name: Verify immutable release outputs
+        shell: pwsh
+        run: ./tool/ci/test_release_immutability.ps1
+      - name: Verify exact-HEAD release gate
+        shell: pwsh
+        run: ./tool/ci/test_release_gate.ps1
+      - name: Verify Android package architectures and provenance
+        shell: pwsh
+        run: ./tool/ci/test_android_package_contents.ps1
+      - name: Verify Windows release package contents
+        shell: pwsh
+        run: ./tool/ci/test_windows_package_contents.ps1
+      - name: Exercise local WebView fork lifecycle
+        timeout-minutes: 15
+        run: flutter test integration_test/animeko_webview_sniffer_integration_test.dart -d windows --reporter compact
+
+  web:
+    name: Web build and conditional stubs
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - run: flutter build web --release --suppress-analytics
+
+  supply-chain:
+    name: Secrets, licenses, advisories, and SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - name: Test repository policy and size-accounting tools
+        run: python3 -m unittest discover -s tool/ci -p 'test_*.py'
+      - name: Test Android update feed generator
+        run: python3 -m unittest discover -s tool/tests -p 'test_*.py'
+      - name: Verify repository artifact policy
+        run: python3 tool/ci/repository_gate.py --root .
+      - name: Verify advisories and licenses; generate Flutter SBOM
+        run: python3 tool/ci/dependency_gate.py --root .
+      - name: Upload supply-chain reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: supply-chain-reports
+          path: |
+            build/reports/*.json
+            build/sbom/*.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,3042 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+
+import '../accounts/local_account_repository.dart';
+import '../app/anime_app.dart';
+import '../catalog/catalog_page.dart';
+import '../data/anime_controller.dart';
+import '../data/media_download_task.dart';
+import '../domain/anime_models.dart';
+import '../downloads/download_controller.dart';
+import '../rules/bundled_community_subscriptions.dart';
+import '../shared_ui/app_chrome.dart';
+import '../shared_ui/app_interactions.dart';
+import '../shared_ui/app_navigation.dart';
+import '../shared_ui/poster_card.dart';
+import '../shared_ui/settings_ui.dart';
+import '../shared_ui/danmaku_display_controls.dart';
+import '../sync/sync_controller.dart';
+import '../theme/accent_color_picker.dart';
+import '../theme/theme_ripple_transition.dart';
+import '../updates/app_update_card.dart';
+
+class ProfilePage extends ConsumerStatefulWidget {
+  const ProfilePage({super.key});
+
+  @override
+  ConsumerState<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends ConsumerState<ProfilePage> {
+  final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    TabReselectBus.register('/profile', _scrollToTop);
+  }
+
+  @override
+  void dispose() {
+    TabReselectBus.unregister('/profile', _scrollToTop);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToTop() {
+    if (!mounted) return;
+    scrollControllerToTop(
+      _scrollController,
+      reduceMotion: MediaQuery.disableAnimationsOf(context),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final compact = MediaQuery.sizeOf(context).width < 760;
+        return AppChrome(
+          active: ChromeDestination.favorite,
+          showSearch: false,
+          title: '个人中心',
+          onBack: () => safeNavigateBack(context),
+          compactAction: AppIconButton(
+            icon: Icons.settings_outlined,
+            tooltip: '系统设置',
+            onPressed: () => context.push('/settings'),
+          ),
+          rightRail: _ProfileRightRail(state: state),
+          child: ListView(
+            controller: _scrollController,
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 4 : 8,
+              compact ? 14 : 20,
+              120,
+            ),
+            children: [
+              _ProfileBanner(state: state),
+              SizedBox(height: compact ? 14 : 18),
+              _ProfilePlaylistSection(state: state),
+              SizedBox(height: compact ? 14 : 18),
+              _ProfileShortcutSection(state: state),
+              SizedBox(height: compact ? 14 : 18),
+              _HistoryStrip(entries: state.history),
+              SizedBox(height: compact ? 14 : 18),
+              _DownloadStrip(entries: state.offlineTasks),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+String _profileSyncStatus(SyncStatus status) => switch (status.phase) {
+  SyncPhase.localOnly => '仅本机',
+  SyncPhase.checking => '检查中',
+  SyncPhase.pending => '待同步',
+  SyncPhase.synced => '已同步',
+  SyncPhase.offline => '离线缓存',
+  SyncPhase.expired => '登录失效',
+  SyncPhase.error => '需重试',
+};
+
+class _ProfileBanner extends StatelessWidget {
+  const _ProfileBanner({required this.state});
+
+  final AnimeState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    final hero = state.homeFeed.hero;
+    return AppPanel(
+      padding: EdgeInsets.zero,
+      radius: AppRadius.xl,
+      borderColor: AppColors.primary.withValues(alpha: 0.28),
+      elevated: true,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(AppRadius.xl),
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: PosterArt(
+                coverUrl: hero.bannerUrl,
+                fallbackCoverUrl: hero.coverUrl,
+                title: state.profile.nickname,
+              ),
+            ),
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: AppOverlays.heroLeadingSoft,
+                ),
+              ),
+            ),
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topRight,
+                    end: Alignment.bottomLeft,
+                    colors: [
+                      AppColors.primary.withValues(alpha: 0.20),
+                      Colors.transparent,
+                      AppColors.cyan.withValues(alpha: 0.14),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: EdgeInsets.all(compact ? 18 : 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(2.5),
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: AppGradients.brand,
+                          boxShadow: AppShadows.primaryGlow,
+                        ),
+                        child: CircleAvatar(
+                          radius: compact ? 30 : 42,
+                          backgroundColor: AppColors.panel,
+                          child: Text(
+                            state.profile.avatarText,
+                            style:
+                                (compact
+                                        ? Theme.of(
+                                            context,
+                                          ).textTheme.headlineSmall
+                                        : Theme.of(
+                                            context,
+                                          ).textTheme.displaySmall)
+                                    ?.copyWith(
+                                      color: AppColors.theaterInk,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: compact ? 14 : 22),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    state.profile.nickname,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style:
+                                        (compact
+                                                ? Theme.of(
+                                                    context,
+                                                  ).textTheme.titleLarge
+                                                : Theme.of(
+                                                    context,
+                                                  ).textTheme.headlineMedium)
+                                            ?.copyWith(
+                                              color: AppColors.theaterInk,
+                                              fontWeight: FontWeight.w900,
+                                            ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    color: state.accountSession.isSignedIn
+                                        ? AppColors.primary.withValues(
+                                            alpha: 0.28,
+                                          )
+                                        : Colors.white.withValues(alpha: 0.14),
+                                    borderRadius: BorderRadius.circular(
+                                      AppRadius.pill,
+                                    ),
+                                    border: Border.all(
+                                      color: state.accountSession.isSignedIn
+                                          ? AppColors.primary2.withValues(
+                                              alpha: 0.55,
+                                            )
+                                          : Colors.white.withValues(
+                                              alpha: 0.22,
+                                            ),
+                                    ),
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 9,
+                                      vertical: 3,
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (state
+                                            .accountSession
+                                            .isSignedIn) ...[
+                                          const Icon(
+                                            Icons.cloud_done_rounded,
+                                            size: 12,
+                                            color: Colors.white,
+                                          ),
+                                          const SizedBox(width: 4),
+                                        ],
+                                        Text(
+                                          state.accountSession.isSignedIn
+                                              ? '云端账号'
+                                              : '游客',
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelSmall
+                                              ?.copyWith(
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            SizedBox(height: compact ? 5 : 8),
+                            Text(
+                              state.accountSession.isSignedIn
+                                  ? 'UID ${state.profile.uid} · ${state.accountSession.current!.email}'
+                                  : '游客空间 · 登录后可使用云端同步收藏与历史',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: AppColors.theaterMuted,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (!compact) ...[
+                        _BannerMetric(
+                          label: '追番',
+                          value: '${state.following.length}',
+                        ),
+                        _BannerMetric(
+                          label: '收藏',
+                          value: '${state.favorites.length}',
+                        ),
+                        _BannerMetric(
+                          label: '历史',
+                          value: '${state.history.length}',
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (compact) ...[
+                    const SizedBox(height: 14),
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.44),
+                        borderRadius: BorderRadius.circular(AppRadius.sm),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.12),
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _CompactBannerMetric(
+                              label: '追番',
+                              value: '${state.following.length}',
+                            ),
+                            _CompactBannerMetric(
+                              label: '收藏',
+                              value: '${state.favorites.length}',
+                            ),
+                            _CompactBannerMetric(
+                              label: '历史',
+                              value: '${state.history.length}',
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactBannerMetric extends StatelessWidget {
+  const _CompactBannerMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          value,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            color: AppColors.theaterInk,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.labelSmall?.copyWith(color: AppColors.theaterMuted),
+        ),
+      ],
+    );
+  }
+}
+
+class _BannerMetric extends StatelessWidget {
+  const _BannerMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 22),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            value,
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+              color: AppColors.theaterInk,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProfilePlaylistSection extends StatelessWidget {
+  const _ProfilePlaylistSection({required this.state});
+
+  final AnimeState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    final entries = state.following.take(8).toList(growable: false);
+    return AppPanel(
+      child: Column(
+        children: [
+          SectionTitle(
+            title: '我的追番',
+            action: entries.isEmpty
+                ? null
+                : TextButton(
+                    onPressed: () => context.push('/profile/following'),
+                    child: Text('全部 ${state.following.length} ›'),
+                  ),
+          ),
+          SizedBox(height: compact ? 10 : 14),
+          if (entries.isEmpty)
+            const _InlineEmpty('还没有追番，在详情页点击“追番”后会显示在这里')
+          else
+            SizedBox(
+              height: compact ? 124 : 150,
+              child: HorizontalScrollStrip(
+                builder: (context, controller) => ListView.separated(
+                  controller: controller,
+                  scrollDirection: Axis.horizontal,
+                  itemBuilder: (context, index) {
+                    final subject = entries[index].subject;
+                    return _PlaylistCard(
+                      title: subject.title,
+                      subject: subject,
+                      onTap: () => _openDetail(context, subject),
+                    );
+                  },
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(width: 12),
+                  itemCount: entries.length,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PlaylistCard extends StatelessWidget {
+  const _PlaylistCard({
+    required this.title,
+    required this.subject,
+    required this.onTap,
+  });
+
+  final String title;
+  final AnimeSubject subject;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    return SizedBox(
+      width: compact ? 150 : 170,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: AppPanel(
+          padding: EdgeInsets.zero,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PosterArt(
+                  coverUrl: subject.bannerUrl,
+                  fallbackCoverUrl: subject.coverUrl,
+                  title: title,
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(gradient: AppOverlays.mediaCaption),
+                ),
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 12,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: AppColors.theaterInk,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '已加入追番 · 打开详情',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.theaterMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProfileShortcutSection extends StatelessWidget {
+  const _ProfileShortcutSection({required this.state});
+
+  final AnimeState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    final visibleCustomRuleCount = visibleUserRules(
+      state.rulePlugins.customRules,
+      repositories: state.rulePlugins.repositories,
+    ).length;
+    final visibleRepoCount = visibleUserRuleRepositories(
+      state.rulePlugins.repositories,
+    ).length;
+    final sourceSummary = visibleRepoCount > 0 || visibleCustomRuleCount > 0
+        ? '$visibleRepoCount 个订阅 · $visibleCustomRuleCount 条自定义'
+        : '管理自定义播放来源';
+    final themeSummary = state.appearance.isMonochrome
+        ? (state.appearance.pureBlackOled ? '黑白 · 纯黑 OLED' : '黑白极简')
+        : '自定义主题色';
+
+    final mediaSourceTiles = [
+      _ShortcutTile(
+        icon: Icons.rss_feed_rounded,
+        accent: scheme.primary,
+        title: '扩展来源',
+        value: sourceSummary,
+        onTap: () => context.push('/profile/rules'),
+      ),
+      if (!kIsWeb)
+        _ShortcutTile(
+          icon: Icons.video_library_outlined,
+          accent: AppColors.cyan,
+          title: '私有媒体库',
+          value: 'Emby / Jellyfin / Alist / WebDAV',
+          onTap: () => context.push('/settings/media-sources'),
+        ),
+      _ShortcutTile(
+        icon: Icons.video_file_outlined,
+        accent: context.gold,
+        title: '打开媒体',
+        value: '本地视频 / 播放直链',
+        onTap: () => context.push('/player/open'),
+      ),
+    ];
+
+    final libraryTiles = [
+      _ShortcutTile(
+        icon: state.accountSession.isSignedIn
+            ? Icons.account_circle_rounded
+            : Icons.login_rounded,
+        accent: scheme.primary,
+        title: '账号管理',
+        value: state.accountSession.isSignedIn ? '已登录' : '登录 / 注册',
+        onTap: () => context.push('/profile/account'),
+      ),
+      _ShortcutTile(
+        icon: Icons.bookmark_rounded,
+        accent: context.sakura,
+        title: '追番列表',
+        value: '${state.following.length}',
+        onTap: () => context.push('/profile/following'),
+      ),
+      _ShortcutTile(
+        icon: Icons.favorite_rounded,
+        accent: context.sakura,
+        title: '全部收藏',
+        value: '${state.favorites.length}',
+        onTap: () => context.push('/profile/favorites'),
+      ),
+      _ShortcutTile(
+        icon: Icons.history_rounded,
+        accent: AppColors.cyan,
+        title: '观看记录',
+        value: '${state.history.length}',
+        onTap: () => _scrollToHistory(context),
+      ),
+      _ShortcutTile(
+        icon: Icons.download_done_rounded,
+        accent: AppColors.success,
+        title: '下载管理',
+        value: '${state.offlineTasks.length}',
+        onTap: () => context.push('/profile/offline'),
+      ),
+    ];
+
+    final preferenceTiles = [
+      _ShortcutTile(
+        icon: Icons.palette_outlined,
+        accent: scheme.primary,
+        title: '外观与主题',
+        value: themeSummary,
+        onTap: () => context.push('/profile/appearance'),
+      ),
+      _ShortcutTile(
+        icon: Icons.play_circle_outline_rounded,
+        accent: scheme.primary,
+        title: '播放设置',
+        value: '偏好',
+        onTap: () => context.push('/settings/playback'),
+      ),
+      _ShortcutTile(
+        icon: Icons.subtitles_outlined,
+        accent: AppColors.violet,
+        title: '弹幕设置',
+        value: '过滤',
+        onTap: () => context.push('/profile/danmaku'),
+      ),
+      _ShortcutTile(
+        icon: Icons.settings_outlined,
+        accent: AppColors.cyan,
+        title: '系统设置',
+        value: '在线服务 / 弹幕来源 / 全部设置',
+        onTap: () => context.push('/settings'),
+      ),
+      _ShortcutTile(
+        icon: Icons.system_update_outlined,
+        accent: context.gold,
+        title: '版本信息',
+        value: '应用更新',
+        onTap: () => context.push('/profile/version'),
+      ),
+    ];
+
+    if (compact) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ShortcutGroupCard(
+            title: '片源与媒体库',
+            icon: Icons.auto_awesome_rounded,
+            tiles: mediaSourceTiles,
+            compact: true,
+          ),
+          const SizedBox(height: 12),
+          _ShortcutGroupCard(
+            title: '我的内容',
+            icon: Icons.collections_bookmark_outlined,
+            tiles: libraryTiles,
+            compact: true,
+          ),
+          const SizedBox(height: 12),
+          _ShortcutGroupCard(
+            title: '偏好与系统',
+            icon: Icons.tune_rounded,
+            tiles: preferenceTiles,
+            compact: true,
+          ),
+        ],
+      );
+    }
+
+    Widget desktopGroup(String label, List<_ShortcutTile> tiles) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 2, bottom: 8),
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: scheme.onSurfaceVariant,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+              ),
+            ),
+          ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = (constraints.maxWidth / 195).floor().clamp(3, 5);
+              return GridView.count(
+                crossAxisCount: columns,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 3.15,
+                children: tiles,
+              );
+            },
+          ),
+        ],
+      );
+    }
+
+    return AppPanel(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          desktopGroup('片源与媒体库', mediaSourceTiles),
+          const SizedBox(height: 12),
+          desktopGroup('我的内容', libraryTiles),
+          const SizedBox(height: 12),
+          desktopGroup('偏好与系统', preferenceTiles),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShortcutGroupCard extends StatelessWidget {
+  const _ShortcutGroupCard({
+    required this.title,
+    required this.icon,
+    required this.tiles,
+    required this.compact,
+  });
+
+  final String title;
+  final IconData icon;
+  final List<_ShortcutTile> tiles;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return AppPanel(
+      padding: EdgeInsets.all(compact ? 14 : 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SectionTitle(title: title, icon: icon),
+          SizedBox(height: compact ? 10 : 14),
+          if (compact)
+            Column(
+              children: [
+                for (var i = 0; i < tiles.length; i++) ...[
+                  tiles[i],
+                  if (i != tiles.length - 1)
+                    Divider(
+                      height: 1,
+                      indent: 52,
+                      color: scheme.outlineVariant.withValues(alpha: 0.5),
+                    ),
+                ],
+              ],
+            )
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = (constraints.maxWidth / 250).floor().clamp(
+                  2,
+                  4,
+                );
+                return GridView.count(
+                  crossAxisCount: columns,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  childAspectRatio: 3.1,
+                  children: tiles,
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ShortcutTile extends StatelessWidget {
+  const _ShortcutTile({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.onTap,
+    this.accent,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final VoidCallback onTap;
+  final Color? accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final compact = MediaQuery.sizeOf(context).width < 760;
+    final scheme = Theme.of(context).colorScheme;
+    final tint = accent ?? scheme.primary;
+    final content = Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 4 : 12,
+        vertical: compact ? 11 : 10,
+      ),
+      child: Row(
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: tint.withValues(alpha: context.isDarkMode ? 0.18 : 0.12),
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              border: Border.all(
+                color: tint.withValues(alpha: context.isDarkMode ? 0.32 : 0.22),
+              ),
+            ),
+            child: SizedBox.square(
+              dimension: compact ? 38 : 36,
+              child: Icon(icon, color: tint, size: 20),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Icon(
+            Icons.chevron_right_rounded,
+            color: scheme.onSurfaceVariant.withValues(alpha: 0.65),
+            size: 20,
+          ),
+        ],
+      ),
+    );
+    if (compact) {
+      return Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(onTap: onTap, child: content),
+      );
+    }
+    return Material(
+      color: scheme.surfaceContainerHigh.withValues(
+        alpha: context.isDarkMode ? 0.58 : 0.72,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        side: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.45)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(onTap: onTap, child: content),
+    );
+  }
+}
+
+class _HistoryStrip extends StatefulWidget {
+  const _HistoryStrip({required this.entries});
+
+  final List<LibraryEntry> entries;
+
+  @override
+  State<_HistoryStrip> createState() => _HistoryStripState();
+}
+
+class _HistoryStripState extends State<_HistoryStrip> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.entries;
+    final visibleEntries = _expanded ? entries : entries.take(6).toList();
+    return AppPanel(
+      key: AppChrome.profileHistorySectionKey,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SectionTitle(
+            title: '历史记录',
+            action: entries.length <= 6
+                ? null
+                : TextButton(
+                    onPressed: () => setState(() => _expanded = !_expanded),
+                    child: Text(_expanded ? '收起历史' : '全部历史 ›'),
+                  ),
+          ),
+          const SizedBox(height: 14),
+          if (entries.isEmpty)
+            _InlineEmpty('暂无观看历史')
+          else if (_expanded)
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = (constraints.maxWidth / 214).floor().clamp(
+                  2,
+                  6,
+                );
+                return GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: visibleEntries.length,
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    mainAxisSpacing: 12,
+                    crossAxisSpacing: 12,
+                    childAspectRatio: 1.92,
+                  ),
+                  itemBuilder: (context, index) =>
+                      _HistoryCard(entry: visibleEntries[index]),
+                );
+              },
+            )
+          else
+            SizedBox(
+              height: 98,
+              child: HorizontalScrollStrip(
+                builder: (context, controller) => ListView.separated(
+                  controller: controller,
+                  scrollDirection: Axis.horizontal,
+                  itemCount: visibleEntries.length,
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(width: 12),
+                  itemBuilder: (context, index) =>
+                      _HistoryCard(entry: visibleEntries[index]),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HistoryCard extends StatelessWidget {
+  const _HistoryCard({required this.entry});
+
+  final LibraryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
+    return SizedBox(
+      width: 190,
+      child: InkWell(
+        onTap: () => _playEntry(context, entry),
+        borderRadius: BorderRadius.circular(8),
+        child: AppPanel(
+          padding: EdgeInsets.zero,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                PosterArt(
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
+                  title: entry.title,
+                ),
+                const DecoratedBox(
+                  decoration: BoxDecoration(gradient: AppOverlays.mediaCaption),
+                ),
+                Positioned(
+                  left: 10,
+                  right: 10,
+                  bottom: 10,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.subject.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: AppColors.theaterInk,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        entry.episode?.displayTitle ??
+                            (entry.note.isEmpty ? '详情页' : entry.note),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.theaterMuted,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      if (progress != null) ...[
+                        const SizedBox(height: 5),
+                        LinearProgressIndicator(
+                          value: progress,
+                          minHeight: 3,
+                          borderRadius: BorderRadius.circular(3),
+                          backgroundColor: AppColors.theaterFaint,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DownloadStrip extends StatelessWidget {
+  const _DownloadStrip({required this.entries});
+
+  final List<MediaDownloadTask> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppPanel(
+      child: Column(
+        children: [
+          SectionTitle(
+            title: '下载管理',
+            action: TextButton(
+              onPressed: () => context.push('/profile/offline'),
+              child: Text('全部下载 (${entries.length}) ›'),
+            ),
+          ),
+          const SizedBox(height: 14),
+          if (entries.isEmpty)
+            _InlineEmpty('还没有下载任务')
+          else
+            for (final entry in entries.take(2)) _DownloadRow(entry: entry),
+        ],
+      ),
+    );
+  }
+}
+
+class _DownloadRow extends ConsumerWidget {
+  const _DownloadRow({required this.entry});
+
+  final MediaDownloadTask entry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = entry.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : entry.progress;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 82,
+            height: 48,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: PosterArt(
+                coverUrl: entry.subject.bannerUrl,
+                fallbackCoverUrl: entry.subject.coverUrl,
+                title: entry.title,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  entry.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: context.ink,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${entry.statusLabel} · ${_downloadSizeText(entry)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: context.inkMuted,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 4,
+                  borderRadius: BorderRadius.circular(4),
+                  backgroundColor: Theme.of(context).colorScheme.outlineVariant,
+                  color: AppColors.primary,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: entry.isPlayable ? '播放本地文件' : '查看下载任务',
+            onPressed: entry.isPlayable
+                ? () => _playDownloadTask(context, ref, entry)
+                : () => context.push('/profile/offline'),
+            icon: Icon(
+              entry.isPlayable
+                  ? Icons.play_arrow_rounded
+                  : Icons.chevron_right_rounded,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class DownloadManagementPage extends ConsumerWidget {
+  const DownloadManagementPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final tasks = state.offlineTasks;
+        final compact = MediaQuery.sizeOf(context).width < 760;
+        return AppChrome(
+          active: ChromeDestination.download,
+          showSearch: false,
+          title: '下载管理',
+          onBack: () => safeNavigateBack(context, fallbackRoute: '/profile'),
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? 14 : 24,
+              compact ? 0 : 6,
+              compact ? 14 : 24,
+              120,
+            ),
+            child: tasks.isEmpty
+                ? const EmptyState(
+                    icon: Icons.inbox_outlined,
+                    compact: true,
+                    title: '还没有下载任务',
+                    message: '在详情页点击下载后，任务会显示在这里。',
+                  )
+                : ListView.separated(
+                    itemCount: tasks.length + 1,
+                    separatorBuilder: (context, index) =>
+                        const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        final controller = ref.read(
+                          animeControllerProvider.notifier,
+                        );
+                        return Column(
+                          children: [
+                            AppPanel(
+                              child: SectionTitle(
+                                title: '全部下载',
+                                subtitle: '${tasks.length} 个下载任务，可在这里暂停、继续或删除',
+                                icon: Icons.download_for_offline_outlined,
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            FutureBuilder<DownloadStorageSnapshot>(
+                              future: controller.isDownloadDomainReady
+                                  ? controller.downloadStorageSnapshot()
+                                  : null,
+                              builder: (context, snapshot) {
+                                final usage = snapshot.data;
+                                if (usage == null) {
+                                  return const SizedBox.shrink();
+                                }
+                                return _DownloadStoragePanel(
+                                  usage: usage,
+                                  onCleanup: usage.orphanedPaths.isEmpty
+                                      ? null
+                                      : () => _confirmCleanupStorage(
+                                          context,
+                                          controller,
+                                          usage.orphanedPaths,
+                                        ),
+                                );
+                              },
+                            ),
+                          ],
+                        );
+                      }
+                      return _DownloadTaskCard(task: tasks[index - 1]);
+                    },
+                  ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _DownloadStoragePanel extends StatelessWidget {
+  const _DownloadStoragePanel({required this.usage, this.onCleanup});
+
+  final DownloadStorageSnapshot usage;
+  final VoidCallback? onCleanup;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppPanel(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      child: Row(
+        children: [
+          Icon(Icons.storage_outlined, color: context.inkMuted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '当前账号 ${_downloadBytesLabel(usage.accountBytes)} · 本机总占用 ${_downloadBytesLabel(usage.totalBytes)}'
+              '${usage.orphanedPaths.isEmpty ? '' : ' · 可清理 ${usage.orphanedPaths.length} 个残留文件'}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: context.inkMuted,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (onCleanup != null)
+            TextButton(onPressed: onCleanup, child: const Text('清理残留文件')),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> _confirmCleanupStorage(
+  BuildContext context,
+  AnimeController controller,
+  List<String> paths,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('清理残留的下载文件？'),
+      content: Text('将删除 ${paths.length} 个不属于任何下载任务的视频文件，其中可能包含旧版本留下的文件。'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('保留'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认清理'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed == true && context.mounted) {
+    await controller.deleteConfirmedDownloadStorageEntries(paths);
+  }
+}
+
+class _DownloadTaskCard extends ConsumerWidget {
+  const _DownloadTaskCard({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final progress = task.status == MediaDownloadTaskStatus.completed
+        ? 1.0
+        : task.progress;
+    final statusColor = switch (task.status) {
+      MediaDownloadTaskStatus.completed => AppStatusColors.available,
+      MediaDownloadTaskStatus.failed => AppStatusColors.failed,
+      MediaDownloadTaskStatus.corrupt => AppStatusColors.failed,
+      MediaDownloadTaskStatus.missing => AppStatusColors.failed,
+      MediaDownloadTaskStatus.cancelled => context.inkMuted,
+      MediaDownloadTaskStatus.paused => AppStatusColors.probing,
+      _ => AppColors.primary,
+    };
+    return AppPanel(
+      padding: const EdgeInsets.all(14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(7),
+            child: SizedBox(
+              width: 116,
+              height: 68,
+              child: PosterArt(
+                coverUrl: task.subject.bannerUrl,
+                fallbackCoverUrl: task.subject.coverUrl,
+                title: task.title,
+              ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        task.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: context.ink,
+                              fontWeight: FontWeight.w900,
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      task.statusLabel,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: statusColor,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  [
+                    if (task.providerName?.trim().isNotEmpty == true)
+                      task.providerName!,
+                    _downloadSizeText(task),
+                    if (task.message.trim().isNotEmpty) task.message.trim(),
+                  ].join(' · '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: context.inkMuted,
+                    height: 1.35,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 5,
+                  borderRadius: BorderRadius.circular(4),
+                  backgroundColor: Theme.of(context).colorScheme.outlineVariant,
+                  color: statusColor,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          _DownloadTaskActions(task: task),
+        ],
+      ),
+    );
+  }
+}
+
+class _DownloadTaskActions extends ConsumerWidget {
+  const _DownloadTaskActions({required this.task});
+
+  final MediaDownloadTask task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = ref.read(animeControllerProvider.notifier);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (task.isPlayable)
+          IconButton(
+            tooltip: '播放本地文件',
+            onPressed: () => _playDownloadTask(context, ref, task),
+            icon: const Icon(Icons.play_arrow_rounded),
+          ),
+        if (task.isActive)
+          IconButton(
+            tooltip: '暂停',
+            onPressed: () => controller.pauseDownload(task.id),
+            icon: const Icon(Icons.pause_rounded),
+          ),
+        if (task.status == MediaDownloadTaskStatus.paused ||
+            task.status == MediaDownloadTaskStatus.failed ||
+            task.status == MediaDownloadTaskStatus.cancelled ||
+            task.status == MediaDownloadTaskStatus.missing ||
+            task.status == MediaDownloadTaskStatus.corrupt)
+          IconButton(
+            tooltip: task.downloadedBytes > 0 ? '继续下载' : '重新下载',
+            onPressed: () => controller.resumeDownload(task.id),
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        if (task.isActive || task.status == MediaDownloadTaskStatus.paused)
+          IconButton(
+            tooltip: '取消下载',
+            onPressed: () => controller.cancelDownload(task.id),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        IconButton(
+          tooltip: task.isPlayable ? '删除下载文件' : '移除任务',
+          onPressed: () async {
+            final confirmed = await _confirmRemoveDownload(context, task);
+            if (!confirmed) return;
+            await controller.removeDownload(task.id);
+          },
+          icon: const Icon(Icons.delete_outline_rounded),
+        ),
+      ],
+    );
+  }
+}
+
+class _ProfileRightRail extends StatelessWidget {
+  const _ProfileRightRail({required this.state});
+
+  final AnimeState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final finished = state.history.where(_isFinishedEntry).length;
+    final latest = state.history.isEmpty ? null : state.history.first;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
+      children: [
+        AppPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle(title: '观看概览'),
+              const SizedBox(height: 14),
+              _HistoryStatRow(label: '观看记录', value: '${state.history.length}'),
+              _HistoryStatRow(label: '已看完', value: '$finished'),
+              _HistoryStatRow(
+                label: '最近观看',
+                value: latest == null ? '暂无' : latest.subject.title,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        AppPanel(
+          child: Column(
+            children: [
+              const SectionTitle(title: '快捷操作'),
+              const SizedBox(height: 12),
+              _RailAction(
+                icon: Icons.schedule,
+                title: '观看记录',
+                value: '${state.history.length}',
+                onTap: () => _scrollToHistory(context),
+              ),
+              _RailAction(
+                icon: Icons.bookmark_border,
+                title: '追番列表',
+                value: '${state.following.length}',
+                onTap: () => context.push('/profile/following'),
+              ),
+              _RailAction(
+                icon: Icons.favorite_border,
+                title: '收藏列表',
+                value: '${state.favorites.length}',
+                onTap: () => context.push('/profile/favorites'),
+              ),
+              _RailAction(
+                icon: Icons.feedback_outlined,
+                title: '反馈记录',
+                value: '${state.feedbacks.length}',
+                onTap: () => context.push('/profile/feedback'),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 14),
+        AppPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle(title: '账号与数据'),
+              const SizedBox(height: 12),
+              _DeviceRow(
+                icon: Icons.devices_rounded,
+                title: '当前设备',
+                status: state.accountSession.isSignedIn
+                    ? _profileSyncStatus(state.syncStatus)
+                    : '游客空间',
+              ),
+              const SizedBox(height: 8),
+              Text(
+                state.accountSession.isSignedIn
+                    ? '收藏、追番、历史和播放进度会先保存在这台设备，再同步到你的账号；下载的视频和自建来源的账号信息只留在本机。'
+                    : '登录或创建云端账号后，可在安卓和 Windows 使用同一邮箱；本机资料会按账号隔离。',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: context.inkMuted),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RailAction extends StatelessWidget {
+  const _RailAction({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Icon(icon, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: context.ink,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            Text(
+              value,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: context.inkMuted,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceRow extends StatelessWidget {
+  const _DeviceRow({
+    required this.icon,
+    required this.title,
+    required this.status,
+  });
+
+  final IconData icon;
+  final String title;
+  final String status;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        children: [
+          Icon(icon, color: context.inkMuted),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: context.ink,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          Text(
+            status,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: status == '在线' || status == '已登录'
+                  ? AppColors.success
+                  : context.inkMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InlineEmpty extends StatelessWidget {
+  const _InlineEmpty(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 72,
+      child: Center(
+        child: Text(
+          text,
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
+        ),
+      ),
+    );
+  }
+}
+
+class LibraryPage extends ConsumerWidget {
+  const LibraryPage({
+    super.key,
+    required this.title,
+    required this.emptyTitle,
+    required this.emptyMessage,
+    required this.entriesOf,
+    this.active = ChromeDestination.favorite,
+    this.clearKey,
+    this.playEntries = false,
+  });
+
+  final String title;
+  final String emptyTitle;
+  final String emptyMessage;
+  final List<LibraryEntry> Function(AnimeState state) entriesOf;
+  final ChromeDestination active;
+  final String? clearKey;
+  final bool playEntries;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final entries = entriesOf(state);
+        return AppChrome(
+          title: title,
+          active: active,
+          showSearch: false,
+          onBack: () => safeNavigateBack(context),
+          trailing: clearKey == null || entries.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: '清空',
+                  onPressed: () => ref
+                      .read(animeControllerProvider.notifier)
+                      .clearLibrary(clearKey!),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+          child: entries.isEmpty
+              ? EmptyState(
+                  icon: Icons.inbox_outlined,
+                  compact: true,
+                  title: emptyTitle,
+                  message: emptyMessage,
+                )
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    final columns = (constraints.maxWidth / 360).floor().clamp(
+                      1,
+                      4,
+                    );
+                    final extra =
+                        (MediaQuery.textScalerOf(context).scale(1) - 1).clamp(
+                          0.0,
+                          2.0,
+                        );
+                    return CustomScrollView(
+                      slivers: [
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
+                          sliver: SliverToBoxAdapter(
+                            child: Text(
+                              '${entries.length} 部作品',
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: context.inkMuted),
+                            ),
+                          ),
+                        ),
+                        SliverPadding(
+                          padding: EdgeInsets.fromLTRB(
+                            columns == 1 ? 14 : 24,
+                            0,
+                            columns == 1 ? 14 : 24,
+                            24,
+                          ),
+                          sliver: SliverGrid(
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: columns,
+                                  mainAxisExtent: 136 + extra * 60,
+                                  mainAxisSpacing: 14,
+                                  crossAxisSpacing: 14,
+                                ),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) => _LibraryTile(
+                                entry: entries[index],
+                                onTap: playEntries
+                                    ? () => _playEntry(context, entries[index])
+                                    : () => _openDetail(
+                                        context,
+                                        entries[index].subject,
+                                      ),
+                                trailingIcon: playEntries
+                                    ? Icons.play_arrow_rounded
+                                    : Icons.chevron_right_rounded,
+                              ),
+                              childCount: entries.length,
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+        );
+      },
+    );
+  }
+}
+
+class HistoryPage extends ConsumerWidget {
+  const HistoryPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final entries = state.history;
+        return AppChrome(
+          active: ChromeDestination.history,
+          showSearch: false,
+          title: '历史记录',
+          onBack: () => safeNavigateBack(context),
+          trailing: entries.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: '清空历史',
+                  onPressed: () => ref
+                      .read(animeControllerProvider.notifier)
+                      .clearLibrary('history'),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+          rightRail: _HistoryRightRail(entries: entries),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 6, 0, 120),
+            child: entries.isEmpty
+                ? const EmptyState(
+                    icon: Icons.inbox_outlined,
+                    compact: true,
+                    title: '还没有观看记录',
+                    message: '从详情页播放任意一集后，这里会记录番剧和集数。',
+                  )
+                : _HistoryList(entries: entries),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HistoryList extends StatelessWidget {
+  const _HistoryList({required this.entries});
+
+  final List<LibraryEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      itemCount: entries.length + 1,
+      separatorBuilder: (context, index) => const SizedBox(height: 10),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return AppPanel(
+            child: SectionTitle(
+              title: '全部历史',
+              subtitle: '${entries.length} 条观看记录，点击任意记录继续播放',
+              icon: Icons.history_rounded,
+            ),
+          );
+        }
+        final entry = entries[index - 1];
+        return _HistoryListTile(entry: entry);
+      },
+    );
+  }
+}
+
+class _HistoryListTile extends StatelessWidget {
+  const _HistoryListTile({required this.entry});
+
+  final LibraryEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _entryProgress(entry);
+    return InkWell(
+      onTap: () => _playEntry(context, entry),
+      borderRadius: BorderRadius.circular(8),
+      child: AppPanel(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(7),
+              child: SizedBox(
+                width: 116,
+                height: 68,
+                child: PosterArt(
+                  coverUrl: entry.subject.bannerUrl,
+                  fallbackCoverUrl: entry.subject.coverUrl,
+                  title: entry.title,
+                ),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    entry.subject.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: context.ink,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    [
+                      entry.episode?.displayTitle ?? '详情页',
+                      if (entry.note.isNotEmpty) entry.note,
+                      _formatDateTime(entry.updatedAt),
+                    ].join(' · '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: context.inkMuted,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (progress != null) ...[
+                    const SizedBox(height: 10),
+                    LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(4),
+                      backgroundColor: Theme.of(
+                        context,
+                      ).colorScheme.outlineVariant,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Icon(
+              Icons.play_arrow_rounded,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryRightRail extends StatelessWidget {
+  const _HistoryRightRail({required this.entries});
+
+  final List<LibraryEntry> entries;
+
+  @override
+  Widget build(BuildContext context) {
+    final finished = entries.where(_isFinishedEntry).length;
+    final latest = entries.isEmpty ? null : entries.first;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
+      children: [
+        AppPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SectionTitle(title: '历史概览'),
+              const SizedBox(height: 14),
+              _HistoryStatRow(label: '总记录', value: '${entries.length}'),
+              _HistoryStatRow(label: '已看完', value: '$finished'),
+              _HistoryStatRow(
+                label: '最近观看',
+                value: latest == null ? '暂无' : latest.subject.title,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _HistoryStatRow extends StatelessWidget {
+  const _HistoryStatRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.right,
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: context.ink,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+typedef ResetRecommendationPreferencesCallback = Future<void> Function();
+
+class HomeSettingsPage extends ConsumerWidget {
+  const HomeSettingsPage({super.key, this.onResetRecommendationPreferences});
+
+  final ResetRecommendationPreferencesCallback?
+  onResetRecommendationPreferences;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) => _ProfileScaffold(
+        title: '主页设置',
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+          children: [
+            SettingsCard(
+              children: [
+                SettingsSwitchRow(
+                  title: '个性化推荐',
+                  subtitle: '结合观看、追番和收藏习惯调整首页与分类排序',
+                  value: state.homePreferences.personalizedRecommendations,
+                  onChanged: (value) => ref
+                      .read(animeControllerProvider.notifier)
+                      .updateHomePreferences(
+                        state.homePreferences.copyWith(
+                          personalizedRecommendations: value,
+                        ),
+                      ),
+                ),
+                SettingsActionRow(
+                  key: const ValueKey('reset_recommendation_preferences'),
+                  icon: Icons.restart_alt_rounded,
+                  title: '重置推荐偏好',
+                  subtitle: onResetRecommendationPreferences == null
+                      ? '暂不可用'
+                      : '清除已学习的兴趣与展示记录，不会删除观看历史、收藏或追番',
+                  onTap: onResetRecommendationPreferences == null
+                      ? null
+                      : () => _confirmResetRecommendationPreferences(context),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SettingsCard(
+              children: [
+                for (final tab in AnimeHomeTab.values)
+                  _RadioRow<AnimeHomeTab>(
+                    title: tab.label,
+                    value: tab,
+                    groupValue: state.homePreferences.defaultTab,
+                    onChanged: (value) => ref
+                        .read(animeControllerProvider.notifier)
+                        .updateHomePreferences(
+                          state.homePreferences.copyWith(defaultTab: value),
+                        ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmResetRecommendationPreferences(
+    BuildContext context,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重置推荐偏好？'),
+        content: const Text('将清除推荐系统已学习的兴趣和展示记录，不会删除观看历史、收藏或追番。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const ValueKey('confirm_reset_recommendation_preferences'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认重置'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    await onResetRecommendationPreferences!();
+    if (context.mounted) _showToast(context, '推荐偏好已重置');
+  }
+}
+
+class AppearanceSettingsPage extends ConsumerWidget {
+  const AppearanceSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final settings = state.appearance;
+        final controller = ref.read(animeControllerProvider.notifier);
+        final scheme = Theme.of(context).colorScheme;
+        return AppChrome(
+          active: ChromeDestination.settings,
+          title: '外观与主题',
+          showSearch: false,
+          onBack: () => safeNavigateBack(context, fallbackRoute: '/settings'),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 720),
+              child: ListView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
+                children: [
+                  ZelunaAccentColorPicker(
+                    settings: settings,
+                    onChanged: controller.updateAppearance,
+                  ),
+                  const SizedBox(height: 22),
+                  Divider(
+                    height: 1,
+                    color: scheme.outlineVariant.withValues(alpha: 0.7),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    '明暗与画布',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SettingsCard(
+                    children: [
+                      Builder(
+                        builder: (rowContext) => SettingsSwitchRow(
+                          title: '跟随系统',
+                          subtitle: '自动跟随系统的深色或浅色模式',
+                          value: settings.followSystem,
+                          onChanged: (value) {
+                            final next = settings.copyWith(followSystem: value);
+                            final currentDark =
+                                Theme.of(rowContext).brightness ==
+                                Brightness.dark;
+                            final nextDark = value
+                                ? MediaQuery.platformBrightnessOf(rowContext) ==
+                                      Brightness.dark
+                                : next.darkMode;
+                            if (nextDark == currentDark) {
+                              controller.updateAppearance(next);
+                              return;
+                            }
+                            ThemeRippleHost.runIfAvailable(
+                              rowContext,
+                              origin: ThemeRippleHost.switchCenterOf(
+                                rowContext,
+                              ),
+                              accentColor: ThemeRippleHost.accentColorFor(
+                                next,
+                                dark: nextDark,
+                              ),
+                              nextIsDark: nextDark,
+                              applyChange: () =>
+                                  controller.updateAppearance(next),
+                            );
+                          },
+                        ),
+                      ),
+                      Builder(
+                        builder: (rowContext) => SettingsSwitchRow(
+                          title: '深色模式',
+                          subtitle: '深色界面更适合长时间追番观影',
+                          value: settings.darkMode,
+                          onChanged: (value) {
+                            final next = settings.copyWith(
+                              followSystem: false,
+                              darkMode: value,
+                            );
+                            final currentDark =
+                                Theme.of(rowContext).brightness ==
+                                Brightness.dark;
+                            if (value == currentDark) {
+                              controller.updateAppearance(next);
+                              return;
+                            }
+                            ThemeRippleHost.runIfAvailable(
+                              rowContext,
+                              origin: ThemeRippleHost.switchCenterOf(
+                                rowContext,
+                              ),
+                              accentColor: ThemeRippleHost.accentColorFor(
+                                next,
+                                dark: value,
+                              ),
+                              nextIsDark: value,
+                              applyChange: () =>
+                                  controller.updateAppearance(next),
+                            );
+                          },
+                        ),
+                      ),
+                      Builder(
+                        builder: (rowContext) => SettingsSwitchRow(
+                          title: '纯黑 OLED 深色',
+                          subtitle: '深色画布使用纯黑 #000000，更省电、对比更纯粹',
+                          value: settings.pureBlackOled,
+                          onChanged: (value) {
+                            final next = settings.copyWith(
+                              pureBlackOled: value,
+                            );
+                            final isDark =
+                                Theme.of(rowContext).brightness ==
+                                Brightness.dark;
+                            if (!isDark) {
+                              controller.updateAppearance(next);
+                              return;
+                            }
+                            ThemeRippleHost.runIfAvailable(
+                              rowContext,
+                              origin: ThemeRippleHost.switchCenterOf(
+                                rowContext,
+                              ),
+                              accentColor: ThemeRippleHost.accentColorFor(
+                                next,
+                                dark: true,
+                              ),
+                              nextIsDark: true,
+                              applyChange: () =>
+                                  controller.updateAppearance(next),
+                            );
+                          },
+                        ),
+                      ),
+                      if (!settings.isMonochrome)
+                        Builder(
+                          builder: (rowContext) => SettingsSwitchRow(
+                            title: '表面微染主题色',
+                            subtitle: '给页面卡片轻微混入当前强调色，关闭则保持纯黑白中性底色',
+                            value: settings.tintedSurfaces,
+                            onChanged: (value) {
+                              final next = settings.copyWith(
+                                tintedSurfaces: value,
+                              );
+                              final isDark =
+                                  Theme.of(rowContext).brightness ==
+                                  Brightness.dark;
+                              ThemeRippleHost.runIfAvailable(
+                                rowContext,
+                                origin: ThemeRippleHost.switchCenterOf(
+                                  rowContext,
+                                ),
+                                accentColor: ThemeRippleHost.accentColorFor(
+                                  next,
+                                  dark: isDark,
+                                ),
+                                nextIsDark: isDark,
+                                applyChange: () =>
+                                    controller.updateAppearance(next),
+                              );
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    '布局与动效',
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SettingsCard(
+                    children: [
+                      SettingsSwitchRow(
+                        title: '紧凑列表',
+                        subtitle: '缩小行距与卡片间距，一屏显示更多内容',
+                        value: settings.compactMode,
+                        onChanged: (value) => controller.updateAppearance(
+                          settings.copyWith(compactMode: value),
+                        ),
+                      ),
+                      SettingsSwitchRow(
+                        title: '减少动效',
+                        subtitle: '降低页面切换与缩放动画强度',
+                        value: settings.reduceMotion,
+                        onChanged: (value) => controller.updateAppearance(
+                          settings.copyWith(reduceMotion: value),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class DanmakuSettingsPage extends ConsumerWidget {
+  const DanmakuSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final settings = state.danmaku;
+        final controller = ref.read(animeControllerProvider.notifier);
+        return _ProfileScaffold(
+          title: '弹幕设置',
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+            children: [
+              DanmakuDisplayControls(
+                settings: settings,
+                onChanged: controller.updateDanmaku,
+              ),
+              const SizedBox(height: 12),
+              _KeywordEditor(settings: settings),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class MiscSettingsPage extends ConsumerWidget {
+  const MiscSettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final settings = state.misc;
+        final controller = ref.read(animeControllerProvider.notifier);
+        return _ProfileScaffold(
+          title: '其他设置',
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+            children: [
+              SettingsCard(
+                children: [
+                  SettingsSwitchRow(
+                    title: '播放时保持屏幕常亮',
+                    subtitle: '播放期间屏幕不会自动息屏',
+                    value: settings.keepScreenOn,
+                    onChanged: (value) => controller.updateMisc(
+                      settings.copyWith(keepScreenOn: value),
+                    ),
+                  ),
+                  const SettingsReadonlyRow(
+                    title: '视频下载',
+                    value: '支持常见格式的视频下载',
+                  ),
+                  SettingsActionRow(
+                    title: '应用更新',
+                    subtitle: '检查版本、下载安装包与更新设置',
+                    icon: Icons.system_update,
+                    onTap: () => context.push('/profile/version'),
+                  ),
+                  const SettingsReadonlyRow(title: '崩溃报告', value: '当前不上传隐私日志'),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class VersionInfoPage extends StatelessWidget {
+  const VersionInfoPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return _ProfileScaffold(
+      title: '版本信息',
+      child: FutureBuilder<PackageInfo>(
+        future: PackageInfo.fromPlatform(),
+        builder: (context, snapshot) {
+          final info = snapshot.data;
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+            children: [
+              SettingsCard(
+                children: [
+                  SettingsReadonlyRow(
+                    title: '应用',
+                    value: info?.appName ?? 'Zeluna',
+                  ),
+                  SettingsReadonlyRow(
+                    title: '版本',
+                    value: info == null ? '读取中…' : 'v${info.version}',
+                  ),
+                  const SettingsReadonlyRow(
+                    title: '内容资料',
+                    value: '番剧 / 剧集 / 电影',
+                  ),
+                  const SettingsReadonlyRow(
+                    title: '播放能力',
+                    value: '在线播放 / 网络视频 / 本地文件',
+                  ),
+                  const SettingsReadonlyRow(
+                    title: '播放器',
+                    value: '进度条、倍速、弹幕与全屏控制',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const AppUpdateCard(),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class FeedbackPage extends ConsumerStatefulWidget {
+  const FeedbackPage({super.key, this.subject});
+
+  final AnimeSubject? subject;
+
+  @override
+  ConsumerState<FeedbackPage> createState() => _FeedbackPageState();
+}
+
+class _FeedbackPageState extends ConsumerState<FeedbackPage> {
+  final _title = TextEditingController();
+  final _content = TextEditingController();
+
+  @override
+  void dispose() {
+    _title.dispose();
+    _content.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AsyncAnimeGate(
+      builder: (context, state) => _ProfileScaffold(
+        title: '问题反馈',
+        action: state.feedbacks.isEmpty
+            ? null
+            : IconButton(
+                tooltip: '清空',
+                onPressed: () => ref
+                    .read(animeControllerProvider.notifier)
+                    .clearLibrary('feedbacks'),
+                icon: const Icon(Icons.delete_outline),
+              ),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(8, 12, 8, 120),
+          children: [
+            SettingsCard(
+              children: [
+                SizedBox(
+                  height: 74,
+                  child: TextField(
+                    controller: _title,
+                    decoration: const InputDecoration(labelText: '标题'),
+                  ),
+                ),
+                SizedBox(
+                  height: 112,
+                  child: TextField(
+                    controller: _content,
+                    maxLines: 3,
+                    decoration: const InputDecoration(labelText: '反馈内容'),
+                  ),
+                ),
+                SettingsActionRow(
+                  icon: Icons.archive_outlined,
+                  title: '保存到本地反馈箱',
+                  subtitle: widget.subject == null
+                      ? '不会联网发送'
+                      : '关联：${widget.subject!.title}',
+                  onTap: _submit,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (state.feedbacks.isEmpty)
+              const EmptyState(
+                icon: Icons.inbox_outlined,
+                compact: true,
+                title: '还没有反馈记录',
+                message: '提交后会保存在本地，方便你后续整理问题。',
+              )
+            else
+              for (final item in state.feedbacks) _FeedbackTile(item: item),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _submit() {
+    if (_content.text.trim().isEmpty) {
+      _showToast(context, '先写一点反馈内容');
+      return;
+    }
+    ref
+        .read(animeControllerProvider.notifier)
+        .submitFeedback(
+          title: _title.text,
+          content: _content.text,
+          subject: widget.subject,
+        );
+    _title.clear();
+    _content.clear();
+    _showToast(context, '已保存到本地反馈箱');
+  }
+}
+
+class _ProfileScaffold extends StatelessWidget {
+  const _ProfileScaffold({
+    required this.title,
+    required this.child,
+    this.action,
+  });
+
+  final String title;
+  final Widget child;
+  static const active = ChromeDestination.favorite;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) {
+    final desktop = MediaQuery.sizeOf(context).width >= 980;
+    return Scaffold(
+      body: SafeArea(
+        child: Row(
+          children: [
+            if (desktop) _ProfileMiniRail(active: active),
+            Expanded(
+              child: Stack(
+                children: [
+                  Column(
+                    children: [
+                      SizedBox(
+                        height: 48,
+                        child: Row(
+                          children: [
+                            IconButton(
+                              onPressed: () => safeNavigateBack(
+                                context,
+                                fallbackRoute: '/profile',
+                              ),
+                              icon: const Icon(Icons.arrow_back),
+                            ),
+                            Expanded(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleLarge
+                                    ?.copyWith(
+                                      color: context.ink,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                            ),
+                            ?action,
+                            const SizedBox(width: 8),
+                          ],
+                        ),
+                      ),
+                      Expanded(child: child),
+                    ],
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 28,
+                    child: Center(
+                      child: BackPill(
+                        onBack: () => safeNavigateBack(
+                          context,
+                          fallbackRoute: '/profile',
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ProfileMiniRail extends StatelessWidget {
+  const _ProfileMiniRail({required this.active});
+
+  final ChromeDestination active;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = const [
+      ChromeDestination.home,
+      ChromeDestination.anime,
+      ChromeDestination.favorite,
+      ChromeDestination.settings,
+    ];
+    return Container(
+      width: 72,
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: Border(
+          right: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 12),
+          for (final item in items)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: IconButton(
+                tooltip: item.label,
+                onPressed: () => context.go(item.route),
+                icon: Icon(
+                  item.icon,
+                  color: item == active
+                      ? Theme.of(context).colorScheme.primary
+                      : context.inkMuted,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RadioRow<T> extends StatelessWidget {
+  const _RadioRow({
+    required this.title,
+    required this.value,
+    required this.groupValue,
+    required this.onChanged,
+  });
+
+  final String title;
+  final T value;
+  final T groupValue;
+  final ValueChanged<T> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => onChanged(value),
+      child: SizedBox(
+        height: 62,
+        child: RadioGroup<T>(
+          groupValue: groupValue,
+          onChanged: (value) {
+            if (value != null) onChanged(value);
+          },
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: context.ink,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              Radio<T>(value: value),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LibraryTile extends StatelessWidget {
+  const _LibraryTile({
+    required this.entry,
+    required this.onTap,
+    required this.trailingIcon,
+  });
+
+  final LibraryEntry entry;
+  final VoidCallback onTap;
+  final IconData trailingIcon;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainer,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 70,
+                height: 106,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: _PosterThumb(subject: entry.subject),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      entry.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      entry.note.isEmpty ? entry.subject.year : entry.note,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _formatDateTime(entry.updatedAt).split(' ').first,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 4),
+              Icon(trailingIcon, color: scheme.onSurfaceVariant, size: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PosterThumb extends StatelessWidget {
+  const _PosterThumb({required this.subject});
+
+  final AnimeSubject subject;
+
+  @override
+  Widget build(BuildContext context) {
+    return PosterArt(
+      coverUrl: subject.coverUrl,
+      title: subject.title,
+      fit: BoxFit.cover,
+    );
+  }
+}
+
+class _KeywordEditor extends ConsumerStatefulWidget {
+  const _KeywordEditor({required this.settings});
+
+  final DanmakuSettings settings;
+
+  @override
+  ConsumerState<_KeywordEditor> createState() => _KeywordEditorState();
+}
+
+class _KeywordEditorState extends ConsumerState<_KeywordEditor> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: widget.settings.blockKeywords.join('，'),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SettingsCard(
+      children: [
+        SizedBox(
+          height: 78,
+          child: TextField(
+            controller: _controller,
+            decoration: const InputDecoration(labelText: '屏蔽词，用逗号分隔'),
+          ),
+        ),
+        SettingsActionRow(
+          icon: Icons.save_outlined,
+          title: '保存屏蔽词',
+          onTap: _save,
+        ),
+      ],
+    );
+  }
+
+  void _save() {
+    final keywords = _controller.text
+        .split(RegExp(r'[,，\n]'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+    ref
+        .read(animeControllerProvider.notifier)
+        .updateDanmaku(widget.settings.copyWith(blockKeywords: keywords));
+    _showToast(context, '屏蔽词已保存');
+  }
+}
+
+class _FeedbackTile extends StatelessWidget {
+  const _FeedbackTile({required this.item});
+
+  final LocalFeedback item;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.title,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: context.ink,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                item.content,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: context.inkMuted),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                [
+                  if (item.subject != null) item.subject!.title,
+                  _formatDateTime(item.createdAt),
+                ].join(' · '),
+                style: TextStyle(color: context.inkMuted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _formatDateTime(DateTime date) {
+  if (date.millisecondsSinceEpoch <= 0) return '未知时间';
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${date.year}-${two(date.month)}-${two(date.day)} ${two(date.hour)}:${two(date.minute)}';
+}
+
+Future<void> _playDownloadTask(
+  BuildContext context,
+  WidgetRef ref,
+  MediaDownloadTask task,
+) async {
+  final line = task.localPlaybackLine;
+  if (line == null) {
+    _showToast(context, '本地文件尚不可播放');
+    return;
+  }
+  final controller = ref.read(animeControllerProvider.notifier);
+  final accountContextVersion = controller.accountContextVersion;
+  final historyEntry = ref
+      .read(animeControllerProvider)
+      .value
+      ?.history
+      .where(
+        (entry) =>
+            sameSubjectIdentity(entry.subject, task.subject) &&
+            entry.episode?.id == task.episode.id,
+      )
+      .firstOrNull;
+  if (!context.mounted ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
+  context.push(
+    '/player',
+    extra: PlaySessionRequest(
+      subject: task.subject,
+      episodes: [task.episode],
+      episode: task.episode,
+      initialLine: line,
+      offlineOnly: true,
+      resumePosition: _resumePositionFor(historyEntry, task.episode),
+    ),
+  );
+}
+
+Future<bool> _confirmRemoveDownload(
+  BuildContext context,
+  MediaDownloadTask task,
+) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(task.isPlayable ? '删除本地文件？' : '移除下载任务？'),
+      content: Text(
+        task.isPlayable
+            ? '将删除“${task.title}”的本地视频文件，此操作无法撤销。'
+            : '将移除“${task.title}”并清理未完成的临时文件。',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('保留'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认删除'),
+        ),
+      ],
+    ),
+  );
+  return result ?? false;
+}
+
+String _downloadSizeText(MediaDownloadTask task) {
+  final downloaded = _downloadBytesLabel(task.downloadedBytes);
+  final percent = task.totalUnits > 0
+      ? '${(task.completedUnits / task.totalUnits * 100).round()}%'
+      : null;
+  if (task.totalBytes <= 0) {
+    return percent == null ? downloaded : '$percent · $downloaded';
+  }
+  final bytes = '$downloaded / ${_downloadBytesLabel(task.totalBytes)}';
+  if (percent != null && task.status != MediaDownloadTaskStatus.completed) {
+    return '$percent · $bytes';
+  }
+  return bytes;
+}
+
+String _downloadBytesLabel(int bytes) {
+  if (bytes <= 0) return '0 KB';
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(1)} GB';
+  }
+  if (bytes >= 1024 * 1024) {
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / 1024).toStringAsFixed(1)} KB';
+}
+
+Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
+  final ref = ProviderScope.containerOf(context, listen: false);
+  final controller = ref.read(animeControllerProvider.notifier);
+  final accountContextVersion = controller.accountContextVersion;
+  var episode = entry.episode;
+  var episodes = <AnimeEpisode>[];
+  try {
+    final detail = await controller.detail(entry.subject);
+    episodes = detail.episodes;
+    episode ??= episodes.firstOrNull;
+  } on AccountException {
+    return;
+  } catch (_) {
+    if (!controller.isAccountContextCurrent(accountContextVersion)) return;
+    episode ??= entry.episode;
+  }
+  if (!context.mounted ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
+  if (episode == null) {
+    _showToast(context, '这条记录没有可继续播放的集数');
+    _openDetail(context, entry.subject);
+    return;
+  }
+  if (!context.mounted ||
+      !controller.isAccountContextCurrent(accountContextVersion)) {
+    return;
+  }
+  context.push(
+    '/player',
+    extra: PlaySessionRequest(
+      subject: entry.subject,
+      episodes: episodes.isEmpty ? [episode] : episodes,
+      episode: episode,
+      resumePosition: _resumePositionFor(entry, episode),
+    ),
+  );
+}
+
+Duration _resumePositionFor(LibraryEntry? entry, AnimeEpisode episode) {
+  if (entry?.episode?.id != episode.id || (entry?.positionSeconds ?? 0) <= 0) {
+    return Duration.zero;
+  }
+  return Duration(seconds: entry!.positionSeconds);
+}
+
+void _openDetail(BuildContext context, AnimeSubject subject) {
+  Navigator.of(
+    context,
+  ).push(MaterialPageRoute(builder: (context) => DetailPage(subject: subject)));
+}
+
+void _scrollToHistory(BuildContext context) {
+  final target = AppChrome.profileHistorySectionKey.currentContext;
+  if (target == null) {
+    context.go('/profile');
+    return;
+  }
+  Scrollable.ensureVisible(
+    target,
+    duration: const Duration(milliseconds: 280),
+    curve: Curves.easeOutCubic,
+    alignment: 0.08,
+  );
+}
+
+double? _entryProgress(LibraryEntry entry) => entry.playbackProgress;
+
+bool _isFinishedEntry(LibraryEntry entry) {
+  final total = entry.subject.totalEpisodes;
+  final number = entry.episode?.number ?? 0;
+  return total > 0 && number >= total;
+}
+
+void _showToast(BuildContext context, String message) {
+  ScaffoldMessenger.of(context)
+    ..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: Text(message)));
+}

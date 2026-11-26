@@ -1,0 +1,473 @@
+import 'dart:async';
+
+import 'package:anime/src/data/playback_source_repository.dart';
+import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/player/lines/playback_line_controller.dart';
+import 'package:anime/src/player/lines/playback_line_repository.dart';
+import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/rules/rule_models.dart';
+import 'package:anime/src/rules/rule_plugin_repository.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('real rule stream completion turns the page scanner off', () async {
+    final ruleSource = RulePlaybackSourceRepository(
+      repository: RulePluginRepository(),
+      ruleState: const RulePluginState(),
+      cacheNamespace: 'page-scan-owned-token',
+    );
+    final page = _repository(
+      loadExpandedLines: (subject, episode, token) => ruleSource
+          .lineUpdatesForEpisode(subject, episode, cancellationToken: token),
+    );
+    addTearDown(page.dispose);
+    final done = Completer<void>();
+    expect(
+      page.startExpandedLookup(
+        subject: _subject,
+        episode: _episode,
+        hasActivePlayableLine: false,
+        preserveLoadedLine: (lines) => lines,
+        onUpdate: (_) {},
+        onError: (error, stack) => done.completeError(error, stack),
+        onDone: done.complete,
+      ),
+      isTrue,
+    );
+    await done.future.timeout(const Duration(seconds: 1));
+    expect(page.scanInProgress, isFalse);
+    expect(page.lookupInProgress, isFalse);
+    expect(page.scanComplete, isTrue);
+    expect(page.hasExpandedLookup, isFalse);
+    expect(page.activeCancellationToken?.isCancelled, isFalse);
+  });
+
+  test('a thrown probe cannot discard a different working candidate', () async {
+    final repository = _repository(
+      loadQuickLines: (_, _, _) async => [_line('error'), _line('ready')],
+      verifyLine: (line, _) async {
+        if (line.id == 'error') throw StateError('probe');
+        return _line('ready', clientVerified: true);
+      },
+    );
+    addTearDown(repository.dispose);
+    final inventory = await repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+    );
+    expect(inventory?.playableLines.single.id, 'ready');
+  });
+
+  test('one silent probe cannot hide a ready playback route', () async {
+    final silent = Completer<PlaybackLine>();
+    RulePlaybackCancellationToken? owned;
+    final repository = _repository(
+      loadQuickLines: (_, _, _) async => [_line('silent'), _line('ready')],
+      verifyLine: (line, token) {
+        owned = token;
+        return line.id == 'silent'
+            ? silent.future
+            : Future.value(_line('ready', clientVerified: true));
+      },
+    );
+    addTearDown(repository.dispose);
+    final inventory = await repository
+        .lookupQuick(subject: _subject, episode: _episode, progressive: true)
+        .timeout(const Duration(milliseconds: 500));
+    expect(inventory?.playableLines.map((l) => l.id), ['ready']);
+    expect(owned?.isCancelled, isTrue);
+    silent.complete(_line('silent', clientVerified: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(repository.lines.map((l) => l.id), ['ready']);
+  });
+
+  test('quick lookup verifies media before publishing its inventory', () async {
+    final candidate = _line('candidate', requiresClientProbe: true);
+    final verified = _line('candidate', clientVerified: true);
+    var verificationCalls = 0;
+    final repository = _repository(
+      loadQuickLines: (_, _, _) async => [candidate],
+      verifyLine: (_, _) async {
+        verificationCalls++;
+        return verified;
+      },
+    );
+    addTearDown(repository.dispose);
+
+    final inventory = await repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+    );
+
+    expect(verificationCalls, 1);
+    expect(inventory?.lines.single, same(verified));
+    expect(repository.lines.single, same(verified));
+    expect(repository.lookupInProgress, isFalse);
+    expect(repository.scanComplete, isFalse);
+  });
+
+  test('quick lookup failure preserves an active playback inventory', () async {
+    final current = _line('current', clientVerified: true);
+    final repository = _repository(
+      initialLines: [current],
+      loadQuickLines: (_, _, _) async => throw StateError('temporary lookup'),
+    );
+    addTearDown(repository.dispose);
+
+    await expectLater(
+      repository.lookupQuick(
+        subject: _subject,
+        episode: _episode,
+        progressive: true,
+        hasActivePlayableLine: true,
+      ),
+      throwsA(isA<StateError>()),
+    );
+
+    expect(repository.lines, [same(current)]);
+    expect(repository.lookupInProgress, isFalse);
+  });
+
+  test('verification rejection preserves the currently loaded line', () async {
+    final current = _line('current', clientVerified: true);
+    final rejected = _line('candidate', available: false);
+    final lineController = PlaybackLineController();
+    addTearDown(lineController.dispose);
+    final repository = _repository(
+      initialLines: [current],
+      loadQuickLines: (_, _, _) async => [rejected],
+      verifyLine: (_, _) async => rejected,
+    );
+    addTearDown(repository.dispose);
+
+    final inventory = await repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+      hasActivePlayableLine: true,
+      preserveLoadedLine: (lines) =>
+          lineController.preserveLoadedLineIfProbeDisagrees(
+            lines: lines,
+            currentLine: current,
+            loadedUrl: current.url,
+            playbackFailed: false,
+          ),
+    );
+
+    expect(inventory?.playableLines, [same(current)]);
+    expect(repository.lines, hasLength(2));
+    expect(repository.lines, contains(same(current)));
+  });
+
+  test(
+    'a newer quick lookup prevents a stale result from publishing',
+    () async {
+      final firstResult = Completer<List<PlaybackLine>>();
+      final secondResult = Completer<List<PlaybackLine>>();
+      final tokens = <RulePlaybackCancellationToken>[];
+      var calls = 0;
+      final repository = _repository(
+        loadQuickLines: (_, _, token) {
+          tokens.add(token);
+          return calls++ == 0 ? firstResult.future : secondResult.future;
+        },
+      );
+      addTearDown(repository.dispose);
+
+      final firstLookup = repository.lookupQuick(
+        subject: _subject,
+        episode: _episode,
+        progressive: true,
+      );
+      final secondLookup = repository.lookupQuick(
+        subject: _subject,
+        episode: _episode,
+        progressive: true,
+      );
+      final newest = _line('newest', clientVerified: true);
+      secondResult.complete([newest]);
+      expect((await secondLookup)?.lines.single, same(newest));
+      firstResult.complete([_line('stale', clientVerified: true)]);
+
+      expect(await firstLookup, isNull);
+      expect(tokens.first.isCancelled, isTrue);
+      expect(repository.lines.single, same(newest));
+    },
+  );
+
+  test('a stale quick lookup error cannot clear a newer inventory', () async {
+    final firstResult = Completer<List<PlaybackLine>>();
+    final secondResult = Completer<List<PlaybackLine>>();
+    var calls = 0;
+    final repository = _repository(
+      loadQuickLines: (_, _, _) =>
+          calls++ == 0 ? firstResult.future : secondResult.future,
+    );
+    addTearDown(repository.dispose);
+
+    final firstLookup = repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+    );
+    final secondLookup = repository.lookupQuick(
+      subject: _subject,
+      episode: _episode,
+      progressive: true,
+    );
+    final newest = _line('newest', clientVerified: true);
+    secondResult.complete([newest]);
+    expect((await secondLookup)?.lines.single, same(newest));
+    firstResult.completeError(StateError('stale lookup'));
+
+    expect(await firstLookup, isNull);
+    expect(repository.lines.single, same(newest));
+  });
+
+  test(
+    'expanded lookup owns scan state and merges progressive updates',
+    () async {
+      final updates = StreamController<PlaybackLineLookupUpdate>();
+      final current = _line('current', clientVerified: true);
+      final backup = _line('backup', clientVerified: true);
+      final updateReceived = Completer<void>();
+      var callbacks = 0;
+      final repository = _repository(
+        initialLines: [current],
+        loadExpandedLines: (_, _, _) => updates.stream,
+      );
+      addTearDown(() async {
+        await repository.dispose();
+        await updates.close();
+      });
+
+      expect(
+        repository.startExpandedLookup(
+          subject: _subject,
+          episode: _episode,
+          hasActivePlayableLine: true,
+          preserveLoadedLine: (lines) => lines,
+          onUpdate: (_) {
+            callbacks++;
+            updateReceived.complete();
+          },
+          onError: (_, _) {},
+          onDone: () {},
+        ),
+        isTrue,
+      );
+      expect(repository.scanInProgress, isTrue);
+      updates.add(
+        PlaybackLineLookupUpdate(
+          phase: PlaybackLineLookupPhase.discovery,
+          lines: [backup],
+          completedRules: 1,
+          totalRules: 3,
+        ),
+      );
+      await updateReceived.future;
+
+      expect(callbacks, 1);
+      expect(repository.lines.map((line) => line.id), ['current', 'backup']);
+      expect(repository.scanCompletedRules, 1);
+      expect(repository.scanTotalRules, 3);
+      expect(repository.scanInProgress, isTrue);
+    },
+  );
+
+  test('expanded lookup errors do not erase an active inventory', () async {
+    final updates = StreamController<PlaybackLineLookupUpdate>();
+    final current = _line('current', clientVerified: true);
+    final errorReceived = Completer<void>();
+    final repository = _repository(
+      initialLines: [current],
+      loadExpandedLines: (_, _, _) => updates.stream,
+    );
+    addTearDown(() async {
+      await repository.dispose();
+      await updates.close();
+    });
+
+    repository.startExpandedLookup(
+      subject: _subject,
+      episode: _episode,
+      hasActivePlayableLine: true,
+      preserveLoadedLine: (lines) => lines,
+      onUpdate: (_) {},
+      onError: (_, _) => errorReceived.complete(),
+      onDone: () {},
+    );
+    updates.addError(StateError('temporary scan'));
+    await errorReceived.future;
+
+    expect(repository.lines, [same(current)]);
+    expect(repository.lookupInProgress, isFalse);
+    expect(repository.scanInProgress, isFalse);
+  });
+
+  for (final failure in ['error', 'incomplete', 'timedOut']) {
+    test('a $failure scan can be retried after its stream closes', () async {
+      var calls = 0;
+      final done = Completer<void>();
+      final repository = _repository(
+        loadExpandedLines: (_, _, _) async* {
+          calls++;
+          yield PlaybackLineLookupUpdate(
+            lines: [_line('partial', clientVerified: true)],
+            completedRules: 1,
+            totalRules: 3,
+            phase: failure == 'timedOut'
+                ? PlaybackLineLookupPhase.complete
+                : PlaybackLineLookupPhase.discovery,
+            timedOut: failure == 'timedOut',
+          );
+          if (failure == 'error') throw StateError('temporary');
+        },
+      );
+      addTearDown(repository.dispose);
+      bool start(void Function() onDone) => repository.startExpandedLookup(
+        subject: _subject,
+        episode: _episode,
+        hasActivePlayableLine: true,
+        preserveLoadedLine: (lines) => lines,
+        onUpdate: (_) {},
+        onError: (_, _) {},
+        onDone: onDone,
+      );
+      expect(start(done.complete), isTrue);
+      await done.future;
+      expect(repository.scanComplete, isFalse);
+      expect(repository.lines.map((line) => line.id), contains('partial'));
+      final retried = Completer<void>();
+      expect(start(retried.complete), isTrue);
+      await retried.future;
+      expect(calls, 2);
+    });
+  }
+
+  test(
+    'dispose cancels expanded and backup work without late callbacks',
+    () async {
+      final updates = StreamController<PlaybackLineLookupUpdate>();
+      final backupResult = Completer<List<PlaybackLine>>();
+      RulePlaybackCancellationToken? lookupToken;
+      RulePlaybackCancellationToken? backupToken;
+      var callbacks = 0;
+      final current = _line('current', clientVerified: true);
+      final repository = _repository(
+        initialLines: [current],
+        loadExpandedLines: (_, _, token) {
+          lookupToken = token;
+          return updates.stream;
+        },
+        loadSingleBackup: (_, _, _, token) {
+          backupToken = token;
+          return backupResult.future;
+        },
+      );
+
+      repository.startExpandedLookup(
+        subject: _subject,
+        episode: _episode,
+        hasActivePlayableLine: true,
+        preserveLoadedLine: (lines) => lines,
+        onUpdate: (_) => callbacks++,
+        onError: (_, _) {},
+        onDone: () {},
+      );
+      final backupLookup = repository.prepareSingleBackup(
+        subject: _subject,
+        episode: _episode,
+        currentLine: current,
+        preserveLoadedLine: (lines) => lines,
+      );
+
+      await repository.dispose();
+      updates.add(
+        PlaybackLineLookupUpdate(
+          phase: PlaybackLineLookupPhase.complete,
+          lines: [_line('late', clientVerified: true)],
+          completedRules: 1,
+          totalRules: 1,
+        ),
+      );
+      backupResult.complete([_line('late-backup', clientVerified: true)]);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(lookupToken?.isCancelled, isTrue);
+      expect(backupToken?.isCancelled, isTrue);
+      expect(await backupLookup, isNull);
+      expect(repository.hasExpandedLookup, isFalse);
+      expect(repository.backupInProgress, isFalse);
+      expect(callbacks, 0);
+      await updates.close();
+    },
+  );
+}
+
+PlaybackLineRepository _repository({
+  QuickPlaybackLineLoader? loadQuickLines,
+  PlaybackLineVerifier? verifyLine,
+  ExpandedPlaybackLineLoader? loadExpandedLines,
+  BackupPlaybackLineLoader? loadSingleBackup,
+  Iterable<PlaybackLine> initialLines = const <PlaybackLine>[],
+}) {
+  return PlaybackLineRepository(
+    loadQuickLines: loadQuickLines ?? (_, _, _) async => const [],
+    verifyLine: verifyLine ?? (line, _) async => line,
+    loadExpandedLines: loadExpandedLines ?? (_, _, _) => const Stream.empty(),
+    loadSingleBackup: loadSingleBackup ?? (_, _, _, _) async => const [],
+    initialLines: initialLines,
+    initialEpisodeId: _episode.id,
+  );
+}
+
+const _subject = AnimeSubject(
+  id: 1,
+  title: '测试番剧',
+  originalTitle: 'Test Anime',
+  summary: '',
+  coverUrl: null,
+  bannerUrl: null,
+  date: null,
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '',
+  categories: [],
+  tags: [],
+  totalEpisodes: 1,
+);
+
+const _episode = AnimeEpisode(
+  id: 101,
+  subjectId: 1,
+  number: 1,
+  title: '',
+  airdate: null,
+  duration: '24:00',
+  description: '',
+);
+
+PlaybackLine _line(
+  String id, {
+  bool requiresClientProbe = false,
+  bool clientVerified = false,
+  bool available = true,
+}) {
+  return PlaybackLine(
+    id: id,
+    episodeId: _episode.id,
+    providerId: 'provider-$id',
+    providerName: id,
+    title: id,
+    quality: '1080p',
+    format: 'HLS',
+    url: 'https://example.invalid/$id.m3u8',
+    available: available,
+    requiresClientProbe: requiresClientProbe,
+    clientVerified: clientVerified,
+  );
+}

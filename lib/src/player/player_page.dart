@@ -1,0 +1,3824 @@
+import 'dart:async';
+import 'dart:math' as math;
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:screen_brightness/screen_brightness.dart';
+
+import '../app/anime_app.dart';
+import '../app/app_theme.dart';
+import '../accounts/local_account_repository.dart';
+import '../data/anime_controller.dart';
+import '../playback/local_route_ranker.dart';
+import '../data/playback_source_repository.dart';
+import '../domain/anime_models.dart';
+import '../sources/media_library_adapter.dart';
+import '../recommendations/recommendation_playback.dart';
+import '../rules/rule_playback_resolver.dart';
+import '../settings/settings_page.dart';
+import '../shared_ui/app_chrome.dart';
+import '../shared_ui/app_interactions.dart';
+import '../shared_ui/danmaku_display_controls.dart';
+import '../shared_ui/app_navigation.dart';
+import '../shared_ui/poster_card.dart';
+import 'anime4k/anime4k_controller.dart';
+import 'app_fullscreen.dart';
+import 'danmaku/danmaku_controller.dart';
+import 'danmaku_overlay.dart';
+import 'gestures/player_gesture_controller.dart';
+import 'lines/playback_line_controller.dart';
+import 'lines/playback_line_repository.dart';
+import 'lines/playback_recovery_controller.dart';
+import 'local_media.dart';
+import 'playback_continuity.dart';
+import 'playback_line_display.dart';
+import 'ui/playback_line_tile.dart';
+import 'playback_performance_trace.dart';
+import 'session/playback_session_controller.dart';
+import 'session/playback_session_event.dart';
+import 'session/playback_session_state.dart';
+import 'video/native_video_controller.dart';
+import 'video/media_transport_failure.dart';
+import 'video/native_video_compatibility.dart';
+import 'video/native_playback_gate_stub.dart'
+    if (dart.library.io) 'video/native_playback_gate_io.dart';
+import 'video/web_video_controller.dart';
+import 'web_stream_player.dart';
+import 'subtitles/subtitle_store.dart';
+import 'subtitles/subtitle_repository.dart';
+import 'subtitles/subtitle_overlay.dart';
+import 'subtitles/subtitle_panel.dart';
+import 'subtitles/supplemental_subtitle_controller.dart';
+
+part 'ui/player_canvas.dart';
+part 'ui/player_chrome.dart';
+part 'ui/player_panels.dart';
+part 'ui/player_mobile_layout.dart';
+part 'ui/player_desktop_layout.dart';
+
+const _episodeTransitionSafetyMargin = Duration(seconds: 30);
+
+bool webPlaybackEventIsCurrent({
+  required int eventGeneration,
+  required int currentGeneration,
+}) {
+  return eventGeneration == currentGeneration;
+}
+
+class PlayerPage extends ConsumerStatefulWidget {
+  const PlayerPage({
+    super.key,
+    required this.request,
+    this.nativeVideoControllerFactory,
+  });
+
+  final PlaySessionRequest request;
+
+  /// Test-only engine seam. The page owns and disposes the returned controller.
+  @visibleForTesting
+  final NativeVideoController Function(int Function() readOpenSerial)?
+  nativeVideoControllerFactory;
+
+  @override
+  ConsumerState<PlayerPage> createState() => _PlayerPageState();
+}
+
+class _PlayerPageState extends ConsumerState<PlayerPage>
+    with WidgetsBindingObserver {
+  late AnimeEpisode _episode;
+  late final NativeVideoController _nativeVideo;
+  late final WebVideoController _webVideo;
+  late final PlayerGestureController _gestureController;
+  late final PlaybackSessionController _sessionController;
+  late final PlaybackLineController _lineController;
+  late final PlaybackLineRepository _lineRepository;
+  late final PlaybackRecoveryController _recoveryController;
+  late final NextEpisodeWarmupCoordinator _nextEpisodeWarmupCoordinator;
+  late final DanmakuController _danmakuController;
+  late final Anime4KController _anime4kController;
+  late PlaybackPerformanceTrace _playbackTrace;
+  NativeMediaEventGuard get _nativeMediaEvents => _nativeVideo.events;
+  final _appFullscreen = AppFullscreenController();
+  final _subscriptions = <StreamSubscription<dynamic>>[];
+  int? _handledFailureOpenSerial;
+  PlaybackLine? _line;
+  String? _loadedUrl;
+  String? _playerMessage;
+  String? _lineLookupMessage;
+  Timer? _expandedLineUiThrottle;
+  bool _expandedLineUiPending = false;
+  RulePlaybackCancellationToken? _metadataProbeToken;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
+  Duration _buffer = Duration.zero;
+  // Native timeline events keep recovery/watchdog state current without
+  // rebuilding mobile metadata, episode grids or sorting every route again.
+  final _timelineRevision = ValueNotifier<int>(0);
+  double _volume = 100;
+  double _lastNonZeroVolume = 100;
+  double? _appliedRate;
+  double? _appliedVolume;
+  var _manualVolumeOverride = false;
+  bool _controlsVisible = true;
+  bool _controlMenuOpen = false;
+  final _danmakuInputFocus = FocusNode(debugLabel: 'Player danmaku input');
+  double? _temporaryPlaybackRate;
+  bool _pointerInChromeHotZone = false;
+  var _playing = false;
+  var _buffering = false;
+  var _loadingLine = false;
+  var _playbackFailed = false;
+  var _fullscreen = false;
+  var _muted = false;
+  var _leaving = false;
+  var _openLineSerial = 0;
+  var _automaticRecoveryEpoch = 0;
+  ({int epoch, int openSerial})? _expandedRecoveryOwner;
+  int? _firstFrameTraceOpenSerial;
+  int _startupTransportFailures = 0;
+  String? _pendingRecoveryLineId;
+  String? _pendingRecoveryStrategy;
+  String? _pendingRecoveryFromProvider;
+  var _finalFailureTraceRecorded = false;
+  PlaybackSettings _currentSettings = const PlaybackSettings();
+  DateTime? _ignoreNativeErrorsUntil;
+  var _appInForeground = true;
+  Duration? _pendingInitialResumePosition;
+  bool _episodePanel = false;
+  bool _linePanel = false;
+  bool _danmakuPanel = false;
+  bool _settingsPanel = false;
+  bool _subtitlePanel = false;
+  SupplementalSubtitleController? _supplementalSubtitles;
+  int _subtitleStoreEpoch = 0;
+  String? _subtitleStorageError;
+  bool _theaterMode = false;
+  RulePlaybackCancellationToken? _nextEpisodePrefetchCancellation;
+  DateTime? _nextEpisodePrefetchStartedAt;
+  String? _warmupTransitionPrimaryLineId;
+  String? _warmupTransitionFallbackLineId;
+  var _openingWarmupTransitionPrimary = false;
+  var _accountContextVersion = 0;
+  int? _recommendationFirstFrameEpisodeId;
+  int? _recommendationEffectiveEpisodeId;
+  int? _recommendationCompletedEpisodeId;
+  Duration _recommendationWatched = Duration.zero;
+  Duration? _recommendationLastObservedPosition;
+  DateTime? _lastPlaybackProgressPersistedAt;
+  int? _handledEndedEpisodeId;
+  int? _handledEndedOpenSerial;
+
+  Player get _player => _nativeVideo.player;
+  VideoController get _controller => _nativeVideo.surfaceController;
+  WebStreamPlayerController get _webPlayerController =>
+      _webVideo.surfaceController;
+  Timer? get _backupLookupDelayTimer => _recoveryController.backupLookupTimer;
+  set _backupLookupDelayTimer(Timer? value) =>
+      _recoveryController.replaceBackupLookupTimer(value);
+  FocusNode get _shortcutFocusNode => _gestureController.shortcutFocusNode;
+  Timer? get _controlsHideTimer => _gestureController.controlsHideTimer;
+  set _controlsHideTimer(Timer? value) =>
+      _gestureController.replaceControlsHideTimer(value);
+  List<PlaybackLine> get _lines => _lineRepository.lines;
+  set _lines(List<PlaybackLine> value) => _lineRepository.replaceLines(value);
+  bool get _lineLookupInProgress => _lineRepository.lookupInProgress;
+  bool get _lineScanInProgress => _lineRepository.scanInProgress;
+  bool get _lineScanComplete => _lineRepository.scanComplete;
+  int get _lineScanCompletedRules => _lineRepository.scanCompletedRules;
+  int get _lineScanTotalRules => _lineRepository.scanTotalRules;
+  bool get _backupLookupInProgress => _lineRepository.backupInProgress;
+  bool get _hasExpandedLineLookup => _lineRepository.hasExpandedLookup;
+  RulePlaybackCancellationToken? _openProbeToken;
+  Set<String> get _failedLineIds => _lineController.failedLineIds;
+  Map<String, int> get _lineFailureCounts => _lineController.failureCounts;
+  String? get _preferredProviderId => _lineController.preferredProviderId;
+  set _preferredProviderId(String? value) =>
+      _lineController.preferredProviderId = value;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _nativeVideo =
+        widget.nativeVideoControllerFactory?.call(() => _openLineSerial) ??
+        NativeVideoController(readOpenSerial: () => _openLineSerial);
+    _webVideo = WebVideoController();
+    _gestureController = PlayerGestureController();
+    _nextEpisodeWarmupCoordinator = NextEpisodeWarmupCoordinator();
+    _episode = widget.request.episode;
+    _accountContextVersion = ref
+        .read(animeControllerProvider.notifier)
+        .accountContextVersion;
+    _sessionController = PlaybackSessionController(episodeId: _episode.id);
+    _lineController = PlaybackLineController();
+    _line = widget.request.initialLine;
+    unawaited(_initializeSupplementalSubtitles());
+    _loadingLine = _isPlayableLine(_line);
+    _lineRepository = PlaybackLineRepository(
+      loadQuickLines: (subject, episode, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .linesForEpisode(
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          ),
+      verifyLine: (line, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .verifyPlaybackLine(
+            line,
+            enrichMetadata: false,
+            cancellationToken: cancellationToken,
+          ),
+      loadExpandedLines: (subject, episode, cancellationToken) => ref
+          .read(animeControllerProvider.notifier)
+          .lineUpdatesForEpisode(
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          ),
+      loadSingleBackup: (subject, episode, currentLine, cancellationToken) =>
+          ref
+              .read(animeControllerProvider.notifier)
+              .prepareSingleBackupForEpisode(
+                subject,
+                episode,
+                currentLine: currentLine,
+                cancellationToken: cancellationToken,
+              ),
+      initialLines: initialPlaybackLinesForDisplay(widget.request.initialLine),
+      initialEpisodeId: _episode.id,
+      lookupInProgress: !_loadingLine && !widget.request.offlineOnly,
+    );
+    _recoveryController = PlaybackRecoveryController();
+    _danmakuInputFocus.addListener(_handleDanmakuInputFocus);
+    _danmakuController = DanmakuController()
+      ..addListener(_handleDanmakuChanged);
+    _anime4kController = Anime4KController(
+      platform: defaultTargetPlatform,
+      getProperty: _readMpvProperty,
+      setProperty: _writeMpvProperty,
+    )..addListener(_handleAnime4KChanged);
+    _startPlaybackTrace();
+    _nativeVideo.onTransportFailure = _handleMediaTransportFailure;
+    _pendingInitialResumePosition = widget.request.resumePosition;
+    _resetPlaybackStallWatchdog(
+      position: widget.request.resumePosition,
+      grace: const Duration(seconds: 5),
+    );
+    _recoveryController.startStallWatchdog(
+      const Duration(seconds: 1),
+      _checkPlaybackStall,
+    );
+    _bindPlayer();
+    _subscriptions.add(
+      _appFullscreen.changes.listen((enabled) {
+        if (!mounted || _fullscreen == enabled) return;
+        setState(() => _fullscreen = enabled);
+        if (!enabled) unawaited(_restoreSystemUi());
+      }),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _requestPlayerFocus();
+      _applyPlaybackSettings(_currentSettings);
+      if (_isPlayableLine(_line)) {
+        unawaited(_openLine(_line!, force: true));
+        if (!widget.request.offlineOnly &&
+            widget.request.subject.source != 'direct') {
+          unawaited(_resolveLinesForCurrentEpisode(autoplay: false));
+        }
+      } else if (!widget.request.offlineOnly) {
+        unawaited(_resolveLinesForCurrentEpisode());
+      } else {
+        _recordFinalPlaybackFailure(reason: 'offline_line_unavailable');
+      }
+    });
+  }
+
+  void _handleDanmakuChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _handleAnime4KChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _readMpvProperty(String property) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      throw UnsupportedError('The current player is not backed by libmpv.');
+    }
+    final nativePlayer = platform as dynamic;
+    final value = await nativePlayer.getProperty(property);
+    return value?.toString() ?? '';
+  }
+
+  Future<void> _writeMpvProperty(String property, String value) async {
+    final platform = _player.platform;
+    if (platform is! NativePlayer) {
+      throw UnsupportedError('The current player is not backed by libmpv.');
+    }
+    final nativePlayer = platform as dynamic;
+    await nativePlayer.setProperty(property, value);
+  }
+
+  void _startPlaybackTrace() {
+    _playbackTrace = PlaybackPerformanceTrace();
+    _firstFrameTraceOpenSerial = null;
+    _pendingRecoveryLineId = null;
+    _pendingRecoveryStrategy = null;
+    _pendingRecoveryFromProvider = null;
+    _finalFailureTraceRecorded = false;
+    _playbackTrace.record(
+      'play_requested',
+      fields: <String, Object?>{
+        'episode_number': _episode.number,
+        'content_source': widget.request.subject.source,
+        'offline': widget.request.offlineOnly,
+      },
+    );
+  }
+
+  Map<String, Object?> _lineTraceFields(PlaybackLine line) {
+    return <String, Object?>{
+      'provider': line.providerId,
+      'format': line.format,
+      'server_verified': line.serverVerified,
+      'client_verified': line.clientVerified,
+      'requires_client_probe': line.requiresClientProbe,
+      'cache_state': line.cacheState,
+      'source_error_category': line.sourceErrorCategory,
+      if (line.latency != null)
+        'source_latency_ms': line.latency!.inMilliseconds,
+    };
+  }
+
+  void _recordFirstFrame(PlaybackLine line) {
+    if (_firstFrameTraceOpenSerial == _openLineSerial) return;
+    _firstFrameTraceOpenSerial = _openLineSerial;
+    _sessionController.dispatch(PlaybackSessionEvent.firstFrame(line.id));
+    _recordRecommendationFirstFrame();
+    _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
+    _loadEnabledDanmakuAfterFirstFrame();
+    final inventoryEpisodeId = _episode.id;
+    final metadataOpenSerial = _openLineSerial;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _leaving ||
+          _episode.id != inventoryEpisodeId ||
+          _openLineSerial != metadataOpenSerial) {
+        return;
+      }
+      // Fill the visible route inventory only after the first frame; discovery
+      // does not replace a healthy selection or block native startup.
+      _startExpandedLineLookup(autoplay: false);
+      unawaited(_enrichSelectedLineMetadata(line, metadataOpenSerial));
+    });
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: <String, Object?>{
+        ..._lineTraceFields(line),
+        'outcome': 'resumed',
+      },
+    );
+    final pendingRecoveryLineId = _pendingRecoveryLineId;
+    if (pendingRecoveryLineId != null) {
+      _playbackTrace.record(
+        'playback_recovered',
+        fields: <String, Object?>{
+          ..._lineTraceFields(line),
+          'recovery_strategy': pendingRecoveryLineId == line.id
+              ? _pendingRecoveryStrategy ?? 'unknown'
+              : 'manual_override',
+          if (_pendingRecoveryFromProvider?.isNotEmpty == true)
+            'from_provider': _pendingRecoveryFromProvider,
+          'to_provider': line.providerId,
+        },
+      );
+      _pendingRecoveryLineId = null;
+      _pendingRecoveryStrategy = null;
+      _pendingRecoveryFromProvider = null;
+    }
+    _finalFailureTraceRecorded = false;
+    if (_currentSettings.rememberLine) {
+      final controller = ref.read(animeControllerProvider.notifier);
+      unawaited(
+        controller
+            .rememberPlaybackProvider(
+              subject: widget.request.subject,
+              line: line,
+              expectedAccountContextVersion: _accountContextVersion,
+            )
+            .onError((_, _) {}),
+      );
+      _scheduleNextEpisodePrefetch();
+    }
+    if (line.id == _warmupTransitionPrimaryLineId ||
+        line.id == _warmupTransitionFallbackLineId) {
+      _clearWarmupTransitionState();
+    }
+  }
+
+  Future<void> _enrichSelectedLineMetadata(
+    PlaybackLine line,
+    int openSerial,
+  ) async {
+    final uri = Uri.tryParse(line.url ?? '');
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme) ||
+        widget.request.offlineOnly ||
+        (line.sizeBytes != null &&
+            line.videoWidth != null &&
+            line.videoHeight != null)) {
+      return;
+    }
+    _metadataProbeToken?.cancel();
+    final token = RulePlaybackCancellationToken();
+    _metadataProbeToken = token;
+    try {
+      final metadata = await ref
+          .read(animeControllerProvider.notifier)
+          .verifyPlaybackLine(
+            line,
+            enrichMetadata: true,
+            cancellationToken: token,
+          )
+          .timeout(const Duration(seconds: 12));
+      if (!mounted ||
+          _leaving ||
+          token.isCancelled ||
+          _openLineSerial != openSerial ||
+          _line?.id != line.id ||
+          _line?.url != line.url) {
+        return;
+      }
+      final current = _line!;
+      final enriched = mergePlaybackLineMediaMetadata(
+        current: current,
+        metadata: metadata,
+      );
+      setState(() {
+        _line = enriched;
+        _lines = upsertPlaybackLine(_lines, enriched);
+      });
+    } catch (_) {
+      // Optional information must never pause, reopen or fail active playback.
+    } finally {
+      token.cancel();
+      if (identical(_metadataProbeToken, token)) _metadataProbeToken = null;
+    }
+  }
+
+  void _clearWarmupTransitionState() {
+    _warmupTransitionPrimaryLineId = null;
+    _warmupTransitionFallbackLineId = null;
+    _openingWarmupTransitionPrimary = false;
+  }
+
+  AnimeEpisode? get _nextEpisode {
+    final index = _currentEpisodeIndex;
+    if (index < 0 || index >= widget.request.episodes.length - 1) {
+      return null;
+    }
+    return widget.request.episodes[index + 1];
+  }
+
+  static bool _isPrefetchableSubject(AnimeSubject subject) {
+    final source = subject.source.trim().toLowerCase();
+    return source != 'direct' && source != 'offline';
+  }
+
+  static bool _isPrefetchableLine(PlaybackLine? line) {
+    final provider = line?.providerId.trim().toLowerCase() ?? '';
+    return provider.isNotEmpty &&
+        provider != 'direct' &&
+        provider != 'local' &&
+        provider != 'network' &&
+        provider != 'offline' &&
+        !provider.startsWith('direct:') &&
+        !provider.startsWith('local:') &&
+        !provider.startsWith('network:') &&
+        !provider.startsWith('offline:');
+  }
+
+  bool _hasUsableNextEpisodePrefetch() {
+    final next = _nextEpisode;
+    if (next == null) return false;
+    final controller = ref.read(animeControllerProvider.notifier);
+    final requiredValidity =
+        calculateRequiredWarmupValidity(
+          duration: _duration,
+          position: _position,
+          safetyMargin: _episodeTransitionSafetyMargin,
+        ) ??
+        const Duration(seconds: 60);
+    return controller.prefetchedWarmupBundleForEpisode(
+          widget.request.subject,
+          next,
+          minValidity: requiredValidity,
+        ) !=
+        null;
+  }
+
+  void _scheduleNextEpisodePrefetch() {
+    if (!mounted ||
+        !_currentSettings.rememberLine ||
+        widget.request.offlineOnly ||
+        !_isPrefetchableSubject(widget.request.subject) ||
+        !_isPrefetchableLine(_line) ||
+        !_appInForeground ||
+        _nextEpisode == null ||
+        _nextEpisodeWarmupCoordinator.lookupStarted ||
+        _nextEpisodeWarmupCoordinator.initialDelayScheduled) {
+      return;
+    }
+    if (_hasUsableNextEpisodePrefetch()) {
+      _nextEpisodeWarmupCoordinator.markLookupStarted();
+      return;
+    }
+    _nextEpisodeWarmupCoordinator.scheduleInitial(
+      canStart: () =>
+          mounted &&
+          _currentSettings.rememberLine &&
+          _appInForeground &&
+          _isPrefetchableLine(_line) &&
+          _playing &&
+          !_buffering &&
+          !_loadingLine &&
+          !_playbackFailed &&
+          _pendingRecoveryLineId == null &&
+          !_nativeVideo.resumeSeek.isPending &&
+          !_nativeVideo.resumeSeek.isSeeking &&
+          canSpendBandwidthOnNextEpisode(
+            position: _position,
+            buffer: _buffer,
+          ) &&
+          _nextEpisode != null,
+      onStart: _startNextEpisodePrefetch,
+    );
+  }
+
+  void _startNextEpisodePrefetch({bool forceRefresh = false}) {
+    final next = _nextEpisode;
+    if (!mounted ||
+        next == null ||
+        widget.request.offlineOnly ||
+        !_isPrefetchableSubject(widget.request.subject) ||
+        !_isPrefetchableLine(_line) ||
+        !_currentSettings.rememberLine ||
+        (!_appInForeground ||
+            _buffering ||
+            _loadingLine ||
+            _playbackFailed ||
+            _pendingRecoveryLineId != null ||
+            _nativeVideo.resumeSeek.isPending ||
+            _nativeVideo.resumeSeek.isSeeking)) {
+      return;
+    }
+    if (forceRefresh) {
+      _cancelNextEpisodePrefetch();
+    }
+    if (!_nextEpisodeWarmupCoordinator.markLookupStarted(
+      forceRefresh: forceRefresh,
+    )) {
+      return;
+    }
+    final token = RulePlaybackCancellationToken();
+    _nextEpisodePrefetchCancellation = token;
+    _nextEpisodePrefetchStartedAt = DateTime.now();
+    final controller = ref.read(animeControllerProvider.notifier);
+    final preferredProviderId =
+        _preferredProviderId ??
+        controller.rememberedPlaybackProvider(widget.request.subject);
+    _playbackTrace.recordContinuity(
+      forceRefresh
+          ? PlaybackContinuityTraceEvent.nextWarmupRefreshStarted
+          : PlaybackContinuityTraceEvent.nextWarmupStarted,
+      fields: <String, Object?>{
+        if (preferredProviderId?.isNotEmpty == true)
+          'preferred_provider': preferredProviderId,
+      },
+    );
+    final future = controller.prefetchPlaybackForEpisode(
+      widget.request.subject,
+      next,
+      preferredProviderId: preferredProviderId,
+      forceRefresh: forceRefresh,
+      cancellationToken: token,
+    );
+    unawaited(
+      future
+          .then<void>(
+            (_) {
+              if (token.isCancelled) return;
+              final startedAt = _nextEpisodePrefetchStartedAt;
+              final bundle = controller.prefetchedWarmupBundleForEpisode(
+                widget.request.subject,
+                next,
+                minValidity: Duration.zero,
+              );
+              if (bundle == null) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupFailed,
+                  fields: const <String, Object?>{
+                    'reason_code': 'no_fresh_bundle',
+                  },
+                );
+                return;
+              }
+              final readinessFields = <String, Object?>{
+                if (bundle.preferredProviderId != null)
+                  'preferred_provider': bundle.preferredProviderId,
+                'line_count': bundle.allLines.length,
+                'fallback_count': bundle.fallback == null ? 0 : 1,
+                if (startedAt != null)
+                  'elapsed_ms': DateTime.now()
+                      .difference(startedAt)
+                      .inMilliseconds,
+              };
+              _playbackTrace.recordContinuity(
+                PlaybackContinuityTraceEvent.nextWarmupPrimaryReady,
+                fields: <String, Object?>{
+                  ...readinessFields,
+                  'provider': bundle.primary.providerId,
+                },
+              );
+              final fallback = bundle.fallback;
+              if (fallback != null) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupFallbackReady,
+                  fields: <String, Object?>{
+                    ...readinessFields,
+                    'provider': fallback.providerId,
+                  },
+                );
+              }
+              if (forceRefresh) {
+                _playbackTrace.recordContinuity(
+                  PlaybackContinuityTraceEvent.nextWarmupRefreshCompleted,
+                  fields: <String, Object?>{
+                    ...readinessFields,
+                    'provider': bundle.primary.providerId,
+                  },
+                );
+              }
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              if (token.isCancelled) return;
+              final startedAt = _nextEpisodePrefetchStartedAt;
+              _playbackTrace.recordContinuity(
+                PlaybackContinuityTraceEvent.nextWarmupFailed,
+                fields: <String, Object?>{
+                  'reason_code': 'lookup_error',
+                  if (startedAt != null)
+                    'elapsed_ms': DateTime.now()
+                        .difference(startedAt)
+                        .inMilliseconds,
+                },
+              );
+            },
+          )
+          .whenComplete(() {
+            if (identical(_nextEpisodePrefetchCancellation, token)) {
+              _nextEpisodePrefetchCancellation = null;
+              _nextEpisodePrefetchStartedAt = null;
+            }
+          }),
+    );
+  }
+
+  void _maybeRefreshNextEpisodePrefetch() {
+    if (_nextEpisode == null ||
+        !_isPrefetchableLine(_line) ||
+        !_nextEpisodeWarmupCoordinator.lookupStarted ||
+        _nextEpisodeWarmupCoordinator.refreshRequested ||
+        !_playing ||
+        _buffering ||
+        _loadingLine ||
+        _duration <= Duration.zero) {
+      return;
+    }
+    if (!_nextEpisodeWarmupCoordinator.requestNearTransitionRefresh(
+      duration: _duration,
+      position: _position,
+    )) {
+      return;
+    }
+    _startNextEpisodePrefetch(forceRefresh: true);
+  }
+
+  void _cancelNextEpisodePrefetch() {
+    _nextEpisodeWarmupCoordinator.cancelInitialDelay();
+    final token = _nextEpisodePrefetchCancellation;
+    if (token != null && !token.isCancelled) {
+      final startedAt = _nextEpisodePrefetchStartedAt;
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.nextWarmupCancelled,
+        fields: <String, Object?>{
+          if (startedAt != null)
+            'elapsed_ms': DateTime.now().difference(startedAt).inMilliseconds,
+        },
+      );
+      token.cancel();
+    }
+    _nextEpisodePrefetchCancellation = null;
+    _nextEpisodePrefetchStartedAt = null;
+  }
+
+  void _resetNextEpisodePrefetch() {
+    _cancelNextEpisodePrefetch();
+    _nextEpisodeWarmupCoordinator.reset();
+  }
+
+  void _beginPlaybackRecovery(
+    PlaybackLine target, {
+    required String strategy,
+    PlaybackLine? previous,
+    Duration position = Duration.zero,
+  }) {
+    _resetNextEpisodePrefetch();
+    if (strategy == 'auto_switch' &&
+        previous?.id == _warmupTransitionPrimaryLineId &&
+        target.id == _warmupTransitionFallbackLineId) {
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionFallbackHit,
+        fields: <String, Object?>{'provider': target.providerId},
+      );
+    }
+    if (strategy == 'auto_switch' && previous?.id != target.id) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.alternativeSelected(target.id),
+      );
+    }
+    _pendingRecoveryLineId = target.id;
+    _pendingRecoveryStrategy = strategy;
+    _pendingRecoveryFromProvider = previous?.providerId;
+    _playbackTrace.record(
+      strategy == 'auto_switch' ? 'auto_switch_started' : 'recovery_started',
+      fields: <String, Object?>{
+        if (previous != null) 'from_provider': previous.providerId,
+        'to_provider': target.providerId,
+        'recovery_strategy': strategy,
+        'position_ms': position.inMilliseconds,
+      },
+    );
+  }
+
+  void _recordFinalPlaybackFailure({required String reason}) {
+    if (_finalFailureTraceRecorded) return;
+    _finalFailureTraceRecorded = true;
+    _sessionController.dispatch(
+      PlaybackSessionEvent.mediaError(reason, hasAlternative: false),
+    );
+    final current = _line;
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: const <String, Object?>{'outcome': 'failed'},
+    );
+    _playbackTrace.record(
+      'playback_failed',
+      fields: <String, Object?>{
+        if (current != null) ..._lineTraceFields(current),
+        'reason': reason,
+        'position_ms': _currentRecoveryPosition.inMilliseconds,
+        'line_count': _lines.length,
+        'failed_line_count': _failedLineIds.length,
+      },
+    );
+    _pendingRecoveryLineId = null;
+    _pendingRecoveryStrategy = null;
+    _pendingRecoveryFromProvider = null;
+  }
+
+  @override
+  void dispose() {
+    _expandedLineUiThrottle?.cancel();
+    _expandedLineUiThrottle = null;
+    _metadataProbeToken?.cancel();
+    _openProbeToken?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _subtitleStoreEpoch++;
+    _supplementalSubtitles?.dispose();
+    unawaited(_persistPlaybackProgress(force: true));
+    _nativeMediaEvents.invalidate();
+    for (final subscription in _subscriptions) {
+      subscription.cancel();
+    }
+    _anime4kController.dispose();
+    unawaited(_restoreSystemUi());
+    if (_fullscreen) unawaited(_appFullscreen.setEnabled(false));
+    _appFullscreen.dispose();
+    _cancelNextEpisodePrefetch();
+    unawaited(_nativeVideo.dispose());
+    _webVideo.dispose();
+    _recoveryController.dispose();
+    unawaited(_lineRepository.dispose());
+    _lineController.dispose();
+    _danmakuInputFocus.dispose();
+    _danmakuController.dispose();
+    _gestureController.dispose();
+    _sessionController.dispose();
+    _timelineRevision.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final inForeground = state == AppLifecycleState.resumed;
+    if (_appInForeground == inForeground) return;
+    _appInForeground = inForeground;
+    _sessionController.dispatch(
+      inForeground
+          ? PlaybackSessionEvent.applicationResumed()
+          : PlaybackSessionEvent.applicationPaused(),
+    );
+    if (!inForeground) unawaited(_persistPlaybackProgress(force: true));
+    _resetPlaybackStallWatchdog(
+      grace: inForeground ? const Duration(seconds: 3) : Duration.zero,
+    );
+    if (inForeground &&
+        _playing &&
+        _sessionController.state.userIntent != PlaybackIntent.paused) {
+      _scheduleSingleBackupLookup();
+      _scheduleNextEpisodePrefetch();
+    } else {
+      if (!inForeground) {
+        _resetNextEpisodePrefetch();
+      }
+      _backupLookupDelayTimer?.cancel();
+      _backupLookupDelayTimer = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<bool>(
+      animeControllerProvider.select(
+        (state) => state.value?.danmaku.enabled ?? false,
+      ),
+      (_, enabled) {
+        if (enabled) _loadEnabledDanmakuAfterFirstFrame();
+      },
+    );
+    return AsyncAnimeGate(
+      builder: (context, state) {
+        final effectiveSettings = _temporaryPlaybackRate == null
+            ? state.settings
+            : state.settings.copyWith(speed: _temporaryPlaybackRate);
+        _applyPlaybackSettings(effectiveSettings);
+        final playbackGeneration = _openLineSerial;
+        final superResolutionStatus = _anime4kController.displayStatus;
+        final superResolutionPanelStatus = _buildSuperResolutionPanelStatus(
+          superResolutionStatus,
+        );
+        final portraitPlayerLayout = usesPortraitPlayerPageLayoutForSize(
+          MediaQuery.sizeOf(context),
+          defaultTargetPlatform,
+          fullscreen: _fullscreen,
+        );
+        return PopScope<Object?>(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, result) {
+            if (!didPop) unawaited(_handleBack());
+          },
+          child: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle.light,
+            child: Theme(
+              data: _buildPlayerTheaterTheme(Theme.of(context)),
+              child: Scaffold(
+                backgroundColor: AppColors.theaterBg,
+                body: Focus(
+                  focusNode: _shortcutFocusNode,
+                  autofocus: true,
+                  onKeyEvent: (node, event) =>
+                      _handleShortcut(event, state.settings),
+                  child: buildPlayerSafeArea(
+                    fullscreen: _fullscreen,
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        _ResponsivePlayerLayout(
+                          portrait: portraitPlayerLayout,
+                          fullscreen: _fullscreen,
+                          theaterExpanded: _theaterMode,
+                          onToggleTheaterMode: _toggleTheaterMode,
+                          subject: widget.request.subject,
+                          episodes: widget.request.episodes,
+                          episode: _episode,
+                          line: _line,
+                          lines: _lines,
+                          failedLineIds: _failedLineIds,
+                          loadingLines:
+                              _lineLookupInProgress || _lineScanInProgress,
+                          onEpisodePanel: _toggleEpisodePanel,
+                          onEpisodeSelected: _selectEpisode,
+                          onLinePanel: _toggleLinePanel,
+                          onLineSelected: _selectLine,
+                          player: AnimatedBuilder(
+                            animation: _timelineRevision,
+                            builder: (context, _) => _PlayerCanvas(
+                              controller: _controller,
+                              webPlayerController: _webPlayerController,
+                              playbackGeneration: playbackGeneration,
+                              subject: widget.request.subject,
+                              episodes: widget.request.episodes,
+                              episode: _episode,
+                              line: _line,
+                              settings: effectiveSettings,
+                              superResolutionActive:
+                                  _anime4kController.isActive,
+                              services: state.services,
+                              danmaku: state.danmaku,
+                              remoteDanmaku: _danmakuController.remoteComments,
+                              localDanmaku: _danmakuController.localComments,
+                              theaterMode: _theaterMode,
+                              position: _position,
+                              duration: _duration,
+                              buffer: _buffer,
+                              volume: _volume,
+                              playing: _playing,
+                              buffering: _buffering,
+                              loadingLine: _loadingLine,
+                              lineLookupInProgress: _lineLookupInProgress,
+                              playbackFailed: _playbackFailed,
+                              fullscreen: _fullscreen,
+                              muted: _muted,
+                              controlsVisible: _controlsVisible,
+                              autoHideChrome: _shouldAutoHidePlayerControls,
+                              playerMessage: _surfaceMessage,
+                              onToggleControls: _togglePlayerControls,
+                              onPointerActivity: _revealPlayerControls,
+                              onChromeHotZoneChanged:
+                                  _handlePlayerChromeHotZoneChanged,
+                              onBack: _handleBack,
+                              onReload: _reloadCurrentLine,
+                              onScreenshot: _captureScreenshot,
+                              onTheaterMode: _toggleTheaterMode,
+                              onCast: _showExternalPlayback,
+                              onPlayPause: _playing
+                                  ? _pausePlayback
+                                  : _resumePlayback,
+                              onPreviousEpisode: _canPlayPreviousEpisode
+                                  ? _playPreviousEpisode
+                                  : null,
+                              onNextEpisode: _canPlayNextEpisode
+                                  ? _playNextEpisode
+                                  : null,
+                              onTemporaryDoubleSpeedStart:
+                                  _startTemporaryDoubleSpeed,
+                              onTemporaryDoubleSpeedEnd:
+                                  _endTemporaryDoubleSpeed,
+                              onVideoViewportSize: _handleVideoViewportSize,
+                              onRewind: () => _seekBy(
+                                Duration(
+                                  seconds: -state.settings.rewindSeconds,
+                                ),
+                              ),
+                              onForward: () => _seekBy(
+                                Duration(
+                                  seconds: state.settings.forwardSeconds,
+                                ),
+                              ),
+                              onSeek: _seekTo,
+                              onMute: _toggleMute,
+                              onVolumeChanged: _setVolume,
+                              onGestureVolumeChanged: _setGestureVolume,
+                              onSpeedSelected: _selectSpeed,
+                              onControlMenuChanged: _handleControlMenuChanged,
+                              onFullscreen: () => _setFullscreen(!_fullscreen),
+                              onEpisodePanel: _toggleEpisodePanel,
+                              onEpisodeSelected: _selectEpisode,
+                              onLinePanel: _toggleLinePanel,
+                              onDanmakuPanel: _toggleDanmakuPanel,
+                              onDanmakuEnabledChanged: _setDanmakuEnabled,
+                              danmakuInput: _danmakuController.input,
+                              danmakuInputFocus: _danmakuInputFocus,
+                              onSendDanmaku: (text) => unawaited(
+                                _sendDanmaku(
+                                  text,
+                                  settings: state.danmaku,
+                                  loggedIn:
+                                      state
+                                          .accountSession
+                                          .current
+                                          ?.cloudAuthenticated ==
+                                      true,
+                                ),
+                              ),
+                              onWebReady: () =>
+                                  _handleWebReady(playbackGeneration),
+                              onWebError: () =>
+                                  _handleWebError(playbackGeneration),
+                              onWebPosition: (value) =>
+                                  _handleWebPosition(playbackGeneration, value),
+                              onWebDuration: (value) =>
+                                  _handleWebDuration(playbackGeneration, value),
+                              onWebPlaying: (value) =>
+                                  _handleWebPlaying(playbackGeneration, value),
+                              onWebEnded: () =>
+                                  _handleWebEnded(playbackGeneration),
+                              onSettingsPanel: _toggleSettingsPanel,
+                              onSubtitlePanel: _toggleSubtitlePanel,
+                              supplementalSubtitles: _supplementalSubtitles,
+                            ),
+                          ),
+                        ),
+                        AnimatedSwitcher(
+                          duration: MediaQuery.disableAnimationsOf(context)
+                              ? Duration.zero
+                              : const Duration(milliseconds: 220),
+                          reverseDuration:
+                              MediaQuery.disableAnimationsOf(context)
+                              ? Duration.zero
+                              : const Duration(milliseconds: 180),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          layoutBuilder: (currentChild, previousChildren) =>
+                              Stack(
+                                fit: StackFit.expand,
+                                children: [...previousChildren, ?currentChild],
+                              ),
+                          transitionBuilder: (child, animation) =>
+                              _PlayerDrawerTransitionScope(
+                                animation: animation,
+                                child: child,
+                              ),
+                          child: _buildActivePlayerPanel(
+                            state,
+                            superResolutionPanelStatus,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildActivePlayerPanel(
+    AnimeState state,
+    Widget? superResolutionPanelStatus,
+  ) {
+    if (_episodePanel) {
+      return _PlayerFunctionPage(
+        key: const ValueKey('player-panel-episode'),
+        title: '选集',
+        onClose: _closePanels,
+        child: _EpisodePanel(
+          subject: widget.request.subject,
+          episodes: widget.request.episodes,
+          selected: _episode,
+          onSelected: _selectEpisode,
+        ),
+      );
+    }
+    if (_linePanel) {
+      return _PlayerFunctionPage(
+        key: const ValueKey('player-panel-line'),
+        title: '播放来源',
+        onClose: _closePanels,
+        child: PlaybackSourcePanel(
+          selected: _line,
+          lines: _lines,
+          failedLineIds: _failedLineIds,
+          scanning: _lineScanInProgress,
+          completedRules: _lineScanCompletedRules,
+          totalRules: _lineScanTotalRules,
+          onSelected: _selectLine,
+          onPickLocal: _pickLocalPlaybackFile,
+          onOpenNetwork: _openNetworkPlayback,
+          onSearch: _searchPlaybackLines,
+          onCopyDiagnostics: _copyPlaybackDiagnostics,
+          onReportAd: _reportAdAndSwitchLine,
+        ),
+      );
+    }
+    if (_danmakuPanel) {
+      return _PlayerFunctionPage(
+        key: const ValueKey('player-panel-danmaku'),
+        title: '弹幕设置',
+        onClose: _closePanels,
+        child: _DanmakuPanel(
+          comments: _danmakuController.remoteComments,
+          onDelete: _deleteDanmaku,
+          onReload: () => _loadDanmakuForCurrentEpisode(forceRefresh: true),
+        ),
+      );
+    }
+    if (_subtitlePanel) {
+      return _PlayerFunctionPage(
+        key: const ValueKey('player-panel-subtitle'),
+        title: '字幕 · 补充原文',
+        onClose: _closePanels,
+        child: _supplementalSubtitles == null
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(_subtitleStorageError ?? '正在读取本地字幕设置…'),
+                    if (_subtitleStorageError != null)
+                      TextButton(
+                        onPressed: _initializeSupplementalSubtitles,
+                        child: const Text('重试'),
+                      ),
+                  ],
+                ),
+              )
+            : SupplementalSubtitlePanel(
+                key: ValueKey(
+                  '$_subtitleStoreEpoch:${_episode.id}:${_line?.id}',
+                ),
+                controller: _supplementalSubtitles!,
+                subject: widget.request.subject,
+                episode: _episode,
+                episodes: widget.request.episodes,
+                createRepository: () => SubtitleRepository(state.services),
+              ),
+      );
+    }
+    if (_settingsPanel) {
+      return _PlayerFunctionPage(
+        key: const ValueKey('player-panel-settings'),
+        title: '',
+        onClose: _closePanels,
+        child: PlaybackSettingsView(
+          compact: true,
+          subject: widget.request.subject,
+          episode: _episode,
+          line: _line,
+          playbackMessage: _surfaceMessage,
+          superResolutionStatus: superResolutionPanelStatus,
+          settings: state.settings,
+          onChanged: (settings) => ref
+              .read(animeControllerProvider.notifier)
+              .updateSettings(settings),
+          onBack: () => setState(() => _settingsPanel = false),
+        ),
+      );
+    }
+    return const SizedBox.shrink(key: ValueKey('player-panel-empty'));
+  }
+
+  String? get _surfaceMessage {
+    if (_lineLookupInProgress) return '正在查找可播放线路…';
+    if (_loadingLine) {
+      return '正在连接 ${_line == null ? '播放线路' : playbackLineProviderLabel(_line!)}…';
+    }
+    if (_playbackFailed) return _playerMessage ?? '当前线路无法播放，请切换线路。';
+    if (!_isPlayableLine(_line)) {
+      return _lineLookupMessage ?? '当前集还没有选中可播放线路。';
+    }
+    if (_buffering) return '缓冲中…';
+    return _playerMessage;
+  }
+
+  Widget? _buildSuperResolutionPanelStatus(Anime4KDisplayStatus? status) {
+    final notice = _anime4kController.statusMessage?.trim();
+    if (status == null && (notice == null || notice.isEmpty)) return null;
+
+    final children = <Widget>[
+      if (status != null)
+        _SuperResolutionPanelStatus(
+          status: status,
+          onCompareStart: () => _anime4kController.setOriginalPreview(true),
+          onCompareEnd: () => _anime4kController.setOriginalPreview(false),
+        ),
+      if (status != null && notice != null && notice.isNotEmpty)
+        const SizedBox(height: 8),
+      if (notice != null && notice.isNotEmpty)
+        _SuperResolutionPanelNotice(message: notice),
+    ];
+    return children.length == 1
+        ? children.single
+        : Column(mainAxisSize: MainAxisSize.min, children: children);
+  }
+
+  bool get _usesWebPlayer {
+    final loadedUrl = _loadedUrl?.trim() ?? '';
+    final url = loadedUrl.isNotEmpty ? loadedUrl : _line?.url?.trim() ?? '';
+    return supportsWebStreamPlayer && shouldUseWebStreamPlayer(url);
+  }
+
+  bool get _shouldAutoHidePlayerControls {
+    return !_controlMenuOpen &&
+        !_danmakuInputFocus.hasFocus &&
+        _playing &&
+        !_buffering &&
+        !_loadingLine &&
+        !_lineLookupInProgress &&
+        !_playbackFailed &&
+        !_hasOpenPanel;
+  }
+
+  void _revealPlayerControls() {
+    if (!mounted) return;
+    _controlsHideTimer?.cancel();
+    if (!_controlsVisible) {
+      setState(() => _controlsVisible = true);
+    }
+    if (!_shouldAutoHidePlayerControls || _pointerInChromeHotZone) return;
+    _scheduleControlsHide();
+  }
+
+  void _togglePlayerControls() {
+    if (!mounted || _hasOpenPanel) return;
+    _controlsHideTimer?.cancel();
+    setState(() => _controlsVisible = !_controlsVisible);
+    if (_controlsVisible) _scheduleControlsHide();
+  }
+
+  void _startTemporaryDoubleSpeed() {
+    if (!mounted || _temporaryPlaybackRate != null) return;
+    HapticFeedback.selectionClick();
+    setState(() => _temporaryPlaybackRate = 2.0);
+  }
+
+  void _endTemporaryDoubleSpeed() {
+    if (!mounted || _temporaryPlaybackRate == null) return;
+    setState(() => _temporaryPlaybackRate = null);
+  }
+
+  void _handlePlayerChromeHotZoneChanged(bool inHotZone) {
+    if (!mounted || _pointerInChromeHotZone == inHotZone) return;
+    _pointerInChromeHotZone = inHotZone;
+    if (inHotZone) {
+      _controlsHideTimer?.cancel();
+      if (!_controlsVisible) setState(() => _controlsVisible = true);
+      return;
+    }
+    _scheduleControlsHide();
+  }
+
+  void _handleDanmakuInputFocus() {
+    if (_danmakuInputFocus.hasFocus) {
+      _revealPlayerControls();
+    } else {
+      _scheduleControlsHide();
+    }
+  }
+
+  void _handleControlMenuChanged(bool open) {
+    _controlMenuOpen = open;
+    if (!mounted) return;
+    if (open) {
+      _controlsHideTimer?.cancel();
+    } else {
+      _scheduleControlsHide();
+    }
+  }
+
+  void _scheduleControlsHide() {
+    _controlsHideTimer?.cancel();
+    if (!_shouldAutoHidePlayerControls) return;
+    _controlsHideTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted ||
+          !_shouldAutoHidePlayerControls ||
+          _pointerInChromeHotZone) {
+        return;
+      }
+      setState(() => _controlsVisible = false);
+    });
+  }
+
+  void _requestPlayerFocus() {
+    if (!mounted) return;
+    FocusScope.of(context).requestFocus(_shortcutFocusNode);
+  }
+
+  KeyEventResult _handleShortcut(KeyEvent event, PlaybackSettings settings) {
+    if (!settings.keyboardShortcutsEnabled || _danmakuInputFocus.hasFocus) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      if (_hasOpenPanel) {
+        _closePanels();
+      } else if (_fullscreen) {
+        unawaited(_setFullscreen(false));
+      } else {
+        return KeyEventResult.ignored;
+      }
+      _requestPlayerFocus();
+      return KeyEventResult.handled;
+    }
+    if (_hasOpenPanel) return KeyEventResult.ignored;
+    _revealPlayerControls();
+    if (settings.shortcutPlayPause &&
+        (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK)) {
+      unawaited(_togglePlayPause());
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutSeek && key == LogicalKeyboardKey.arrowLeft) {
+      unawaited(_seekBy(Duration(seconds: -settings.rewindSeconds)));
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutSeek && key == LogicalKeyboardKey.arrowRight) {
+      unawaited(_seekBy(Duration(seconds: settings.forwardSeconds)));
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutVolume && key == LogicalKeyboardKey.arrowUp) {
+      unawaited(_adjustVolume(8));
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutVolume && key == LogicalKeyboardKey.arrowDown) {
+      unawaited(_adjustVolume(-8));
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutFullscreen && key == LogicalKeyboardKey.keyF) {
+      unawaited(_setFullscreen(!_fullscreen));
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutMute && key == LogicalKeyboardKey.keyM) {
+      unawaited(_toggleMute());
+      return KeyEventResult.handled;
+    }
+    if (settings.shortcutReload && key == LogicalKeyboardKey.keyR) {
+      unawaited(_reloadCurrentLine());
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  void _confirmNativeFirstFrame({NativePlaybackStartupSnapshot? snapshot}) {
+    if (!mounted || _leaving) return;
+    _ignoreNativeErrorsUntil = null;
+    if (snapshot != null) {
+      _notePlaybackProgress(snapshot.position);
+      _nativeVideo.resumeSeek.handleProgress(snapshot.position);
+    }
+    setState(() {
+      if (snapshot != null) {
+        _playing = snapshot.playing;
+        _position = snapshot.position;
+        _buffer = snapshot.buffer;
+        _buffering = snapshot.buffering;
+        _duration = _player.state.duration;
+      }
+      _loadingLine = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+    final current = _line;
+    if (current != null) {
+      _clearLineFailure(current.id);
+      _preferredProviderId = current.providerId;
+      _recordFirstFrame(current);
+    }
+    _scheduleSingleBackupLookup();
+    _scheduleNextEpisodePrefetch();
+  }
+
+  void _bindPlayer() {
+    _nativeVideo
+      ..track(
+        _player.stream.playing.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.playing,
+          )) {
+            return;
+          }
+          _sessionController.dispatch(
+            PlaybackSessionEvent.playbackStateChanged(value),
+          );
+          setState(() => _playing = value);
+          _resetPlaybackStallWatchdog(
+            grace: value ? const Duration(seconds: 2) : Duration.zero,
+          );
+          if (value) {
+            _scheduleControlsHide();
+            _scheduleSingleBackupLookup();
+          } else {
+            unawaited(_persistPlaybackProgress(force: true));
+            _backupLookupDelayTimer?.cancel();
+            _backupLookupDelayTimer = null;
+            _controlsHideTimer?.cancel();
+            if (!_controlsVisible) setState(() => _controlsVisible = true);
+          }
+        }),
+      )
+      ..track(
+        _player.stream.position.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.position,
+          )) {
+            return;
+          }
+          _notePlaybackProgress(value);
+          _nativeVideo.resumeSeek.handleProgress(value);
+          final previousPosition = _position;
+          final reachedFirstFrame = _nativeVideo.handlePlaybackProgress(
+            previousPosition: previousPosition,
+            currentPosition: value,
+          );
+          _position = value;
+          _timelineRevision.value++;
+          if (reachedFirstFrame) _confirmNativeFirstFrame();
+          _maybeRefreshNextEpisodePrefetch();
+        }),
+      )
+      ..track(
+        _player.stream.duration.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.duration,
+          )) {
+            return;
+          }
+          setState(() => _duration = value);
+          if (value > Duration.zero) {
+            _nativeVideo.resumeSeek.nudge(mediaReady: true);
+          }
+        }),
+      )
+      ..track(
+        _player.stream.buffer.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.buffer,
+          )) {
+            return;
+          }
+          if (_buffer == value) return;
+          _buffer = value;
+          _timelineRevision.value++;
+        }),
+      )
+      ..track(
+        _player.stream.videoParams.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.videoParams,
+          )) {
+            return;
+          }
+          _anime4kController.updateVideoDimensions(
+            width: value.w ?? 0,
+            height: value.h ?? 0,
+          );
+        }),
+      )
+      ..track(
+        _player.stream.buffering.listen((value) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+            playerState,
+            eventValue: value,
+            playerStateValue: playerState.buffering,
+          )) {
+            return;
+          }
+          _sessionController.dispatch(
+            value
+                ? PlaybackSessionEvent.bufferingStarted()
+                : PlaybackSessionEvent.bufferingEnded(),
+          );
+          final changed = _buffering != value;
+          final current = _line;
+          if (changed) {
+            _playbackTrace.recordBufferingChanged(
+              buffering: value,
+              fields: <String, Object?>{
+                if (current != null) ..._lineTraceFields(current),
+                'position_ms': _position.inMilliseconds,
+                'buffer_ahead_ms': playbackBufferedAhead(
+                  position: _position,
+                  buffer: _buffer,
+                ).inMilliseconds,
+              },
+            );
+          }
+          setState(() => _buffering = value);
+          if (value) {
+            _resetNextEpisodePrefetch();
+            _backupLookupDelayTimer?.cancel();
+            _backupLookupDelayTimer = null;
+          } else if (_playing) {
+            _scheduleSingleBackupLookup();
+            _scheduleNextEpisodePrefetch();
+          }
+        }),
+      )
+      ..track(
+        _player.stream.volume.listen((value) {
+          if (mounted) {
+            setState(() {
+              _volume = value;
+              if (!_muted && value > 0) _lastNonZeroVolume = value;
+            });
+          }
+        }),
+      )
+      ..track(
+        _player.stream.completed.listen((completed) {
+          final playerState = _player.state;
+          if (!_acceptsNativeValue(
+                playerState,
+                eventValue: completed,
+                playerStateValue: playerState.completed,
+              ) ||
+              _firstFrameTraceOpenSerial != _openLineSerial) {
+            return;
+          }
+          if (completed) _handlePlaybackEnded();
+        }),
+      )
+      ..track(
+        _player.stream.error.listen((error) {
+          if (!_acceptsNativeMedia(_player.state)) return;
+          _handlePlayerError(error);
+        }),
+      );
+  }
+
+  bool _acceptsNativeMedia(PlayerState playerState) {
+    if (!mounted || _usesWebPlayer) return false;
+    final playlist = playerState.playlist;
+    final index = playlist.index;
+    final playerMediaUri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    return _nativeMediaEvents.isCurrent(
+      currentOpenSerial: _openLineSerial,
+      playerMediaUri: playerMediaUri,
+    );
+  }
+
+  bool _acceptsNativeValue<T>(
+    PlayerState playerState, {
+    required T eventValue,
+    required T playerStateValue,
+  }) {
+    if (!mounted || _usesWebPlayer) return false;
+    final playlist = playerState.playlist;
+    final index = playlist.index;
+    final playerMediaUri = index >= 0 && index < playlist.medias.length
+        ? playlist.medias[index].uri
+        : null;
+    return _nativeMediaEvents.acceptsValue(
+      currentOpenSerial: _openLineSerial,
+      playerMediaUri: playerMediaUri,
+      eventValue: eventValue,
+      playerStateValue: playerStateValue,
+    );
+  }
+
+  void _applyPlaybackSettings(PlaybackSettings settings) {
+    final accountContextVersion = ref
+        .read(animeControllerProvider.notifier)
+        .accountContextVersion;
+    if (accountContextVersion != _accountContextVersion) {
+      _accountContextVersion = accountContextVersion;
+      unawaited(_initializeSupplementalSubtitles());
+      _resetRecommendationTracking();
+      _resetNextEpisodePrefetch();
+      _preferredProviderId = null;
+      _clearWarmupTransitionState();
+    }
+    final volumeSettingChanged =
+        _currentSettings.volumeBoost != settings.volumeBoost;
+    _currentSettings = settings;
+    if (settings.rememberLine) {
+      _preferredProviderId ??= ref
+          .read(animeControllerProvider.notifier)
+          .rememberedPlaybackProvider(widget.request.subject);
+      _scheduleNextEpisodePrefetch();
+    } else {
+      _preferredProviderId = null;
+      _resetNextEpisodePrefetch();
+      _clearWarmupTransitionState();
+    }
+    if (volumeSettingChanged) _manualVolumeOverride = false;
+    final targetRate = settings.speed <= 0 ? 1.0 : settings.speed;
+    if (_appliedRate != targetRate) {
+      _appliedRate = targetRate;
+      unawaited(_player.setRate(targetRate));
+    }
+    final targetVolume = _muted
+        ? 0.0
+        : (_manualVolumeOverride ? _volume : _volumeFromSettings(settings));
+    if (_appliedVolume != targetVolume) {
+      _appliedVolume = targetVolume;
+      unawaited(_player.setVolume(targetVolume));
+    }
+    _applyVideoRenderSettings(settings);
+    if (settings.autoFullscreen && !_fullscreen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_fullscreen) unawaited(_setFullscreen(true));
+      });
+    }
+  }
+
+  void _applyVideoRenderSettings(
+    PlaybackSettings settings, {
+    bool force = false,
+  }) {
+    _anime4kController.applySettings(settings, force: force);
+  }
+
+  void _refreshSuperResolutionShader() {
+    _anime4kController.refresh();
+  }
+
+  void _handleVideoViewportSize(Size physicalSize) {
+    _anime4kController.updateViewport(physicalSize);
+  }
+
+  // HTMLMediaElement cannot amplify above 100%; native libmpv still can.
+  double get _maximumVolume => kIsWeb ? 100 : 200;
+
+  double _volumeFromSettings(PlaybackSettings settings) {
+    return (100 + settings.volumeBoost * 100)
+        .clamp(0, _maximumVolume)
+        .toDouble();
+  }
+
+  Future<void> _resolveLinesForCurrentEpisode({bool autoplay = true}) async {
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    final preserveActivePlayback = _isPlayableLine(_line) && !_playbackFailed;
+    if (!preserveActivePlayback) {
+      _sessionController.dispatch(PlaybackSessionEvent.lookupStarted());
+    }
+    _cancelSingleBackupLookup();
+    final usesProgressiveLookup = _usesProgressiveRuleLookup(
+      widget.request.subject,
+    );
+    final lookup = _lineRepository.lookupQuick(
+      subject: widget.request.subject,
+      episode: _episode,
+      progressive: usesProgressiveLookup,
+      hasActivePlayableLine: preserveActivePlayback,
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
+    );
+    setState(() {
+      _lineLookupMessage = null;
+      _playerMessage = null;
+      _playbackFailed = false;
+    });
+    _playbackTrace.record('line_lookup_started');
+    try {
+      final inventory = await lookup;
+      if (!mounted || inventory == null) return;
+      final lines = inventory.lines;
+      final available = inventory.playableLines;
+      for (final discovered in available) {
+        _sessionController.dispatch(
+          PlaybackSessionEvent.lineDiscovered(discovered.id),
+        );
+        if (discovered.serverVerified || discovered.clientVerified) {
+          _sessionController.dispatch(
+            PlaybackSessionEvent.lineVerified(discovered.id),
+          );
+        }
+      }
+      PlaybackLine? nextLine = _line;
+      var resumeVerifiedStartup = false;
+      if (_loadingLine &&
+          _openProbeToken != null &&
+          _firstFrameTraceOpenSerial == null &&
+          _canRecoverAutomatically(recoveryEpoch)) {
+        // Detail prefetch can still be checking an old request while the quick
+        // lookup has already qualified one on this device. Let that result
+        // finish startup, instead of waiting for the old request's timeout.
+        // A manual selection/pause invalidates recoveryEpoch; decoded playback
+        // and the user's auto-switch setting keep their existing ownership.
+        final ready = available.where(
+          (line) =>
+              line.clientVerified &&
+              playbackLineCanStartImmediately(line) &&
+              !_failedLineIds.contains(line.id) &&
+              (line.id == nextLine?.id || _currentSettings.autoSwitchLine),
+        );
+        if (ready.isNotEmpty) {
+          nextLine = ready.first;
+          resumeVerifiedStartup = true;
+        }
+      }
+      if (!_isPlayableLine(nextLine) && available.isNotEmpty) {
+        nextLine = _preferredPlayableLine(available);
+      }
+      setState(() {
+        _line = nextLine;
+        _lineLookupMessage = available.isEmpty ? '暂时还没找到可用线路，仍在继续查找…' : null;
+      });
+      _playbackTrace.record(
+        'line_lookup_completed',
+        fields: <String, Object?>{
+          'line_count': lines.length,
+          'playable_count': available.length,
+        },
+      );
+      if ((autoplay || resumeVerifiedStartup) &&
+          _canRecoverAutomatically(recoveryEpoch) &&
+          _isPlayableLine(nextLine)) {
+        await _openLine(nextLine!, force: true, automatic: true);
+      } else if (available.isEmpty && usesProgressiveLookup) {
+        _startExpandedLineLookup(autoplay: autoplay);
+      } else if (available.isEmpty) {
+        _nativeMediaEvents.invalidate();
+        await _player.stop();
+        _recordFinalPlaybackFailure(reason: 'no_playable_line');
+      }
+    } catch (error) {
+      if (!mounted) return;
+      if (preserveActivePlayback && _isPlayableLine(_line)) {
+        _playbackTrace.record(
+          'line_lookup_degraded',
+          fields: <String, Object?>{'error_type': error.runtimeType.toString()},
+        );
+        setState(() {
+          _lineLookupMessage = '备用线路加载失败，当前线路继续播放';
+          _playbackFailed = false;
+        });
+        return;
+      }
+      _playbackTrace.record(
+        'line_lookup_failed',
+        fields: <String, Object?>{'error_type': error.runtimeType.toString()},
+      );
+      setState(() {
+        _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
+        _playbackFailed = true;
+      });
+      _recordFinalPlaybackFailure(reason: 'line_lookup_failed');
+    }
+  }
+
+  void _resetPlaybackStallWatchdog({
+    Duration? position,
+    Duration grace = Duration.zero,
+  }) {
+    _recoveryController.resetStallWatchdog(
+      position: position ?? _position,
+      grace: grace,
+    );
+  }
+
+  void _notePlaybackProgress(Duration value) {
+    _recoveryController.notePlaybackProgress(value);
+    _trackRecommendationWatchTime(value);
+    _scheduleNextEpisodePrefetch();
+    unawaited(_persistPlaybackProgress());
+  }
+
+  void _resetRecommendationTracking() {
+    _recommendationFirstFrameEpisodeId = null;
+    _recommendationEffectiveEpisodeId = null;
+    _recommendationCompletedEpisodeId = null;
+    _recommendationWatched = Duration.zero;
+    _recommendationLastObservedPosition = null;
+    _lastPlaybackProgressPersistedAt = null;
+    _handledEndedEpisodeId = null;
+    _handledEndedOpenSerial = null;
+  }
+
+  void _recordRecommendationFirstFrame() {
+    if (_recommendationFirstFrameEpisodeId == _episode.id) return;
+    _recommendationFirstFrameEpisodeId = _episode.id;
+    _recommendationEffectiveEpisodeId = null;
+    _recommendationCompletedEpisodeId = null;
+    _recommendationWatched = Duration.zero;
+    _recommendationLastObservedPosition = _position;
+    final controller = ref.read(animeControllerProvider.notifier);
+    unawaited(
+      controller.recordRecommendationFirstFrame(
+        widget.request.subject,
+        _episode,
+        expectedAccountContextVersion: _accountContextVersion,
+      ),
+    );
+  }
+
+  void _trackRecommendationWatchTime(Duration value) {
+    if (_recommendationFirstFrameEpisodeId != _episode.id) {
+      _recommendationLastObservedPosition = value;
+      return;
+    }
+    final previous = _recommendationLastObservedPosition;
+    _recommendationLastObservedPosition = value;
+    if (previous != null && _playing) {
+      final delta = value - previous;
+      if (delta > Duration.zero && delta <= const Duration(seconds: 5)) {
+        _recommendationWatched += delta;
+      }
+    }
+    final duration = _duration;
+    if (duration <= Duration.zero) return;
+    final effectiveThreshold = recommendationEffectiveWatchThreshold(duration);
+    if (_recommendationEffectiveEpisodeId != _episode.id &&
+        _recommendationWatched >= effectiveThreshold) {
+      _recommendationEffectiveEpisodeId = _episode.id;
+      unawaited(
+        ref
+            .read(animeControllerProvider.notifier)
+            .recordRecommendationEffectiveWatch(
+              widget.request.subject,
+              _episode,
+              expectedAccountContextVersion: _accountContextVersion,
+            ),
+      );
+    }
+    final reachedEnd = recommendationPlaybackReachedCompletion(
+      position: value,
+      duration: duration,
+    );
+    if (reachedEnd) _recordRecommendationCompletion();
+  }
+
+  void _recordRecommendationCompletion() {
+    if (_recommendationFirstFrameEpisodeId != _episode.id ||
+        _recommendationCompletedEpisodeId == _episode.id) {
+      return;
+    }
+    _recommendationCompletedEpisodeId = _episode.id;
+    unawaited(
+      ref
+          .read(animeControllerProvider.notifier)
+          .recordRecommendationCompleted(
+            widget.request.subject,
+            _episode,
+            expectedAccountContextVersion: _accountContextVersion,
+          ),
+    );
+  }
+
+  void _handlePlaybackEnded() {
+    if (!mounted ||
+        (_handledEndedEpisodeId == _episode.id &&
+            _handledEndedOpenSerial == _openLineSerial)) {
+      return;
+    }
+    _handledEndedEpisodeId = _episode.id;
+    _handledEndedOpenSerial = _openLineSerial;
+    _sessionController.dispatch(PlaybackSessionEvent.playbackEnded());
+    _backupLookupDelayTimer?.cancel();
+    _backupLookupDelayTimer = null;
+    _resetPlaybackStallWatchdog();
+    _recordRecommendationCompletion();
+    unawaited(_persistPlaybackProgress(force: true));
+    if (_currentSettings.autoNext) unawaited(_playNextEpisode());
+  }
+
+  Future<void> _persistPlaybackProgress({bool force = false}) async {
+    if (_recommendationFirstFrameEpisodeId != _episode.id ||
+        _position <= Duration.zero ||
+        _duration <= Duration.zero) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastPlaybackProgressPersistedAt;
+    if (!force &&
+        last != null &&
+        now.difference(last) < const Duration(seconds: 15)) {
+      return;
+    }
+    _lastPlaybackProgressPersistedAt = now;
+    try {
+      await ref
+          .read(animeControllerProvider.notifier)
+          .updatePlaybackProgress(
+            widget.request.subject,
+            _episode,
+            position: _position,
+            duration: _duration,
+            expectedAccountContextVersion: _accountContextVersion,
+          );
+    } catch (_) {
+      // Playback must remain responsive when optional progress persistence fails.
+    }
+  }
+
+  void _checkPlaybackStall() {
+    if (!_recoveryController.shouldRecoverFromStall(
+      recoveryBlocked:
+          !mounted ||
+          _leaving ||
+          _sessionController.state.userIntent == PlaybackIntent.paused ||
+          !_isPlayableLine(_line) ||
+          _nativeVideo.resumeSeek.blocksStallRecovery,
+      appInForeground: _appInForeground,
+      playing: _playing,
+      buffering: _buffering,
+      loading: _loadingLine,
+      playbackFailed: _playbackFailed,
+      position: _position,
+      duration: _duration,
+      buffer: _buffer,
+    )) {
+      return;
+    }
+    final current = _line;
+    if (!_isPlayableLine(current)) return;
+    _playbackTrace.record(
+      'stall_detected',
+      fields: <String, Object?>{
+        ..._lineTraceFields(current!),
+        'position_ms': _position.inMilliseconds,
+        'buffer_ahead_ms': playbackBufferedAhead(
+          position: _position,
+          buffer: _buffer,
+        ).inMilliseconds,
+      },
+    );
+    _handleRuntimeLineFailure(
+      current,
+      message: '画面一直在缓冲，正在尝试恢复这条线路。',
+      definitive: _recoveryController.lastRecoveryWasRepeatedBuffering,
+    );
+  }
+
+  void _scheduleSingleBackupLookup({
+    Duration delay = playbackBackupProbeDelay,
+  }) {
+    if (!mounted ||
+        widget.request.offlineOnly ||
+        _sessionController.state.userIntent == PlaybackIntent.paused ||
+        !_usesProgressiveRuleLookup(widget.request.subject) ||
+        _line == null ||
+        _nextPlayableLine() != null ||
+        _backupLookupDelayTimer != null ||
+        _backupLookupInProgress ||
+        _lineScanInProgress ||
+        _hasExpandedLineLookup) {
+      return;
+    }
+    _backupLookupDelayTimer = Timer(delay, () {
+      _backupLookupDelayTimer = null;
+      if (!mounted || _nextPlayableLine() != null) return;
+      final canProbe = playbackShouldPrepareSingleBackup(
+        appInForeground: _appInForeground,
+        playing: _playing,
+        buffering: _buffering,
+        loading: _loadingLine,
+        playbackFailed: _playbackFailed,
+        hasAlternative: _nextPlayableLine() != null,
+        position: _position,
+        buffer: _buffer,
+      );
+      if (!canProbe) {
+        if (_playing && _appInForeground) {
+          _scheduleSingleBackupLookup(delay: const Duration(seconds: 4));
+        }
+        return;
+      }
+      unawaited(_prepareSingleBackupLine());
+    });
+  }
+
+  Future<void> _prepareSingleBackupLine() async {
+    final current = _line;
+    if (!mounted ||
+        current == null ||
+        _backupLookupInProgress ||
+        _nextPlayableLine() != null) {
+      return;
+    }
+    final inventory = await _lineRepository.prepareSingleBackup(
+      subject: widget.request.subject,
+      episode: _episode,
+      currentLine: current,
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
+    );
+    if (!mounted || inventory == null) return;
+    setState(() {});
+    final backup = _nextPlayableLine();
+    if (backup != null) {
+      _playbackTrace.record('backup_ready', fields: _lineTraceFields(backup));
+    }
+  }
+
+  void _cancelSingleBackupLookup() {
+    _backupLookupDelayTimer?.cancel();
+    _backupLookupDelayTimer = null;
+    _lineRepository.cancelSingleBackupLookup();
+  }
+
+  void _startExpandedLineLookup({bool autoplay = false}) {
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    if (!mounted ||
+        widget.request.offlineOnly ||
+        !_usesProgressiveRuleLookup(widget.request.subject) ||
+        _lineScanComplete) {
+      return;
+    }
+    // A fresh recovery may adopt a still-running scan after Pause/resume.
+    // A manual open alone never authorizes an old scan to replace its choice.
+    if (autoplay || (!_lineScanInProgress && !_hasExpandedLineLookup)) {
+      _expandedRecoveryOwner = (
+        epoch: recoveryEpoch,
+        openSerial: _openLineSerial,
+      );
+    }
+    if (_lineScanInProgress || _hasExpandedLineLookup) return;
+    _cancelSingleBackupLookup();
+    final started = _lineRepository.startExpandedLookup(
+      subject: widget.request.subject,
+      episode: _episode,
+      hasActivePlayableLine: _isPlayableLine(_line),
+      preserveLoadedLine: _preserveLoadedLineIfProbeDisagrees,
+      onUpdate: (repositoryUpdate) {
+        if (!mounted) return;
+        final update = repositoryUpdate.source;
+        final merged = repositoryUpdate.inventory.lines;
+        final available = repositoryUpdate.inventory.playableLines;
+        final previous = _line;
+        final recoveryPosition = _currentRecoveryPosition;
+        PlaybackLine? selected = _line;
+        if (selected != null) {
+          final refreshed = _lineById(merged, selected.id);
+          if (refreshed != null && (refreshed.available || _playbackFailed)) {
+            selected = refreshed;
+          }
+        }
+        final currentFailed =
+            _playbackFailed ||
+            (selected != null && _failedLineIds.contains(selected.id));
+        final target = currentFailed
+            ? _lineController.nextPlayableLine(
+                    currentLine: selected,
+                    lines: available,
+                  ) ??
+                  _preferredPlayableLine(available)
+            : !_isPlayableLine(selected)
+            ? _preferredPlayableLine(available)
+            : selected;
+        final owner = _expandedRecoveryOwner;
+        final shouldOpen =
+            owner != null &&
+            _canRecoverAutomatically(owner.epoch) &&
+            owner.openSerial == _openLineSerial &&
+            !_loadingLine &&
+            target != null &&
+            // Discovery can echo the failed current route before a backup is
+            // verified. Only the retry controller may reopen that same route.
+            (!currentFailed || target.id != selected?.id) &&
+            !_failedLineIds.contains(target.id) &&
+            ((autoplay && (!_isPlayableLine(_line) || _loadedUrl == null)) ||
+                (currentFailed && _currentSettings.autoSwitchLine));
+        final nextLine = shouldOpen ? target : selected;
+        final nextLookupMessage = available.isEmpty
+            ? update.isComplete
+                  ? _emptyLineMessage(merged, subject: widget.request.subject)
+                  : _progressiveLookupMessage(update)
+            : null;
+        final mustRefreshImmediately =
+            shouldOpen ||
+            update.isComplete ||
+            _line?.id != nextLine?.id ||
+            _expandedLineUiThrottle == null;
+        _line = nextLine;
+        _lineLookupMessage = nextLookupMessage;
+        if (mustRefreshImmediately) {
+          _expandedLineUiPending = false;
+          _expandedLineUiThrottle?.cancel();
+          if (update.isComplete) {
+            _expandedLineUiThrottle = null;
+          } else {
+            _expandedLineUiThrottle = Timer(
+              const Duration(milliseconds: 180),
+              () {
+                _expandedLineUiThrottle = null;
+                if (mounted && _expandedLineUiPending) {
+                  _expandedLineUiPending = false;
+                  setState(() {});
+                }
+              },
+            );
+          }
+          setState(() {});
+        } else {
+          _expandedLineUiPending = true;
+        }
+        if (shouldOpen) {
+          if (currentFailed) {
+            _beginPlaybackRecovery(
+              target,
+              strategy: 'auto_switch',
+              previous: previous,
+              position: recoveryPosition,
+            );
+          }
+          unawaited(
+            _openLine(
+              target,
+              force: true,
+              resumePosition: recoveryPosition,
+              automatic: true,
+            ),
+          );
+        } else if (update.isComplete &&
+            available.isEmpty &&
+            (_playbackFailed || !_isPlayableLine(_line))) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
+        }
+      },
+      onError: (error, stackTrace) {
+        _expandedLineUiThrottle?.cancel();
+        _expandedLineUiThrottle = null;
+        _expandedLineUiPending = false;
+        if (!mounted) return;
+        setState(() {
+          _lineLookupMessage = '查找线路失败：${_friendlyPlaybackError(error)}';
+        });
+        if (_playbackFailed || !_isPlayableLine(_line)) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_failed');
+        }
+      },
+      onDone: () {
+        _expandedLineUiThrottle?.cancel();
+        _expandedLineUiThrottle = null;
+        _expandedLineUiPending = false;
+        if (!mounted) return;
+        setState(() {});
+        if (_availableLines(_lines).isEmpty &&
+            (_playbackFailed || !_isPlayableLine(_line))) {
+          _recordFinalPlaybackFailure(reason: 'source_scan_exhausted');
+        }
+      },
+    );
+    if (started) setState(() {});
+  }
+
+  List<PlaybackLine> _preserveLoadedLineIfProbeDisagrees(
+    List<PlaybackLine> lines,
+  ) {
+    return _lineController.preserveLoadedLineIfProbeDisagrees(
+      lines: lines,
+      currentLine: _line,
+      loadedUrl: _loadedUrl,
+      playbackFailed: _playbackFailed,
+    );
+  }
+
+  PlaybackLine? _preferredPlayableLine(List<PlaybackLine> lines) {
+    return _lineController.preferredPlayableLine(lines);
+  }
+
+  Future<void> _openLine(
+    PlaybackLine requestedLine, {
+    bool force = false,
+    Duration? resumePosition,
+    bool automatic = false,
+  }) async {
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    if (automatic && !_canRecoverAutomatically(recoveryEpoch)) return;
+    _resetNextEpisodePrefetch();
+    var line = requestedLine;
+    _recoveryController.cancelCurrentLineRetry();
+    if (!_isPlayableLine(line)) {
+      _nativeMediaEvents.invalidate();
+      await _player.stop();
+      if (!mounted) return;
+      setState(() {
+        _loadedUrl = null;
+        _loadingLine = false;
+        _playbackFailed = true;
+        // line.message is resolver-internal text (HLS 子清单、DASH 媒体分片、
+        // CDN 状态码...). Sanitize it before it reaches the error banner.
+        _playerMessage = playbackLineFailureLabel(line);
+      });
+      return;
+    }
+    final requestedUrl = line.url!.trim();
+    if (!force && _loadedUrl == requestedUrl && !_playbackFailed) return;
+    final requestedResumePosition = playbackRecoveryPosition(
+      resumePosition ?? _pendingInitialResumePosition ?? Duration.zero,
+    );
+    _sessionController.dispatch(
+      PlaybackSessionEvent.openRequested(
+        line.id,
+        position: requestedResumePosition,
+      ),
+    );
+    _nativeVideo.resumeSeek.cancel();
+    final serial = ++_openLineSerial;
+    _metadataProbeToken?.cancel();
+    _metadataProbeToken = null;
+    _openProbeToken?.cancel();
+    _openProbeToken = null;
+    _startupTransportFailures = 0;
+    _nativeMediaEvents.invalidate();
+    _handledFailureOpenSerial = null;
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: const <String, Object?>{'outcome': 'line_changed'},
+    );
+    _playbackTrace.record(
+      'line_open_requested',
+      fields: _lineTraceFields(line),
+    );
+    _cancelSingleBackupLookup();
+    _resetPlaybackStallWatchdog(
+      position: Duration.zero,
+      grace: const Duration(seconds: 5),
+    );
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
+    _ignoreNativeErrorsUntil = null;
+    _revealPlayerControls();
+    _anime4kController.resetVideo();
+    setState(() {
+      _line = line;
+      _loadingLine = true;
+      _playbackFailed = false;
+      _playerMessage = '正在确认这条线路可以正常播放…';
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      _buffer = Duration.zero;
+    });
+    _bindSupplementalSubtitles();
+    if (!playbackLineCanStartImmediately(line)) {
+      // Inventory completion/replacement must not cancel an active media-open
+      // check. Cancelled probes return the original candidate, not proof that
+      // this device can fetch it; never hand that result to the decoder.
+      final token = RulePlaybackCancellationToken();
+      _openProbeToken = token;
+      final notifier = ref.read(animeControllerProvider.notifier);
+      final accountVersion = notifier.accountContextVersion;
+      try {
+        line = await notifier.verifyPlaybackLine(
+          line,
+          enrichMetadata: false,
+          forceRefresh: true,
+          cancellationToken: token,
+        );
+      } finally {
+        if (identical(_openProbeToken, token)) _openProbeToken = null;
+      }
+      if (token.isCancelled ||
+          notifier.accountContextVersion != accountVersion) {
+        return;
+      }
+    }
+    if (!mounted || serial != _openLineSerial) return;
+    // Verification may complete after a new explicit pause/manual selection.
+    if (automatic && !_canRecoverAutomatically(recoveryEpoch)) return;
+    _lines = upsertPlaybackLine(_lines, line);
+    if (!_isPlayableLine(line)) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.lineFailed(
+          line.id,
+          reason: 'verification_rejected',
+          hasAlternative: _nextPlayableLine() != null,
+        ),
+      );
+      _playbackTrace.record('line_rejected', fields: _lineTraceFields(line));
+      _markLineFailure(line, definitive: true);
+      setState(() {
+        _line = line;
+        _loadingLine = false;
+        _playbackFailed = true;
+        _playerMessage = '这条线路不可用，正在自动寻找其他可播线路…';
+      });
+      _startExpandedLineLookup(autoplay: true);
+      unawaited(_tryAutoSwitchLine(resumePosition: requestedResumePosition));
+      return;
+    }
+    final url = line.url!.trim();
+    if (resumePosition == null && _pendingInitialResumePosition != null) {
+      _pendingInitialResumePosition = null;
+    }
+    setState(() {
+      _line = line;
+      _loadedUrl = url;
+      if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
+        _position = requestedResumePosition;
+      }
+      _playerMessage = null;
+    });
+    if (supportsWebStreamPlayer && shouldUseWebStreamPlayer(url)) {
+      if (!mounted || serial != _openLineSerial) return;
+      _playbackTrace.record(
+        'player_open_dispatched',
+        fields: <String, Object?>{..._lineTraceFields(line), 'player': 'web'},
+      );
+      unawaited(_player.stop());
+      _webVideo.startStartupWatchdog(
+        isCurrent: () =>
+            mounted && serial == _openLineSerial && _loadedUrl == url,
+        waitingForReady: () => _loadingLine,
+        hasAlternative: () => _nextPlayableLine() != null,
+        onTimeout: (event) {
+          _sessionController.dispatch(
+            event.phase == WebStartupTimeoutPhase.soft
+                ? PlaybackSessionEvent.softTimeout(
+                    hasAlternative: event.hasAlternative,
+                  )
+                : PlaybackSessionEvent.hardTimeout(
+                    hasAlternative: event.hasAlternative,
+                  ),
+          );
+          _handleWebError(
+            serial,
+            message: event.phase == WebStartupTimeoutPhase.soft
+                ? '这条线路一直没有出画面，已切换到备用线路。'
+                : '长时间未能开始播放，已尝试切换其他线路。',
+          );
+        },
+      );
+      setState(() {
+        _loadingLine = true;
+        _playbackFailed = false;
+        // This is the desired state passed to WebStreamPlayer. The browser
+        // events below remain authoritative and will set it back to false if
+        // autoplay is blocked or the user pauses playback.
+        _playing =
+            _sessionController.state.userIntent == PlaybackIntent.playing;
+        _playerMessage = null;
+      });
+      return;
+    }
+    try {
+      if (supportsWebStreamPlayer) _webPlayerController.pause();
+      _nativeVideo.startFirstFrameWatchdog(
+        isCurrent: () =>
+            mounted && serial == _openLineSerial && _loadedUrl == url,
+        readSnapshot: () => _nativeMediaEvents.readStartupSnapshot(
+          currentOpenSerial: serial,
+          playerState: _player.state,
+          hasAlternative: _nextPlayableLine() != null,
+          decodedFrame: _nativeVideo.hasDecodedFrame,
+        ),
+        onFirstFrame: (snapshot) =>
+            _confirmNativeFirstFrame(snapshot: snapshot),
+        onTimeout: (event) {
+          final hardTimedOut = event.phase == NativeStartupTimeoutPhase.hard;
+          _sessionController.dispatch(
+            hardTimedOut
+                ? PlaybackSessionEvent.hardTimeout(
+                    hasAlternative: event.hasAlternative,
+                  )
+                : PlaybackSessionEvent.softTimeout(
+                    hasAlternative: event.hasAlternative,
+                  ),
+          );
+          unawaited(
+            _handleNativeStartupFailure(
+              line,
+              serial,
+              recoveryEpoch,
+              hardTimedOut: hardTimedOut,
+            ),
+          );
+        },
+      );
+      final privateRequest = line is MediaLibraryPlaybackLine
+          ? ref.read(mediaLibraryAdapterProvider)!.playbackRequestFor(line)
+          : null;
+      final opened = await _nativeVideo.openRequest(
+        NativePlaybackRequest(
+          url: url,
+          headers: privateRequest?.headers ?? line.headers,
+          format: line.format,
+          publicHttpOnly: line.publicHttpOnly,
+          privateLibraryOrigin: privateRequest?.origin,
+          resumePosition: requestedResumePosition,
+        ),
+        serial: serial,
+        isCurrent: () => mounted && serial == _openLineSerial,
+        canPlay: () => _canRecoverAutomatically(recoveryEpoch),
+        onDispatched: () {
+          _ignoreNativeErrorsUntil = DateTime.now().add(
+            const Duration(milliseconds: 750),
+          );
+          _playbackTrace.record(
+            'player_open_dispatched',
+            fields: {..._lineTraceFields(line), 'player': 'native'},
+          );
+        },
+      );
+      if (!opened || !mounted || serial != _openLineSerial) return;
+      final openedState = _player.state;
+      _refreshSuperResolutionShader();
+      setState(() {
+        _playing = openedState.playing;
+        _duration = openedState.duration;
+        _buffer = openedState.buffer;
+        _buffering = openedState.buffering;
+        _loadingLine = !_nativeVideo.hasDecodedFrame;
+        _playbackFailed = false;
+        _playerMessage = null;
+      });
+    } catch (error) {
+      if (!mounted || serial != _openLineSerial) return;
+      _nativeMediaEvents.invalidate();
+      _playbackTrace.record(
+        'line_open_failed',
+        fields: <String, Object?>{
+          ..._lineTraceFields(line),
+          'error_type': error.runtimeType.toString(),
+        },
+      );
+      _nativeVideo.cancelFirstFrameWatchdog();
+      _handleRuntimeLineFailure(
+        line,
+        message: '当前线路无法播放：${_friendlyPlaybackError(error)}',
+      );
+    }
+  }
+
+  Future<void> _handleNativeStartupFailure(
+    PlaybackLine line,
+    int serial,
+    int recoveryEpoch, {
+    required bool hardTimedOut,
+  }) async {
+    if (!mounted || serial != _openLineSerial) return;
+    if (_canRecoverAutomatically(recoveryEpoch) &&
+        await _nativeVideo.trySoftwareDecoding(serial: serial)) {
+      if (!mounted ||
+          serial != _openLineSerial ||
+          !_canRecoverAutomatically(recoveryEpoch)) {
+        return;
+      }
+      _playbackTrace.record(
+        'decoder_fallback',
+        fields: {'reason_code': 'no_decoded_video', 'decoder': 'software'},
+      );
+      await _openLine(
+        line,
+        force: true,
+        automatic: true,
+        resumePosition: _currentRecoveryPosition,
+      );
+      return;
+    }
+    if (!mounted || serial != _openLineSerial) return;
+    _handleRuntimeLineFailure(
+      line,
+      message: hardTimedOut ? '未能解码出画面，正在检查其他线路。' : '暂时没有出画面。',
+      // The startup watchdog already spent this route's budget. Retrying the
+      // same URL doubles the wait and defeats its soft-timeout backup choice.
+      definitive: true,
+    );
+  }
+
+  void _clearLineFailure(String lineId) {
+    _lineController.clearFailure(lineId);
+  }
+
+  void _handleMediaTransportFailure(MediaTransportFailure failure) {
+    _playbackTrace.record('media_request_failed', fields: failure.safeFields);
+    final line = _line;
+    if (!mounted ||
+        line == null ||
+        !_loadingLine ||
+        _nativeVideo.hasDecodedFrame ||
+        !_canRecoverAutomatically(_automaticRecoveryEpoch) ||
+        _handledFailureOpenSerial == _openLineSerial ||
+        failure.kind == MediaTransportFailureKind.unknown) {
+      return;
+    }
+    _startupTransportFailures++;
+    // A failed request is not a failed movie: HLS can recover a single segment.
+    // Look for a backup immediately, but only abandon startup after repeated
+    // transport failures. Reopening this same URL just repeats its TLS failure.
+    if (_currentSettings.autoSwitchLine) {
+      _startExpandedLineLookup(autoplay: true);
+    }
+    if (_startupTransportFailures < 2) return;
+    _handleRuntimeLineFailure(
+      line,
+      message: '当前线路连接失败，正在检查其他线路。',
+      definitive: true,
+    );
+  }
+
+  bool _markLineFailure(PlaybackLine line, {bool definitive = false}) {
+    return _lineController.markFailure(line, definitive: definitive);
+  }
+
+  void _handleRuntimeLineFailure(
+    PlaybackLine line, {
+    required String message,
+    bool definitive = false,
+  }) {
+    if (!mounted || _handledFailureOpenSerial == _openLineSerial) return;
+    _handledFailureOpenSerial = _openLineSerial;
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    final failedOpenSerial = _openLineSerial;
+    final recoverAutomatically = _canRecoverAutomatically(recoveryEpoch);
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
+    final resumePosition = _currentRecoveryPosition;
+    final nextAlternative = _nextPlayableLine();
+    final hasAlternative = nextAlternative != null;
+    final hasWarmupFallback = warmupFallbackReadyForImmediateRecovery(
+      nextAlternative,
+      expectedLineId: _warmupTransitionFallbackLineId,
+      now: DateTime.now(),
+      minValidity: const Duration(seconds: 5),
+    );
+    final warmupPrimaryFailed =
+        line.id == _warmupTransitionPrimaryLineId && hasWarmupFallback;
+    if (warmupPrimaryFailed) {
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionPrimaryFailed,
+        fields: <String, Object?>{
+          'provider': line.providerId,
+          'fallback_count': 1,
+          'reason_code': 'runtime_failure',
+        },
+      );
+    } else if (line.id == _warmupTransitionFallbackLineId) {
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionFallbackFailed,
+        fields: <String, Object?>{
+          'provider': line.providerId,
+          'reason_code': 'runtime_failure',
+        },
+      );
+      _warmupTransitionFallbackLineId = null;
+    }
+    final shouldSwitch = _markLineFailure(
+      line,
+      definitive:
+          definitive ||
+          warmupPrimaryFailed ||
+          shouldSwitchAfterPlaybackInterruption(
+            position: resumePosition,
+            hasAlternative: hasAlternative,
+          ),
+    );
+    _sessionController.dispatch(
+      PlaybackSessionEvent.lineFailed(
+        line.id,
+        reason: message,
+        hasAlternative: hasAlternative,
+      ),
+    );
+    _playbackTrace.record(
+      'runtime_failure',
+      fields: <String, Object?>{
+        ..._lineTraceFields(line),
+        'position_ms': resumePosition.inMilliseconds,
+        'failure_count': _lineFailureCounts[line.id] ?? 0,
+        'will_switch':
+            recoverAutomatically &&
+            shouldSwitch &&
+            _currentSettings.autoSwitchLine,
+      },
+    );
+    _playbackTrace.recordBufferingChanged(
+      buffering: false,
+      fields: <String, Object?>{..._lineTraceFields(line), 'outcome': 'failed'},
+    );
+    setState(() {
+      _loadingLine = false;
+      _playbackFailed = true;
+      _playing = false;
+      _playerMessage = !recoverAutomatically
+          ? '当前线路播放中断，点击播放可重新尝试。'
+          : shouldSwitch
+          ? (_currentSettings.autoSwitchLine
+                ? '当前线路连续播放失败，正在自动切换备用线路…'
+                : message)
+          : '播放暂时中断，正在重试当前线路…';
+    });
+    if (!recoverAutomatically) return;
+    // Reload resets the failure counter, so its first new failure may only queue
+    // a retry. Let that current failure adopt an existing scan immediately too.
+    if (_hasExpandedLineLookup) {
+      _expandedRecoveryOwner = (
+        epoch: recoveryEpoch,
+        openSerial: failedOpenSerial,
+      );
+    }
+    if (!shouldSwitch) {
+      // A slow single route can never accumulate the buffer needed for idle
+      // backup prefetch. Discover alternatives on its first failure while the
+      // one permitted retry runs; a verified result still obeys pause/ownership.
+      if (_currentSettings.autoSwitchLine && !hasAlternative) {
+        _startExpandedLineLookup(autoplay: true);
+      }
+      _recoveryController.scheduleCurrentLineRetry(
+        const Duration(milliseconds: 500),
+        () async {
+          if (!_canRecoverAutomatically(recoveryEpoch) ||
+              failedOpenSerial != _openLineSerial ||
+              _line?.id != line.id ||
+              _lineFailureCounts[line.id] != 1) {
+            return;
+          }
+          _beginPlaybackRecovery(
+            line,
+            strategy: 'current_line_retry',
+            previous: line,
+            position: resumePosition,
+          );
+          await _openLine(
+            line,
+            force: true,
+            resumePosition: resumePosition,
+            automatic: true,
+          );
+        },
+      );
+      return;
+    }
+    if (!_currentSettings.autoSwitchLine) {
+      _recordFinalPlaybackFailure(reason: 'auto_switch_disabled');
+    }
+    if (_openingWarmupTransitionPrimary &&
+        warmupPrimaryFailed &&
+        _currentSettings.autoSwitchLine) {
+      return;
+    }
+    if (!hasWarmupFallback || !_currentSettings.autoSwitchLine) {
+      _startExpandedLineLookup(autoplay: true);
+    }
+    unawaited(_tryAutoSwitchLine(resumePosition: resumePosition));
+  }
+
+  void _handlePlayerError(Object error) {
+    final ignoreUntil = _ignoreNativeErrorsUntil;
+    if (ignoreUntil != null && DateTime.now().isBefore(ignoreUntil)) {
+      // stop/open can emit a delayed error from the previous media. The active
+      // attempt still has its startup timer and will be judged independently.
+      return;
+    }
+    _nativeVideo.cancelFirstFrameWatchdog();
+    if (!_isPlayableLine(_line)) {
+      if (!mounted) return;
+      setState(() {
+        _loadingLine = false;
+        _playbackFailed = false;
+        _playerMessage = null;
+      });
+      return;
+    }
+    final current = _line;
+    if (!mounted) return;
+    if (current != null) {
+      _handleRuntimeLineFailure(
+        current,
+        message: '当前线路无法播放：${_friendlyPlaybackError(error)}',
+      );
+    }
+  }
+
+  Duration get _currentRecoveryPosition {
+    return _nativeVideo.resumeSeek.recoveryPosition(_position);
+  }
+
+  Future<void> _tryAutoSwitchLine({Duration? resumePosition}) async {
+    final recoveryEpoch = _automaticRecoveryEpoch;
+    if (!_currentSettings.autoSwitchLine ||
+        !_canRecoverAutomatically(recoveryEpoch)) {
+      return;
+    }
+    await _recoveryController.runAutoSwitch(
+      resumePosition: resumePosition,
+      attempt: (targetResumePosition) async {
+        if (!_canRecoverAutomatically(recoveryEpoch) ||
+            !_currentSettings.autoSwitchLine) {
+          return;
+        }
+        final next = _nextPlayableLine();
+        if (next == null) {
+          if (!widget.request.offlineOnly && !_lineScanComplete) {
+            _startExpandedLineLookup(autoplay: true);
+            if (mounted) {
+              setState(() {
+                _playerMessage = '当前线路失败，正在后台搜索备用线路…';
+              });
+            }
+          } else if (mounted) {
+            setState(() {
+              _playerMessage = _emptyLineMessage(
+                _lines,
+                subject: widget.request.subject,
+              );
+            });
+            _recordFinalPlaybackFailure(reason: 'no_backup_line');
+          }
+          return;
+        }
+        if (!mounted) return;
+        final switchTarget = next;
+        final previous = _line;
+        _beginPlaybackRecovery(
+          switchTarget,
+          strategy: 'auto_switch',
+          previous: previous,
+          position: targetResumePosition,
+        );
+        setState(() {
+          _line = switchTarget;
+          _playerMessage =
+              '当前线路失败，已切换到 ${playbackLineProviderLabel(switchTarget)}。';
+        });
+        await _openLine(
+          switchTarget,
+          force: true,
+          resumePosition: targetResumePosition,
+          automatic: true,
+        );
+      },
+    );
+  }
+
+  PlaybackLine? _nextPlayableLine() {
+    return _lineController.nextPlayableLine(currentLine: _line, lines: _lines);
+  }
+
+  bool _canRecoverAutomatically(int epoch) =>
+      mounted &&
+      !_leaving &&
+      epoch == _automaticRecoveryEpoch &&
+      _sessionController.state.userIntent == PlaybackIntent.playing;
+
+  void _cancelAutomaticRecovery() {
+    _automaticRecoveryEpoch++;
+    _openProbeToken?.cancel();
+    _recoveryController.cancelCurrentLineRetry();
+    _recoveryController.clearPendingAutoSwitch();
+  }
+
+  void _requestManualPlayback() {
+    _cancelAutomaticRecovery();
+    _sessionController.dispatch(PlaybackSessionEvent.playbackResumed());
+  }
+
+  Future<void> _togglePlayPause() =>
+      _playing ? _pausePlayback() : _resumePlayback();
+
+  Future<void> _pausePlayback() async {
+    _revealPlayerControls();
+    _sessionController.dispatch(PlaybackSessionEvent.playbackPaused());
+    _cancelAutomaticRecovery();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
+    _cancelSingleBackupLookup();
+    setState(() {
+      // A cancelled opening attempt needs a fresh manual open, not play() on
+      // whichever previous media remains in the engine.
+      if (_loadingLine) _playbackFailed = true;
+      _loadingLine = false;
+      _playing = false;
+    });
+    if (_usesWebPlayer) {
+      _webPlayerController.pause();
+    } else {
+      await _player.pause();
+    }
+  }
+
+  Future<void> _resumePlayback() async {
+    _revealPlayerControls();
+    _requestManualPlayback();
+    if (!_isPlayableLine(_line)) {
+      await _resolveLinesForCurrentEpisode();
+      return;
+    }
+    if (_playbackFailed || _loadingLine) {
+      await _openLine(
+        _line!,
+        force: true,
+        resumePosition: _currentRecoveryPosition,
+      );
+      return;
+    }
+    if (_usesWebPlayer) {
+      _webPlayerController.play();
+    } else {
+      final serial = _openLineSerial;
+      final recoveryEpoch = _automaticRecoveryEpoch;
+      await playNativeIfCurrent(
+        _player,
+        isCurrent: () =>
+            serial == _openLineSerial &&
+            _canRecoverAutomatically(recoveryEpoch),
+      );
+    }
+  }
+
+  Future<void> _seekBy(Duration delta) {
+    _revealPlayerControls();
+    return _seekTo(_position + delta);
+  }
+
+  Future<void> _seekTo(Duration target) async {
+    _revealPlayerControls();
+    if (_duration <= Duration.zero) return;
+    final max = _duration.inMilliseconds;
+    final clamped = target.inMilliseconds.clamp(0, max);
+    final position = Duration(milliseconds: clamped);
+    _sessionController.dispatch(PlaybackSessionEvent.userSeek(position));
+    _resetPlaybackStallWatchdog(
+      position: position,
+      grace: const Duration(seconds: 5),
+    );
+    if (_usesWebPlayer) {
+      _webPlayerController.seek(position);
+      setState(() => _position = position);
+      return;
+    }
+    await _player.seek(position);
+  }
+
+  Future<void> _setVolume(double value) async {
+    _revealPlayerControls();
+    await _applyVolume(value);
+  }
+
+  Future<void> _setGestureVolume(double value) => _applyVolume(value);
+
+  Future<void> _applyVolume(double value) async {
+    final clamped = value.clamp(0, _maximumVolume).toDouble();
+    _manualVolumeOverride = true;
+    setState(() {
+      _muted = clamped <= 0;
+      _volume = clamped;
+      if (clamped > 0) _lastNonZeroVolume = clamped;
+    });
+    _appliedVolume = clamped;
+    if (!_usesWebPlayer) await _player.setVolume(clamped);
+  }
+
+  Future<void> _selectSpeed(double value) async {
+    final settings = ref.read(animeControllerProvider).value?.settings;
+    if (settings == null || settings.speed == value) return;
+    await ref
+        .read(animeControllerProvider.notifier)
+        .updateSettings(settings.copyWith(speed: value));
+  }
+
+  Future<void> _adjustVolume(double delta) async {
+    _revealPlayerControls();
+    final next = (_muted ? _lastNonZeroVolume : _volume) + delta;
+    final clamped = next.clamp(0, _maximumVolume).toDouble();
+    _manualVolumeOverride = true;
+    if (clamped <= 0) {
+      setState(() {
+        _muted = true;
+        _volume = 0;
+      });
+      _appliedVolume = 0;
+      if (!_usesWebPlayer) await _player.setVolume(0);
+      return;
+    }
+    setState(() {
+      _muted = false;
+      _volume = clamped;
+      _lastNonZeroVolume = clamped;
+    });
+    final targetVolume = clamped;
+    _appliedVolume = targetVolume;
+    if (!_usesWebPlayer) await _player.setVolume(targetVolume);
+  }
+
+  Future<void> _toggleMute() async {
+    _revealPlayerControls();
+    final next = !_muted;
+    final volume = next
+        ? 0.0
+        : (_lastNonZeroVolume > 0
+              ? _lastNonZeroVolume
+              : _volumeFromSettings(_currentSettings));
+    _manualVolumeOverride = true;
+    setState(() {
+      _muted = next;
+      _volume = volume;
+      if (!next && volume > 0) _lastNonZeroVolume = volume;
+    });
+    _appliedVolume = volume;
+    if (!_usesWebPlayer) await _player.setVolume(volume);
+  }
+
+  Future<void> _reloadCurrentLine() async {
+    _revealPlayerControls();
+    _requestManualPlayback();
+    _failedLineIds.clear();
+    _lineFailureCounts.clear();
+    _handledFailureOpenSerial = null;
+    if (_isPlayableLine(_line)) {
+      await _openLine(
+        _line!,
+        force: true,
+        resumePosition: _currentRecoveryPosition,
+      );
+    } else {
+      await _resolveLinesForCurrentEpisode();
+    }
+  }
+
+  void _selectEpisode(AnimeEpisode episode) {
+    zelunaSelectionHaptic();
+    _revealPlayerControls();
+    if (widget.request.offlineOnly) {
+      if (episode.id != _episode.id) {
+        _showPlayerToast('离线播放只能打开已经下载的当前集。');
+      }
+      setState(() => _episodePanel = false);
+      return;
+    }
+    unawaited(_persistPlaybackProgress(force: true));
+    _cancelAutomaticRecovery();
+    _sessionController.dispatch(
+      PlaybackSessionEvent.episodeChanged(episode.id),
+    );
+    final controller = ref.read(animeControllerProvider.notifier);
+    // A prefetched public route should not replace a user's current library
+    // before the next episode has been looked up there.
+    final preparedBundle =
+        _currentSettings.rememberLine && _line is! MediaLibraryPlaybackLine
+        ? controller.prefetchedWarmupBundleForEpisode(
+            widget.request.subject,
+            episode,
+            minValidity: _episodeTransitionSafetyMargin,
+          )
+        : null;
+    final preparedLines = preparedBundle == null
+        ? const <PlaybackLine>[]
+        : buildWarmupTransitionInventory(
+            preparedBundle,
+            expectedEpisodeIdentity: episode.identityKey(
+              subjectKey: widget.request.subject.identityKey,
+            ),
+            now: DateTime.now(),
+            minValidity: _episodeTransitionSafetyMargin,
+          );
+    final preparedLine = preparedLines.firstOrNull;
+    _warmupTransitionPrimaryLineId = preparedLine?.id;
+    _warmupTransitionFallbackLineId = preparedLines.skip(1).firstOrNull?.id;
+    _openingWarmupTransitionPrimary = false;
+    _resetNextEpisodePrefetch();
+    _danmakuController.changeEpisode();
+    final playbackSerial = ++_openLineSerial;
+    _openProbeToken?.cancel();
+    _openProbeToken = null;
+    _nativeMediaEvents.invalidate();
+    _webVideo.cancelStartupWatchdog();
+    _nativeVideo.cancelFirstFrameWatchdog();
+    _cancelSingleBackupLookup();
+    unawaited(_lineRepository.cancelLookup());
+    _lineRepository.resetForEpisode(
+      episodeId: episode.id,
+      initialLines: preparedLines,
+      lookupInProgress: preparedLines.isEmpty,
+    );
+    _resetPlaybackStallWatchdog(
+      position: Duration.zero,
+      grace: const Duration(seconds: 5),
+    );
+    _failedLineIds.clear();
+    _lineFailureCounts.clear();
+    _handledFailureOpenSerial = null;
+    _recoveryController.clearPendingAutoSwitch();
+    _pendingInitialResumePosition = null;
+    _nativeVideo.resumeSeek.cancel();
+    _resetRecommendationTracking();
+    setState(() {
+      _episode = episode;
+      _line = preparedLine;
+      _loadedUrl = null;
+      _playerMessage = null;
+      _lineLookupMessage = null;
+      _playbackFailed = false;
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      _buffer = Duration.zero;
+      _episodePanel = false;
+      _loadingLine = _isPlayableLine(preparedLine);
+    });
+    _bindSupplementalSubtitles();
+    _startPlaybackTrace();
+    if (preparedLine != null) {
+      final cacheAge = DateTime.now().difference(preparedBundle!.preparedAt);
+      _playbackTrace.record(
+        'next_line_prefetch_cache_hit',
+        fields: <String, Object?>{
+          'episode_number': episode.number,
+          'provider': preparedLine.providerId,
+        },
+      );
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionWarmupHit,
+        fields: <String, Object?>{
+          'provider': preparedLine.providerId,
+          if (preparedBundle.preferredProviderId != null)
+            'preferred_provider': preparedBundle.preferredProviderId,
+          'line_count': preparedLines.length,
+          'fallback_count': math.max(0, preparedLines.length - 1),
+          'cache_age_ms': math.max(0, cacheAge.inMilliseconds),
+        },
+      );
+    } else {
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionWarmupMiss,
+        fields: <String, Object?>{
+          'reason_code': !_currentSettings.rememberLine
+              ? 'disabled'
+              : preparedBundle == null
+              ? 'not_found_or_stale'
+              : 'invalid_transition_inventory',
+        },
+      );
+    }
+    unawaited(
+      _stopAndResolveSelectedEpisode(
+        episodeId: episode.id,
+        playbackSerial: playbackSerial,
+        preparedLine: preparedLine,
+        hasWarmupFallback: preparedLines.length > 1,
+      ),
+    );
+  }
+
+  Future<void> _stopAndResolveSelectedEpisode({
+    required int episodeId,
+    required int playbackSerial,
+    PlaybackLine? preparedLine,
+    bool hasWarmupFallback = false,
+  }) async {
+    try {
+      await _player.stop();
+    } catch (_) {
+      // A stale native open may already have torn down the previous media.
+    }
+    if (!mounted ||
+        playbackSerial != _openLineSerial ||
+        _episode.id != episodeId) {
+      return;
+    }
+    if (preparedLine != null && _isPlayableLine(preparedLine)) {
+      _playbackTrace.recordContinuity(
+        PlaybackContinuityTraceEvent.episodeTransitionPrimaryOpen,
+        fields: <String, Object?>{'provider': preparedLine.providerId},
+      );
+      _openingWarmupTransitionPrimary =
+          hasWarmupFallback && _currentSettings.autoSwitchLine;
+      try {
+        await _openLine(preparedLine, force: true);
+      } finally {
+        _openingWarmupTransitionPrimary = false;
+      }
+      if (!mounted || _episode.id != episodeId) return;
+      if (_playbackFailed &&
+          warmupFallbackReadyForImmediateRecovery(
+            _nextPlayableLine(),
+            expectedLineId: _warmupTransitionFallbackLineId,
+            now: DateTime.now(),
+            minValidity: const Duration(seconds: 5),
+          )) {
+        await _tryAutoSwitchLine(resumePosition: _currentRecoveryPosition);
+        if (!mounted || _episode.id != episodeId) return;
+      }
+      await _resolveLinesForCurrentEpisode(
+        autoplay: _playbackFailed || !_isPlayableLine(_line),
+      );
+    } else {
+      await _resolveLinesForCurrentEpisode();
+    }
+  }
+
+  void _selectLine(PlaybackLine line) {
+    _revealPlayerControls();
+    _requestManualPlayback();
+    _resetNextEpisodePrefetch();
+    _clearWarmupTransitionState();
+    if (_line?.id != line.id) {
+      _sessionController.dispatch(
+        PlaybackSessionEvent.alternativeSelected(line.id),
+      );
+    }
+    final resumePosition = _currentRecoveryPosition;
+    _clearLineFailure(line.id);
+    _handledFailureOpenSerial = null;
+    _preferredProviderId = line.providerId;
+    setState(() {
+      _line = line;
+      _linePanel = false;
+      _playerMessage = null;
+      _playbackFailed = false;
+    });
+    unawaited(_openLine(line, force: true, resumePosition: resumePosition));
+  }
+
+  void _reportAdAndSwitchLine(PlaybackLine line) {
+    LocalRouteRanker.instance.markLineAsAd(line);
+    final reordered = rankPlaybackLinesForStartup(_lines);
+    PlaybackLine? replacement;
+    for (final candidate in reordered) {
+      if (candidate.id != line.id &&
+          _isPlayableLine(candidate) &&
+          !LocalRouteRanker.instance.isAdDemoted(candidate)) {
+        replacement = candidate;
+        break;
+      }
+    }
+    setState(() {
+      _lines = reordered;
+      _playerMessage = replacement != null
+          ? '已降权该广告线路，正在切换更干净的线路…'
+          : '已记录该线路含广告，后续将优先选择其他干净线路。';
+    });
+    if (replacement != null && _line?.id == line.id) {
+      _selectLine(replacement);
+    }
+  }
+
+  Future<void> _pickLocalPlaybackFile() async {
+    final result = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const [
+        'mp4',
+        'mkv',
+        'webm',
+        'mov',
+        'avi',
+        'm3u8',
+        'mpd',
+      ],
+    );
+    final file = result?.files.singleOrNull;
+    final path = file?.xFile.path.trim() ?? '';
+    if (path.isEmpty || !mounted) return;
+    _requestManualPlayback();
+    final id = DateTime.now().microsecondsSinceEpoch;
+    final line = PlaybackLine(
+      id: 'local:$id',
+      episodeId: _episode.id,
+      providerId: 'local',
+      providerName: '本地文件',
+      title: file?.name ?? '本地视频',
+      quality: '原始',
+      format: _directPlaybackFormat(path),
+      url: localMediaPlaybackUrl(path),
+      available: true,
+    );
+    setState(() {
+      _lines = upsertPlaybackLine(_lines, line);
+      _line = line;
+      _linePanel = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+    await _openLine(line, force: true);
+  }
+
+  Future<void> _openNetworkPlayback(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    final value = url.trim();
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty) {
+      throw const FormatException('请输入完整的 http/https 视频地址');
+    }
+    final id = DateTime.now().microsecondsSinceEpoch;
+    final line = PlaybackLine(
+      id: 'network:$id',
+      episodeId: _episode.id,
+      providerId: 'network',
+      providerName: '网络视频',
+      title: uri.host,
+      quality: '原始',
+      format: _directPlaybackFormat(value),
+      url: value,
+      headers: headers,
+      available: true,
+    );
+    if (!mounted) return;
+    _requestManualPlayback();
+    setState(() {
+      _lines = upsertPlaybackLine(_lines, line);
+      _line = line;
+      _linePanel = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+    await _openLine(line, force: true);
+  }
+
+  Future<void> _searchPlaybackLines() async {
+    _failedLineIds.clear();
+    _lineFailureCounts.clear();
+    await _resolveLinesForCurrentEpisode(autoplay: false);
+    if (!mounted) return;
+    _startExpandedLineLookup(autoplay: false);
+  }
+
+  int get _currentEpisodeIndex => widget.request.episodes.indexWhere(
+    (episode) => episode.id == _episode.id,
+  );
+
+  bool get _canPlayPreviousEpisode =>
+      !widget.request.offlineOnly && _currentEpisodeIndex > 0;
+
+  bool get _canPlayNextEpisode {
+    if (widget.request.offlineOnly) return false;
+    final index = _currentEpisodeIndex;
+    return index >= 0 && index < widget.request.episodes.length - 1;
+  }
+
+  Future<void> _playPreviousEpisode() async {
+    final index = _currentEpisodeIndex;
+    if (widget.request.offlineOnly || index <= 0) return;
+    _selectEpisode(widget.request.episodes[index - 1]);
+  }
+
+  Future<void> _playNextEpisode() async {
+    final index = _currentEpisodeIndex;
+    if (widget.request.offlineOnly) return;
+    if (index < 0 || index >= widget.request.episodes.length - 1) return;
+    _selectEpisode(widget.request.episodes[index + 1]);
+  }
+
+  Future<void> _setFullscreen(bool enabled) async {
+    _revealPlayerControls();
+    if (_fullscreen == enabled) return;
+    bool actualState;
+    try {
+      actualState = await _appFullscreen.setEnabled(enabled);
+    } catch (_) {
+      if (mounted) {
+        _showPlayerToast('系统未能切换全屏，请再次点击全屏按钮。');
+      }
+      return;
+    }
+    if (!mounted) return;
+    if (actualState != enabled) {
+      _showPlayerToast('系统未能切换全屏，请再次点击全屏按钮。');
+      return;
+    }
+    if (enabled) {
+      await _enterSystemFullscreen();
+    } else {
+      await _restoreSystemUi();
+    }
+    if (!mounted) return;
+    setState(() {
+      _fullscreen = enabled;
+      if (!enabled) return;
+      _episodePanel = false;
+      _linePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
+      _subtitlePanel = false;
+    });
+  }
+
+  Future<void> _enterSystemFullscreen() async {
+    if (kIsWeb ||
+        (defaultTargetPlatform != TargetPlatform.android &&
+            defaultTargetPlatform != TargetPlatform.iOS)) {
+      return;
+    }
+    await SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  Future<void> _restoreSystemUi() async {
+    if (kIsWeb ||
+        (defaultTargetPlatform != TargetPlatform.android &&
+            defaultTargetPlatform != TargetPlatform.iOS)) {
+      return;
+    }
+    await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+
+  Future<void> _handleBack() async {
+    if (_hasOpenPanel) {
+      _closePanels();
+      return;
+    }
+    if (_fullscreen) {
+      await _setFullscreen(false);
+      return;
+    }
+    if (_leaving) return;
+    _leaving = true;
+    _supplementalSubtitles?.invalidate();
+    _nativeMediaEvents.invalidate();
+    _cancelSingleBackupLookup();
+    await _lineRepository.cancelLookup();
+    await _persistPlaybackProgress(force: true);
+    await _restoreSystemUi();
+    await _player.stop();
+    if (mounted) safeNavigateBack(context);
+  }
+
+  bool get _hasOpenPanel =>
+      _episodePanel ||
+      _linePanel ||
+      _danmakuPanel ||
+      _settingsPanel ||
+      _subtitlePanel;
+
+  void _closePanels() {
+    if (!_hasOpenPanel) return;
+    setState(() {
+      _episodePanel = false;
+      _linePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
+      _subtitlePanel = false;
+    });
+    _revealPlayerControls();
+  }
+
+  void _toggleEpisodePanel() {
+    _revealPlayerControls();
+    setState(() {
+      _episodePanel = !_episodePanel;
+      _linePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
+      _subtitlePanel = false;
+    });
+  }
+
+  void _toggleLinePanel() {
+    _revealPlayerControls();
+    final opening = !_linePanel;
+    setState(() {
+      _linePanel = opening;
+      _episodePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
+      _subtitlePanel = false;
+    });
+    if (opening) _startExpandedLineLookup();
+  }
+
+  Future<void> _setDanmakuEnabled(bool enabled) async {
+    _revealPlayerControls();
+    try {
+      final current = ref.read(animeControllerProvider).value?.danmaku;
+      if (current == null) return;
+      await ref
+          .read(animeControllerProvider.notifier)
+          .updateDanmaku(current.copyWith(enabled: enabled));
+    } catch (_) {
+      if (mounted) _showPlayerToast('弹幕设置未保存，请重试');
+    }
+  }
+
+  void _toggleDanmakuPanel() {
+    _revealPlayerControls();
+    final opening = !_danmakuPanel;
+    setState(() {
+      _danmakuPanel = opening;
+      _episodePanel = false;
+      _linePanel = false;
+      _settingsPanel = false;
+      _subtitlePanel = false;
+    });
+    // Opening the source panel may also inspect a timeline while display is off.
+    if (opening) unawaited(_loadDanmakuForCurrentEpisode());
+  }
+
+  void _toggleSettingsPanel() {
+    _revealPlayerControls();
+    setState(() {
+      _settingsPanel = !_settingsPanel;
+      _subtitlePanel = false;
+      _episodePanel = false;
+      _linePanel = false;
+      _danmakuPanel = false;
+    });
+  }
+
+  Future<void> _initializeSupplementalSubtitles() async {
+    final epoch = ++_subtitleStoreEpoch;
+    _supplementalSubtitles?.dispose();
+    _supplementalSubtitles = null;
+    _subtitleStorageError = null;
+    final account = ref
+        .read(animeControllerProvider)
+        .value
+        ?.accountSession
+        .current
+        ?.id;
+    try {
+      final store = await SubtitleStore.open(account);
+      if (!mounted || epoch != _subtitleStoreEpoch || _leaving) return;
+      final controller = SupplementalSubtitleController(store);
+      _supplementalSubtitles = controller;
+      // bind first, then listen: initialization may originate in a build.
+      _bindSupplementalSubtitles();
+      controller.addListener(_handleSupplementalSubtitlesChanged);
+      setState(() {});
+    } catch (_) {
+      if (mounted && epoch == _subtitleStoreEpoch) {
+        setState(() => _subtitleStorageError = '本地字幕存储暂时不可用，播放不受影响');
+      }
+    }
+  }
+
+  void _handleSupplementalSubtitlesChanged() {
+    if (mounted && !_leaving) setState(() {});
+  }
+
+  void _bindSupplementalSubtitles() {
+    final controller = _supplementalSubtitles;
+    if (controller == null) return;
+    controller.bind(
+      subject: widget.request.subject.identityKey,
+      episode: _episode.identityKey(
+        subjectKey: widget.request.subject.identityKey,
+      ),
+      line: _line?.id ?? 'unselected',
+      originalLanguage: widget.request.subject.language,
+    );
+    if (controller.enabled &&
+        !controller.bilingual &&
+        controller.document == null &&
+        !widget.request.offlineOnly &&
+        controller.language != 'zh-Hans') {
+      unawaited(_restoreOnlineSupplementalSubtitles(controller));
+    }
+  }
+
+  Future<void> _restoreOnlineSupplementalSubtitles(
+    SupplementalSubtitleController controller,
+  ) async {
+    final generation = controller.generation;
+    final services = ref.read(animeControllerProvider).value?.services;
+    if (services == null || !services.playbackBackendEnabled) return;
+    final repository = SubtitleRepository(services);
+    try {
+      final prefs = controller.store.preferences(controller.subjectKey);
+      final result = await repository.search(
+        widget.request.subject,
+        _episode,
+        controller.language,
+        confirmedEntryId: prefs['entryId'] as String?,
+      );
+      if (!mounted || !controller.isCurrent(generation)) return;
+      controller.reportSource(result.message, expectedGeneration: generation);
+      final matches = result.candidates
+          .where(
+            (item) =>
+                item.autoMatch &&
+                (item.provider == 'library' ||
+                    (item.entryId == prefs['entryId'] &&
+                        item.provider == prefs['provider'])),
+          )
+          .toList();
+      if (matches.length != 1) {
+        return; // ambiguous or unavailable is never auto-selected
+      }
+      final selected = matches.single;
+      final cached =
+          controller.store.sourceDocument(
+            selected.provider,
+            selected.entryId,
+            selected.id,
+            selected.language,
+          ) ??
+          await repository.download(selected);
+      if (!mounted || !controller.isCurrent(generation)) return;
+      await controller.selectDocument(cached, expectedGeneration: generation);
+    } catch (_) {
+      controller.reportSource(
+        '服务器字幕暂时无法加载，原有中文字幕和播放不受影响；可在字幕面板重试',
+        expectedGeneration: generation,
+      );
+    } finally {
+      repository.dispose();
+    }
+  }
+
+  void _toggleSubtitlePanel() {
+    _revealPlayerControls();
+    setState(() {
+      _subtitlePanel = !_subtitlePanel;
+      _episodePanel = false;
+      _linePanel = false;
+      _danmakuPanel = false;
+      _settingsPanel = false;
+    });
+  }
+
+  Future<void> _copyPlaybackDiagnostics() async {
+    final environment = await NativeVideoCompatibility.instance
+        .diagnosticEnvironment();
+    PackageInfo? version;
+    try {
+      version = await PackageInfo.fromPlatform().timeout(
+        const Duration(seconds: 1),
+      );
+    } catch (_) {}
+    if (!mounted) return;
+    final report = _playbackTrace.diagnosticReport(
+      summary: {
+        ...environment,
+        if (version != null)
+          'app_version': '${version.version}+${version.buildNumber}',
+        'platform': defaultTargetPlatform.name,
+        'playback_phase': _sessionController.state.phase.name,
+        ..._nativeVideo.frameDiagnostics,
+        'line_count': _lines.length,
+        'verified_count': _lines
+            .where((l) => l.available && (l.clientVerified || l.serverVerified))
+            .length,
+        'position_ms': _position.inMilliseconds,
+        'probe_failures': _lines
+            .where((l) => !l.available && l.sourceErrorCategory.isNotEmpty)
+            .map((l) => l.sourceErrorCategory)
+            .toSet()
+            .take(12)
+            .join(','),
+      },
+    );
+    await Clipboard.setData(ClipboardData(text: report));
+    if (mounted) _showPlayerToast('已复制脱敏诊断，不含账号、播放地址或请求凭据');
+  }
+
+  Future<void> _captureScreenshot() async {
+    _revealPlayerControls();
+    try {
+      final bytes = await _player.screenshot(format: 'image/png');
+      if (bytes == null || bytes.isEmpty) {
+        _showPlayerToast('这个视频暂时不能截图');
+        return;
+      }
+      final safeTitle = widget.request.subject.title.replaceAll(
+        RegExp(r'[\\/:*?"<>|]'),
+        '_',
+      );
+      final path = await FilePicker.saveFile(
+        dialogTitle: '保存视频截图',
+        fileName:
+            '${safeTitle}_EP${_episode.number}_${DateTime.now().millisecondsSinceEpoch}.png',
+        bytes: bytes,
+      );
+      if (path != null || kIsWeb) _showPlayerToast('截图已保存');
+    } catch (error) {
+      _showPlayerToast('截图失败：${_friendlyPlaybackError(error)}');
+    }
+  }
+
+  void _toggleTheaterMode() {
+    _revealPlayerControls();
+    setState(() => _theaterMode = !_theaterMode);
+  }
+
+  Future<void> _showExternalPlayback() async {
+    final url = _line?.url?.trim() ?? '';
+    if (url.isEmpty) {
+      _showPlayerToast('当前没有可分享的播放地址');
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('投屏与外部播放'),
+        content: const Text(
+          '已复制当前播放地址，可以粘贴到电视或投屏 App（支持 AirPlay、Chromecast 等）里播放。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _loadEnabledDanmakuAfterFirstFrame() {
+    if (!mounted ||
+        _leaving ||
+        widget.request.offlineOnly ||
+        widget.request.subject.source == 'direct' ||
+        _firstFrameTraceOpenSerial != _openLineSerial ||
+        !(ref.read(animeControllerProvider).value?.danmaku.enabled ?? false)) {
+      return;
+    }
+    // Do not delay the video open: start only once its first frame is rendered.
+    // The controller deduplicates same-episode loads and rejects stale results.
+    unawaited(_loadDanmakuForCurrentEpisode());
+  }
+
+  Future<void> _loadDanmakuForCurrentEpisode({
+    bool forceRefresh = false,
+  }) async {
+    final episode = _episode;
+    await _danmakuController.loadEpisode(
+      episodeId: episode.id,
+      forceRefresh: forceRefresh,
+      load: () => ref
+          .read(animeControllerProvider.notifier)
+          .danmakuTimelineForEpisode(
+            widget.request.subject,
+            episode,
+            forceRefresh: forceRefresh,
+          ),
+    );
+  }
+
+  Future<void> _sendDanmaku(
+    String text, {
+    required DanmakuSettings settings,
+    required bool loggedIn,
+  }) async {
+    final value = text.trim();
+    if (value.isEmpty) return;
+    if (!settings.enabled) {
+      _showPlayerToast('请先在弹幕设置中启用弹幕');
+      return;
+    }
+    if (settings.blockKeywords.any(value.contains)) {
+      _showPlayerToast('这条弹幕包含了你设置的屏蔽词');
+      return;
+    }
+    if (!loggedIn) {
+      _showPlayerToast('登录后才能发送弹幕');
+      return;
+    }
+    switch (_danmakuController.sendLocal(text, settings: settings)) {
+      case LocalDanmakuSendResult.disabled:
+        _showPlayerToast('请先在弹幕设置中启用弹幕');
+      case LocalDanmakuSendResult.blocked:
+        _showPlayerToast('这条弹幕包含了你设置的屏蔽词');
+      case LocalDanmakuSendResult.accepted:
+        try {
+          final comment = await ref
+              .read(animeControllerProvider.notifier)
+              .publishDanmaku(
+                subject: widget.request.subject,
+                episode: _episode,
+                position: _position,
+                text: value,
+              );
+          if (!mounted) return;
+          _danmakuController.addRemoteComment(comment);
+          _showPlayerToast('弹幕已发送');
+        } on AccountException catch (error) {
+          _showPlayerToast('发送失败：${error.message}');
+        } catch (error) {
+          _showPlayerToast('发送失败：${_friendlyPlaybackError(error)}');
+        }
+      case LocalDanmakuSendResult.empty:
+        break;
+    }
+  }
+
+  Future<void> _deleteDanmaku(DanmakuComment comment) async {
+    try {
+      await ref.read(animeControllerProvider.notifier).deleteDanmaku(comment);
+      if (!mounted) return;
+      _danmakuController.removeRemoteComment(comment.id);
+      _showPlayerToast('弹幕已删除');
+    } on AccountException catch (error) {
+      _showPlayerToast('删除失败：${error.message}');
+    } catch (error) {
+      _showPlayerToast('删除失败：${_friendlyPlaybackError(error)}');
+    }
+  }
+
+  void _handleWebReady(int playbackGeneration) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    _webVideo.cancelStartupWatchdog();
+    final current = _line;
+    if (current != null) _clearLineFailure(current.id);
+    setState(() {
+      _loadingLine = false;
+      _playbackFailed = false;
+      _playerMessage = null;
+    });
+  }
+
+  void _handleWebError(int playbackGeneration, {String? message}) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    final current = _line;
+    if (current == null) return;
+    _handleRuntimeLineFailure(
+      current,
+      message: message ?? '这条线路在浏览器里打不开，可能是网络限制或对方不允许直接播放。',
+    );
+  }
+
+  void _handleWebPosition(int playbackGeneration, Duration value) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    final current = _line;
+    if (webPlaybackHasFirstFrame(position: value) &&
+        current != null &&
+        _firstFrameTraceOpenSerial != _openLineSerial) {
+      _webVideo.cancelStartupWatchdog();
+      _clearLineFailure(current.id);
+      _preferredProviderId = current.providerId;
+      _recordFirstFrame(current);
+      _scheduleSingleBackupLookup();
+      _scheduleNextEpisodePrefetch();
+    }
+    _notePlaybackProgress(value);
+    _position = value;
+    _timelineRevision.value++;
+    _maybeRefreshNextEpisodePrefetch();
+  }
+
+  void _handleWebDuration(int playbackGeneration, Duration value) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        ) ||
+        value.isNegative) {
+      return;
+    }
+    setState(() => _duration = value);
+  }
+
+  void _handleWebPlaying(int playbackGeneration, bool value) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        ) ||
+        _playing == value ||
+        !webPlaybackShouldApplyPlayingUpdate(
+          loading: _loadingLine,
+          playing: value,
+        )) {
+      return;
+    }
+    _sessionController.dispatch(
+      PlaybackSessionEvent.playbackStateChanged(value),
+    );
+    setState(() => _playing = value);
+    _resetPlaybackStallWatchdog(
+      grace: value ? const Duration(seconds: 2) : Duration.zero,
+    );
+    if (value) {
+      _scheduleControlsHide();
+    } else {
+      unawaited(_persistPlaybackProgress(force: true));
+      _backupLookupDelayTimer?.cancel();
+      _backupLookupDelayTimer = null;
+    }
+  }
+
+  void _handleWebEnded(int playbackGeneration) {
+    if (!mounted ||
+        !webPlaybackEventIsCurrent(
+          eventGeneration: playbackGeneration,
+          currentGeneration: _openLineSerial,
+        )) {
+      return;
+    }
+    _handlePlaybackEnded();
+  }
+
+  void _showPlayerToast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+    );
+  }
+}

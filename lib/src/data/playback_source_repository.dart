@@ -1,0 +1,1769 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+
+import '../core/network/network_http_client.dart';
+import '../core/network/network_security.dart';
+import '../domain/anime_models.dart';
+import '../domain/subject_content_type.dart';
+import '../rules/rule_models.dart';
+import '../rules/rule_playback_resolver.dart';
+import '../rules/rule_plugin_repository.dart';
+
+const _maxRulesPerQuickLookup = 12;
+const _maxRulesPerGroupPerLookup = 6;
+const _maxRulesPerExpandedLookup = 24;
+const _maxWebViewRulesPerExpandedLookup = 3;
+const _maxVerificationUnmatchedRevisitRules = 16;
+const _quickLookupConcurrency = 4;
+const _expandedLookupConcurrency = 6;
+const _progressiveVerificationConcurrency = 4;
+const _expandedRuleTimeout = Duration(seconds: 14);
+const _expandedLookupTotalBudget = Duration(seconds: 24);
+// A useful Animeko rule often needs one detail request plus one play-page
+// request. The old 4.5/4.8 second edge repeatedly cancelled a nearly-finished
+// rule and made the progressive scan start the same work again from scratch.
+const _quickRuleTimeout = Duration(milliseconds: 6500);
+const _quickLookupTotalBudget = Duration(milliseconds: 7000);
+const _defaultProgressiveDiscoveryRuleTimeout = Duration(seconds: 10);
+const _defaultProgressiveDiscoveryTimeSlice = Duration(seconds: 16);
+const _defaultProgressiveVerificationTimeSlice = Duration(seconds: 24);
+const _availableRuleCacheTtl = Duration(minutes: 3);
+const _unavailableRuleCacheTtl = Duration(seconds: 20);
+const _ruleHealthTtl = Duration(minutes: 30);
+const _maxCachedRuleLookups = 256;
+const _maxRuleHealthEntries = 128;
+
+enum PlaybackLineLookupPhase { discovery, verification, complete }
+
+class PlaybackLineLookupUpdate {
+  const PlaybackLineLookupUpdate({
+    required this.lines,
+    required this.completedRules,
+    required this.totalRules,
+    required this.phase,
+    this.timedOut = false,
+    this.resolvedProviderId,
+  });
+
+  final List<PlaybackLine> lines;
+  final int completedRules;
+  final int totalRules;
+  final PlaybackLineLookupPhase phase;
+  final bool timedOut;
+  final String? resolvedProviderId;
+
+  bool get isComplete => phase == PlaybackLineLookupPhase.complete;
+}
+
+abstract class PlaybackSourceRepository {
+  Future<List<PlaybackLine>> linesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+
+  Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+}
+
+/// Optional capability for sources that can put a remembered provider first
+/// without changing the existing source-repository contract.
+abstract interface class PreferredPlaybackSourceRepository {
+  Future<List<PlaybackLine>> linesForEpisodeWithPreferredProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String preferredProviderId,
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+}
+
+/// Optional capability used by background warmup to resolve the remembered
+/// provider independently from a bounded, verified fallback lookup.
+abstract interface class ProviderAwarePlaybackSourceRepository {
+  bool canResolveProvider(AnimeSubject subject, {required String providerId});
+
+  Future<List<PlaybackLine>> verifiedLinesForProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String providerId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+
+  Future<List<PlaybackLine>> verifiedFallbackLinesExcludingProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String excludedProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  });
+}
+
+class InternetArchivePlaybackSourceRepository {
+  InternetArchivePlaybackSourceRepository({http.Client? client})
+    : _client =
+          client ??
+          createNetworkHttpClient(
+            NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
+          );
+
+  final http.Client _client;
+
+  Future<List<PlaybackLine>> linesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode,
+  ) async {
+    if (!subject.source.startsWith('archive:')) return const [];
+    final identifier = subject.source.substring('archive:'.length).trim();
+    if (identifier.isEmpty) return const [];
+    final response = await _client
+        .get(
+          Uri.parse(
+            'https://archive.org/metadata/${Uri.encodeComponent(identifier)}',
+          ),
+          headers: const {'Accept': 'application/json'},
+        )
+        .timeout(const Duration(seconds: 18));
+    if (response.statusCode != 200) return const [];
+    final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+    final files = decoded is Map ? decoded['files'] : null;
+    if (files is! List) return const [];
+    final metadata = decoded is Map && decoded['metadata'] is Map
+        ? decoded['metadata'] as Map
+        : const {};
+    if (!_archiveRightsAllowed(metadata)) return const [];
+    final candidates =
+        files.whereType<Map>().where((item) {
+          final name = item['name']?.toString().toLowerCase() ?? '';
+          final format = item['format']?.toString().toLowerCase() ?? '';
+          final size = int.tryParse(item['size']?.toString() ?? '') ?? 0;
+          final excluded = _containsAny(name, const [
+            '_thumb',
+            'thumbnail',
+            'sample',
+            'preview',
+            'trailer',
+          ]);
+          return !excluded &&
+              size > 1024 * 1024 &&
+              (name.endsWith('.mp4') ||
+                  name.endsWith('.webm') ||
+                  format.contains('mpeg4') ||
+                  format.contains('h.264'));
+        }).toList()..sort((a, b) {
+          return _archiveFileScore(b).compareTo(_archiveFileScore(a));
+        });
+    final lines = await Future.wait(
+      candidates.take(8).map((item) async {
+        final name = item['name']?.toString() ?? '';
+        final size = int.tryParse(item['size']?.toString() ?? '');
+        final url =
+            'https://archive.org/download/${Uri.encodeComponent(identifier)}/${Uri.encodeComponent(name)}';
+        if (!await _probeVideo(Uri.parse(url))) return null;
+        return PlaybackLine(
+          id: 'archive:$identifier:$name',
+          episodeId: episode.id,
+          providerId: 'internet_archive',
+          providerName: 'Internet Archive',
+          title: name,
+          quality: _archiveQuality(name),
+          format: name.toLowerCase().endsWith('.webm') ? 'WebM' : 'MP4',
+          url: url,
+          sizeLabel: size == null
+              ? null
+              : '${(size / 1024 / 1024).toStringAsFixed(1)} MB',
+          available: true,
+          message: 'Internet Archive 已验证公开媒体文件',
+        );
+      }),
+    );
+    return lines.whereType<PlaybackLine>().take(6).toList(growable: false);
+  }
+
+  Future<bool> _probeVideo(Uri uri) async {
+    try {
+      final request = http.Request('GET', uri)
+        ..headers['Range'] = 'bytes=0-1023';
+      final response = await _client
+          .send(request)
+          .timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200 && response.statusCode != 206) {
+        return false;
+      }
+      final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+      final typeLooksPlayable =
+          contentType.startsWith('video/') ||
+          contentType.contains('octet-stream') ||
+          contentType.contains('mp4') ||
+          contentType.contains('webm');
+      if (!typeLooksPlayable) return false;
+      await response.stream.take(1).drain<void>();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+class EmptyPlaybackSourceRepository implements PlaybackSourceRepository {
+  const EmptyPlaybackSourceRepository();
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    return linesForEpisodeMode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    return [
+      PlaybackLine(
+        id: 'placeholder:${subject.id}:${episode.id}',
+        episodeId: episode.id,
+        providerId: 'custom',
+        providerName: '暂无来源',
+        title: '${subject.title} - 第${episode.number}集',
+        quality: '暂无',
+        format: '视频',
+        available: false,
+        message: '暂时没有可用的播放地址。',
+      ),
+    ];
+  }
+
+  @override
+  Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async* {
+    final lines = await linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+      cancellationToken: cancellationToken,
+    );
+    if (cancellationToken?.isCancelled ?? false) return;
+    yield PlaybackLineLookupUpdate(
+      lines: lines,
+      completedRules: 1,
+      totalRules: 1,
+      phase: PlaybackLineLookupPhase.complete,
+    );
+  }
+}
+
+/// Whether [rule] represents a bulk MacCMS / TVBox resource collection site
+/// (e.g. iKun资源, 量子资源, 360资源, 极速资源) whose anime streams frequently carry
+/// burned-in subtitle ads and should only be used as lower-priority fallback
+/// when dedicated anime sites are insufficient.
+@visibleForTesting
+bool isAnimeResourceCollectionRule(RulePlugin rule) {
+  final engine = rule.engine.trim().toLowerCase();
+  if (engine == 'tvbox' || engine == 'maccms' || engine == 'vod-json') {
+    return true;
+  }
+  final id = rule.id.trim().toLowerCase();
+  if (id.contains(':tvbox:') ||
+      id.contains(':maccms:') ||
+      id.contains('maccms') ||
+      id.contains('tvbox') ||
+      id.contains('lunatv')) {
+    return true;
+  }
+  final group = rule.groupId.trim().toLowerCase();
+  if (group.contains('lunatv') ||
+      group.contains('tvbox') ||
+      group.contains('maccms')) {
+    return true;
+  }
+  final repo = rule.effectiveManifest.sourceRepository.trim().toLowerCase();
+  if (repo.contains('lunatv-config')) return true;
+  final name = rule.name.trim();
+  if (name.contains('资源')) return true;
+  return false;
+}
+
+class RulePlaybackSourceRepository
+    implements
+        PlaybackSourceRepository,
+        PreferredPlaybackSourceRepository,
+        ProviderAwarePlaybackSourceRepository {
+  RulePlaybackSourceRepository({
+    required RulePluginRepository repository,
+    required RulePluginState ruleState,
+    RulePlaybackResolver? resolver,
+    Duration quickLookupBudget = _quickLookupTotalBudget,
+    Duration progressiveDiscoveryTimeSlice =
+        _defaultProgressiveDiscoveryTimeSlice,
+    Duration progressiveVerificationTimeSlice =
+        _defaultProgressiveVerificationTimeSlice,
+    Duration progressiveDiscoveryRuleTimeout =
+        _defaultProgressiveDiscoveryRuleTimeout,
+    Duration progressiveVerificationRuleTimeout = _expandedRuleTimeout,
+    String cacheNamespace = 'shared',
+  }) : assert(progressiveDiscoveryTimeSlice > Duration.zero),
+       assert(progressiveVerificationTimeSlice > Duration.zero),
+       assert(progressiveDiscoveryRuleTimeout > Duration.zero),
+       assert(progressiveVerificationRuleTimeout > Duration.zero),
+       _repository = repository,
+       _ruleState = ruleState,
+       _resolver = resolver ?? _sharedResolver,
+       _quickLookupBudget = quickLookupBudget,
+       _progressiveDiscoveryTimeSlice = progressiveDiscoveryTimeSlice,
+       _progressiveVerificationTimeSlice = progressiveVerificationTimeSlice,
+       _progressiveDiscoveryRuleTimeout = progressiveDiscoveryRuleTimeout,
+       _progressiveVerificationRuleTimeout = progressiveVerificationRuleTimeout,
+       _cacheNamespace = cacheNamespace;
+
+  final RulePluginRepository _repository;
+  final RulePluginState _ruleState;
+  final RulePlaybackResolver _resolver;
+  final Duration _quickLookupBudget;
+  final Duration _progressiveDiscoveryTimeSlice;
+  final Duration _progressiveVerificationTimeSlice;
+  final Duration _progressiveDiscoveryRuleTimeout;
+  final Duration _progressiveVerificationRuleTimeout;
+  final String _cacheNamespace;
+
+  static final RulePlaybackResolver _sharedResolver = RulePlaybackResolver();
+  static final LinkedHashMap<String, _CachedRuleLookup> _ruleLookupCache =
+      LinkedHashMap<String, _CachedRuleLookup>();
+  static final Map<String, Future<List<PlaybackLine>>> _inFlightRuleLookups =
+      <String, Future<List<PlaybackLine>>>{};
+  static final LinkedHashMap<String, _RuleHealth> _ruleHealth =
+      LinkedHashMap<String, _RuleHealth>();
+  static int _runtimeCacheGeneration = 0;
+  static int _ruleForceRefreshGeneration = 0;
+  final Expando<int> _preparedForceRefreshOperations = Expando<int>();
+
+  static void clearRuntimeCaches() {
+    _runtimeCacheGeneration++;
+    _ruleForceRefreshGeneration++;
+    _ruleLookupCache.clear();
+    _inFlightRuleLookups.clear();
+    _ruleHealth.clear();
+  }
+
+  @override
+  bool canResolveProvider(AnimeSubject subject, {required String providerId}) {
+    final provider = providerId.trim();
+    if (provider.isEmpty) return false;
+    final type = _contentTypeFor(subject);
+    return _repository
+        .playbackRulesFor(_ruleState, type)
+        .any((rule) => rule.id == provider);
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    return linesForEpisodeMode(
+      subject,
+      episode,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeMode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository.playbackRulesFor(_ruleState, type),
+      expandAll: expandAll,
+      contentType: type,
+    );
+    if (rules.isEmpty) {
+      return const EmptyPlaybackSourceRepository().linesForEpisode(
+        subject,
+        episode,
+        cancellationToken: cancellationToken,
+      );
+    }
+    return expandAll
+        ? _resolveExpandedRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          )
+        : _resolveQuickRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          );
+  }
+
+  @override
+  Future<List<PlaybackLine>> linesForEpisodeWithPreferredProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String preferredProviderId,
+    bool expandAll = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository.playbackRulesFor(_ruleState, type),
+      expandAll: expandAll,
+      preferredProviderId: preferredProviderId,
+      contentType: type,
+    );
+    if (rules.isEmpty) {
+      return const EmptyPlaybackSourceRepository().linesForEpisode(
+        subject,
+        episode,
+        cancellationToken: cancellationToken,
+      );
+    }
+    return expandAll
+        ? _resolveExpandedRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          )
+        : _resolveQuickRules(
+            rules,
+            subject,
+            episode,
+            cancellationToken: cancellationToken,
+          );
+  }
+
+  @override
+  Future<List<PlaybackLine>> verifiedLinesForProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String providerId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final provider = providerId.trim();
+    if (provider.isEmpty) return const [];
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository
+          .playbackRulesFor(_ruleState, type)
+          .where((rule) => rule.id == provider)
+          .toList(growable: false),
+      expandAll: false,
+      contentType: type,
+    );
+    if (rules.isEmpty) return const [];
+    final forceRefreshGeneration = _prepareForceRefresh(
+      forceRefresh,
+      cancellationToken,
+    );
+
+    final lines = await _resolveQuickRules(
+      rules,
+      subject,
+      episode,
+      // The quick resolver still probes manifest + media; `true` additionally
+      // scans every road and enriches metadata. A remembered provider/backup
+      // only needs its first genuinely verified playable road.
+      verifyPlayable: false,
+      forceRefreshGeneration: forceRefreshGeneration,
+      cancellationToken: cancellationToken,
+    );
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    return List<PlaybackLine>.unmodifiable(
+      lines.where(
+        (line) => line.providerId == provider && _isVerifiedPlayableLine(line),
+      ),
+    );
+  }
+
+  @override
+  Future<List<PlaybackLine>> verifiedFallbackLinesExcludingProvider(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required String excludedProviderId,
+    bool forceRefresh = false,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final excludedProvider = excludedProviderId.trim();
+    final type = _contentTypeFor(subject);
+    final rules = _selectLookupRules(
+      _repository
+          .playbackRulesFor(_ruleState, type)
+          .where(
+            (rule) => excludedProvider.isEmpty || rule.id != excludedProvider,
+          )
+          .toList(growable: false),
+      expandAll: false,
+      contentType: type,
+    );
+    if (rules.isEmpty) return const [];
+    final forceRefreshGeneration = _prepareForceRefresh(
+      forceRefresh,
+      cancellationToken,
+    );
+
+    final lines = await _resolveQuickRules(
+      rules,
+      subject,
+      episode,
+      // The quick resolver still probes manifest + media; `true` additionally
+      // scans every road and enriches metadata. A remembered provider/backup
+      // only needs its first genuinely verified playable road.
+      verifyPlayable: false,
+      forceRefreshGeneration: forceRefreshGeneration,
+      cancellationToken: cancellationToken,
+    );
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    for (final line in lines) {
+      if ((excludedProvider.isEmpty || line.providerId != excludedProvider) &&
+          _isVerifiedPlayableLine(line)) {
+        return List<PlaybackLine>.unmodifiable(<PlaybackLine>[line]);
+      }
+    }
+    return const [];
+  }
+
+  @override
+  Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    // A producer owns its child cancellation. StreamController invokes onCancel
+    // even after normal close: using the caller's token there would cancel the
+    // parallel backend producer and prevent the page's final scan update.
+    final sessionToken = RulePlaybackCancellationToken();
+    final unlinkSession = cancellationToken?.register(sessionToken.cancel);
+    late final StreamController<PlaybackLineLookupUpdate> controller;
+    var started = false;
+
+    Future<void> run() async {
+      try {
+        final type = _contentTypeFor(subject);
+        final enabledRules = _repository.playbackRulesFor(_ruleState, type);
+        final allRules = _boundProgressiveLookupRules(
+          _selectLookupRules(enabledRules, expandAll: true, contentType: type),
+          contentType: type,
+        );
+        if (allRules.isEmpty) {
+          if (!sessionToken.isCancelled && !controller.isClosed) {
+            controller.add(
+              const PlaybackLineLookupUpdate(
+                lines: <PlaybackLine>[],
+                completedRules: 0,
+                totalRules: 0,
+                phase: PlaybackLineLookupPhase.complete,
+              ),
+            );
+          }
+          return;
+        }
+
+        final quickRules = _selectLookupRules(
+          enabledRules,
+          expandAll: false,
+          contentType: type,
+        );
+        final allowedRuleIds = allRules.map((rule) => rule.id).toSet();
+        final prioritizedQuickRules = quickRules
+            .where((rule) => allowedRuleIds.contains(rule.id))
+            .toList(growable: false);
+        final quickRuleIds = prioritizedQuickRules
+            .map((rule) => rule.id)
+            .toSet();
+        final orderedRules = <RulePlugin>[
+          ...prioritizedQuickRules,
+          ...allRules.where((rule) => !quickRuleIds.contains(rule.id)),
+        ];
+        final inventory = <String, PlaybackLine>{};
+
+        final discovery = await _runProgressivePhase(
+          controller: controller,
+          sessionToken: sessionToken,
+          rules: orderedRules,
+          subject: subject,
+          episode: episode,
+          inventory: inventory,
+          verifyPlayable: false,
+          concurrency: _expandedLookupConcurrency,
+          timeSlice: _progressiveDiscoveryTimeSlice,
+          ruleTimeout: _progressiveDiscoveryRuleTimeout,
+          phase: PlaybackLineLookupPhase.discovery,
+        );
+        if (sessionToken.isCancelled ||
+            controller.isClosed ||
+            !discovery.isComplete) {
+          return;
+        }
+
+        // Small inventories still revisit unavailable providers so every route
+        // can reveal remaining roads. Large multi-subscription inventories only
+        // verify providers that actually produced a candidate URL or playable
+        // route in discovery, avoiding a second wave of dead/WebView lookups.
+        final verificationRules =
+            orderedRules.length <= _maxVerificationUnmatchedRevisitRules
+            ? orderedRules
+            : orderedRules
+                  .where(
+                    (rule) => discovery.candidateProviderIds.contains(rule.id),
+                  )
+                  .toList(growable: false);
+        var timedOut = discovery.timedOut;
+        if (verificationRules.isNotEmpty) {
+          final verification = await _runProgressivePhase(
+            controller: controller,
+            sessionToken: sessionToken,
+            rules: verificationRules,
+            subject: subject,
+            episode: episode,
+            inventory: inventory,
+            verifyPlayable: true,
+            concurrency: _progressiveVerificationConcurrency,
+            timeSlice: _progressiveVerificationTimeSlice,
+            ruleTimeout: _progressiveVerificationRuleTimeout,
+            phase: PlaybackLineLookupPhase.verification,
+          );
+          if (sessionToken.isCancelled ||
+              controller.isClosed ||
+              !verification.isComplete) {
+            return;
+          }
+          timedOut |= verification.timedOut;
+        }
+        if (sessionToken.isCancelled || controller.isClosed) return;
+        controller.add(
+          PlaybackLineLookupUpdate(
+            lines: List<PlaybackLine>.unmodifiable(inventory.values),
+            completedRules: orderedRules.length,
+            totalRules: orderedRules.length,
+            phase: PlaybackLineLookupPhase.complete,
+            timedOut: timedOut,
+          ),
+        );
+      } catch (error, stackTrace) {
+        if (!sessionToken.isCancelled && !controller.isClosed) {
+          controller.addError(error, stackTrace);
+        }
+      } finally {
+        unlinkSession?.call();
+        if (!controller.isClosed) await controller.close();
+      }
+    }
+
+    controller = StreamController<PlaybackLineLookupUpdate>(
+      onListen: () {
+        if (started) return;
+        started = true;
+        unawaited(run());
+      },
+      onCancel: () {
+        unlinkSession?.call();
+        sessionToken.cancel();
+      },
+    );
+    return controller.stream;
+  }
+
+  Future<_ProgressivePhaseResult> _runProgressivePhase({
+    required StreamController<PlaybackLineLookupUpdate> controller,
+    required RulePlaybackCancellationToken sessionToken,
+    required List<RulePlugin> rules,
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    required Map<String, PlaybackLine> inventory,
+    required bool verifyPlayable,
+    required int concurrency,
+    required Duration timeSlice,
+    required Duration ruleTimeout,
+    required PlaybackLineLookupPhase phase,
+  }) async {
+    if (rules.isEmpty || sessionToken.isCancelled) {
+      return const _ProgressivePhaseResult();
+    }
+    final phaseToken = RulePlaybackCancellationToken();
+    final unlinkPhase = sessionToken.register(phaseToken.cancel);
+    final pending = <int, Future<_RuleResolution>>{};
+    final sliceStopwatch = Stopwatch()..start();
+    final availableProviderIds = <String>{};
+    final candidateProviderIds = <String>{};
+    var nextRuleIndex = 0;
+    var completedRules = 0;
+    var timedOut = false;
+
+    void fillLookupSlots() {
+      while (!phaseToken.isCancelled &&
+          pending.length < concurrency &&
+          nextRuleIndex < rules.length) {
+        final index = nextRuleIndex++;
+        pending[index] = _resolveRuleForProgressiveLookup(
+          index,
+          rules[index],
+          subject,
+          episode,
+          verifyPlayable: verifyPlayable,
+          timeout: ruleTimeout,
+          cancellationToken: phaseToken,
+        );
+      }
+    }
+
+    try {
+      fillLookupSlots();
+      while (pending.isNotEmpty && !phaseToken.isCancelled) {
+        final remaining = timeSlice - sliceStopwatch.elapsed;
+        if (remaining <= Duration.zero) {
+          sliceStopwatch.reset();
+          await Future<void>.delayed(Duration.zero);
+          continue;
+        }
+        final resolution = await _nextProgressiveResolution(
+          pending.values,
+          timeout: remaining,
+          cancellationToken: phaseToken,
+        );
+        if (resolution == null) {
+          if (phaseToken.isCancelled) break;
+          sliceStopwatch.reset();
+          await Future<void>.delayed(Duration.zero);
+          continue;
+        }
+        pending.remove(resolution.index);
+        completedRules++;
+        timedOut |= resolution.timedOut;
+        final rule = rules[resolution.index];
+        if (!resolution.timedOut) {
+          inventory.removeWhere((_, line) => line.providerId == rule.id);
+        }
+        if (resolution.lines.isNotEmpty) {
+          for (final line in resolution.lines) {
+            inventory[line.id] = line;
+          }
+        }
+        if (resolution.lines.any((line) => line.available)) {
+          availableProviderIds.add(rule.id);
+        }
+        if (resolution.lines.any(
+          (line) =>
+              line.available ||
+              (line.url?.trim().isNotEmpty ?? false) ||
+              line.requiresClientProbe,
+        )) {
+          candidateProviderIds.add(rule.id);
+        }
+        if (!sessionToken.isCancelled && !controller.isClosed) {
+          controller.add(
+            PlaybackLineLookupUpdate(
+              lines: List<PlaybackLine>.unmodifiable(inventory.values),
+              completedRules: completedRules,
+              totalRules: rules.length,
+              phase: phase,
+              timedOut: resolution.timedOut,
+              resolvedProviderId: rule.id,
+            ),
+          );
+        }
+        fillLookupSlots();
+      }
+      return _ProgressivePhaseResult(
+        completedRules: completedRules,
+        totalRules: rules.length,
+        timedOut: timedOut,
+        availableProviderIds: Set<String>.unmodifiable(availableProviderIds),
+        candidateProviderIds: Set<String>.unmodifiable(candidateProviderIds),
+      );
+    } finally {
+      sliceStopwatch.stop();
+      phaseToken.cancel();
+      unlinkPhase();
+    }
+  }
+
+  Future<_RuleResolution> _resolveRuleForProgressiveLookup(
+    int index,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+    required Duration timeout,
+    required RulePlaybackCancellationToken cancellationToken,
+  }) async {
+    final ruleToken = RulePlaybackCancellationToken();
+    final unlinkRule = cancellationToken.register(ruleToken.cancel);
+    try {
+      var timedOut = false;
+      final lines =
+          await _resolveRuleCached(
+            rule,
+            subject,
+            episode,
+            verifyPlayable: verifyPlayable,
+            cancellationToken: ruleToken,
+          ).timeout(
+            timeout,
+            onTimeout: () {
+              timedOut = true;
+              ruleToken.cancel();
+              return <PlaybackLine>[
+                _timedOutPlaybackLine(
+                  rule: rule,
+                  subject: subject,
+                  episode: episode,
+                  verifyPlayable: verifyPlayable,
+                ),
+              ];
+            },
+          );
+      return _RuleResolution(index, lines, timedOut: timedOut);
+    } finally {
+      unlinkRule();
+    }
+  }
+
+  Future<List<PlaybackLine>> _resolveQuickRules(
+    List<RulePlugin> rules,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool verifyPlayable = false,
+    int? forceRefreshGeneration,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final quickToken = RulePlaybackCancellationToken();
+    final unlinkQuick = cancellationToken?.register(quickToken.cancel);
+    final pending = <int, Future<_RuleResolution>>{};
+    final completed = <int, List<PlaybackLine>>{};
+    final budgetStopwatch = Stopwatch()..start();
+    var nextRuleIndex = 0;
+    var foundAvailableLine = false;
+
+    void fillLookupSlots() {
+      while (!quickToken.isCancelled &&
+          !foundAvailableLine &&
+          budgetStopwatch.elapsed < _quickLookupBudget &&
+          pending.length < _quickLookupConcurrency &&
+          nextRuleIndex < rules.length) {
+        final index = nextRuleIndex++;
+        pending[index] = _resolveRuleForQuickLookup(
+          index,
+          rules[index],
+          subject,
+          episode,
+          verifyPlayable: verifyPlayable,
+          forceRefreshGeneration: forceRefreshGeneration,
+          cancellationToken: quickToken,
+        );
+      }
+    }
+
+    try {
+      fillLookupSlots();
+      while (pending.isNotEmpty) {
+        if (quickToken.isCancelled) break;
+        final budgetRemaining = _quickLookupBudget - budgetStopwatch.elapsed;
+        if (budgetRemaining <= Duration.zero) break;
+
+        final resolution = await _nextProgressiveResolution(
+          pending.values,
+          timeout: budgetRemaining,
+          cancellationToken: quickToken,
+        );
+        if (resolution == null) break;
+        pending.remove(resolution.index);
+        completed[resolution.index] = resolution.lines;
+
+        if (!foundAvailableLine &&
+            resolution.lines.any(
+              verifyPlayable
+                  ? _isVerifiedPlayableLine
+                  : (line) => line.available,
+            )) {
+          foundAvailableLine = true;
+          break;
+        }
+        fillLookupSlots();
+      }
+    } finally {
+      budgetStopwatch.stop();
+      quickToken.cancel();
+      unlinkQuick?.call();
+    }
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    final orderedIndexes = completed.keys.toList()..sort();
+    return [for (final index in orderedIndexes) ...completed[index]!];
+  }
+
+  Future<_RuleResolution> _resolveRuleForQuickLookup(
+    int index,
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    bool verifyPlayable = false,
+    int? forceRefreshGeneration,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final ruleToken = RulePlaybackCancellationToken();
+    final unlinkRule = cancellationToken?.register(ruleToken.cancel);
+    try {
+      final lines =
+          await _resolveRuleCached(
+            rule,
+            subject,
+            episode,
+            verifyPlayable: verifyPlayable,
+            forceRefreshGeneration: forceRefreshGeneration,
+            cancellationToken: ruleToken,
+          ).timeout(
+            _quickRuleTimeout,
+            onTimeout: () {
+              ruleToken.cancel();
+              return const <PlaybackLine>[];
+            },
+          );
+      return _RuleResolution(index, lines);
+    } finally {
+      unlinkRule?.call();
+    }
+  }
+
+  Future<_RuleResolution?> _nextProgressiveResolution(
+    Iterable<Future<_RuleResolution>> pending, {
+    required Duration timeout,
+    required RulePlaybackCancellationToken cancellationToken,
+  }) async {
+    if (cancellationToken.isCancelled) return null;
+    final cancelled = Completer<_RuleResolution?>();
+    final unlinkCancellation = cancellationToken.register(() {
+      if (!cancelled.isCompleted) cancelled.complete(null);
+    });
+    try {
+      return await Future.any<_RuleResolution?>([
+        Future.any<_RuleResolution>(pending),
+        cancelled.future,
+      ]).timeout(timeout, onTimeout: () => null);
+    } finally {
+      unlinkCancellation();
+    }
+  }
+
+  Future<List<PlaybackLine>> _resolveExpandedRules(
+    List<RulePlugin> rules,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    RulePlaybackCancellationToken? cancellationToken,
+  }) async {
+    final operationToken = RulePlaybackCancellationToken();
+    final unlinkOperation = cancellationToken?.register(operationToken.cancel);
+    final resolved = List<List<PlaybackLine>?>.filled(rules.length, null);
+    var nextRuleIndex = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        if (operationToken.isCancelled) return;
+        final index = nextRuleIndex++;
+        if (index >= rules.length) return;
+        try {
+          resolved[index] = await _resolveRuleCached(
+            rules[index],
+            subject,
+            episode,
+            verifyPlayable: true,
+            cancellationToken: operationToken,
+          ).timeout(_expandedRuleTimeout);
+        } on TimeoutException {
+          resolved[index] = const <PlaybackLine>[];
+        }
+      }
+    }
+
+    final workerCount = rules.length < _expandedLookupConcurrency
+        ? rules.length
+        : _expandedLookupConcurrency;
+    final workers = Future.wait(List.generate(workerCount, (_) => worker()));
+    try {
+      final completed = await Future.any<bool>([
+        workers.then((_) => true),
+        Future<bool>.delayed(_expandedLookupTotalBudget, () => false),
+      ]);
+      if (!completed) {
+        operationToken.cancel();
+        try {
+          await workers.timeout(const Duration(milliseconds: 800));
+        } on TimeoutException {
+          // Closing the owned HTTP clients stops active network work. A custom
+          // client used by tests may not be abortable, so do not block the UI.
+        }
+      }
+    } finally {
+      unlinkOperation?.call();
+    }
+    if (cancellationToken?.isCancelled ?? false) return const [];
+    return [for (final lines in resolved) ...?lines];
+  }
+
+  Future<List<PlaybackLine>> _resolveRuleCached(
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+    int? forceRefreshGeneration,
+    RulePlaybackCancellationToken? cancellationToken,
+  }) {
+    if (cancellationToken?.isCancelled ?? false) {
+      return Future.value(const <PlaybackLine>[]);
+    }
+    if (_ruleContainsPrivateCredentials(rule)) {
+      return _resolver
+          .resolveRule(
+            rule: rule,
+            subject: subject,
+            episode: episode,
+            verifyPlayable: verifyPlayable,
+            cancellationToken: cancellationToken,
+          )
+          .catchError((Object _) => const <PlaybackLine>[]);
+    }
+    final cacheGeneration = _runtimeCacheGeneration;
+    final now = DateTime.now();
+    final cacheKey = _ruleLookupCacheKey(
+      rule,
+      subject,
+      episode,
+      verifyPlayable: verifyPlayable,
+    );
+    final successfulCacheKey = _successfulRuleLookupCacheKey(
+      rule,
+      subject,
+      episode,
+      verifyPlayable: verifyPlayable,
+    );
+    final lookupRefreshGeneration =
+        forceRefreshGeneration ?? _ruleForceRefreshGeneration;
+    if (forceRefreshGeneration != null) {
+      _ruleLookupCache.removeWhere(
+        (_, cached) => cached.successfulCacheKey == successfulCacheKey,
+      );
+    } else {
+      for (final key in <String>[successfulCacheKey, cacheKey]) {
+        final cached = _ruleLookupCache.remove(key);
+        if (cached != null && cached.expiresAt.isAfter(now)) {
+          _ruleLookupCache[key] = cached;
+          return Future.value(cached.lines);
+        }
+      }
+    }
+
+    final versionedInFlightKey = '$cacheKey|refresh:$lookupRefreshGeneration';
+    final inFlightKey = cancellationToken == null
+        ? versionedInFlightKey
+        : '$versionedInFlightKey|token:${identityHashCode(cancellationToken)}';
+    final inFlight = _inFlightRuleLookups[inFlightKey];
+    if (inFlight != null) return inFlight;
+
+    final stopwatch = Stopwatch()..start();
+    late final Future<List<PlaybackLine>> lookup;
+    lookup = _resolver
+        .resolveRule(
+          rule: rule,
+          subject: subject,
+          episode: episode,
+          verifyPlayable: verifyPlayable,
+          cancellationToken: cancellationToken,
+        )
+        .then((lines) {
+          stopwatch.stop();
+          final immutableLines = List<PlaybackLine>.unmodifiable(
+            _withFallbackLatency(lines, stopwatch.elapsed),
+          );
+          if (cacheGeneration != _runtimeCacheGeneration ||
+              lookupRefreshGeneration != _ruleForceRefreshGeneration ||
+              (cancellationToken?.isCancelled ?? false)) {
+            return immutableLines;
+          }
+          final available = immutableLines.any((line) => line.available);
+          _rememberRuleHealth(rule, available, stopwatch.elapsed);
+          final completedAt = DateTime.now();
+          final cacheExpiresAt = _boundedRuleCacheExpiry(
+            immutableLines,
+            completedAt.add(
+              available ? _availableRuleCacheTtl : _unavailableRuleCacheTtl,
+            ),
+          );
+          if (cacheExpiresAt.isAfter(completedAt)) {
+            _storeCachedRuleLookup(
+              cacheKey,
+              immutableLines,
+              cacheExpiresAt,
+              successfulCacheKey: successfulCacheKey,
+            );
+            if (available && successfulCacheKey != cacheKey) {
+              _storeCachedRuleLookup(
+                successfulCacheKey,
+                immutableLines,
+                cacheExpiresAt,
+                successfulCacheKey: successfulCacheKey,
+              );
+            }
+          }
+          return immutableLines;
+        })
+        .catchError((Object _) => const <PlaybackLine>[])
+        .whenComplete(() {
+          if (identical(_inFlightRuleLookups[inFlightKey], lookup)) {
+            _inFlightRuleLookups.remove(inFlightKey);
+          }
+        });
+    _inFlightRuleLookups[inFlightKey] = lookup;
+    return lookup;
+  }
+
+  int? _prepareForceRefresh(
+    bool forceRefresh,
+    RulePlaybackCancellationToken? cancellationToken,
+  ) {
+    if (!forceRefresh) return null;
+    if (cancellationToken != null) {
+      final prepared = _preparedForceRefreshOperations[cancellationToken];
+      if (prepared == _ruleForceRefreshGeneration) return prepared;
+    }
+    final generation = ++_ruleForceRefreshGeneration;
+    _resolver.clearCaches();
+    if (cancellationToken != null) {
+      _preparedForceRefreshOperations[cancellationToken] = generation;
+    }
+    return generation;
+  }
+
+  DateTime _boundedRuleCacheExpiry(
+    List<PlaybackLine> lines,
+    DateTime defaultExpiry,
+  ) {
+    var expiry = defaultExpiry;
+    for (final line in lines) {
+      final lineExpiry = line.expiresAt;
+      if (line.available && lineExpiry != null && lineExpiry.isBefore(expiry)) {
+        expiry = lineExpiry;
+      }
+    }
+    return expiry;
+  }
+
+  void _storeCachedRuleLookup(
+    String key,
+    List<PlaybackLine> lines,
+    DateTime expiresAt, {
+    required String successfulCacheKey,
+  }) {
+    _ruleLookupCache.remove(key);
+    _ruleLookupCache[key] = _CachedRuleLookup(
+      lines,
+      expiresAt,
+      successfulCacheKey,
+    );
+    while (_ruleLookupCache.length > _maxCachedRuleLookups) {
+      _ruleLookupCache.remove(_ruleLookupCache.keys.first);
+    }
+  }
+
+  void _rememberRuleHealth(RulePlugin rule, bool available, Duration latency) {
+    final key = _ruleHealthKey(rule);
+    final previous = _ruleHealth.remove(key);
+    _ruleHealth[key] = available
+        ? _RuleHealth(
+            lastSuccessAt: DateTime.now(),
+            latency: latency,
+            consecutiveFailures: 0,
+          )
+        : _RuleHealth(
+            lastSuccessAt: previous?.lastSuccessAt,
+            lastFailureAt: DateTime.now(),
+            latency: previous?.latency,
+            consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
+          );
+    while (_ruleHealth.length > _maxRuleHealthEntries) {
+      _ruleHealth.remove(_ruleHealth.keys.first);
+    }
+  }
+
+  List<RulePlugin> _selectLookupRules(
+    List<RulePlugin> rules, {
+    required bool expandAll,
+    String? preferredProviderId,
+    RuleContentType? contentType,
+  }) {
+    if (rules.isEmpty) return const [];
+    final validRules = rules.where(_isValidLookupRule).toList();
+    final preferred = preferredProviderId?.trim();
+    final preferDedicatedAnime = contentType == RuleContentType.anime;
+    final sorted = [...validRules]
+      ..sort((a, b) {
+        if (preferred != null && preferred.isNotEmpty) {
+          final aPreferred = a.id == preferred;
+          final bPreferred = b.id == preferred;
+          if (aPreferred != bPreferred) return aPreferred ? -1 : 1;
+        }
+        if (preferDedicatedAnime) {
+          final aResource = isAnimeResourceCollectionRule(a) ? 1 : 0;
+          final bResource = isAnimeResourceCollectionRule(b) ? 1 : 0;
+          if (aResource != bResource) return aResource.compareTo(bResource);
+        }
+        if (!expandAll) {
+          final quickSearch = _quickSearchRank(
+            a,
+          ).compareTo(_quickSearchRank(b));
+          if (quickSearch != 0) return quickSearch;
+          final health = _ruleHealthRank(a).compareTo(_ruleHealthRank(b));
+          if (health != 0) return health;
+          final latency = _knownLatency(a).compareTo(_knownLatency(b));
+          if (latency != 0) return latency;
+        }
+        final priority = a.priority.compareTo(b.priority);
+        if (priority != 0) return priority;
+        final quality = b.qualityScore.compareTo(a.qualityScore);
+        if (quality != 0) return quality;
+        return a.name.compareTo(b.name);
+      });
+    if (expandAll) return sorted;
+
+    List<RulePlugin> pickWithGroupFairness(
+      List<RulePlugin> candidates,
+      int limit,
+    ) {
+      if (limit <= 0 || candidates.isEmpty) return <RulePlugin>[];
+      final grouped = <String, List<RulePlugin>>{};
+      for (final rule in candidates) {
+        final groupId = rule.groupId.trim();
+        final key = groupId.isEmpty ? 'rule:${rule.id}' : 'group:$groupId';
+        grouped.putIfAbsent(key, () => <RulePlugin>[]).add(rule);
+      }
+      final groupedCount = <String, int>{};
+      final picked = <RulePlugin>[];
+      var groupOffset = 0;
+      var madeProgress = true;
+      while (picked.length < limit && madeProgress) {
+        madeProgress = false;
+        for (final entry in grouped.entries) {
+          final groupId = entry.key;
+          final groupRules = entry.value;
+          if (groupOffset >= groupRules.length) continue;
+          final count = groupedCount[groupId] ?? 0;
+          if (count >= _maxRulesPerGroupPerLookup) continue;
+          picked.add(groupRules[groupOffset]);
+          groupedCount[groupId] = count + 1;
+          madeProgress = true;
+          if (picked.length >= limit) break;
+        }
+        groupOffset++;
+      }
+      if (picked.length < limit) {
+        final pickedIds = picked.map((rule) => rule.id).toSet();
+        for (final rule in candidates) {
+          if (picked.length >= limit) break;
+          if (pickedIds.add(rule.id)) {
+            picked.add(rule);
+          }
+        }
+      }
+      return picked;
+    }
+
+    final List<RulePlugin> selected;
+    if (preferDedicatedAnime) {
+      final dedicated = sorted
+          .where((rule) => !isAnimeResourceCollectionRule(rule))
+          .toList(growable: false);
+      final resourceFallback = sorted
+          .where(isAnimeResourceCollectionRule)
+          .toList(growable: false);
+      selected = pickWithGroupFairness(dedicated, _maxRulesPerQuickLookup);
+      if (selected.length < _maxRulesPerQuickLookup &&
+          resourceFallback.isNotEmpty) {
+        selected.addAll(
+          pickWithGroupFairness(
+            resourceFallback,
+            _maxRulesPerQuickLookup - selected.length,
+          ),
+        );
+      }
+    } else {
+      selected = pickWithGroupFairness(sorted, _maxRulesPerQuickLookup);
+    }
+    if (preferred != null && preferred.isNotEmpty) {
+      final preferredRule = sorted
+          .where((rule) => rule.id == preferred)
+          .firstOrNull;
+      if (preferredRule != null && !selected.contains(preferredRule)) {
+        selected
+          ..removeLast()
+          ..insert(0, preferredRule);
+      }
+    }
+    return selected;
+  }
+
+  bool _isValidLookupRule(RulePlugin rule) {
+    final endpoint = Uri.tryParse(rule.baseUrl.trim());
+    return endpoint != null && endpoint.hasScheme && endpoint.host.isNotEmpty;
+  }
+
+  bool _isVerifiedPlayableLine(PlaybackLine line) {
+    if (!line.available || (!line.serverVerified && !line.clientVerified)) {
+      return false;
+    }
+    final url = Uri.tryParse(line.url?.trim() ?? '');
+    if (url == null ||
+        (url.scheme != 'http' && url.scheme != 'https') ||
+        url.host.isEmpty) {
+      return false;
+    }
+    final expiresAt = line.expiresAt;
+    return expiresAt == null || expiresAt.isAfter(DateTime.now());
+  }
+
+  List<RulePlugin> _boundProgressiveLookupRules(
+    List<RulePlugin> sorted, {
+    RuleContentType? contentType,
+  }) {
+    if (sorted.length <= _maxRulesPerExpandedLookup) return sorted;
+    int compareRules(RulePlugin a, RulePlugin b) {
+      final health = _ruleHealthRank(a).compareTo(_ruleHealthRank(b));
+      if (health != 0) return health;
+      final latency = _knownLatency(a).compareTo(_knownLatency(b));
+      if (latency != 0) return latency;
+      final priority = a.priority.compareTo(b.priority);
+      if (priority != 0) return priority;
+      final quality = b.qualityScore.compareTo(a.qualityScore);
+      if (quality != 0) return quality;
+      return a.name.compareTo(b.name);
+    }
+
+    List<RulePlugin> selectBoundedPool(List<RulePlugin> pool, int limit) {
+      if (limit <= 0 || pool.isEmpty) return const <RulePlugin>[];
+      final lightweight =
+          pool.where((rule) => !_isHeavyWebViewRule(rule)).toList()
+            ..sort(compareRules);
+      final webView = pool.where(_isHeavyWebViewRule).toList()
+        ..sort(compareRules);
+
+      // Reserve up to _maxWebViewRulesPerExpandedLookup slots for WebView anime
+      // rules so a large non-WebView subscription cannot starve Kazumi/Animeko
+      // repositories down to zero slots, while still strictly capping WebViews.
+      final reservedWebView = _roundRobinRulesByRepository(
+        webView,
+        limit < _maxWebViewRulesPerExpandedLookup
+            ? limit
+            : _maxWebViewRulesPerExpandedLookup,
+      );
+      final lightweightBudget = limit - reservedWebView.length;
+      final selectedLightweight = _roundRobinRulesByRepository(
+        lightweight,
+        lightweightBudget,
+      );
+      return <RulePlugin>[...selectedLightweight, ...reservedWebView];
+    }
+
+    if (contentType == RuleContentType.anime) {
+      final dedicated = sorted
+          .where((rule) => !isAnimeResourceCollectionRule(rule))
+          .toList(growable: false);
+      final resourceFallback = sorted
+          .where(isAnimeResourceCollectionRule)
+          .toList(growable: false);
+      final pickedDedicated = selectBoundedPool(
+        dedicated,
+        _maxRulesPerExpandedLookup,
+      );
+      if (pickedDedicated.length >= _maxRulesPerExpandedLookup ||
+          resourceFallback.isEmpty) {
+        return pickedDedicated;
+      }
+      final pickedFallback = selectBoundedPool(
+        resourceFallback,
+        _maxRulesPerExpandedLookup - pickedDedicated.length,
+      );
+      return <RulePlugin>[...pickedDedicated, ...pickedFallback];
+    }
+
+    return selectBoundedPool(sorted, _maxRulesPerExpandedLookup);
+  }
+
+  String _ruleFairnessBucket(RulePlugin rule) {
+    final repo = rule.permissionManifest?.sourceRepository.trim() ?? '';
+    if (repo.isNotEmpty) return 'repo:$repo';
+    final group = rule.groupId.trim();
+    if (group.isNotEmpty) return 'group:$group';
+    return 'engine:${rule.engine.trim().toLowerCase()}';
+  }
+
+  List<RulePlugin> _roundRobinRulesByRepository(
+    List<RulePlugin> ranked,
+    int limit,
+  ) {
+    if (limit <= 0 || ranked.isEmpty) return const <RulePlugin>[];
+    final buckets = <String, List<RulePlugin>>{};
+    for (final rule in ranked) {
+      buckets
+          .putIfAbsent(_ruleFairnessBucket(rule), () => <RulePlugin>[])
+          .add(rule);
+    }
+    final selected = <RulePlugin>[];
+    var offset = 0;
+    var progressed = true;
+    while (selected.length < limit && progressed) {
+      progressed = false;
+      for (final bucket in buckets.values) {
+        if (offset >= bucket.length) continue;
+        selected.add(bucket[offset]);
+        progressed = true;
+        if (selected.length >= limit) break;
+      }
+      offset++;
+    }
+    return selected;
+  }
+
+  bool _isHeavyWebViewRule(RulePlugin rule) {
+    if (rule.requiresWebView || rule.kazumi?.useWebView == true) return true;
+    return rule.engine.trim().toLowerCase() == 'animeko-web-selector';
+  }
+
+  int _quickSearchRank(RulePlugin rule) => rule.quickSearch ? 0 : 1;
+
+  int _ruleHealthRank(RulePlugin rule) {
+    final health = _activeRuleHealth(rule);
+    if (health == null) return 1;
+    if (health.consecutiveFailures >= 2 &&
+        health.lastFailureAt != null &&
+        (health.lastSuccessAt == null ||
+            health.lastFailureAt!.isAfter(health.lastSuccessAt!))) {
+      return 2;
+    }
+    if (health.lastSuccessAt != null) return 0;
+    return 1;
+  }
+
+  int _knownLatency(RulePlugin rule) {
+    return _activeRuleHealth(rule)?.latency?.inMilliseconds ?? 1 << 30;
+  }
+
+  _RuleHealth? _activeRuleHealth(RulePlugin rule) {
+    final key = _ruleHealthKey(rule);
+    final health = _ruleHealth[key];
+    if (health == null) return null;
+    final successAt = health.lastSuccessAt;
+    final failureAt = health.lastFailureAt;
+    final latest = successAt == null
+        ? failureAt
+        : failureAt == null || successAt.isAfter(failureAt)
+        ? successAt
+        : failureAt;
+    if (latest == null || DateTime.now().difference(latest) > _ruleHealthTtl) {
+      _ruleHealth.remove(key);
+      return null;
+    }
+    return health;
+  }
+
+  String _ruleLookupCacheKey(
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+  }) {
+    final verification = verifyPlayable ? 'verified' : 'unverified';
+    return '$_cacheNamespace|${identityHashCode(_resolver)}|$verification|'
+        '${_ruleConfigDigest(rule)}|${rule.id}|${rule.version}|'
+        '${rule.updatedAt.microsecondsSinceEpoch}|${rule.engine}|'
+        '${rule.baseUrl}|${rule.searchUrl}|${subject.source}|${subject.id}|'
+        '${subject.title}|${subject.originalTitle}|${episode.id}|'
+        '${episode.number}|${episode.title}';
+  }
+
+  String _ruleHealthKey(RulePlugin rule) {
+    return '$_cacheNamespace|${_ruleConfigDigest(rule)}|'
+        '${rule.contentType.name}|${rule.id}|${rule.version}|'
+        '${rule.updatedAt.microsecondsSinceEpoch}';
+  }
+
+  String _successfulRuleLookupCacheKey(
+    RulePlugin rule,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    required bool verifyPlayable,
+  }) {
+    final verification = verifyPlayable ? 'verified' : 'unverified';
+    return '$_cacheNamespace|${identityHashCode(_resolver)}|$verification|'
+        'successful|${_ruleConfigDigest(rule)}|${rule.id}|${rule.version}|'
+        '${rule.updatedAt.microsecondsSinceEpoch}|${rule.engine}|'
+        '${rule.baseUrl}|${rule.searchUrl}|${subject.source}|${subject.id}|'
+        '${episode.id}|${episode.number}';
+  }
+
+  RuleContentType _contentTypeFor(AnimeSubject subject) {
+    return switch (subjectContentTypeOf(subject)) {
+      SubjectContentType.anime => RuleContentType.anime,
+      SubjectContentType.series => RuleContentType.series,
+      SubjectContentType.movie => RuleContentType.movie,
+    };
+  }
+}
+
+String _ruleConfigDigest(RulePlugin rule) {
+  try {
+    return sha256.convert(utf8.encode(jsonEncode(rule.toJson()))).toString();
+  } catch (_) {
+    return identityHashCode(rule).toRadixString(16);
+  }
+}
+
+bool _ruleContainsPrivateCredentials(RulePlugin rule) {
+  if (rule.requiresPrivateAuth ||
+      (rule.animeko?.cookies.trim().isNotEmpty ?? false)) {
+    return true;
+  }
+  if (rule.requestHeaders.entries.any(
+    (entry) => _looksSensitiveName(entry.key) && entry.value.trim().isNotEmpty,
+  )) {
+    return true;
+  }
+  return _containsSensitiveConfig(rule.rawConfig);
+}
+
+bool _containsSensitiveConfig(Object? value, [String key = '']) {
+  if (value is Map) {
+    return value.entries.any(
+      (entry) => _containsSensitiveConfig(entry.value, entry.key.toString()),
+    );
+  }
+  if (value is Iterable) {
+    return value.any((item) => _containsSensitiveConfig(item, key));
+  }
+  return _looksSensitiveName(key) &&
+      value?.toString().trim().isNotEmpty == true;
+}
+
+bool _looksSensitiveName(String name) {
+  final normalized = name.toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+  return normalized.contains('auth') ||
+      normalized.contains('cookie') ||
+      normalized.contains('credential') ||
+      normalized.contains('password') ||
+      normalized.contains('session') ||
+      normalized.contains('signature') ||
+      normalized.contains('secret') ||
+      normalized.contains('token') ||
+      normalized == 'apikey' ||
+      normalized == 'accesskey';
+}
+
+List<PlaybackLine> _withFallbackLatency(
+  List<PlaybackLine> lines,
+  Duration lookupLatency,
+) {
+  return lines
+      .map(
+        (line) => line.available && line.latency == null
+            ? PlaybackLine(
+                id: line.id,
+                episodeId: line.episodeId,
+                providerId: line.providerId,
+                providerName: line.providerName,
+                title: line.title,
+                quality: line.quality,
+                format: line.format,
+                url: line.url,
+                clientResolver: line.clientResolver,
+                headers: line.headers,
+                latency: lookupLatency,
+                sizeLabel: line.sizeLabel,
+                sizeBytes: line.sizeBytes,
+                sizeEstimated: line.sizeEstimated,
+                videoWidth: line.videoWidth,
+                videoHeight: line.videoHeight,
+                bitrate: line.bitrate,
+                codecs: line.codecs,
+                isLive: line.isLive,
+                adaptive: line.adaptive,
+                publicHttpOnly: line.publicHttpOnly,
+                serverVerified: line.serverVerified,
+                requiresClientProbe: line.requiresClientProbe,
+                clientVerified: line.clientVerified,
+                startupProfile: line.startupProfile,
+                cacheState: line.cacheState,
+                sourceErrorCategory: line.sourceErrorCategory,
+                sourceName: line.sourceName,
+                sourceInventoryId: line.sourceInventoryId,
+                clientQuerySupported: line.clientQuerySupported,
+                queryLocation: line.queryLocation,
+                sourceAddress: line.sourceAddress,
+                diagnosticStatus: line.diagnosticStatus,
+                queried: line.queried,
+                aliasesAttempted: line.aliasesAttempted,
+                searchHitCount: line.searchHitCount,
+                bestMatchScore: line.bestMatchScore,
+                matched: line.matched,
+                episodeFound: line.episodeFound,
+                discoveryElapsed: line.discoveryElapsed,
+                expiresAt: line.expiresAt,
+                available: line.available,
+                message: line.message,
+              )
+            : line,
+      )
+      .toList(growable: false);
+}
+
+PlaybackLine _timedOutPlaybackLine({
+  required RulePlugin rule,
+  required AnimeSubject subject,
+  required AnimeEpisode episode,
+  required bool verifyPlayable,
+}) {
+  final stage = verifyPlayable ? 'verification' : 'discovery';
+  return PlaybackLine(
+    id: 'timeout:$stage:${rule.id}:${episode.id}',
+    episodeId: episode.id,
+    providerId: rule.id,
+    providerName: rule.name,
+    title: '${subject.title} · 第${episode.number}集',
+    quality: '超时',
+    format: '--',
+    available: false,
+    message: verifyPlayable ? '线路验证超时，已暂时标记为不可用。' : '线路检索超时，请稍后重试。',
+  );
+}
+
+class _ProgressivePhaseResult {
+  const _ProgressivePhaseResult({
+    this.completedRules = 0,
+    this.totalRules = 0,
+    this.timedOut = false,
+    this.availableProviderIds = const <String>{},
+    this.candidateProviderIds = const <String>{},
+  });
+
+  final int completedRules;
+  final int totalRules;
+  final bool timedOut;
+  final Set<String> availableProviderIds;
+  final Set<String> candidateProviderIds;
+
+  bool get isComplete => completedRules == totalRules;
+}
+
+class _RuleResolution {
+  const _RuleResolution(this.index, this.lines, {this.timedOut = false});
+
+  final int index;
+  final List<PlaybackLine> lines;
+  final bool timedOut;
+}
+
+class _CachedRuleLookup {
+  const _CachedRuleLookup(this.lines, this.expiresAt, this.successfulCacheKey);
+
+  final List<PlaybackLine> lines;
+  final DateTime expiresAt;
+  final String successfulCacheKey;
+}
+
+class _RuleHealth {
+  const _RuleHealth({
+    this.lastSuccessAt,
+    this.lastFailureAt,
+    this.latency,
+    required this.consecutiveFailures,
+  });
+
+  final DateTime? lastSuccessAt;
+  final DateTime? lastFailureAt;
+  final Duration? latency;
+  final int consecutiveFailures;
+}
+
+bool _containsAny(String text, List<String> patterns) {
+  return patterns.any(text.contains);
+}
+
+String _archiveQuality(String name) {
+  final lower = name.toLowerCase();
+  final match = RegExp(r'(2160|1440|1080|720|480)p').firstMatch(lower);
+  return match?.group(0)?.toUpperCase() ?? '原画';
+}
+
+bool _archiveRightsAllowed(Map metadata) {
+  final license = [
+    metadata['licenseurl'],
+    metadata['rights'],
+    metadata['usage'],
+  ].whereType<Object>().map((item) => item.toString()).join(' ').toLowerCase();
+  if (_containsAny(license, const [
+    'creativecommons.org',
+    'public domain',
+    'cc0',
+    'cc by',
+  ])) {
+    return true;
+  }
+  final collection = metadata['collection'];
+  final collections = collection is List
+      ? collection.map((item) => item.toString().toLowerCase())
+      : [collection?.toString().toLowerCase() ?? ''];
+  return collections.any(
+    (item) => _containsAny(item, const [
+      'feature_films',
+      'prelinger',
+      'classic_tv',
+      'animationandcartoons',
+    ]),
+  );
+}
+
+int _archiveFileScore(Map item) {
+  final name = item['name']?.toString().toLowerCase() ?? '';
+  final format = item['format']?.toString().toLowerCase() ?? '';
+  var score = 0;
+  if (name.endsWith('.mp4')) score += 20;
+  if (format.contains('h.264') || format.contains('mpeg4')) score += 12;
+  if (RegExp(r'(2160|1440|1080|720)p').hasMatch(name)) score += 8;
+  if (item['source']?.toString() == 'derivative') score += 2;
+  return score;
+}

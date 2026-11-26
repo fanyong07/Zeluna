@@ -1,0 +1,126 @@
+{
+  "version": "v1",
+  "digests": [
+    {
+      "input": "",
+      "expected": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "input": "abc",
+      "expected": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "input": "中文/α",
+      "expected": "1fb714fb45645cdfd453e5d9668e73604e12cd3d44b8e0cef200bfe3526653e2"
+    }
+  ],
+  "subjects": [
+    {
+      "source": "bangumi",
+      "identifier": 42,
+      "expected": "bangumi:42"
+    },
+    {
+      "source": "tmdb:series:550",
+      "identifier": 550,
+      "expected": "tmdb:tv:550"
+    },
+    {
+      "source": "archive:item:with:colon",
+      "identifier": 999,
+      "expected": "subject:v1:4edc06c4dfde316ed79b906d25f5307ec6bc914068d34200583c66a044f0fc7c"
+    },
+    {
+      "source": "m3u-channel:source-a:channel-7",
+      "identifier": 1,
+      "expected": "subject:v1:053ec8c1425521ffab6ef7e2947148112f5c926cb262059e19f533c34b6cda93"
+    },
+    {
+      "source": "Custom Provider",
+      "identifier": "作品-α",
+      "expected": "subject:v1:6ab7308c94e9fd5ef7056f117ee34214c775277a8b9720bb2caf627a4719d4c9"
+    }
+  ],
+  "episodes": [
+    {
+      "subjectKey": "bangumi:42",
+      "number": "01.5000",
+      "expected": "v1|bangumi:42|episode:1.5"
+    },
+    {
+      "subjectKey": "subject:v1:6ab7308c94e9fd5ef7056f117ee34214c775277a8b9720bb2caf627a4719d4c9",
+      "number": "-0.00",
+      "expected": "v1|subject:v1:6ab7308c94e9fd5ef7056f117ee34214c775277a8b9720bb2caf627a4719d4c9|episode:0"
+    }
+  ],
+  "uris": [
+    {
+      "input": "HTTPS://CDN.Example.COM:443/video/main.m3u8?token=z&part=1#ignored",
+      "expected": "https://cdn.example.com/video/main.m3u8?token=z&part=1"
+    },
+    {
+      "input": "http://Example.com:80/a?b=2&a=1#x",
+      "expected": "http://example.com/a?b=2&a=1"
+    },
+    {
+      "input": "https://Example.com:8443/a",
+      "expected": "https://example.com:8443/a"
+    },
+    {
+      "input": "https://[2001:DB8::1]:443/v",
+      "expected": "https://[2001:db8::1]/v"
+    }
+  ],
+  "headers": [
+    {
+      "input": {
+        "Referer": "HTTPS://Example.COM:443/watch/7#part",
+        "Origin": "https://EXAMPLE.com:443",
+        "Authorization": "value-one",
+        "Cookie": "session=value-two",
+        "Range": "bytes=0-2048",
+        "X-Client": "zeluna-test"
+      },
+      "expected": "d229aee1f2923d440773a99d60fe49a7aeec26f4cb094392745bcba2753c9e1b"
+    }
+  ],
+  "playbackLines": [
+    {
+      "providerId": "provider-a",
+      "episodeKey": "v1|bangumi:42|episode:1.5",
+      "uri": "HTTPS://CDN.Example.COM:443/video/main.m3u8?token=z&part=1#ignored",
+      "headers": {
+        "Referer": "HTTPS://Example.COM:443/watch/7#part",
+        "Origin": "https://EXAMPLE.com:443",
+        "Authorization": "value-one",
+        "Cookie": "session=value-two",
+        "Range": "bytes=0-2048",
+        "X-Client": "zeluna-test"
+      },
+      "expected": "line:v1:58266a6fa4fa40f7386fcd7d6128afee917951fa7cff2791abf1aadc3185657b"
+    }
+  ],
+  "downloads": [
+    {
+      "subjectKey": "bangumi:42",
+      "episodeKey": "v1|bangumi:42|episode:1.5",
+      "providerId": "",
+      "expected": "download:v1:65f7ae6474e53d3c7621b3e9536a8d2c627b7aed0b3e11df71a1391db6fc5118"
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": "manual:test",
+      "engine": "Native",
+      "sourceRepository": "HTTPS://Rules.Example.COM:443/list.json#x",
+      "contentHash": "3cfe5c044c1050206b76c938a3b5645d9c6ad975748b078516f871bbb384875b",
+      "expected": "rule:v1:7ed669c49a1ca36bb27cff0ef0b54492a060dbf8c09641202928047ae93b6a7c"
+    }
+  ],
+  "int63": [
+    {
+      "input": "bangumi:42",
+      "expected": 5106289002705368555
+    }
+  ]
+}

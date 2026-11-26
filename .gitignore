@@ -1,0 +1,104 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/key.properties
+/android/keystore-password.txt
+*.jks
+*.keystore
+
+# Local agent, browser and verification artifacts
+.agent/
+/.diff_namestat.txt
+/_branch_log.txt
+.claude/
+.codex/
+.codex_tmp*
+*codex_tmp_readme_check.txt
+*_probe_*.json
+.playwright-cli/
+scratchpad/
+artifacts/
+dist/
+output/
+release/
+/tmp/imagegen/
+!android/app/src/release/
+!android/app/src/release/AndroidManifest.xml
+.vscode/
+
+# Local helper scripts used only while publishing documentation
+tool/_push_readme*.ps1
+
+# Local brand concept iterations; only the selected anime_logo_* assets ship.
+assets/brand/zeluna_anime_logo_app_icon_v*.png
+assets/brand/zeluna_logo_*.png
+assets/brand/zeluna_eye_logo_transparent_v*.png
+assets/brand/splash/**
+!assets/brand/splash/zeluna_android_splash.png
+
+# Local Android/Gradle caches
+android/.gradle/
+android/build/
+
+# Local database and server runtime data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/server/data/integration_release/*.tar.gz
+server/**/__pycache__/
+server/**/*.pyc
+server/.venv/
+server/.pytest_cache/
+server/.ruff_cache/
+server/**/*.db
+server/**/*.db-shm
+server/**/*.db-wal
+server/.env
+server/.env.*
+!server/.env.example
+
+# Operator-managed subtitle content and provenance are never source assets.
+/server/data/subtitles/

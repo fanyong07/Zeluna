@@ -1,0 +1,589 @@
+import 'dart:async';
+import 'package:media_kit/media_kit.dart';
+import 'package:anime/src/player/video/native_video_controller.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  test('delayed polling does not extend the native startup deadline', () async {
+    final watchdog = NativeFirstFrameWatchdog();
+    addTearDown(watchdog.dispose);
+    final events = <NativeStartupTimeoutEvent>[];
+    watchdog.start(
+      isCurrent: () => true,
+      readSnapshot: () =>
+          _snapshot(buffer: const Duration(seconds: 2), hasAlternative: true),
+      onTimeout: events.add,
+      softTimeout: const Duration(milliseconds: 5),
+      hardTimeout: const Duration(milliseconds: 20),
+      pollInterval: const Duration(milliseconds: 5),
+    );
+    // Reproduce a busy UI isolate: the first poll cannot run until after the
+    // hard deadline. It must not start a fresh series of relative waits.
+    final busy = Stopwatch()..start();
+    while (busy.elapsed < const Duration(milliseconds: 50)) {}
+    await Future<void>.delayed(Duration.zero);
+    expect(events, hasLength(1));
+    expect(events.single.phase, NativeStartupTimeoutPhase.hard);
+    expect(watchdog.isActive, isFalse);
+  });
+
+  testWidgets(
+    'decoded-frame sample from a replaced open cannot confirm the new open',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      addTearDown(monitor.dispose);
+      final old = Completer<bool>();
+      var frames = 0;
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () => old.future,
+        onFrame: () => frames += 10,
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () async => true,
+        onFrame: () => frames++,
+      );
+      old.complete(true);
+      await tester.pump();
+      expect(frames, 0);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(frames, 1);
+    },
+  );
+
+  testWidgets('hung probe from old open does not starve replacement', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    var frames = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () => frames += 100,
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () async => true,
+      onFrame: () => frames++,
+    );
+    // Do not finish the old read until the new open has proved its own image.
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(frames, 1);
+    old.complete(true);
+    await tester.pump();
+    expect(frames, 1);
+  });
+
+  testWidgets('stale finally cannot unlock an in-flight replacement probe', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    final current = Completer<bool>();
+    var reads = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () {},
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () {
+        reads++;
+        return current.future;
+      },
+      onFrame: () {},
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    old.complete(false);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(reads, 1, reason: 'the new probe remains single-flight');
+    current.complete(false);
+    await tester.pump();
+    monitor.dispose();
+  });
+
+  testWidgets(
+    'timed-out image probe reports reason without cancelling deadline',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      addTearDown(monitor.dispose);
+      final pending = Completer<bool>();
+      final reasons = <String>[];
+      var frames = 0;
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () => pending.future,
+        onFrame: () => frames++,
+        onProbe: reasons.add,
+        readTimeout: const Duration(seconds: 1),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 1));
+      expect(reasons, ['probe_timeout']);
+      expect(frames, 0);
+      pending.complete(false);
+      await tester.pump();
+      monitor.dispose();
+    },
+  );
+
+  testWidgets(
+    'timed-out native work is not requeued and hard startup deadline survives',
+    (tester) async {
+      final monitor = NativeDecodedFrameMonitor();
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(monitor.dispose);
+      addTearDown(watchdog.dispose);
+      final pending = Completer<bool>();
+      var reads = 0;
+      var frames = 0;
+      final probes = <String>[];
+      final deadlines = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => _snapshot(buffer: const Duration(seconds: 5)),
+        onTimeout: deadlines.add,
+        softTimeout: const Duration(seconds: 4),
+        hardTimeout: const Duration(seconds: 4),
+      );
+      monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () {
+          reads++;
+          return pending.future;
+        },
+        onFrame: () => frames++,
+        onProbe: probes.add,
+        readTimeout: const Duration(seconds: 1),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(seconds: 1));
+      for (var i = 0; i < 12; i++) {
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+      expect(reads, 1, reason: 'timeout must not queue native work repeatedly');
+      expect(probes, ['probe_timeout']);
+      expect(deadlines, hasLength(1));
+      expect(deadlines.single.phase, NativeStartupTimeoutPhase.hard);
+      pending.complete(true);
+      await tester.pump();
+      expect(frames, 0, reason: 'late image is not a confirmed first frame');
+    },
+  );
+
+  testWidgets('timeout callback may start a fresh probe generation', (
+    tester,
+  ) async {
+    final monitor = NativeDecodedFrameMonitor();
+    addTearDown(monitor.dispose);
+    final old = Completer<bool>();
+    var frames = 0;
+    monitor.start(
+      isCurrent: () => true,
+      canRead: () => true,
+      readFrame: () => old.future,
+      onFrame: () => frames += 100,
+      readTimeout: const Duration(seconds: 1),
+      onProbe: (_) => monitor.start(
+        isCurrent: () => true,
+        canRead: () => true,
+        readFrame: () async => true,
+        onFrame: () => frames++,
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(frames, 1);
+    old.completeError(StateError('late native failure'));
+    await tester.pump();
+    expect(frames, 1);
+  });
+
+  testWidgets(
+    'advancing audio clock without decoded video is not a first frame',
+    (tester) async {
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      var frames = 0;
+      var timeouts = 0;
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => const NativePlaybackStartupSnapshot(
+          playing: true,
+          position: Duration(seconds: 3),
+          buffer: Duration(seconds: 10),
+          buffering: false,
+          hasAlternative: true,
+        ),
+        onFirstFrame: (_) => frames++,
+        onTimeout: (_) => timeouts++,
+        softTimeout: const Duration(seconds: 1),
+        hardTimeout: const Duration(seconds: 2),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(frames, 0);
+      await tester.pump(const Duration(seconds: 1));
+      expect(timeouts, 1);
+    },
+  );
+
+  test('native media events stay blocked across stop and open transitions', () {
+    final guard = NativeMediaEventGuard();
+    guard.beginOpen(openSerial: 4, mediaUri: 'https://media.test/ep2.mp4');
+
+    expect(guard.isTransitioning, isTrue);
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 4,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+
+    guard.finishOpen(openSerial: 4);
+    expect(guard.isTransitioning, isFalse);
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 4,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: const Duration(seconds: 1),
+        playerStateValue: const Duration(seconds: 1),
+      ),
+      isTrue,
+    );
+  });
+
+  test('native media events reject stale serial, uri, and state values', () {
+    final guard = NativeMediaEventGuard()
+      ..beginOpen(openSerial: 8, mediaUri: 'https://media.test/ep2.mp4')
+      ..finishOpen(openSerial: 8);
+
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 9,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep1.mp4',
+        eventValue: true,
+        playerStateValue: true,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: true,
+        playerStateValue: false,
+      ),
+      isFalse,
+    );
+    expect(
+      guard.acceptsValue(
+        currentOpenSerial: 8,
+        playerMediaUri: 'https://media.test/ep2.mp4',
+        eventValue: const Duration(minutes: 22),
+        playerStateValue: Duration.zero,
+      ),
+      isFalse,
+    );
+  });
+
+  testWidgets(
+    'startup samples current backend buffering after early events were rejected',
+    (tester) async {
+      final media = Media('https://media.test/episode.m3u8');
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 2, mediaUri: media.uri);
+      // Buffering can arrive before the playlist confirms the media identity.
+      expect(
+        guard.acceptsValue(
+          currentOpenSerial: 2,
+          playerMediaUri: null,
+          eventValue: true,
+          playerStateValue: true,
+        ),
+        isFalse,
+      );
+      guard.finishOpen(openSerial: 2);
+      final backend = PlayerState().copyWith(
+        playlist: Playlist([media]),
+        playing: true,
+        buffering: true,
+      );
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      final events = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => guard.readStartupSnapshot(
+          currentOpenSerial: 2,
+          playerState: backend,
+          hasAlternative: true,
+          decodedFrame: true,
+        ),
+        onTimeout: events.add,
+        softTimeout: const Duration(seconds: 7),
+        hardTimeout: const Duration(seconds: 25),
+      );
+      await tester.pump(const Duration(seconds: 7));
+      expect(
+        events,
+        isEmpty,
+        reason:
+            'Do not switch a still-buffering live stream using stale UI state.',
+      );
+      await tester.pump(const Duration(seconds: 18));
+      expect(events.single.phase, NativeStartupTimeoutPhase.hard);
+    },
+  );
+
+  test(
+    'startup snapshot never attributes old media progress to a new open',
+    () {
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 3, mediaUri: 'https://media.test/new.mp4');
+      final old = PlayerState().copyWith(
+        playlist: Playlist([Media('https://media.test/old.mp4')]),
+        position: const Duration(seconds: 42),
+        playing: true,
+      );
+      for (final ready in [false, true]) {
+        if (ready) guard.finishOpen(openSerial: 3);
+        final snapshot = guard.readStartupSnapshot(
+          currentOpenSerial: 3,
+          playerState: old,
+          hasAlternative: true,
+        );
+        expect(snapshot.position, Duration.zero);
+        expect(snapshot.buffering, isTrue);
+      }
+    },
+  );
+
+  testWidgets(
+    'sampled first frame confirms startup after early progress was rejected',
+    (tester) async {
+      final media = Media('https://media.test/episode.m3u8');
+      final guard = NativeMediaEventGuard()
+        ..beginOpen(openSerial: 2, mediaUri: media.uri);
+      expect(
+        guard.acceptsValue(
+          currentOpenSerial: 2,
+          playerMediaUri: null,
+          eventValue: const Duration(seconds: 3),
+          playerStateValue: const Duration(seconds: 3),
+        ),
+        isFalse,
+      );
+      guard.finishOpen(openSerial: 2);
+      final backend = PlayerState().copyWith(
+        playlist: Playlist([media]),
+        playing: true,
+        position: const Duration(seconds: 3),
+      );
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      final frames = <NativePlaybackStartupSnapshot>[];
+      final errors = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => guard.readStartupSnapshot(
+          currentOpenSerial: 2,
+          playerState: backend,
+          hasAlternative: true,
+          decodedFrame: true,
+        ),
+        onFirstFrame: frames.add,
+        onTimeout: errors.add,
+      );
+      await tester.pump(const Duration(seconds: 7));
+      expect(frames, hasLength(1));
+      expect(frames.single.position, const Duration(seconds: 3));
+      expect(watchdog.isActive, isFalse);
+      expect(
+        watchdog.handleProgress(
+          previousPosition: Duration.zero,
+          currentPosition: const Duration(seconds: 4),
+        ),
+        isFalse,
+        reason: 'A later stream event must not confirm the same frame twice.',
+      );
+      await tester.pump(const Duration(seconds: 30));
+      expect(frames, hasLength(1));
+      expect(errors, isEmpty);
+    },
+  );
+
+  for (final end in ['cancel', 'dispose', 'stale', 'replace']) {
+    testWidgets('sampled first frame respects $end lifecycle', (tester) async {
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      var current = true;
+      var oldFrames = 0;
+      var newFrames = 0;
+      var errors = 0;
+      watchdog.start(
+        isCurrent: () => current,
+        readSnapshot: () => _snapshot(position: const Duration(seconds: 1)),
+        onFirstFrame: (_) => oldFrames++,
+        onTimeout: (_) => errors++,
+      );
+      switch (end) {
+        case 'cancel':
+          watchdog.cancel();
+        case 'dispose':
+          watchdog.dispose();
+        case 'stale':
+          current = false;
+        case 'replace':
+          watchdog.start(
+            isCurrent: () => true,
+            readSnapshot: () => _snapshot(position: const Duration(seconds: 2)),
+            onFirstFrame: (_) => newFrames++,
+            onTimeout: (_) => errors++,
+          );
+      }
+      await tester.pump(const Duration(seconds: 30));
+      expect(oldFrames, 0);
+      expect(newFrames, end == 'replace' ? 1 : 0);
+      expect(errors, 0);
+      expect(watchdog.isActive, isFalse);
+    });
+  }
+
+  testWidgets(
+    'decoded video with progress confirms first frame and cancels timeout',
+    (tester) async {
+      final watchdog = NativeFirstFrameWatchdog();
+      addTearDown(watchdog.dispose);
+      final events = <NativeStartupTimeoutEvent>[];
+      watchdog.start(
+        isCurrent: () => true,
+        readSnapshot: () => _snapshot(hasAlternative: true),
+        onTimeout: events.add,
+        softTimeout: const Duration(milliseconds: 15),
+        hardTimeout: const Duration(milliseconds: 35),
+        pollInterval: const Duration(milliseconds: 5),
+      );
+
+      expect(
+        watchdog.handleProgress(
+          previousPosition: Duration.zero,
+          currentPosition: const Duration(milliseconds: 1),
+          decodedFrame: true,
+        ),
+        isTrue,
+      );
+      await tester.pump(const Duration(milliseconds: 30));
+
+      expect(watchdog.isActive, isFalse);
+      expect(events, isEmpty);
+    },
+  );
+
+  testWidgets('native startup emits a soft timeout when a fallback is ready', (
+    tester,
+  ) async {
+    final watchdog = NativeFirstFrameWatchdog();
+    addTearDown(watchdog.dispose);
+    final events = <NativeStartupTimeoutEvent>[];
+    watchdog.start(
+      isCurrent: () => true,
+      readSnapshot: () => _snapshot(hasAlternative: true),
+      onTimeout: events.add,
+      softTimeout: const Duration(milliseconds: 10),
+      hardTimeout: const Duration(milliseconds: 40),
+      pollInterval: const Duration(milliseconds: 5),
+    );
+    await tester.pump(const Duration(milliseconds: 25));
+
+    expect(events, hasLength(1));
+    expect(events.single.phase, NativeStartupTimeoutPhase.soft);
+    expect(events.single.hasAlternative, isTrue);
+  });
+
+  testWidgets('native buffer progress defers recovery until the hard timeout', (
+    tester,
+  ) async {
+    final watchdog = NativeFirstFrameWatchdog();
+    addTearDown(watchdog.dispose);
+    final events = <NativeStartupTimeoutEvent>[];
+    watchdog.start(
+      isCurrent: () => true,
+      readSnapshot: () =>
+          _snapshot(buffer: const Duration(seconds: 2), hasAlternative: true),
+      onTimeout: events.add,
+      softTimeout: const Duration(milliseconds: 5),
+      hardTimeout: const Duration(milliseconds: 25),
+      pollInterval: const Duration(milliseconds: 5),
+    );
+    await tester.pump(const Duration(milliseconds: 45));
+
+    expect(events, hasLength(1));
+    expect(events.single.phase, NativeStartupTimeoutPhase.hard);
+  });
+
+  testWidgets('dispose prevents native first-frame timeout callbacks', (
+    tester,
+  ) async {
+    final watchdog = NativeFirstFrameWatchdog();
+    var callbacks = 0;
+    watchdog.start(
+      isCurrent: () => true,
+      readSnapshot: () => _snapshot(hasAlternative: true),
+      onTimeout: (_) => callbacks++,
+      softTimeout: const Duration(milliseconds: 10),
+      hardTimeout: const Duration(milliseconds: 20),
+      pollInterval: const Duration(milliseconds: 5),
+    );
+    watchdog.dispose();
+    await tester.pump(const Duration(milliseconds: 25));
+
+    expect(watchdog.isDisposed, isTrue);
+    expect(watchdog.isActive, isFalse);
+    expect(callbacks, 0);
+  });
+}
+
+NativePlaybackStartupSnapshot _snapshot({
+  Duration position = Duration.zero,
+  Duration buffer = Duration.zero,
+  bool hasAlternative = false,
+}) {
+  return NativePlaybackStartupSnapshot(
+    playing: true,
+    position: position,
+    buffer: buffer,
+    buffering: false,
+    hasAlternative: hasAlternative,
+    decodedFrame: position > Duration.zero,
+  );
+}

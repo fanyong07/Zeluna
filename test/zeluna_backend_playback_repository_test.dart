@@ -1,0 +1,1031 @@
+import 'dart:convert';
+
+import 'package:anime/src/data/zeluna_backend_playback_repository.dart';
+import 'package:anime/src/core/network/network_security.dart';
+import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/rules/rule_playback_resolver.dart';
+import 'package:anime/src/playback/playback_discovery_controller.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+void main() {
+  const subject = AnimeSubject(
+    id: 1,
+    title: '葬送的芙莉莲',
+    originalTitle: 'Sousou no Frieren',
+    summary: '',
+    coverUrl: null,
+    bannerUrl: null,
+    date: '2023',
+    platform: 'TV',
+    language: '日语',
+    region: '日本',
+    status: '完结',
+    categories: [AnimeCategory(name: '动画')],
+    tags: [],
+    totalEpisodes: 28,
+  );
+  const episode = AnimeEpisode(
+    id: 101,
+    subjectId: 1,
+    number: 1,
+    title: '第1集',
+    airdate: null,
+    duration: '',
+    description: '',
+  );
+
+  AnimeEpisode ep(int n, {int? relative, int season = 2}) => AnimeEpisode(
+    id: 1000 + n,
+    subjectId: 1,
+    number: n,
+    title: '第$n集',
+    stableKey: 'episode:$n',
+    seasonNumber: season,
+    seasonEpisodeNumber: relative,
+    airdate: null,
+    duration: '',
+    description: 'metadata',
+  );
+  test('continuous sequel numbering preserves identity and display order', () {
+    final entries = [ep(28), ep(26), ep(27)];
+    final actual = inferSeasonEpisodeNumbers(entries);
+    expect(actual.map((e) => e.seasonEpisodeNumber), [3, 1, 2]);
+    expect(
+      actual.map((e) => (e.number, e.id, e.identityKey(), e.description)),
+      entries.map((e) => (e.number, e.id, e.identityKey(), e.description)),
+    );
+    for (final nonSeason in [
+      [ep(26)],
+      [ep(26), ep(28)],
+      [ep(26), ep(26)],
+      [ep(26), ep(27, relative: 7)],
+      [ep(26), ep(27, season: 3)],
+      [ep(1), ep(2)],
+    ]) {
+      expect(inferSeasonEpisodeNumbers(nonSeason), same(nonSeason));
+    }
+  });
+  const miss = {
+    'source': 'matched-site',
+    'diagnostic_status': 'matched_no_episode',
+    'available': false,
+  };
+  const feature = {
+    'url': 'https://cdn.example/full.mp4',
+    'source': 'matched-site',
+    'available': true,
+    'status': 'server_verified',
+    'format': 'mp4',
+    'size_bytes': 412 * 1024 * 1024,
+  };
+  const placeholder = {
+    'source': 'pending-site',
+    'source_inventory_entry': true,
+    'available': false,
+  };
+  for (final full in [true, false]) {
+    test(
+      'legacy full=$full retries only the missing source, keeping episode identity',
+      () async {
+        final calls = <String>[];
+        final repo = ZelunaBackendPlaybackRepository(
+          baseUrl: 'https://backend.example',
+          client: MockClient((r) async {
+            expect(r.url.pathSegments[2], full ? 'playback' : 'quick-playback');
+            final query = r.url.queryParameters;
+            calls.add(query['episode']!);
+            if (calls.length == 1) {
+              expect(query['season_episode'], '2');
+              return _jsonResponse([miss, placeholder]);
+            }
+            expect(query.containsKey('season_episode'), isFalse);
+            return _jsonResponse([
+              feature,
+              {
+                ...feature,
+                'source': 'unrelated',
+                'url': 'https://cdn.example/other.mp4',
+              },
+            ]);
+          }),
+        );
+        final lines = await repo.linesForEpisodeMode(
+          subject,
+          ep(27, relative: 2),
+          expandAll: full,
+        );
+        expect(calls, ['27', '2']);
+        expect(lines, hasLength(2));
+        expect(lines.where((l) => l.available).single.url, feature['url']);
+        expect(lines.every((l) => l.episodeId == 1027), isTrue);
+      },
+    );
+  }
+  for (final mode in [
+    'supported',
+    'playable',
+    'empty',
+    'search_failed',
+    'pending',
+    'cancel',
+    'anonymous',
+  ]) {
+    test('no relative retry after $mode', () async {
+      var calls = 0;
+      final token = RulePlaybackCancellationToken();
+      final repo = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example',
+        client: MockClient((r) async {
+          calls++;
+          if (mode == 'cancel') token.cancel();
+          final response = _jsonResponse(switch (mode) {
+            'playable' => [miss, feature],
+            'empty' => [],
+            'search_failed' => [
+              {...miss, 'diagnostic_status': 'search_failed'},
+            ],
+            'pending' => [
+              {...miss, 'discovery_pending': true},
+            ],
+            'anonymous' => [
+              {...miss, 'source': ''},
+            ],
+            _ => [miss],
+          });
+          return mode == 'supported'
+              ? http.Response.bytes(
+                  response.bodyBytes,
+                  200,
+                  headers: {'x-zeluna-season-episode': 'supported'},
+                )
+              : response;
+        }),
+      );
+      final lines = await repo.linesForEpisodeMode(
+        subject,
+        ep(27, relative: 2),
+        cancellationToken: token,
+      );
+      expect(calls, 1);
+      if (mode == 'cancel') expect(lines, isEmpty);
+    });
+  }
+  test(
+    'a 6s ad can never win startup, while genuine full file and stream exceptions remain',
+    () async {
+      const ad = 'https://highlight-video.cdn.bcebos.com/video/6s/ad';
+      final repo = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example',
+        client: MockClient(
+          (_) async => _jsonResponse([
+            {
+              ...feature,
+              'title': 'ad',
+              'url': ad,
+              'size_bytes': 614400,
+              'startup_profile': 'mp4_faststart',
+              'startup_latency_ms': 110,
+            },
+            feature,
+            for (final extra in <Map<String, Object>>[
+              {'title': 'small'},
+              {'title': 'estimate', 'size_estimated': true},
+              {'title': 'live', 'is_live': true},
+              {'title': 'duration', 'duration_seconds': 60},
+              {'title': 'threshold', 'size_bytes': 5 * 1024 * 1024},
+              {'title': 'hls', 'format': 'hls'},
+              {'title': 'dash', 'format': 'dash'},
+            ])
+              {
+                ...feature,
+                'url': 'https://cdn.example/${extra['title']}.mp4',
+                'size_bytes': 614400,
+                ...extra,
+              },
+          ]),
+        ),
+      );
+      final lines = await repo.linesForEpisode(subject, ep(27, relative: 2));
+      final blocked = lines.where((l) => !l.available);
+      expect(blocked.map((l) => l.title), unorderedEquals(['ad', 'small']));
+      expect(
+        blocked.every(
+          (l) =>
+              l.url == null &&
+              !l.requiresClientProbe &&
+              !l.serverVerified &&
+              l.message!.contains('短片'),
+        ),
+        isTrue,
+      );
+      final ranked = rankPlaybackLinesForStartup(
+        lines.where((l) => l.title == 'ad' || l.url == feature['url']),
+      );
+      expect(ranked.first.url, feature['url']);
+      expect(lines.where((l) => l.available), hasLength(7));
+      var requests = 0;
+      final probe = RulePlaybackResolver(
+        client: MockClient((_) async {
+          requests++;
+          return http.Response('', 404);
+        }),
+      );
+      final checked = await probe.verifyPlaybackLine(
+        line: const PlaybackLine(
+          id: 'ad',
+          episodeId: 1027,
+          providerId: 'old',
+          providerName: 'old',
+          title: 'ad',
+          quality: '',
+          format: 'mp4',
+          url: ad,
+          available: true,
+          serverVerified: true,
+        ),
+      );
+      expect(requests, 0);
+      expect(checked.url, isNull);
+      expect(checked.available, isFalse);
+      expect(checked.serverVerified, isFalse);
+    },
+  );
+  for (final type in ['movie', 'tv']) {
+    for (final explicitKey in [false, true]) {
+      test(
+        'TMDB $type short source uses canonical identity explicit=$explicitKey',
+        () async {
+          const providerId = 535167;
+          var calls = 0;
+          final repository = ZelunaBackendPlaybackRepository(
+            baseUrl: 'https://backend.example.com',
+            client: MockClient((request) async {
+              calls++;
+              expect(
+                request.url.path,
+                '/api/v3/quick-playback/tmdb:$type:$providerId',
+              );
+              return _jsonResponse([
+                {
+                  'url': 'https://cdn.example/media.m3u8',
+                  'status': 'server_verified',
+                  'available': true,
+                  'source': 'maccms:fixture',
+                },
+              ]);
+            }),
+          );
+          final item = AnimeSubject.fromJson({
+            ...subject.toJson(),
+            'id': explicitKey ? -42 : providerId,
+            'source': 'tmdb:$type',
+            'stableKey': explicitKey ? 'tmdb:$type:$providerId' : null,
+            'platform': type == 'movie' ? 'Movie' : 'TV',
+            'categories': const [],
+          });
+          final lines = await repository.linesForEpisode(item, episode);
+          expect(calls, 1);
+          expect(lines.single.available, isTrue);
+        },
+      );
+    }
+  }
+
+  test(
+    'partial full response retains routes and explicit non-final cache state',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient(
+          (_) async => _jsonResponse([
+            {
+              'url': 'https://cdn.example/quick.m3u8',
+              'source': 'maccms:iKun',
+              'available': true,
+              'status': 'server_verified',
+              'discovery_pending': true,
+              'cache_state': 'fresh',
+            },
+            {
+              'url': '',
+              'source': 'maccms:pending',
+              'available': false,
+              'diagnostic_status': 'not_queried',
+              'discovery_pending': true,
+              'message': '完整检索仍在后台进行',
+            },
+          ]),
+        ),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(2));
+      expect(lines.first.available, isTrue);
+      expect(lines.every((line) => line.cacheState == 'partial'), isTrue);
+      expect(lines.last.available, isFalse);
+      expect(lines.last.message, contains('后台'));
+    },
+  );
+
+  test(
+    'full AniCh inventory preserves all 58 distinct routes before probing',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient((request) async {
+          expect(request.url.path, '/api/v3/playback/bangumi:1');
+          return _jsonResponse(
+            List.generate(
+              58,
+              (i) => {
+                'url': 'https://cdn.example.com/route-$i/index.m3u8',
+                'title': '第1集',
+                'source': 'route-$i',
+                'provider_id': 'route-$i',
+                'provider_name': 'route-$i',
+                'tag': 'route-$i',
+                'quality': '1080P',
+                'format': 'hls',
+                'available': false,
+                'status': 'client_probe_required',
+              },
+            ),
+          );
+        }),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(58));
+      expect(lines.map((l) => l.id).toSet(), hasLength(58));
+      expect(lines.every((l) => l.requiresClientProbe), isTrue);
+    },
+  );
+
+  test(
+    'unavailable inventory keeps all 58 routes without authorizing playback',
+    () async {
+      final repository = ZelunaBackendPlaybackRepository(
+        baseUrl: 'https://backend.example.com',
+        client: MockClient(
+          (request) async => _jsonResponse(
+            List.generate(
+              58,
+              (i) => {
+                'url': 'https://cdn.example.com/opaque-$i',
+                'title': 'Route $i',
+                'source': 'route-$i',
+                'provider_id': 'route-$i',
+                'provider_name': 'route-$i',
+                'format': 'auto',
+                'available': i < 10,
+                'status': i < 10 ? 'server_verified' : 'unavailable',
+                'inventory_only': i >= 10,
+              },
+            ),
+          ),
+        ),
+      );
+      final lines = await repository.linesForEpisodeMode(
+        subject,
+        episode,
+        expandAll: true,
+      );
+      expect(lines, hasLength(58));
+      expect(lines.map((line) => line.id).toSet(), hasLength(58));
+      expect(lines.where((line) => line.available), hasLength(10));
+      expect(lines.where((line) => line.requiresClientProbe), isEmpty);
+      expect(lines.where((line) => line.serverVerified), hasLength(10));
+    },
+  );
+
+  test('服务端媒体元数据兼容snake/camel并且缺测保持未知', () async {
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: MockClient(
+        (_) async => _jsonResponse([
+          {
+            'url': 'https://cdn.example/known.mp4',
+            'source': 'crawler:fixture',
+            'size_bytes': 104857600,
+            'size_estimated': false,
+            'video_width': 1920,
+            'video_height': 1080,
+            'bitrate': 4000000,
+            'codecs': 'avc1.640028, mp4a.40.2',
+            'is_live': false,
+            'adaptive': true,
+            'startup_latency_ms': 125,
+          },
+          {
+            'url': 'https://cdn.example/legacy.mp4',
+            'source': 'crawler:fixture',
+            'sizeBytes': '209715200',
+            'sizeEstimated': 'true',
+            'videoWidth': 1280.0,
+            'height': '720',
+            'bitrate_bps': '2000000',
+            'codecs': ['avc1.4d401f', 'mp4a.40.2'],
+            'isLive': 'true',
+            'adaptive': 'false',
+          },
+          {
+            'url': 'https://cdn.example/unmeasured.m3u8',
+            'source': 'crawler:fixture',
+          },
+        ]),
+      ),
+    );
+    addTearDown(repository.dispose);
+    final lines = await repository.linesForEpisode(subject, episode);
+    expect(lines, hasLength(3));
+    expect(lines[0].sizeBytes, 104857600);
+    expect(lines[0].sizeEstimated, isFalse);
+    expect(lines[0].videoWidth, 1920);
+    expect(lines[0].videoHeight, 1080);
+    expect(lines[0].bitrate, 4000000);
+    expect(lines[0].codecs, 'avc1.640028, mp4a.40.2');
+    expect(lines[0].adaptive, isTrue);
+    expect(lines[0].isLive, isFalse);
+    expect(lines[0].latency, const Duration(milliseconds: 125));
+    expect(lines[1].sizeBytes, 209715200);
+    expect(lines[1].sizeEstimated, isTrue);
+    expect(lines[1].videoWidth, 1280);
+    expect(lines[1].videoHeight, 720);
+    expect(lines[1].bitrate, 2000000);
+    expect(lines[1].codecs, 'avc1.4d401f, mp4a.40.2');
+    expect(lines[1].isLive, isTrue);
+    expect(lines[1].adaptive, isFalse);
+    expect(lines[2].sizeBytes, isNull);
+    expect(lines[2].videoWidth, isNull);
+    expect(lines[2].videoHeight, isNull);
+    expect(lines[2].bitrate, isNull);
+    expect(lines[2].codecs, isNull);
+    expect(lines[2].latency, isNull);
+  });
+
+  test('媒体整数边界不截断负数分数布尔和超JSON精度数值', () async {
+    final invalid = <Object?>[
+      -1,
+      -0.1,
+      '-1',
+      true,
+      1.5,
+      '1.5',
+      'NaN',
+      'Infinity',
+      '9007199254740992',
+      9007199254740992,
+      {},
+      [],
+    ];
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: MockClient(
+        (_) async => _jsonResponse([
+          for (final value in [...invalid, 0, '0', 9007199254740991])
+            {
+              'url': 'https://cdn.example/${invalid.indexOf(value)}.mp4',
+              'source': 'crawler:fixture',
+              'size_bytes': value,
+              'size_estimated': true,
+              'video_width': value,
+              'video_height': value,
+              'bitrate': value,
+              'startup_latency_ms': value,
+              'source_latency_ms': value,
+              'codecs': {'value': 'not-a-codec'},
+            },
+        ]),
+      ),
+    );
+    addTearDown(repository.dispose);
+    final lines = await repository.linesForEpisode(subject, episode);
+    expect(lines, hasLength(invalid.length + 3));
+    for (final line in lines.take(invalid.length)) {
+      expect(line.sizeBytes, isNull);
+      expect(line.sizeEstimated, isFalse);
+      expect(line.videoWidth, isNull);
+      expect(line.videoHeight, isNull);
+      expect(line.bitrate, isNull);
+      expect(line.codecs, isNull);
+      expect(line.latency, isNull);
+    }
+    for (final line in lines.skip(invalid.length).take(2)) {
+      expect(line.sizeBytes, 0);
+      expect(line.videoWidth, 0);
+      expect(line.videoHeight, 0);
+      expect(line.bitrate, 0);
+      expect(line.latency, isNull);
+    }
+    expect(lines.last.sizeBytes, 9007199254740991);
+  });
+
+  test('聚合后端会保留同一作品的不同站点线路', () async {
+    String? requestedStableId;
+    final client = MockClient((request) async {
+      if (request.url.pathSegments.take(3).join('/') ==
+          'api/v3/quick-playback') {
+        requestedStableId = request.url.pathSegments.last;
+        expect(request.url.queryParameters['title'], subject.title);
+        return _jsonResponse([
+          {
+            'url': 'https://cdn.example.com/ikun/index.m3u8',
+            'title': '线路1',
+            'quality': '1080P',
+            'format': 'hls',
+            'source': 'maccms:iKun',
+            'headers': {'Referer': 'https://player.example.com/'},
+            'cached': true,
+            'cache_state': 'fresh',
+            'source_latency_ms': 420,
+            'startup_profile': 'hls',
+            'startup_latency_ms': 180,
+          },
+          {
+            'url': 'https://cdn.example.com/modu/index.m3u8',
+            'title': '线路2',
+            'quality': '1080P',
+            'format': 'hls',
+            'source': 'maccms:魔都',
+            'headers': const <String, String>{},
+            'cached': false,
+          },
+          {
+            'url': '',
+            'title': '如意',
+            'source': 'maccms:如意',
+            'available': false,
+            'status': 'not_found',
+            'message': '当前站点没有匹配到这部作品',
+          },
+        ]);
+      }
+      return http.Response('not found', 404);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com/',
+      client: client,
+    );
+    expect(repository.requestTimeout, const Duration(seconds: 18));
+
+    final lines = await repository.linesForEpisode(subject, episode);
+
+    expect(requestedStableId, 'bangumi:1');
+    expect(lines, hasLength(3));
+    expect(
+      lines.map((line) => line.providerName),
+      containsAll(['在线服务 · iKun', '在线服务 · 魔都']),
+    );
+    expect(lines, everyElement(isA<PlaybackLine>()));
+    expect(lines.where((line) => line.available), hasLength(2));
+    expect(
+      lines,
+      everyElement(predicate<PlaybackLine>((line) => !line.publicHttpOnly)),
+    );
+    expect(lines.first.headers['Referer'], 'https://player.example.com/');
+    expect(lines.first.message, '来自在线服务（已缓存）');
+    expect(lines.first.cacheState, 'fresh');
+    expect(lines.first.startupProfile, PlaybackStartupProfile.hls);
+    expect(lines.first.latency, const Duration(milliseconds: 180));
+    expect(lines[1].startupProfile, PlaybackStartupProfile.unknown);
+    expect(lines.last.available, isFalse);
+    expect(lines.last.url, isNull);
+    expect(lines.last.message, '当前站点没有匹配到这部作品');
+  });
+
+  test('聚合后端会保留请求级来源诊断字段', () async {
+    final client = MockClient((request) async {
+      expect(request.url.pathSegments.take(3).join('/'), 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': '',
+          'title': '超时源',
+          'source': 'maccms:超时源',
+          'provider_id': 'aggregate.maccms',
+          'source_name': '超时源',
+          'available': false,
+          'status': 'search_timeout',
+          'diagnostic_status': 'search_timeout',
+          'queried': true,
+          'aliases_attempted': 2,
+          'search_hit_count': 0,
+          'best_match_score': null,
+          'matched': false,
+          'episode_found': null,
+          'elapsed_ms': 950,
+          'message': '来源搜索超时',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.providerId, 'aggregate.maccms');
+    expect(lines.single.sourceName, '超时源');
+    expect(lines.single.diagnosticStatus, 'search_timeout');
+    expect(lines.single.queried, isTrue);
+    expect(lines.single.aliasesAttempted, 2);
+    expect(lines.single.searchHitCount, 0);
+    expect(lines.single.bestMatchScore, isNull);
+    expect(lines.single.matched, isFalse);
+    expect(lines.single.episodeFound, isNull);
+    expect(lines.single.discoveryElapsed, const Duration(milliseconds: 950));
+    expect(lines.single.message, '来源搜索超时');
+  });
+
+  test('完整查线使用兼容接口，过期前的旧缓存会明确提示后台更新', () async {
+    final client = MockClient((request) async {
+      expect(request.url.pathSegments.take(3).join('/'), 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': 'https://cdn.example.com/stale/index.m3u8',
+          'source': 'maccms:iKun',
+          'available': true,
+          'status': 'server_verified',
+          'cached': true,
+          'stale': true,
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisodeMode(
+      subject,
+      episode,
+      expandAll: true,
+    );
+
+    expect(lines.single.available, isTrue);
+    expect(lines.single.message, '来自可用缓存，正在后台更新线路');
+    expect(lines.single.cacheState, 'stale');
+  });
+
+  test('旧服务没有快速接口时会回退完整播放接口', () async {
+    final paths = <String>[];
+    final client = MockClient((request) async {
+      final path = request.url.pathSegments.take(3).join('/');
+      paths.add(path);
+      if (path == 'api/v3/quick-playback') {
+        return http.Response('not found', 404);
+      }
+      expect(path, 'api/v3/playback');
+      return _jsonResponse([
+        {
+          'url': 'https://cdn.example.com/fallback/index.m3u8',
+          'source': 'maccms:iKun',
+          'available': true,
+          'status': 'server_verified',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+
+    expect(lines.single.available, isTrue);
+    expect(paths, ['api/v3/quick-playback', 'api/v3/playback']);
+  });
+
+  test('后端线路不会被 Clash Fake-IP 的 drpy 防护误杀', () async {
+    final backendClient = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'http://198.18.0.8/video.mp4',
+          'title': 'Fake-IP CDN',
+          'format': 'mp4',
+          'source': 'maccms:iKun',
+        },
+      ]);
+    });
+    final mediaClient = MockClient((request) async {
+      expect(request.url.host, '198.18.0.8');
+      return http.Response.bytes(
+        <int>[0, 0, 0, 24, ...ascii.encode('ftyp'), ...List<int>.filled(16, 0)],
+        206,
+        headers: const {'content-type': 'video/mp4'},
+      );
+    });
+    addTearDown(backendClient.close);
+    addTearDown(mediaClient.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: backendClient,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+    final verified = await RulePlaybackResolver(
+      client: mediaClient,
+    ).verifyPlaybackLine(line: lines.single, enrichMetadata: false);
+
+    expect(lines.single.publicHttpOnly, isFalse);
+    expect(verified.available, isTrue);
+  });
+
+  test('服务器受限线路会在客户端完成清单和首段验证', () async {
+    final expiresAt =
+        DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch ~/
+        1000;
+    final backendClient = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'https://1.1.1.1/index.m3u8',
+          'title': '客户端候选',
+          'format': 'hls',
+          'source': 'crawler:dm706',
+          'headers': {'Referer': 'https://source.example/watch/1'},
+          'available': false,
+          'status': 'client_probe_required',
+          'source_name': 'dm706',
+          'diagnostic_status': 'client_probe_required',
+          'queried': true,
+          'aliases_attempted': 1,
+          'search_hit_count': 2,
+          'best_match_score': 108,
+          'matched': true,
+          'episode_found': true,
+          'elapsed_ms': 410,
+          'cache_state': 'cold',
+          'error_category': 'server_blocked_client_candidate',
+          'source_latency_ms': 730,
+          'expires_at': expiresAt,
+        },
+      ]);
+    });
+    final mediaClient = MockClient((request) async {
+      expect(request.headers['Referer'], 'https://source.example/watch/1');
+      if (request.url.path.endsWith('index.m3u8')) {
+        return http.Response(
+          '#EXTM3U\n#EXTINF:4,\nsegment.ts\n',
+          200,
+          headers: const {'content-type': 'application/vnd.apple.mpegurl'},
+        );
+      }
+      expect(request.url.path, '/segment.ts');
+      final transportStream = List<int>.filled(188 * 2, 0);
+      transportStream[0] = 0x47;
+      transportStream[188] = 0x47;
+      return http.Response.bytes(
+        transportStream,
+        206,
+        headers: const {'content-type': 'video/mp2t'},
+      );
+    });
+    addTearDown(backendClient.close);
+    addTearDown(mediaClient.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: backendClient,
+    );
+
+    final candidate = (await repository.linesForEpisode(
+      subject,
+      episode,
+    )).single;
+    expect(candidate.available, isFalse);
+    expect(candidate.serverVerified, isFalse);
+    expect(candidate.requiresClientProbe, isTrue);
+    expect(candidate.publicHttpOnly, isTrue);
+    expect(candidate.cacheState, 'cold');
+    expect(candidate.sourceErrorCategory, 'server_blocked_client_candidate');
+    expect(candidate.latency, const Duration(milliseconds: 730));
+    expect(candidate.expiresAt, isNotNull);
+
+    final verified = await RulePlaybackResolver(
+      client: mediaClient,
+    ).verifyPlaybackLine(line: candidate, enrichMetadata: false);
+
+    expect(verified.available, isTrue);
+    expect(verified.clientVerified, isTrue);
+    expect(verified.requiresClientProbe, isFalse);
+    expect(verified.serverVerified, isFalse);
+    expect(verified.cacheState, 'cold');
+    expect(verified.sourceErrorCategory, 'server_blocked_client_candidate');
+    expect(verified.sourceName, 'dm706');
+    expect(
+      verified.diagnosticStatus,
+      PlaybackDiscoveryStatus.clientProbeRequired,
+    );
+    expect(verified.queried, isTrue);
+    expect(verified.aliasesAttempted, 1);
+    expect(verified.searchHitCount, 2);
+    expect(verified.bestMatchScore, 108);
+    expect(verified.matched, isTrue);
+    expect(verified.episodeFound, isTrue);
+    expect(verified.discoveryElapsed, const Duration(milliseconds: 410));
+  });
+
+  test('客户端拒绝后端误返回的 HTML 和 embed 播放页', () async {
+    final client = MockClient((request) async {
+      return _jsonResponse([
+        {
+          'url': 'https://source.example/player.html?url=video',
+          'format': 'hls',
+          'source': 'maccms:错误页',
+          'status': 'server_verified',
+        },
+        {
+          'url': 'https://source.example/embed/123',
+          'format': 'hls',
+          'source': 'maccms:嵌入页',
+          'available': false,
+          'status': 'client_probe_required',
+        },
+        {
+          'url': 'https://cdn.example/media/opaque-token',
+          'format': 'auto',
+          'source': 'maccms:无扩展直链',
+          'status': 'server_verified',
+        },
+      ]);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(subject, episode);
+
+    expect(lines, hasLength(1));
+    expect(lines.single.url, 'https://cdn.example/media/opaque-token');
+    expect(lines.single.serverVerified, isTrue);
+  });
+
+  test('兼容 AniCh 风格包装响应并保留 tag、score 与源站地址', () async {
+    final encoded = base64Encode(
+      utf8.encode('https://media.example/movie.m3u8'),
+    );
+    final wrapped = '${encoded.substring(0, 3)}0${encoded.substring(3)}';
+    final client = MockClient((request) async {
+      return _jsonResponse({
+        'schema_version': 1,
+        'content_type': 'movie',
+        'lines': [
+          {
+            'url': wrapped,
+            'tag': 'fc',
+            'score': 5,
+            'source_name': '樱花线路',
+            'source_host': 'm3u8.example',
+            'source_address': 'https://origin.example/movie.m3u8',
+            'provider_id': 'fc',
+            'line_id': 'fc-movie-1',
+            'format': 'hls',
+            'status': 'server_verified',
+          },
+        ],
+      });
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(
+      subject.copyWith(source: 'tmdb:movie:1'),
+      episode,
+    );
+
+    expect(lines, hasLength(1));
+    expect(lines.single.providerId, 'fc');
+    expect(lines.single.sourceName, '樱花线路');
+    expect(lines.single.url, 'https://media.example/movie.m3u8');
+    expect(lines.single.message, '在线服务已确认可播');
+  });
+  test('不受支持的旧来源不会再触发后端或本地规则查源', () async {
+    var requests = 0;
+    final client = MockClient((request) async {
+      requests++;
+      return _jsonResponse(const []);
+    });
+    addTearDown(client.close);
+    final repository = ZelunaBackendPlaybackRepository(
+      baseUrl: 'https://backend.example.com',
+      client: client,
+    );
+
+    final lines = await repository.linesForEpisode(
+      const AnimeSubject(
+        id: 1,
+        title: '旧来源',
+        originalTitle: '',
+        summary: '',
+        coverUrl: null,
+        bannerUrl: null,
+        date: '2024',
+        platform: 'TV',
+        language: '',
+        region: '',
+        status: '',
+        categories: [],
+        tags: [],
+        totalEpisodes: 1,
+        source: 'anich',
+      ),
+      episode,
+    );
+
+    expect(lines, isEmpty);
+    expect(requests, 0);
+  });
+
+  test('后端地址与开关会持久化且拒绝带账号或参数的地址', () {
+    const settings = ExternalServiceSettings(
+      playbackBackendEnabled: true,
+      playbackBackendEndpoint: 'https://anime.example.com',
+      playbackBackendSelfHosted: true,
+    );
+    final restored = ExternalServiceSettings.fromJson(settings.toJson());
+
+    expect(restored.playbackBackendEnabled, isTrue);
+    expect(restored.playbackBackendEndpoint, 'https://anime.example.com');
+    expect(restored.playbackBackendSelfHosted, isTrue);
+    expect(restored.allowInsecurePlaybackBackend, isFalse);
+    final migratedLegacy = ExternalServiceSettings.fromJson({
+      'playbackBackendEnabled': true,
+      'playbackBackendEndpoint': 'https://legacy-self-hosted.example',
+    });
+    expect(migratedLegacy.playbackBackendSelfHosted, isTrue);
+    expect(migratedLegacy.allowInsecurePlaybackBackend, isFalse);
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'https://user:pass@example.com',
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'https://example.com?token=secret',
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://backend.example.com',
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://192.168.1.20:8080',
+        service: NetworkServiceKind.selfHostedPlaybackBackend,
+      ),
+      isNull,
+    );
+    expect(
+      ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+        'http://192.168.1.20:8080',
+        service: NetworkServiceKind.selfHostedPlaybackBackend,
+        allowInsecureSelfHosted: true,
+      ),
+      Uri.parse('http://192.168.1.20:8080'),
+    );
+    const insecureSettings = ExternalServiceSettings(
+      playbackBackendEnabled: true,
+      playbackBackendEndpoint: 'http://192.168.1.20:8080',
+      playbackBackendSelfHosted: true,
+      allowInsecurePlaybackBackend: true,
+    );
+    final restoredInsecure = ExternalServiceSettings.fromJson(
+      insecureSettings.toJson(),
+    );
+    expect(restoredInsecure.playbackBackendSelfHosted, isTrue);
+    expect(restoredInsecure.allowInsecurePlaybackBackend, isTrue);
+  });
+}
+
+http.Response _jsonResponse(Object value) {
+  return http.Response.bytes(
+    utf8.encode(jsonEncode(value)),
+    200,
+    headers: const {'content-type': 'application/json; charset=utf-8'},
+  );
+}

@@ -1,0 +1,1526 @@
+part of '../player_page.dart';
+
+class _SuperResolutionPanelStatus extends StatelessWidget {
+  const _SuperResolutionPanelStatus({
+    required this.status,
+    required this.onCompareStart,
+    required this.onCompareEnd,
+  });
+
+  final Anime4KDisplayStatus status;
+  final VoidCallback onCompareStart;
+  final VoidCallback onCompareEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.primary.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.primary.withValues(alpha: 0.28)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+        child: Row(
+          children: [
+            Icon(
+              status.previewingOriginal
+                  ? Icons.visibility_outlined
+                  : Icons.auto_awesome_rounded,
+              size: 17,
+              color: status.previewingOriginal
+                  ? AppColors.theaterMuted
+                  : AppColors.primary2,
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    status.title,
+                    style: const TextStyle(
+                      color: AppColors.theaterInk,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    status.detail,
+                    style: const TextStyle(
+                      color: AppColors.theaterMuted,
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Semantics(
+              button: true,
+              label: '按住查看原画',
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {},
+                onTapDown: (_) => onCompareStart(),
+                onTapUp: (_) => onCompareEnd(),
+                onTapCancel: onCompareEnd,
+                onLongPressStart: (_) => onCompareStart(),
+                onLongPressEnd: (_) => onCompareEnd(),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: status.previewingOriginal
+                        ? AppColors.primary.withValues(alpha: 0.22)
+                        : AppColors.theaterPanelHigh,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                    child: Text(
+                      '按住原画',
+                      style: TextStyle(
+                        color: AppColors.theaterInk,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SuperResolutionPanelNotice extends StatelessWidget {
+  const _SuperResolutionPanelNotice({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppStatusColors.probing.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppStatusColors.probing.withValues(alpha: 0.28),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(
+              Icons.info_outline_rounded,
+              size: 17,
+              color: AppStatusColors.probing,
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  color: AppColors.theaterInk,
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+bool _isPlayableLine(PlaybackLine? line) {
+  return line?.available == true && (line?.url?.trim().isNotEmpty ?? false);
+}
+
+PlaybackLine? _lineById(List<PlaybackLine> lines, String id) {
+  for (final line in lines) {
+    if (line.id == id) return line;
+  }
+  return null;
+}
+
+bool _usesProgressiveRuleLookup(AnimeSubject subject) {
+  final source = subject.source.toLowerCase();
+  return source != 'direct' &&
+      !source.startsWith('m3u-channel:') &&
+      !source.startsWith('peertube:') &&
+      !source.startsWith('archive:') &&
+      !source.startsWith('commons:');
+}
+
+String _progressiveLookupMessage(PlaybackLineLookupUpdate update) {
+  final progress = update.totalRules <= 0
+      ? ''
+      : ' ${update.completedRules}/${update.totalRules}';
+  return update.phase == PlaybackLineLookupPhase.verification
+      ? '正在确认哪些线路可以流畅播放$progress…'
+      : '正在查找可用播放线路$progress…';
+}
+
+bool _isHlsLine(PlaybackLine? line) {
+  if (line == null) return false;
+  final format = line.format.trim().toLowerCase();
+  if (format.contains('hls') ||
+      format.contains('m3u8') ||
+      format.contains('mpegurl')) {
+    return true;
+  }
+  final url = line.url?.trim().toLowerCase() ?? '';
+  return RegExp(r'\.m3u8(?:$|[?#])').hasMatch(url) ||
+      url.contains('type=m3u8') ||
+      url.contains('format=m3u8');
+}
+
+List<PlaybackLine> _availableLines(List<PlaybackLine> lines) {
+  return playablePlaybackLinesInSourceOrder(lines);
+}
+
+String _emptyLineMessage(
+  List<PlaybackLine> lines, {
+  required AnimeSubject subject,
+}) {
+  final source = subject.source.toLowerCase();
+  final isMetadataOnly =
+      source.startsWith('cinemeta:') ||
+      source.startsWith('tvmaze') ||
+      source == 'wikidata';
+  if (lines.isEmpty) {
+    if (source.startsWith('m3u-channel:')) {
+      return '这个直播暂时打不开。可以稍后再试，或到「扩展来源」确认直播源已开启。';
+    }
+    if (source.startsWith('archive:') ||
+        source.startsWith('peertube:') ||
+        source.startsWith('commons:')) {
+      return '这个公开视频暂时没有可播文件，可能还在处理、已下架或暂时访问不了。';
+    }
+    if (isMetadataOnly) {
+      return '目前只有作品资料，还没有找到可以播放的线路。';
+    }
+    return '还没有找到适合这部作品的播放线路。可在「扩展来源」里添加更多来源后再试。';
+  }
+  if (isMetadataOnly) {
+    return '已检查 ${lines.length} 条候选线路，但暂时都不能播放。';
+  }
+  final unavailableCount = lines.where((line) => !line.available).length;
+  return playbackUnavailableMessage(lines, count: unavailableCount);
+}
+
+String playbackUnavailableMessage(List<PlaybackLine> lines, {int? count}) {
+  final unavailableLines = lines.where((line) => !line.available).toList();
+  final total = count ?? unavailableLines.length;
+  final backendLines = unavailableLines
+      .where(
+        (line) =>
+            line.sourceInventoryId.isNotEmpty ||
+            line.providerId.startsWith('zeluna:') ||
+            line.providerId.startsWith('aggregate.'),
+      )
+      .toList();
+  final backendMediaCount = backendLines
+      .where((line) => line.url?.trim().isNotEmpty == true)
+      .length;
+  if (backendMediaCount > 0) {
+    return '找到了 $backendMediaCount 条视频线路，但当前网络下无法打开。请检查网络或代理后重试。';
+  }
+  if (backendLines.any((line) => line.sourceInventoryId.isNotEmpty)) {
+    final summary = summarizePlaybackSourceDiagnostics(backendLines);
+    final unqueried = summary.totalSources - summary.queriedSources;
+    final pending = unqueried > 0 ? '；其余 $unqueried 项未查询或未接入' : '';
+    return '来源库共 ${summary.totalSources} 项，本次实际查询 ${summary.queriedSources} 项$pending。暂未找到这集的可播放地址。';
+  }
+  if (backendLines.isNotEmpty) {
+    return '已经找过 ${backendLines.length} 个在线来源，都没有找到能播的地址。这部作品可能在这些来源里用了别的名字，或者暂时没有资源。';
+  }
+  final deadCount = unavailableLines
+      .where((line) => (line.message ?? '').contains('视频 CDN'))
+      .length;
+  if (deadCount > 0) {
+    return '找到 $total 条线路，其中 $deadCount 条已失效或连接超时，暂时不能播放。';
+  }
+  return '找到 $total 条线路，但都需要验证或当前设备打不开，暂时不能播放。';
+}
+
+String _friendlyPlaybackError(Object error) {
+  final text = error.toString();
+  if (text.contains('TimeoutException')) return '连接超时';
+  if (text.contains('SocketException')) return '网络不可用，或对方暂时无法访问';
+  if (text.contains('HTTP 403') || text.contains('403')) return '对方拒绝了访问';
+  if (text.contains('HTTP 404') || text.contains('404')) return '视频地址已失效';
+  if (text.contains('FormatException')) return '视频地址格式不正确';
+  if (text.contains('Failed to open')) return '播放器无法打开这个地址';
+  if (text.contains('Empty src') || text.contains('MEDIA_ELEMENT_ERROR')) {
+    return '当前没有可播放地址';
+  }
+  return text.length > 90 ? '${text.substring(0, 90)}...' : text;
+}
+
+class _EpisodePanel extends StatelessWidget {
+  const _EpisodePanel({
+    required this.subject,
+    required this.episodes,
+    required this.selected,
+    required this.onSelected,
+  });
+  final AnimeSubject subject;
+  final List<AnimeEpisode> episodes;
+  final AnimeEpisode selected;
+  final ValueChanged<AnimeEpisode> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
+      itemCount: episodes.length + 1,
+      separatorBuilder: (context, index) => const SizedBox(height: 6),
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 12, top: 4),
+            child: Text(
+              '${subject.title} · 共 ${episodes.length} 集',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+            ),
+          );
+        }
+        final episode = episodes[index - 1];
+        final active = episode.id == selected.id;
+        return Semantics(
+          selected: active,
+          button: true,
+          label: episode.displayTitle,
+          child: Material(
+            color: active ? AppColors.theaterPanelHigh : Colors.transparent,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+              side: BorderSide(
+                color: active
+                    ? AppColors.theaterBorderBright
+                    : Colors.transparent,
+              ),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: () => onSelected(episode),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 14,
+                ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 34,
+                      child: Text(
+                        episode.number.toString().padLeft(2, '0'),
+                        style: Theme.of(context).textTheme.titleMedium
+                            ?.copyWith(
+                              color: active
+                                  ? AppColors.theaterInk
+                                  : AppColors.theaterMuted,
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            episode.title.trim().isEmpty
+                                ? episode.displayTitle
+                                : episode.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleSmall
+                                ?.copyWith(color: AppColors.theaterInk),
+                          ),
+                          if (active || (episode.airdate ?? '').isNotEmpty) ...[
+                            const SizedBox(height: 5),
+                            Text(
+                              active ? '当前选集' : episode.airdate!,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: AppColors.theaterMuted),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    if (active) ...[
+                      const SizedBox(width: 12),
+                      const Icon(
+                        Icons.play_arrow_rounded,
+                        size: 22,
+                        color: AppColors.theaterInk,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+enum _PlaybackSourceMode { lines, local, network, search }
+
+class PlaybackSourcePanel extends StatefulWidget {
+  const PlaybackSourcePanel({
+    super.key,
+    required this.selected,
+    required this.lines,
+    required this.failedLineIds,
+    required this.scanning,
+    required this.completedRules,
+    required this.totalRules,
+    required this.onSelected,
+    required this.onPickLocal,
+    required this.onOpenNetwork,
+    required this.onSearch,
+    this.onCopyDiagnostics,
+    this.onReportAd,
+  });
+
+  final PlaybackLine? selected;
+  final List<PlaybackLine> lines;
+  final Set<String> failedLineIds;
+  final bool scanning;
+  final int completedRules;
+  final int totalRules;
+  final ValueChanged<PlaybackLine> onSelected;
+  final Future<void> Function() onPickLocal;
+  final Future<void> Function(String url, Map<String, String> headers)
+  onOpenNetwork;
+  final Future<void> Function() onSearch;
+  final Future<void> Function()? onCopyDiagnostics;
+  final ValueChanged<PlaybackLine>? onReportAd;
+
+  @override
+  State<PlaybackSourcePanel> createState() => _LinePanelState();
+}
+
+class _LinePanelState extends State<PlaybackSourcePanel> {
+  final _networkUrl = TextEditingController();
+  final _networkHeaders = TextEditingController();
+  _PlaybackSourceMode _mode = _PlaybackSourceMode.lines;
+  bool _working = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _networkUrl.dispose();
+    _networkHeaders.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          child: _LineModeBar(
+            compact: _isMobilePlayerLayout(context),
+            selected: _mode,
+            onSelected: (mode) => setState(() {
+              _mode = mode;
+              _error = null;
+            }),
+          ),
+        ),
+        if (widget.onCopyDiagnostics != null)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: widget.onCopyDiagnostics,
+              icon: const Icon(Icons.copy_rounded, size: 16),
+              label: const Text('复制播放诊断'),
+            ),
+          ),
+        Expanded(child: _modeBody(context)),
+      ],
+    );
+  }
+
+  Widget _modeBody(BuildContext context) {
+    return switch (_mode) {
+      _PlaybackSourceMode.lines => _LinePanelBody(
+        lines: widget.lines,
+        selected: widget.selected,
+        failedLineIds: widget.failedLineIds,
+        scanning: widget.scanning,
+        completedRules: widget.completedRules,
+        totalRules: widget.totalRules,
+        onSelected: widget.onSelected,
+        onReportAd: widget.onReportAd,
+      ),
+      _PlaybackSourceMode.local => _sourceAction(
+        context,
+        icon: Icons.folder_open_rounded,
+        title: '播放本地视频',
+        message: '选择设备里的视频文件，文件不会上传。',
+        buttonLabel: '选择视频文件',
+        onPressed: _pickLocal,
+      ),
+      _PlaybackSourceMode.network => _networkSource(context),
+      _PlaybackSourceMode.search => _sourceAction(
+        context,
+        icon: Icons.manage_search_rounded,
+        title: '重新搜索播放线路',
+        message: widget.scanning
+            ? '正在检查可用来源：${widget.completedRules}/${widget.totalRules}'
+            : '重新查找本集可用的播放线路，并确认能否正常打开。',
+        buttonLabel: widget.scanning ? '正在搜索' : '搜索全部线路',
+        onPressed: widget.scanning ? null : _search,
+      ),
+    };
+  }
+
+  Widget _sourceAction(
+    BuildContext context, {
+    required IconData icon,
+    required String title,
+    required String message,
+    required String buttonLabel,
+    required Future<void> Function()? onPressed,
+  }) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 100),
+      children: [
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.theaterPanelHigh,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppColors.theaterBorder),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                Icon(
+                  icon,
+                  size: 42,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    color: AppColors.theaterInk,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  message,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: AppColors.theaterMuted,
+                    height: 1.5,
+                  ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    _error!,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 18),
+                FilledButton.icon(
+                  onPressed: _working || onPressed == null ? null : onPressed,
+                  icon: _working
+                      ? const SizedBox.square(
+                          dimension: 17,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(icon, size: 19),
+                  label: Text(_working ? '处理中' : buttonLabel),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _networkSource(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 100),
+      children: [
+        TextField(
+          key: const ValueKey('lineNetworkUrl'),
+          controller: _networkUrl,
+          keyboardType: TextInputType.url,
+          minLines: 2,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            labelText: '视频直链',
+            hintText: 'https://example.com/video.m3u8',
+            prefixIcon: Icon(Icons.link_rounded),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const ValueKey('lineNetworkHeaders'),
+          controller: _networkHeaders,
+          minLines: 2,
+          maxLines: 4,
+          decoration: const InputDecoration(
+            labelText: '请求头（可选，每行一个）',
+            hintText: 'Referer: https://example.com/\nUser-Agent: ...',
+            prefixIcon: Icon(Icons.http_rounded),
+          ),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            _error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+        ],
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          key: const ValueKey('lineNetworkPlay'),
+          onPressed: _working ? null : _openNetwork,
+          icon: _working
+              ? const SizedBox.square(
+                  dimension: 17,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.play_arrow_rounded),
+          label: Text(_working ? '正在打开' : '播放网络地址'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _pickLocal() async {
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      await widget.onPickLocal();
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyPlaybackError(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<void> _openNetwork() async {
+    final url = _networkUrl.text.trim();
+    final uri = Uri.tryParse(url);
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme.toLowerCase()) ||
+        uri.host.isEmpty) {
+      setState(() => _error = '请输入完整的 http/https 视频地址');
+      return;
+    }
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      await widget.onOpenNetwork(
+        url,
+        _parseNetworkHeaders(_networkHeaders.text),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyPlaybackError(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Future<void> _search() async {
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      await widget.onSearch();
+      if (mounted) setState(() => _mode = _PlaybackSourceMode.lines);
+    } catch (error) {
+      if (mounted) setState(() => _error = _friendlyPlaybackError(error));
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  Map<String, String> _parseNetworkHeaders(String text) {
+    final result = <String, String>{};
+    for (final line in text.split(RegExp(r'[\r\n]+'))) {
+      final separator = line.indexOf(':');
+      if (separator <= 0) continue;
+      final name = line.substring(0, separator).trim();
+      final value = line.substring(separator + 1).trim();
+      if (name.isNotEmpty && value.isNotEmpty) result[name] = value;
+    }
+    return result;
+  }
+}
+
+class _LinePanelBody extends StatefulWidget {
+  const _LinePanelBody({
+    required this.lines,
+    required this.selected,
+    required this.failedLineIds,
+    required this.scanning,
+    required this.completedRules,
+    required this.totalRules,
+    required this.onSelected,
+    this.onReportAd,
+  });
+
+  final List<PlaybackLine> lines;
+  final PlaybackLine? selected;
+  final Set<String> failedLineIds;
+  final bool scanning;
+  final int completedRules;
+  final int totalRules;
+  final ValueChanged<PlaybackLine> onSelected;
+  final ValueChanged<PlaybackLine>? onReportAd;
+
+  @override
+  State<_LinePanelBody> createState() => _LinePanelBodyState();
+}
+
+class _LinePanelBodyState extends State<_LinePanelBody> {
+  bool _showPassive = false;
+
+  Widget _buildCardRow(List<PlaybackLine> items, int index) {
+    final item = items[index];
+    final isFirst = index == 0;
+    final isLast = index == items.length - 1;
+    final radius = BorderRadius.vertical(
+      top: isFirst ? const Radius.circular(10) : Radius.zero,
+      bottom: isLast ? const Radius.circular(10) : Radius.zero,
+    );
+    return Material(
+      color: AppColors.theaterPanelHigh,
+      borderRadius: radius,
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _LineTile(
+            key: ValueKey(item.id),
+            index: index,
+            line: item,
+            selected: widget.selected?.id == item.id,
+            runtimeFailed: widget.failedLineIds.contains(item.id),
+            onReportAd: item.available && widget.onReportAd != null
+                ? () => widget.onReportAd!(item)
+                : null,
+            onTap: item.available ? () => widget.onSelected(item) : null,
+          ),
+          if (!isLast)
+            const Divider(
+              height: 1,
+              indent: 12,
+              endIndent: 12,
+              color: AppColors.theaterBorder,
+            ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayLines = allPlaybackLinesForDisplay(widget.lines);
+    final groups = groupPlaybackLinesForDiagnostics(
+      displayLines,
+      selectedLineId: widget.selected?.id,
+    );
+    final cards = [...groups.primary, ...groups.other];
+    final routes = cards.where((line) => line.url?.trim().isNotEmpty ?? false);
+    final routeCount = routes.length;
+    final playableCount = routes
+        .where(
+          (line) => line.available && !widget.failedLineIds.contains(line.id),
+        )
+        .length;
+    final unresolvedCount = cards.length - routeCount;
+    final sourceSummary = summarizePlaybackSourceDiagnostics(displayLines);
+    final progress = widget.totalRules <= 0
+        ? ''
+        : '（${widget.completedRules}/${widget.totalRules}）';
+    bool isPassiveInventoryPlaceholder(PlaybackLine line) {
+      if ((line.url?.trim().isNotEmpty ?? false) ||
+          widget.selected?.id == line.id ||
+          line.clientQuerySupported) {
+        return false;
+      }
+      return const {
+        PlaybackDiscoveryStatus.notQueried,
+        PlaybackDiscoveryStatus.candidateUnadmitted,
+        PlaybackDiscoveryStatus.sourceDisabled,
+        PlaybackDiscoveryStatus.compatibilityInactive,
+        PlaybackDiscoveryStatus.retired,
+        PlaybackDiscoveryStatus.quarantined,
+      }.contains(line.diagnosticStatus);
+    }
+
+    final activeCards = [
+      for (final card in cards)
+        if (!isPassiveInventoryPlaceholder(card)) card,
+    ];
+    final passivePlaceholders = [
+      for (final card in cards)
+        if (isPassiveInventoryPlaceholder(card)) card,
+    ];
+
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (widget.scanning || displayLines.isNotEmpty) ...[
+                  _PanelInlineStatus(
+                    loading: widget.scanning,
+                    text: widget.scanning
+                        ? '正在查找全部线路$progress · 已找到 $routeCount 条'
+                        : '共 $routeCount 条线路，$playableCount 条可以播放'
+                              '${unresolvedCount > 0 ? ' · $unresolvedCount 项待解析或暂无线路' : ''}',
+                  ),
+                  if (unresolvedCount > 0) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      '来源状态：共 ${sourceSummary.totalSources} 个来源，已检查 ${sourceSummary.queriedSources} 个',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppColors.theaterMuted,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                ],
+                if (displayLines.isEmpty && widget.scanning)
+                  const Center(child: CircularProgressIndicator())
+                else if (displayLines.isEmpty)
+                  _PanelEmpty(
+                    title: '当前没有可播放线路',
+                    message: widget.lines.isEmpty
+                        ? '仍在查找中，目前还没有确认可播的线路。'
+                        : playbackUnavailableMessage(widget.lines),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (displayLines.isNotEmpty && activeCards.isNotEmpty)
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            sliver: SliverList.builder(
+              itemCount: activeCards.length,
+              itemBuilder: (_, index) => _buildCardRow(activeCards, index),
+            ),
+          ),
+        if (displayLines.isNotEmpty && passivePlaceholders.isNotEmpty) ...[
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(
+              12,
+              activeCards.isNotEmpty ? 10 : 0,
+              12,
+              0,
+            ),
+            sliver: SliverToBoxAdapter(
+              child: Theme(
+                data: Theme.of(
+                  context,
+                ).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+                  collapsedIconColor: AppColors.theaterMuted,
+                  iconColor: AppColors.theaterMuted,
+                  initiallyExpanded: _showPassive,
+                  onExpansionChanged: (expanded) =>
+                      setState(() => _showPassive = expanded),
+                  title: Text(
+                    '未查询 / 未启用来源（${passivePlaceholders.length}）',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.theaterMuted,
+                    ),
+                  ),
+                  children: const [],
+                ),
+              ),
+            ),
+          ),
+          if (_showPassive)
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              sliver: SliverList.builder(
+                itemCount: passivePlaceholders.length,
+                itemBuilder: (_, index) =>
+                    _buildCardRow(passivePlaceholders, index),
+              ),
+            ),
+        ],
+        const SliverPadding(padding: EdgeInsets.only(bottom: 110)),
+      ],
+    );
+  }
+}
+
+class _DanmakuPanel extends ConsumerStatefulWidget {
+  const _DanmakuPanel({
+    required this.comments,
+    required this.onDelete,
+    required this.onReload,
+  });
+  final List<DanmakuComment> comments;
+  final Future<void> Function(DanmakuComment comment) onDelete;
+  final Future<void> Function() onReload;
+  @override
+  ConsumerState<_DanmakuPanel> createState() => _DanmakuPanelState();
+}
+
+class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
+  String? _deletingId;
+  bool _reloading = false;
+  Future<void> _delete(DanmakuComment comment) async {
+    if (_deletingId != null) return;
+    setState(() => _deletingId = comment.id);
+    try {
+      await widget.onDelete(comment);
+    } finally {
+      if (mounted) setState(() => _deletingId = null);
+    }
+  }
+
+  Future<void> _reload() async {
+    if (_reloading) return;
+    setState(() => _reloading = true);
+    try {
+      await widget.onReload();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('弹幕暂时无法刷新，请稍后重试')));
+      }
+    } finally {
+      if (mounted) setState(() => _reloading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings =
+        ref.watch(animeControllerProvider).value?.danmaku ??
+        const DanmakuSettings();
+    final mine = widget.comments
+        .where((c) => c.provider == 'Zeluna' && c.isMine)
+        .toList(growable: false);
+    return ListView(
+      padding: const EdgeInsets.only(bottom: 24),
+      children: [
+        DanmakuDisplayControls(
+          settings: settings,
+          theater: true,
+          onChanged: ref.read(animeControllerProvider.notifier).updateDanmaku,
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.comments.isEmpty
+                      ? '本集暂无弹幕'
+                      : '已加载 ${widget.comments.length} 条弹幕',
+                  style: const TextStyle(
+                    color: AppColors.theaterMuted,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                key: const ValueKey('reloadDanmaku'),
+                onPressed: _reloading ? null : _reload,
+                icon: _reloading
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_rounded, size: 16),
+                label: Text(
+                  _reloading ? '刷新中' : '刷新',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (mine.isNotEmpty) ...[
+          const _PanelSectionTitle('我的弹幕'),
+          for (final comment in mine)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: _OwnedDanmakuRow(
+                key: ValueKey('owned-danmaku-${comment.id}'),
+                comment: comment,
+                deleting: _deletingId == comment.id,
+                onDelete: () => _delete(comment),
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+}
+
+class _PanelSectionTitle extends StatelessWidget {
+  const _PanelSectionTitle(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+    child: Text(
+      text,
+      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+        color: AppColors.theaterMuted,
+        fontWeight: FontWeight.w700,
+      ),
+    ),
+  );
+}
+
+class _OwnedDanmakuRow extends StatelessWidget {
+  const _OwnedDanmakuRow({
+    super.key,
+    required this.comment,
+    required this.deleting,
+    required this.onDelete,
+  });
+
+  final DanmakuComment comment;
+  final bool deleting;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final seconds = comment.time.inSeconds;
+    final position =
+        '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    comment.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: AppColors.theaterInk,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '出现在 $position',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.theaterMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: deleting
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : IconButton(
+                      tooltip: '删除这条弹幕',
+                      onPressed: onDelete,
+                      icon: const Icon(Icons.delete_outline_rounded, size: 20),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PanelEmpty extends StatelessWidget {
+  const _PanelEmpty({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return AppEmptyState(
+      onTheater: true,
+      compact: true,
+      icon: Icons.inbox_outlined,
+      title: title,
+      message: message,
+    );
+  }
+}
+
+class _PanelInlineStatus extends StatelessWidget {
+  const _PanelInlineStatus({required this.text, this.loading = true});
+
+  final String text;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.theaterPanelHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.theaterBorder),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Row(
+          children: [
+            if (loading)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              const Icon(
+                Icons.verified_rounded,
+                size: 18,
+                color: AppStatusColors.available,
+              ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                text,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: AppColors.theaterMuted),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _LineModeBar extends StatelessWidget {
+  const _LineModeBar({
+    required this.selected,
+    required this.onSelected,
+    this.compact = false,
+  });
+
+  final _PlaybackSourceMode selected;
+  final ValueChanged<_PlaybackSourceMode> onSelected;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.theaterPanelHigh,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: SizedBox(
+        height: compact ? 40 : 48,
+        child: Row(
+          children: [
+            _mode(_PlaybackSourceMode.lines, Icons.alt_route_rounded, '线路'),
+            _mode(_PlaybackSourceMode.local, Icons.folder_rounded, '本地'),
+            _mode(_PlaybackSourceMode.network, Icons.link_rounded, '直链'),
+            _mode(_PlaybackSourceMode.search, Icons.search_rounded, '搜索'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _mode(_PlaybackSourceMode mode, IconData icon, String label) {
+    return Expanded(
+      child: _ModeItem(
+        icon,
+        label,
+        compact: compact,
+        selected: selected == mode,
+        onTap: () => onSelected(mode),
+      ),
+    );
+  }
+}
+
+class _ModeItem extends StatelessWidget {
+  const _ModeItem(
+    this.icon,
+    this.label, {
+    this.compact = false,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool compact;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
+    return Padding(
+      padding: EdgeInsets.all(compact ? 2 : 4),
+      child: Material(
+        color: selected ? accent.withValues(alpha: 0.18) : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          key: ValueKey('playbackSourceMode:$label'),
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                color: selected ? accent : AppColors.theaterMuted,
+                size: compact ? 16 : 19,
+              ),
+              SizedBox(width: compact ? 3 : 6),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: selected ? accent : AppColors.theaterMuted,
+                      fontSize: compact ? 11 : 12,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LineTile extends StatelessWidget {
+  const _LineTile({
+    super.key,
+    required this.index,
+    required this.line,
+    required this.selected,
+    required this.runtimeFailed,
+    required this.onTap,
+    this.onReportAd,
+  });
+
+  final int index;
+  final PlaybackLine line;
+  final bool selected;
+  final bool runtimeFailed;
+  final VoidCallback? onTap;
+  final VoidCallback? onReportAd;
+
+  @override
+  Widget build(BuildContext context) {
+    return PlaybackLineTile(
+      line: line,
+      index: index,
+      selected: selected,
+      runtimeFailed: runtimeFailed,
+      onTap: onTap,
+      onReportAd: onReportAd,
+    );
+  }
+}
+
+String _directPlaybackFormat(String value) {
+  final path = value.toLowerCase().split('?').first;
+  if (path.endsWith('.m3u8')) return 'HLS';
+  if (path.endsWith('.mpd')) return 'DASH';
+  if (path.endsWith('.mkv')) return 'MKV';
+  if (path.endsWith('.webm')) return 'WebM';
+  if (path.endsWith('.mov')) return 'MOV';
+  if (path.endsWith('.avi')) return 'AVI';
+  return 'MP4/媒体';
+}
+
+ThemeData _buildPlayerTheaterTheme(
+  ThemeData theme, {
+  double fontSizeFactor = 1.0,
+  Color scaffoldBackgroundColor = AppColors.theaterBg,
+}) {
+  final darkBase = theme.brightness == Brightness.dark
+      ? theme
+      : AnimeTheme.dark(
+          appearance: theme.colorScheme.primary == AppColors.lightPrimary
+              ? const AppearanceSettings(darkMode: true)
+              : AppearanceSettings(
+                  darkMode: true,
+                  accentMode: ThemeAccentMode.custom,
+                  accentColorValue: theme.colorScheme.primary.toARGB32(),
+                ),
+        );
+  final cinemaScheme = darkBase.colorScheme.copyWith(
+    surface: AppColors.theaterBg,
+    surfaceContainerLowest: AppColors.theaterBg,
+    surfaceContainerLow: const Color(0xFF14171E),
+    surfaceContainer: const Color(0xFF191D26),
+    surfaceContainerHigh: const Color(0xFF212632),
+    surfaceContainerHighest: const Color(0xFF2A303E),
+    onSurface: AppColors.theaterInk,
+    outlineVariant: AppColors.theaterBorder,
+  );
+  return darkBase.copyWith(
+    scaffoldBackgroundColor: scaffoldBackgroundColor,
+    colorScheme: cinemaScheme,
+    textTheme: darkBase.textTheme.apply(
+      bodyColor: AppColors.theaterInk,
+      displayColor: AppColors.theaterInk,
+      fontSizeFactor: fontSizeFactor,
+    ),
+  );
+}
+
+class _PlayerDrawerTransitionScope extends InheritedWidget {
+  const _PlayerDrawerTransitionScope({
+    required this.animation,
+    required super.child,
+  });
+
+  final Animation<double> animation;
+
+  static Animation<double>? maybeOf(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<_PlayerDrawerTransitionScope>()
+      ?.animation;
+
+  @override
+  bool updateShouldNotify(_PlayerDrawerTransitionScope oldWidget) =>
+      animation != oldWidget.animation;
+}
+
+class _PlayerFunctionPage extends StatelessWidget {
+  const _PlayerFunctionPage({
+    super.key,
+    required this.title,
+    required this.child,
+    required this.onClose,
+  });
+
+  final String title;
+  final Widget child;
+  final VoidCallback onClose;
+
+  static final Animatable<Offset> _sheetSlideTween = Tween<Offset>(
+    begin: const Offset(0.12, 0),
+    end: Offset.zero,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    final sheetWidth = playerFunctionPanelWidthForSize(size);
+    final panelTheme = _buildPlayerTheaterTheme(
+      Theme.of(context),
+      fontSizeFactor: 0.90,
+      scaffoldBackgroundColor: Colors.transparent,
+    );
+    final transition = _PlayerDrawerTransitionScope.maybeOf(context);
+    final Widget sheet = Material(
+      color: AppColors.theaterBg.withValues(alpha: 0.95),
+      elevation: 0,
+      shape: const Border(left: BorderSide(color: AppColors.theaterBorder)),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: panelTheme,
+        child: SizedBox(
+          width: sheetWidth,
+          height: size.height,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (title.isNotEmpty)
+                DecoratedBox(
+                  decoration: const BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        color: AppColors.theaterBorder,
+                        width: 0.75,
+                      ),
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: panelTheme.textTheme.titleMedium?.copyWith(
+                              color: AppColors.theaterInk,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: '关闭',
+                          onPressed: onClose,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 36,
+                            height: 36,
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          icon: const Icon(
+                            Icons.close_rounded,
+                            size: 20,
+                            color: AppColors.theaterInk,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              Expanded(child: child),
+            ],
+          ),
+        ),
+      ),
+    );
+    return PlayerPanelDismissLayer(
+      onDismiss: onClose,
+      panel: Align(
+        alignment: Alignment.centerRight,
+        child: transition == null
+            ? sheet
+            : SlideTransition(
+                position: _sheetSlideTween.animate(transition),
+                child: sheet,
+              ),
+      ),
+    );
+  }
+}
+
+@visibleForTesting
+double playerFunctionPanelWidthForSize(Size size) {
+  if (size.height >= size.width) return size.width;
+  final minimum = math.min(220.0, size.width);
+  final maximum = math.min(520.0, size.width);
+  return (size.width * 0.30).clamp(minimum, maximum).toDouble();
+}
+
+@visibleForTesting
+class PlayerPanelDismissLayer extends StatelessWidget {
+  const PlayerPanelDismissLayer({
+    super.key,
+    required this.panel,
+    required this.onDismiss,
+  });
+
+  final Widget panel;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final transition = _PlayerDrawerTransitionScope.maybeOf(context);
+    final barrier = Semantics(
+      button: true,
+      label: '点击播放器区域关闭侧边面板',
+      child: GestureDetector(
+        key: const ValueKey('playerPanelDismissBarrier'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onDismiss,
+        child: transition == null
+            ? const SizedBox.expand()
+            : FadeTransition(
+                opacity: transition,
+                child: ColoredBox(color: Colors.black.withValues(alpha: 0.24)),
+              ),
+      ),
+    );
+    final animatedPanel = transition == null
+        ? panel
+        : FadeTransition(opacity: transition, child: panel);
+    final stack = Stack(
+      fit: StackFit.expand,
+      children: [barrier, animatedPanel],
+    );
+    if (transition == null) return stack;
+    return AnimatedBuilder(
+      animation: transition,
+      builder: (context, child) => IgnorePointer(
+        ignoring: transition.status == AnimationStatus.reverse,
+        child: child,
+      ),
+      child: stack,
+    );
+  }
+}
+
+class _HeaderIcon extends StatelessWidget {
+  const _HeaderIcon(this.icon, {required this.tooltip, this.onPressed});
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: IconButton(
+        onPressed: onPressed,
+        icon: Icon(icon, color: AppColors.theaterInk),
+      ),
+    );
+  }
+}

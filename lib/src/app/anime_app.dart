@@ -1,0 +1,381 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../accounts/account_page.dart';
+import '../catalog/catalog_page.dart';
+import '../data/anime_controller.dart';
+import '../data/zeluna_backend_playback_repository.dart';
+import '../core/network/network_security.dart';
+import '../shared_ui/poster_card.dart';
+import '../domain/anime_models.dart';
+import '../player/player_page.dart';
+import '../player/open_media_page.dart';
+import '../profile/profile_page.dart';
+import '../rules/rule_plugin_page.dart';
+import '../settings/settings_page.dart';
+import '../sources/media_library_page.dart';
+import '../shared_ui/app_chrome.dart';
+import '../shared_ui/app_interactions.dart';
+import '../theme/theme_ripple_transition.dart';
+import '../updates/app_update_host.dart';
+import 'app_theme.dart';
+
+final routerProvider = Provider<GoRouter>((ref) {
+  final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
+  final routes = <RouteBase>[
+    StatefulShellRoute.indexedStack(
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state, navigationShell) => navigationShell,
+      branches: [
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/',
+              builder: (context, state) => const CatalogPage(),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/anime',
+              builder: (context, state) =>
+                  const MetadataHubPage(kind: MetadataHubKind.anime),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/series',
+              builder: (context, state) =>
+                  const MetadataHubPage(kind: MetadataHubKind.series),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/movies',
+              builder: (context, state) =>
+                  const MetadataHubPage(kind: MetadataHubKind.movie),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/profile',
+              builder: (context, state) => const ProfilePage(),
+            ),
+          ],
+        ),
+        StatefulShellBranch(
+          routes: [
+            GoRoute(
+              path: '/history',
+              builder: (context, state) => const HistoryPage(),
+            ),
+          ],
+        ),
+      ],
+    ),
+    GoRoute(
+      path: '/discover',
+      parentNavigatorKey: rootNavigatorKey,
+      redirect: (context, state) => '/anime',
+    ),
+    GoRoute(
+      path: '/schedule',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const SchedulePage(),
+    ),
+    GoRoute(
+      path: '/profile/history',
+      parentNavigatorKey: rootNavigatorKey,
+      redirect: (context, state) => '/history',
+    ),
+    GoRoute(
+      path: '/profile/offline',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const DownloadManagementPage(),
+    ),
+    GoRoute(
+      path: '/profile/following',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => LibraryPage(
+        title: '追番列表',
+        emptyTitle: '还没有追番',
+        emptyMessage: '在详情页点“追番”后会加入这里，也可以从“我的”页进入。',
+        entriesOf: (state) => state.following,
+        active: ChromeDestination.favorite,
+      ),
+    ),
+    GoRoute(
+      path: '/profile/favorites',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => LibraryPage(
+        title: '全部收藏',
+        emptyTitle: '还没有收藏',
+        emptyMessage: '在详情页点击收藏后会显示在这里。',
+        entriesOf: (state) => state.favorites,
+        active: ChromeDestination.favorite,
+      ),
+    ),
+    GoRoute(
+      path: '/profile/images',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => LibraryPage(
+        title: '图片收藏',
+        emptyTitle: '还没有图片收藏',
+        emptyMessage: '收藏封面图后会出现在这里，暂不保留单独画廊入口。',
+        entriesOf: (state) => state.imageFavorites,
+        clearKey: 'imageFavorites',
+      ),
+    ),
+    GoRoute(
+      path: '/profile/account',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const AccountSettingsPage(),
+    ),
+    GoRoute(
+      path: '/profile/home-settings',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => HomeSettingsPage(
+        onResetRecommendationPreferences: () => ref
+            .read(animeControllerProvider.notifier)
+            .resetRecommendationPreferences(),
+      ),
+    ),
+    GoRoute(
+      path: '/profile/appearance',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const AppearanceSettingsPage(),
+    ),
+    GoRoute(
+      path: '/profile/danmaku',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const DanmakuSettingsPage(),
+    ),
+    GoRoute(
+      path: '/profile/misc',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const MiscSettingsPage(),
+    ),
+    GoRoute(
+      path: '/profile/version',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const VersionInfoPage(),
+    ),
+    GoRoute(
+      path: '/profile/feedback',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        final subject = state.extra;
+        return FeedbackPage(subject: subject is AnimeSubject ? subject : null);
+      },
+    ),
+    GoRoute(
+      path: '/profile/rules',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const RuleManagementPage(),
+    ),
+    GoRoute(
+      path: '/profile/rules/repository',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const RuleRepositoryPage(),
+    ),
+    GoRoute(
+      path: '/settings',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const SettingsHubPage(),
+    ),
+    GoRoute(
+      path: '/settings/playback',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const SettingsPage(),
+    ),
+    GoRoute(
+      path: '/settings/media-sources',
+      parentNavigatorKey: rootNavigatorKey,
+      redirect: (context, state) => kIsWeb ? '/settings' : null,
+      builder: (context, state) => const MediaLibraryPage(),
+    ),
+    GoRoute(
+      path: '/player',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) {
+        final request = state.extra;
+        if (request is PlaySessionRequest) {
+          return PlayerPage(request: request);
+        }
+        return const MissingPlayerPage();
+      },
+    ),
+    GoRoute(
+      path: '/player/open',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const OpenMediaPage(),
+    ),
+  ];
+  routes.add(
+    GoRoute(
+      path: '/settings/services/:kind',
+      parentNavigatorKey: rootNavigatorKey,
+      redirect: (context, state) {
+        final kind = state.pathParameters['kind'];
+        return kind == 'media' || kind == 'anime' ? '/settings' : null;
+      },
+      builder: (context, state) =>
+          ServiceSettingsPage(kind: state.pathParameters['kind'] ?? ''),
+    ),
+  );
+  return GoRouter(navigatorKey: rootNavigatorKey, routes: routes);
+});
+
+class AnimeApp extends ConsumerWidget {
+  const AnimeApp({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final router = ref.watch(routerProvider);
+    final appearance =
+        ref.watch(
+          animeControllerProvider.select((state) => state.value?.appearance),
+        ) ??
+        const AppearanceSettings();
+    final services = ref.watch(
+      animeControllerProvider.select((state) => state.value?.services),
+    );
+    final catalogBase = services?.playbackBackendEnabled == true
+        ? ZelunaBackendPlaybackRepository.normalizeBaseUrl(
+            services!.playbackBackendEndpoint,
+            service: services.playbackBackendSelfHosted
+                ? NetworkServiceKind.selfHostedPlaybackBackend
+                : NetworkServiceKind.officialPlaybackBackend,
+            allowInsecureSelfHosted: services.allowInsecurePlaybackBackend,
+          )
+        : null;
+    return ThemeRippleHost(
+      reduceMotion: appearance.reduceMotion,
+      child: MaterialApp.router(
+        scrollBehavior: const ZelunaScrollBehavior(),
+        builder: (context, child) => PosterNetworkScope(
+          catalogBase: catalogBase,
+          child: AppUpdateHost(
+            router: router,
+            child: child ?? const SizedBox.shrink(),
+          ),
+        ),
+        title: 'Zeluna',
+        debugShowCheckedModeBanner: false,
+        themeAnimationDuration: Duration.zero,
+        theme: AnimeTheme.light(
+          compact: appearance.compactMode,
+          reduceMotion: appearance.reduceMotion,
+          appearance: appearance,
+        ),
+        darkTheme: AnimeTheme.dark(
+          compact: appearance.compactMode,
+          reduceMotion: appearance.reduceMotion,
+          appearance: appearance,
+        ),
+        themeMode: appearance.followSystem
+            ? ThemeMode.system
+            : appearance.darkMode
+            ? ThemeMode.dark
+            : ThemeMode.light,
+        routerConfig: router,
+      ),
+    );
+  }
+}
+
+class AsyncAnimeGate extends ConsumerWidget {
+  const AsyncAnimeGate({super.key, required this.builder});
+
+  final Widget Function(BuildContext context, AnimeState state) builder;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(animeControllerProvider);
+    return async.when(
+      data: (state) => _RestoreStartupSystemUi(child: builder(context, state)),
+      loading: () => const ZelunaStartupView(),
+      error: (error, stackTrace) => Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 360),
+            child: const Text('内容暂时加载失败，请稍后重试。', textAlign: TextAlign.center),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+bool _startupSystemUiRestored = false;
+
+class _RestoreStartupSystemUi extends StatefulWidget {
+  const _RestoreStartupSystemUi({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_RestoreStartupSystemUi> createState() =>
+      _RestoreStartupSystemUiState();
+}
+
+class _RestoreStartupSystemUiState extends State<_RestoreStartupSystemUi> {
+  @override
+  void initState() {
+    super.initState();
+    if (_startupSystemUiRestored) return;
+    _startupSystemUiRestored = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (kIsWeb ||
+          (defaultTargetPlatform != TargetPlatform.android &&
+              defaultTargetPlatform != TargetPlatform.iOS)) {
+        return;
+      }
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+class ZelunaStartupView extends StatelessWidget {
+  const ZelunaStartupView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        statusBarColor: Colors.black,
+        statusBarIconBrightness: Brightness.light,
+        statusBarBrightness: Brightness.dark,
+        systemNavigationBarColor: Colors.black,
+        systemNavigationBarIconBrightness: Brightness.light,
+        systemNavigationBarContrastEnforced: false,
+      ),
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Semantics(
+          label: 'Zeluna 正在启动',
+          container: true,
+          child: const SizedBox.expand(
+            key: ValueKey<String>('zeluna-startup-background'),
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,1581 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:anime/src/data/danmaku_repository.dart';
+import 'package:anime/src/domain/anime_models.dart';
+import 'package:anime/src/core/network/network_security.dart';
+import 'package:anime/src/player/danmaku_overlay.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+void main() {
+  group('bounded timeline cache', () {
+    const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+
+    test(
+      'entry limit evicts the least recently used timeline after hot hits',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 100,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(number, commentCount: 1);
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        final second = await load(2);
+        expect(await load(1), same(first));
+        final third = await load(3);
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(await load(1), same(first));
+        expect(await load(3), same(third));
+        expect(attempts, {1: 1, 2: 1, 3: 1});
+        expect(await load(2), isNot(same(second)));
+        expect(attempts, {1: 1, 2: 2, 3: 1});
+      },
+    );
+
+    test(
+      'oversized timelines are shared and returned intact but not retained',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 2,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: number == 1 ? 1 : 3,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final small = await load(1);
+        final pending = load(2);
+        expect(
+          load(2),
+          same(pending),
+          reason: 'oversized loads still single-flight',
+        );
+        final large = await pending;
+        expect(large.comments.map((comment) => comment.text), [
+          'episode-2-comment-0',
+          'episode-2-comment-1',
+          'episode-2-comment-2',
+        ]);
+        expect(large.sources.map((source) => source.provider), [
+          'Zeluna',
+          '弹弹play',
+        ]);
+        expect(large.sources.map((source) => source.commentCount), [2, 1]);
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 1);
+        final reloaded = await load(2);
+        expect(reloaded, isNot(same(large)));
+        expect(reloaded.comments, hasLength(3));
+        expect(reloaded.sources, hasLength(2));
+        expect(
+          await load(1),
+          same(small),
+          reason: 'oversized loads do not evict small entries',
+        );
+        expect(attempts, {1: 1, 2: 2});
+        expect(repository.debugCachedCommentCount, 1);
+      },
+    );
+
+    test(
+      'sum budget evicts multiple cold timelines and accepts the exact budget',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 8,
+          maxCachedComments: 6,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: switch (number) {
+                3 => 1,
+                4 => 4,
+                _ => 2,
+              },
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        await load(2);
+        final third = await load(3);
+        expect(repository.debugCachedCommentCount, 5);
+        expect(await load(1), same(first));
+        final fourth = await load(4);
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 6);
+        expect(await load(1), same(first));
+        expect(await load(4), same(fourth));
+        expect(attempts, {1: 1, 2: 1, 3: 1, 4: 1});
+        expect(await load(3), isNot(same(third)));
+        expect(repository.debugCachedCommentCount, 5);
+        expect(await load(4), same(fourth));
+        expect(attempts[3], 2);
+      },
+    );
+
+    test(
+      'access prunes an unrelated transient failure without refreshing its TTL',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        var failing = true;
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          now: () => now,
+          maxCachedTimelines: 4,
+          maxCachedComments: 4,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            attempts.update(number, (count) => count + 1, ifAbsent: () => 1);
+            return _cacheTimelineResponse(
+              number,
+              commentCount: 2,
+              transientFailure: number == 2 && failing,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        Future<DanmakuTimeline> load(int number) => repository
+            .timelineForEpisode(_subject, _cacheEpisode(number), settings);
+
+        final first = await load(1);
+        final failed = await load(2);
+        expect(failed.sources.last, isA<TransientDanmakuFailure>());
+        expect(attempts[2], 3);
+        now = now.add(const Duration(seconds: 29));
+        expect(await load(2), same(failed));
+        now = now.add(const Duration(seconds: 1));
+        expect(await load(1), same(first));
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(attempts, {1: 1, 2: 3});
+        failing = false;
+        expect(
+          (await load(2)).sources.every((source) => source.available),
+          isTrue,
+        );
+        expect(attempts[2], 4);
+      },
+    );
+
+    test(
+      'insertion prunes entries that expired while a different load was pending',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        final response = Completer<http.Response>();
+        final started = Completer<void>();
+        final repository = DanmakuRepository(
+          now: () => now,
+          maxCachedTimelines: 4,
+          maxCachedComments: 4,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            if (number == 2) {
+              started.complete();
+              return response.future;
+            }
+            return _cacheTimelineResponse(number, commentCount: 1);
+          }),
+        );
+        final first = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        now = now.add(const Duration(minutes: 29));
+        final pending = repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        addTearDown(() async {
+          if (!response.isCompleted) {
+            response.complete(_cacheTimelineResponse(2, commentCount: 2));
+          }
+          await pending;
+          repository.close();
+        });
+        await started.future;
+        expect(repository.debugCachedTimelineCount, 1);
+        now = now.add(const Duration(minutes: 1));
+        response.complete(_cacheTimelineResponse(2, commentCount: 2));
+        final second = await pending;
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(
+          await repository.timelineForEpisode(
+            _subject,
+            _cacheEpisode(2),
+            settings,
+          ),
+          same(second),
+        );
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          isNot(same(first)),
+        );
+      },
+    );
+
+    test(
+      'empty timelines retain their two minute TTL and hits do not extend it',
+      () async {
+        var now = DateTime(2026, 9, 8);
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          now: () => now,
+          officialClient: MockClient((_) async {
+            attempts++;
+            return _cacheTimelineResponse(1, commentCount: 0);
+          }),
+        );
+        addTearDown(repository.close);
+        final first = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        now = now.add(const Duration(seconds: 119));
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          same(first),
+        );
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 0);
+        now = now.add(const Duration(seconds: 1));
+        expect(
+          await repository.timelineForEpisode(_subject, _episode, settings),
+          isNot(same(first)),
+        );
+        expect(attempts, 2);
+      },
+    );
+
+    test(
+      'force refresh and invalidation release their retained comment budgets',
+      () async {
+        final attempts = <int, int>{};
+        final repository = DanmakuRepository(
+          maxCachedTimelines: 2,
+          maxCachedComments: 3,
+          officialClient: MockClient((request) async {
+            final number = int.parse(
+              request.url.queryParameters['episode_number']!,
+            );
+            final attempt = attempts.update(
+              number,
+              (count) => count + 1,
+              ifAbsent: () => 1,
+            );
+            return _cacheTimelineResponse(
+              number,
+              commentCount: number == 1 && attempt == 1 ? 2 : 1,
+            );
+          }),
+        );
+        addTearDown(repository.close);
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        final second = await repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        expect(repository.debugCachedCommentCount, 3);
+        await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+          forceRefresh: true,
+        );
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(
+          await repository.timelineForEpisode(
+            _subject,
+            _cacheEpisode(2),
+            settings,
+          ),
+          same(second),
+        );
+        repository.invalidate();
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        await repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        expect(repository.debugCachedTimelineCount, 2);
+        expect(repository.debugCachedCommentCount, 2);
+        expect(attempts, {1: 3, 2: 2});
+      },
+    );
+
+    test(
+      'close clears retention and a late completion cannot repopulate it',
+      () async {
+        final response = Completer<http.Response>();
+        final started = Completer<void>();
+        var attempts = 0;
+        final client = _CloseTrackingClient();
+        final officialClient = _CloseTrackingClient((request) async {
+          attempts++;
+          final number = int.parse(
+            request.url.queryParameters['episode_number']!,
+          );
+          if (number == 2) {
+            started.complete();
+            return response.future;
+          }
+          return _cacheTimelineResponse(number, commentCount: 1);
+        });
+        final repository = DanmakuRepository(
+          client: client,
+          officialClient: officialClient,
+        );
+        await repository.timelineForEpisode(_subject, _episode, settings);
+        final pending = repository.timelineForEpisode(
+          _subject,
+          _cacheEpisode(2),
+          settings,
+        );
+        addTearDown(() async {
+          if (!response.isCompleted) {
+            response.complete(_cacheTimelineResponse(2, commentCount: 2));
+          }
+          await pending;
+          repository.close();
+          client.close();
+          officialClient.close();
+        });
+        await started.future;
+        expect(repository.debugCachedCommentCount, 1);
+        repository.close();
+        repository.close();
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        expect(client.closeCount, 0);
+        expect(officialClient.closeCount, 0);
+        response.complete(_cacheTimelineResponse(2, commentCount: 2));
+        expect((await pending).comments, hasLength(2));
+        expect(repository.debugCachedTimelineCount, 0);
+        expect(repository.debugCachedCommentCount, 0);
+        await expectLater(
+          repository.timelineForEpisode(_subject, _episode, settings),
+          throwsStateError,
+        );
+        expect(attempts, 2);
+      },
+    );
+
+    for (final disabled in ['entries', 'comments']) {
+      test(
+        'a zero $disabled limit disables retention without dropping comments',
+        () async {
+          var attempts = 0;
+          final repository = DanmakuRepository(
+            maxCachedTimelines: disabled == 'entries' ? 0 : 8,
+            maxCachedComments: disabled == 'comments' ? 0 : 50000,
+            officialClient: MockClient((_) async {
+              attempts++;
+              return _cacheTimelineResponse(1, commentCount: 2);
+            }),
+          );
+          addTearDown(repository.close);
+          for (var index = 0; index < 2; index++) {
+            final timeline = await repository.timelineForEpisode(
+              _subject,
+              _episode,
+              settings,
+            );
+            expect(timeline.comments, hasLength(2));
+            expect(timeline.sources, hasLength(2));
+            expect(repository.debugCachedTimelineCount, 0);
+            expect(repository.debugCachedCommentCount, 0);
+          }
+          expect(attempts, 2);
+        },
+      );
+    }
+  });
+
+  for (final order in ['new first', 'old first', 'old before new request']) {
+    test(
+      'invalidation detaches old account future and protects new cache ($order)',
+      () async {
+        final oldResponse = Completer<http.Response>();
+        final newResponse = Completer<http.Response>();
+        final oldStarted = Completer<void>();
+        final newStarted = Completer<void>();
+        var token = 'synthetic-account-a';
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected public request'),
+          ),
+          officialTokenProvider: () async => token,
+          maxCachedTimelines: 1,
+          maxCachedComments: 1,
+          officialClient: MockClient((request) async {
+            attempts++;
+            expect(request.url.path, endsWith('/danmaku/mine'));
+            if (attempts == 1) {
+              expect(
+                request.headers['Authorization'],
+                'Bearer synthetic-account-a',
+              );
+              oldStarted.complete();
+              return oldResponse.future;
+            }
+            expect(
+              request.headers['Authorization'],
+              'Bearer synthetic-account-b',
+            );
+            newStarted.complete();
+            return newResponse.future;
+          }),
+        );
+        final pending = <Future<DanmakuTimeline>>[];
+        addTearDown(() async {
+          if (!oldResponse.isCompleted) {
+            oldResponse.complete(_jsonResponse({'comments': []}));
+          }
+          if (!newResponse.isCompleted) {
+            newResponse.complete(_jsonResponse({'comments': []}));
+          }
+          await Future.wait(pending);
+          repository.close();
+        });
+        const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+        final old = repository.timelineForEpisode(_subject, _episode, settings);
+        pending.add(old);
+        await oldStarted.future;
+
+        repository.invalidate();
+        token = 'synthetic-account-b';
+        if (order == 'old before new request') {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          await old;
+        }
+        final current = repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        pending.add(current);
+        expect(identical(old, current), isFalse);
+        await newStarted.future.timeout(const Duration(seconds: 1));
+        expect(attempts, 2);
+        expect(
+          identical(
+            current,
+            repository.timelineForEpisode(_subject, _episode, settings),
+          ),
+          isTrue,
+        );
+
+        if (order == 'old first') {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          await old;
+          expect(
+            identical(
+              current,
+              repository.timelineForEpisode(_subject, _episode, settings),
+            ),
+            isTrue,
+            reason:
+                'old completion must not remove or replace the current flight',
+          );
+        }
+        newResponse.complete(_ownedTimelineResponse(isMine: false));
+        final latest = await current;
+        if (!oldResponse.isCompleted) {
+          oldResponse.complete(_ownedTimelineResponse(isMine: true));
+        }
+        expect((await old).comments.single.isMine, isTrue);
+        expect(latest.comments.single.isMine, isFalse);
+        final cached = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(cached, latest), isTrue);
+        expect(cached.comments.single.isMine, isFalse);
+        expect(repository.debugCachedTimelineCount, 1);
+        expect(repository.debugCachedCommentCount, 1);
+        expect(attempts, 2);
+      },
+    );
+  }
+
+  for (final deleted in [false, true]) {
+    test(
+      'mutation invalidation keeps the refreshed state (deleted=$deleted)',
+      () async {
+        final oldResponse = Completer<http.Response>();
+        final started = Completer<void>();
+        var attempts = 0;
+        final refreshed = deleted
+            ? _jsonResponse({'comments': []})
+            : _jsonResponse({
+                'comments': [
+                  {
+                    'id': 'published',
+                    'provider': 'Zeluna',
+                    'text': 'Published',
+                    'time_seconds': 2,
+                    'color': 16777215,
+                    'author': {'is_mine': true},
+                  },
+                ],
+              });
+        final repository = DanmakuRepository(
+          client: MockClient(
+            (_) async => throw StateError('unexpected public request'),
+          ),
+          officialClient: MockClient((_) async {
+            attempts++;
+            if (attempts == 1) {
+              started.complete();
+              return oldResponse.future;
+            }
+            return refreshed;
+          }),
+        );
+        const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
+        final old = repository.timelineForEpisode(_subject, _episode, settings);
+        addTearDown(() async {
+          if (!oldResponse.isCompleted) {
+            oldResponse.complete(_ownedTimelineResponse(isMine: true));
+          }
+          await old;
+          repository.close();
+        });
+        await started.future;
+        // This is the same public invalidation boundary used after publish/delete.
+        repository.invalidate();
+        final current = repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(current, old), isFalse);
+        final latest = await current;
+        oldResponse.complete(_ownedTimelineResponse(isMine: true));
+        await old;
+        final cached = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          settings,
+        );
+        expect(identical(cached, latest), isTrue);
+        expect(
+          cached.comments.map((comment) => comment.text),
+          deleted ? <String>[] : ['Published'],
+        );
+        expect(attempts, 2);
+      },
+    );
+  }
+
+  testWidgets(
+    'six second partial response cannot restart an eight second budget',
+    (tester) async {
+      final start = tester.binding.clock.now();
+      final pending = Completer<http.Response>();
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        stopwatchFactory: () =>
+            _TestStopwatch(() => tester.binding.clock.now().difference(start)),
+        officialClient: MockClient((_) async {
+          attempts++;
+          if (attempts > 1) return pending.future;
+          await Future<void>.delayed(const Duration(seconds: 6));
+          return _jsonResponse({
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {
+                'provider': '弹弹play',
+                'available': false,
+                'error_code': 'timeout',
+                'retryable': true,
+              },
+            ],
+            'comments': [
+              {
+                'id': 'community',
+                'provider': 'Zeluna',
+                'text': 'still usable',
+                'time_seconds': 1,
+                'color': 16777215,
+              },
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      DanmakuTimeline? result;
+      final future = repository
+          .timelineForEpisode(
+            _subject,
+            _episode,
+            const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+          )
+          .then((value) => result = value);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 6));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(attempts, 2);
+      await tester.pump(const Duration(milliseconds: 1499));
+      expect(result, isNull);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(result, isNotNull);
+      await future;
+      expect(result!.comments.single.text, 'still usable');
+      expect(result!.sources.last, isA<TransientDanmakuFailure>());
+      pending.complete(http.Response('', 503));
+      await tester.pump(const Duration(seconds: 20));
+      expect(attempts, 2);
+    },
+  );
+
+  test('HTTP 200 permanent unknown and empty outcomes never retry', () async {
+    for (final code in [
+      'authorization',
+      'rate_limited',
+      'disabled',
+      'no_match',
+      'upstream_error',
+      null,
+    ]) {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          return _jsonResponse({
+            'sources': [
+              {
+                'provider': '弹弹play',
+                'available': false,
+                'error_code': code,
+                'retryable': true,
+                'message': '弹弹play 暂时无法访问，Zeluna 社区弹幕仍可正常使用',
+              },
+            ],
+            'comments': [],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final result = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(attempts, 1, reason: '$code');
+      expect(result.sources.single, isNot(isA<TransientDanmakuFailure>()));
+    }
+    for (final retryable in [false, null]) {
+      final parsed = parseZelunaDanmakuSources({
+        'sources': [
+          {
+            'provider': '弹弹play',
+            'available': false,
+            'error_code': 'timeout',
+            'retryable': retryable,
+          },
+        ],
+      });
+      expect(parsed.single, isNot(isA<TransientDanmakuFailure>()));
+    }
+  });
+
+  test(
+    'HTTP 200 explicitly retryable partial failure recovers without a second load',
+    () async {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          return _jsonResponse({
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {
+                'provider': '弹弹play',
+                'available': attempts > 1,
+                'error_code': attempts == 1 ? 'timeout' : null,
+                'retryable': attempts == 1,
+              },
+            ],
+            'comments': [
+              {
+                'id': 'community',
+                'provider': 'Zeluna',
+                'text': 'community',
+                'time_seconds': 2,
+                'color': 16777215,
+              },
+              if (attempts > 1)
+                {
+                  'id': 'external',
+                  'provider': '弹弹play',
+                  'text': 'recovered',
+                  'time_seconds': 1,
+                  'color': 16777215,
+                },
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final result = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(result.comments.map((c) => c.text), ['recovered', 'community']);
+      expect(attempts, 2);
+    },
+  );
+
+  testWidgets(
+    'official retries and anonymous fallback share the eight second budget',
+    (tester) async {
+      final pending = Completer<http.Response>();
+      final start = tester.binding.clock.now();
+      var attempts = 0;
+      final observed = <http.Request>[];
+      final repository = DanmakuRepository(
+        stopwatchFactory: () =>
+            _TestStopwatch(() => tester.binding.clock.now().difference(start)),
+        officialTokenProvider: () async => 'fixture-token',
+        officialClient: MockClient((request) async {
+          attempts++;
+          observed.add(request);
+          if (attempts == 1) {
+            await Future<void>.delayed(const Duration(seconds: 3));
+            return http.Response('', 401);
+          }
+          if (attempts == 2) {
+            await Future<void>.delayed(const Duration(seconds: 3));
+            return http.Response('', 503);
+          }
+          return pending.future;
+        }),
+      );
+      addTearDown(repository.close);
+      DanmakuTimeline? result;
+      final future = repository
+          .timelineForEpisode(
+            _subject,
+            _episode,
+            const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+          )
+          .then((value) => result = value);
+      await tester.pump();
+      expect(attempts, 1);
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      expect(attempts, 2, reason: '${observed.map((r) => r.url.path)}');
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+      expect(attempts, 3);
+      await tester.pump(const Duration(milliseconds: 1499));
+      expect(result, isNull);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(
+        result,
+        isNotNull,
+        reason: 'all requests must settle at eight seconds',
+      );
+      expect(
+        result!.sources.every((s) => s is TransientDanmakuFailure),
+        isTrue,
+      );
+      await future;
+      pending.complete(http.Response('', 503));
+      await tester.pump(const Duration(seconds: 20));
+      expect(attempts, 3, reason: 'expiry must not schedule another retry');
+      expect(observed.map((r) => r.url.path), [
+        '/api/v3/danmaku/mine',
+        '/api/v3/danmaku',
+        '/api/v3/danmaku',
+      ]);
+      expect(observed.first.headers['authorization'], 'Bearer fixture-token');
+      expect(
+        observed.skip(1).every((r) => !r.headers.containsKey('authorization')),
+        isTrue,
+      );
+    },
+  );
+
+  test('only transport failures carry transient source metadata', () async {
+    for (final error in [
+      TimeoutException('offline'),
+      http.ClientException('connection reset'),
+      const FormatException('malformed'),
+      const NetworkSecurityException('blocked'),
+    ]) {
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async => throw error),
+      );
+      addTearDown(repository.close);
+      final timeline = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(timeline.sources, isNotEmpty);
+      expect(
+        timeline.sources.every((s) => s is TransientDanmakuFailure),
+        error is TimeoutException || error is http.ClientException,
+        reason: '${error.runtimeType}',
+      );
+    }
+  });
+
+  test(
+    'transient official failure retries before returning an empty timeline',
+    () async {
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        officialClient: MockClient((_) async {
+          attempts++;
+          if (attempts == 1) throw http.ClientException('network unavailable');
+          if (attempts == 2) throw TimeoutException('request timed out');
+          return _jsonResponse({
+            'comments': [
+              {
+                'id': 'live-retry',
+                'provider': '弹弹play',
+                'text': '自动恢复',
+                'time_seconds': 1,
+                'color': 16777215,
+                'mode': 'scroll',
+              },
+            ],
+            'sources': [
+              {'provider': '弹弹play', 'available': true, 'comment_count': 1},
+            ],
+          });
+        }),
+      );
+      addTearDown(repository.close);
+      final first = repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      final shared = repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(identical(first, shared), isTrue);
+      final timeline = await first;
+      expect(timeline.comments.single.text, '自动恢复');
+      expect(attempts, 3);
+    },
+  );
+
+  test(
+    'official transient retry is bounded and never retries denied requests',
+    () async {
+      for (final status in [503, 403, 429]) {
+        var attempts = 0;
+        final repository = DanmakuRepository(
+          officialClient: MockClient((_) async {
+            attempts++;
+            return http.Response('', status);
+          }),
+        );
+        addTearDown(repository.close);
+        final timeline = await repository.timelineForEpisode(
+          _subject,
+          _episode,
+          const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+        );
+        expect(timeline.comments, isEmpty);
+        expect(attempts, status == 503 ? 3 : 1);
+      }
+    },
+  );
+
+  test(
+    'official failure remains visible and cannot poison a mixed timeline cache',
+    () async {
+      var now = DateTime(2026, 9, 8);
+      var attempts = 0;
+      final repository = DanmakuRepository(
+        now: () => now,
+        officialClient: MockClient((request) async {
+          attempts++;
+          expect(
+            request.url.queryParameters['episode_key'],
+            'v1|bangumi:1|episode:1',
+          );
+          if (attempts == 1) return http.Response('private error body', 422);
+          return _jsonResponse({
+            'comments': [],
+            'sources': [
+              {'provider': 'Zeluna', 'available': true},
+              {'provider': '弹弹play', 'available': true, 'comment_count': 0},
+            ],
+          });
+        }),
+        client: MockClient(
+          (_) async => _jsonResponse([
+            {'time': 1, 'text': '其它来源的弹幕'},
+          ]),
+        ),
+      );
+      addTearDown(repository.close);
+      const settings = ExternalServiceSettings(
+        bilibiliDanmakuEnabled: false,
+        customDanmakuEnabled: true,
+        customDanmakuEndpoint: 'https://danmaku.example/comments',
+      );
+      final failed = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+      );
+      expect(failed.comments, isNotEmpty);
+      expect(
+        failed.sources.where((s) => s.provider == '弹弹play').single.available,
+        isFalse,
+      );
+      expect(failed.sources.first.message, contains('422'));
+      expect(failed.sources.first.message, isNot(contains('private')));
+      await repository.timelineForEpisode(_subject, _episode, settings);
+      expect(
+        attempts,
+        1,
+        reason: 'brief failure cache prevents request storms',
+      );
+      now = now.add(const Duration(seconds: 31));
+      final recovered = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+      );
+      expect(
+        attempts,
+        2,
+        reason: 'partial failure must not be cached for 30 minutes',
+      );
+      expect(
+        recovered.sources.where((s) => s.provider == '弹弹play').single.available,
+        isTrue,
+      );
+      await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        settings,
+        forceRefresh: true,
+      );
+      expect(attempts, 3, reason: 'user retry bypasses a cached result');
+    },
+  );
+
+  test(
+    'official network errors show enabled sources without leaking errors',
+    () async {
+      final repository = DanmakuRepository(
+        officialClient: MockClient(
+          (_) async => throw Exception('private-token'),
+        ),
+      );
+      addTearDown(repository.close);
+      final timeline = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(bilibiliDanmakuEnabled: false),
+      );
+      expect(timeline.sources.map((s) => s.provider), ['Zeluna', '弹弹play']);
+      expect(timeline.sources.every((s) => !s.available), isTrue);
+      expect(timeline.sources.first.message, isNot(contains('private-token')));
+    },
+  );
+  test('Bilibili XML parses real time, mode, color and decoded text', () {
+    final comments = parseBilibiliDanmakuXml('''
+<i>
+  <d p="1.25,1,25,16711680,0,0,user,9001">滚动 &amp; 文本</d>
+  <d p="2.5,5,25,65280,0,0,user,9002">顶部弹幕</d>
+  <d p="3,4,25,255,0,0,user,9003">底部弹幕</d>
+</i>
+''');
+
+    expect(comments, hasLength(3));
+    expect(comments[0].time, const Duration(milliseconds: 1250));
+    expect(comments[0].mode, DanmakuMode.scroll);
+    expect(comments[0].color, 0xFF0000);
+    expect(comments[0].text, '滚动 & 文本');
+    expect(comments[1].mode, DanmakuMode.top);
+    expect(comments[1].color, 0x00FF00);
+    expect(comments[2].mode, DanmakuMode.bottom);
+    expect(comments[2].color, 0x0000FF);
+  });
+
+  test('Bilibili WBI matching loads episode XML and caches the timeline', () async {
+    var requests = 0;
+    final paths = <String>[];
+    final repository = DanmakuRepository(
+      officialClient: MockClient((_) async => _jsonResponse({'comments': []})),
+      client: MockClient((request) async {
+        requests++;
+        paths.add(request.url.path);
+        if (request.url.path == '/x/web-interface/nav') {
+          return _jsonResponse({
+            'code': -101,
+            'data': {
+              'wbi_img': {
+                'img_url':
+                    'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+                'sub_url':
+                    'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+              },
+            },
+          });
+        }
+        if (request.url.path == '/x/web-interface/wbi/search/type') {
+          expect(request.url.queryParameters['search_type'], 'media_bangumi');
+          expect(request.url.queryParameters['wts'], isNotEmpty);
+          expect(
+            request.url.queryParameters['w_rid'],
+            matches(RegExp(r'^[0-9a-f]{32}$')),
+          );
+          return _jsonResponse({
+            'code': 0,
+            'data': {
+              'result': [
+                {
+                  'season_id': 42,
+                  'title': '<em>葬送的芙莉莲</em>',
+                  'org_title': '葬送のフリーレン',
+                },
+              ],
+            },
+          });
+        }
+        if (request.url.path == '/pgc/view/web/season') {
+          expect(request.url.queryParameters['season_id'], '42');
+          return _jsonResponse({
+            'code': 0,
+            'result': {
+              'title': '葬送的芙莉莲',
+              'episodes': [
+                {'title': '1', 'long_title': '冒险的结束', 'cid': 777},
+              ],
+            },
+          });
+        }
+        if (request.url.path == '/x/v1/dm/list.so') {
+          expect(request.url.queryParameters['oid'], '777');
+          final compressed = ZLibCodec(raw: true).encode(
+            utf8.encode('<i><d p="9.5,1,25,16777215,0,0,u,1">真实弹幕</d></i>'),
+          );
+          return http.Response.bytes(
+            compressed,
+            200,
+            headers: const {
+              'content-type': 'text/xml; charset=utf-8',
+              'content-encoding': 'deflate',
+            },
+          );
+        }
+        return http.Response('not found', 404);
+      }),
+    );
+
+    final first = await repository.timelineForEpisode(
+      _subject,
+      _episode,
+      const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
+    );
+    final afterFirstLoad = requests;
+    final second = await repository.timelineForEpisode(
+      _subject,
+      _episode,
+      const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
+    );
+
+    expect(paths, contains('/x/web-interface/wbi/search/type'));
+    expect(
+      first.sources.where((s) => s.provider == 'Bilibili').single.available,
+      isTrue,
+      reason:
+          '${first.sources.where((s) => s.provider == 'Bilibili').single.message}; paths=$paths',
+    );
+    expect(
+      first.sources.where((s) => s.provider == 'Bilibili').single.episodeId,
+      '777',
+    );
+    expect(first.comments.single.provider, 'Bilibili');
+    expect(first.comments.single.text, '真实弹幕');
+    expect(second.comments.single.text, '真实弹幕');
+    expect(requests, afterFirstLoad);
+  });
+
+  test('Bilibili 412 keeps server-provided dandanplay comments', () async {
+    final paths = <String>[];
+    late final MockClient client;
+    client = MockClient((request) async {
+      paths.add(request.url.path);
+      if (request.url.host == 'api.zeluna.test') {
+        expect(request.url.path, '/api/v3/danmaku');
+        expect(request.url.queryParameters['subject_key'], 'bangumi:1');
+        expect(request.url.queryParameters['episode_key'], isNotEmpty);
+        expect(request.url.queryParameters['title'], '葬送的芙莉莲');
+        expect(request.url.queryParameters['original_title'], 'Frieren');
+        expect(request.url.queryParameters['episode_number'], '1');
+        expect(request.url.queryParameters['media_type'], 'anime');
+        expect(request.url.queryParameters['include_dandanplay'], 'true');
+        return _jsonResponse({
+          'comments': [
+            {
+              'id': '41',
+              'provider': 'Zeluna',
+              'time_seconds': 20,
+              'mode': 'scroll',
+              'color': 0xFFFFFF,
+              'text': 'Zeluna 用户弹幕',
+              'author': {'display_name': '用户', 'is_mine': false},
+            },
+            {
+              'id': 'dandanplay:12345:88',
+              'provider': '弹弹play',
+              'time_seconds': 12.5,
+              'mode': 'top',
+              'color': 0xFFFF00,
+              'text': '备用真实弹幕',
+              'author': {'display_name': '弹幕用户', 'is_mine': false},
+            },
+          ],
+          'sources': [
+            {
+              'provider': 'Zeluna',
+              'title': '葬送的芙莉莲',
+              'episode_title': '第 1 集',
+              'episode_id': 'episode:v2:first',
+              'comment_count': 1,
+              'available': true,
+            },
+            {
+              'provider': '弹弹play',
+              'title': '葬送的芙莉莲',
+              'episode_title': '第1话 冒险的结束',
+              'episode_id': '12345',
+              'comment_count': 1,
+              'available': true,
+            },
+          ],
+          'next_cursor': null,
+        });
+      }
+      if (request.url.path == '/x/web-interface/nav') {
+        return _jsonResponse({
+          'code': -101,
+          'data': {
+            'wbi_img': {
+              'img_url':
+                  'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+              'sub_url':
+                  'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+            },
+          },
+        });
+      }
+      if (request.url.path == '/x/web-interface/wbi/search/type') {
+        return http.Response('<div class="error-container">412</div>', 412);
+      }
+      return http.Response('not found', 404);
+    });
+    final repository = DanmakuRepository(
+      client: client,
+      officialClient: client,
+      officialBaseUrl: 'https://api.zeluna.test',
+    );
+
+    final timeline = await repository.timelineForEpisode(
+      _subject,
+      _episode,
+      const ExternalServiceSettings(),
+    );
+
+    expect(paths, contains('/api/v3/danmaku'));
+    expect(paths, contains('/x/web-interface/wbi/search/type'));
+    expect(timeline.sources.map((item) => item.provider), [
+      'Zeluna',
+      '弹弹play',
+      'Bilibili',
+    ]);
+    expect(timeline.sources.last.message, contains('风控'));
+    expect(timeline.comments.map((item) => item.provider), [
+      '弹弹play',
+      'Zeluna',
+    ]);
+    expect(timeline.comments.first.mode, DanmakuMode.top);
+    expect(timeline.comments.first.color, 0xFFFF00);
+    expect(timeline.comments.first.text, '备用真实弹幕');
+  });
+
+  test('official and public danmaku sources are merged', () async {
+    final paths = <String>[];
+    late final MockClient client;
+    client = MockClient((request) async {
+      paths.add(request.url.path);
+      if (request.url.host == 'api.zeluna.test') {
+        expect(request.url.path, '/api/v3/danmaku');
+        expect(request.url.queryParameters['subject_key'], 'bangumi:1');
+        expect(request.url.queryParameters['episode_key'], isNotEmpty);
+        return _jsonResponse({
+          'comments': [
+            {
+              'id': '41',
+              'subject_key': 'bangumi:1',
+              'episode_key': 'episode:v2:first',
+              'time_seconds': 9.5,
+              'mode': 'scroll',
+              'color': 0xFFFFFF,
+              'text': 'B 站公开弹幕',
+              'created_at': 1,
+              'author': {'display_name': '同步用户', 'is_mine': false},
+            },
+            {
+              'id': '42',
+              'subject_key': 'bangumi:1',
+              'episode_key': 'episode:v2:first',
+              'time_seconds': 20,
+              'mode': 'top',
+              'color': 0xFFCC00,
+              'text': 'Zeluna 用户弹幕',
+              'created_at': 1,
+              'author': {'display_name': '用户', 'is_mine': false},
+            },
+          ],
+          'next_cursor': null,
+        });
+      }
+      if (request.url.path == '/x/web-interface/nav') {
+        return _jsonResponse({
+          'code': -101,
+          'data': {
+            'wbi_img': {
+              'img_url':
+                  'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+              'sub_url':
+                  'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+            },
+          },
+        });
+      }
+      if (request.url.path == '/x/web-interface/wbi/search/type') {
+        return _jsonResponse({
+          'code': 0,
+          'data': {
+            'result': [
+              {'season_id': 42, 'title': '葬送的芙莉莲', 'org_title': ''},
+            ],
+          },
+        });
+      }
+      if (request.url.path == '/pgc/view/web/season') {
+        return _jsonResponse({
+          'code': 0,
+          'result': {
+            'title': '葬送的芙莉莲',
+            'episodes': [
+              {'title': '1', 'long_title': '冒险的结束', 'cid': 777},
+            ],
+          },
+        });
+      }
+      if (request.url.path == '/x/v1/dm/list.so') {
+        return http.Response(
+          '<i><d p="9.5,1,25,16777215,0,0,u,1">B 站公开弹幕</d></i>',
+          200,
+          headers: const {'content-type': 'text/xml; charset=utf-8'},
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final repository = DanmakuRepository(
+      client: client,
+      officialClient: client,
+      officialBaseUrl: 'https://api.zeluna.test',
+    );
+
+    final timeline = await repository.timelineForEpisode(
+      _subject,
+      _episode,
+      const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
+    );
+
+    expect(paths, contains('/api/v3/danmaku'));
+    expect(timeline.sources.map((item) => item.provider), [
+      'Zeluna',
+      'Bilibili',
+    ]);
+    expect(timeline.comments.map((item) => item.text), [
+      'B 站公开弹幕',
+      'Zeluna 用户弹幕',
+    ]);
+    expect(timeline.comments.first.provider, 'Zeluna');
+  });
+
+  test(
+    'unrelated Bilibili result is rejected instead of attaching wrong comments',
+    () async {
+      var seasonRequested = false;
+      final repository = DanmakuRepository(
+        client: MockClient((request) async {
+          if (request.url.path == '/x/web-interface/nav') {
+            return _jsonResponse({
+              'code': -101,
+              'data': {
+                'wbi_img': {
+                  'img_url':
+                      'https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz123456.png',
+                  'sub_url':
+                      'https://i0.hdslb.com/bfs/wbi/654321zyxwvutsrqponmlkjihgfedcba.png',
+                },
+              },
+            });
+          }
+          if (request.url.path == '/x/web-interface/wbi/search/type') {
+            return _jsonResponse({
+              'code': 0,
+              'data': {
+                'result': [
+                  {'season_id': 99, 'title': '完全无关的电视剧', 'org_title': ''},
+                ],
+              },
+            });
+          }
+          if (request.url.path == '/pgc/view/web/season') {
+            seasonRequested = true;
+          }
+          return http.Response('not found', 404);
+        }),
+      );
+
+      final timeline = await repository.timelineForEpisode(
+        _subject,
+        _episode,
+        const ExternalServiceSettings(dandanplayDanmakuEnabled: false),
+      );
+
+      expect(seasonRequested, isFalse);
+      expect(timeline.comments, isEmpty);
+      expect(
+        timeline.sources
+            .where((s) => s.provider == 'Bilibili')
+            .single
+            .available,
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'timeline window follows progress and respects mode and keyword filters',
+    () {
+      const comments = [
+        DanmakuComment(
+          id: '1',
+          provider: 'Bilibili',
+          time: Duration(seconds: 1),
+          mode: DanmakuMode.scroll,
+          color: 0xFFFFFF,
+          text: '保留',
+        ),
+        DanmakuComment(
+          id: '2',
+          provider: 'Bilibili',
+          time: Duration(milliseconds: 1200),
+          mode: DanmakuMode.top,
+          color: 0xFFFFFF,
+          text: '顶部',
+        ),
+        DanmakuComment(
+          id: '3',
+          provider: 'Bilibili',
+          time: Duration(milliseconds: 1400),
+          mode: DanmakuMode.bottom,
+          color: 0xFFFFFF,
+          text: '剧透内容',
+        ),
+        DanmakuComment(
+          id: '4',
+          provider: 'Bilibili',
+          time: Duration(seconds: 3),
+          mode: DanmakuMode.scroll,
+          color: 0xFFFFFF,
+          text: '未来弹幕',
+        ),
+      ];
+
+      final visible = visibleDanmakuComments(
+        comments,
+        position: const Duration(seconds: 2),
+        settings: const DanmakuSettings(
+          enabled: true,
+          blockTop: true,
+          blockKeywords: ['剧透'],
+        ),
+      );
+
+      expect(visible.map((item) => item.text), ['保留']);
+    },
+  );
+}
+
+AnimeEpisode _cacheEpisode(int number) => AnimeEpisode(
+  id: 100 + number,
+  subjectId: _subject.id,
+  number: number,
+  title: '',
+  airdate: _episode.airdate,
+  duration: _episode.duration,
+  description: 'Episode $number',
+);
+
+http.Response _cacheTimelineResponse(
+  int number, {
+  required int commentCount,
+  bool transientFailure = false,
+}) => _jsonResponse({
+  'comments': [
+    for (var index = 0; index < commentCount; index++)
+      {
+        'id': 'episode-$number-comment-$index',
+        'provider': index.isEven ? 'Zeluna' : '弹弹play',
+        'text': 'episode-$number-comment-$index',
+        'time_seconds': index + 1,
+        'color': 16777215,
+      },
+  ],
+  'sources': [
+    {
+      'provider': 'Zeluna',
+      'available': true,
+      'comment_count': (commentCount + 1) ~/ 2,
+    },
+    {
+      'provider': '弹弹play',
+      'available': !transientFailure,
+      'comment_count': commentCount ~/ 2,
+      if (transientFailure) 'error_code': 'timeout',
+      if (transientFailure) 'retryable': true,
+    },
+  ],
+});
+
+class _CloseTrackingClient extends MockClient {
+  _CloseTrackingClient([Future<http.Response> Function(http.Request)? handler])
+    : super(handler ?? ((_) async => http.Response('', 404)));
+
+  var closeCount = 0;
+
+  @override
+  void close() {
+    closeCount++;
+    super.close();
+  }
+}
+
+http.Response _ownedTimelineResponse({required bool isMine}) => _jsonResponse({
+  'comments': [
+    {
+      'id': 'synthetic-comment',
+      'provider': 'Zeluna',
+      'text': 'Synthetic ownership view',
+      'time_seconds': 1,
+      'color': 16777215,
+      'author': {'is_mine': isMine},
+    },
+  ],
+});
+
+http.Response _jsonResponse(Object value) {
+  return http.Response(
+    jsonEncode(value),
+    200,
+    headers: const {'content-type': 'application/json; charset=utf-8'},
+  );
+}
+
+const _subject = AnimeSubject(
+  id: 1,
+  title: '葬送的芙莉莲',
+  originalTitle: 'Frieren',
+  summary: 'summary',
+  coverUrl: null,
+  bannerUrl: null,
+  date: '2023-09-29',
+  platform: 'TV',
+  language: '日语',
+  region: '日本',
+  status: '全28集',
+  categories: [AnimeCategory(name: '动画')],
+  tags: [AnimeTag(name: 'TV')],
+  totalEpisodes: 28,
+);
+
+const _episode = AnimeEpisode(
+  id: 101,
+  subjectId: 1,
+  number: 1,
+  title: '',
+  airdate: '2023-09-29',
+  duration: '24:00',
+  description: '第一集',
+);
+
+class _TestStopwatch extends Stopwatch {
+  _TestStopwatch(this.readElapsed);
+  final Duration Function() readElapsed;
+  @override
+  Duration get elapsed => readElapsed();
+}
