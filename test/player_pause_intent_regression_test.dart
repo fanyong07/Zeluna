@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 
 import 'package:anime/src/app/app_theme.dart';
 import 'package:anime/src/data/anime_controller.dart';
+import 'package:anime/src/data/bangumi_metadata_repository.dart';
 import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/rules/rule_playback_cancellation.dart';
@@ -19,6 +20,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -69,6 +72,79 @@ void main() {
     expect(fixture.engine.seeks, contains(resume));
     expect(fixture.engine.seeks, isNot(contains(const Duration(seconds: 30))));
   });
+
+  for (final crossesThreshold in [true, false]) {
+    testWidgets(
+      'Bangumi write at ${crossesThreshold ? '85%' : 'end'} does not block the next episode',
+      (tester) async {
+        final subject = AnimeSubject.fromJson({'id': 41, 'title': '进度同步'});
+        final episode = AnimeEpisode.fromJson({
+          'id': 72,
+          'number': 1,
+          'subjectId': 41,
+        });
+        final next = AnimeEpisode.fromJson({
+          'id': 73,
+          'number': 2,
+          'subjectId': 41,
+        });
+        final line = PlaybackLine(
+          id: 'sync-primary',
+          episodeId: 72,
+          providerId: _primary.providerId,
+          providerName: _primary.providerName,
+          title: _primary.title,
+          quality: _primary.quality,
+          format: _primary.format,
+          url: _primary.url,
+          available: true,
+          clientVerified: true,
+        );
+        final response = Completer<http.Response>();
+        final writes = <String>[];
+        final repository = BangumiMetadataRepository(
+          accessCredentialProvider: () async =>
+              const BangumiAccessCredential(token: 'player-test'),
+          client: MockClient((req) async {
+            expect(req.method, 'PUT');
+            writes.add(req.url.path);
+            return response.future;
+          }),
+        );
+        final account = _PauseAccount(
+          online: true,
+          quick: [line],
+          outroSeconds: 1,
+          syncProgress: true,
+        );
+        final fixture = await _mount(
+          tester,
+          account: account,
+          subject: subject,
+          episodes: [episode, next],
+          initialLine: line,
+          bangumi: repository,
+        );
+        fixture.engine.progress(
+          const Duration(seconds: 152),
+        ); // 152 / 180 < 85%
+        await tester.pump();
+        expect(writes, isEmpty);
+        if (crossesThreshold) {
+          fixture.engine.progress(const Duration(seconds: 153));
+          await tester.pump();
+          expect(writes, ['/v0/users/-/collections/-/episodes/72']);
+        }
+        fixture.engine.finish();
+        await tester.pump();
+        await tester.pump();
+        expect(writes, ['/v0/users/-/collections/-/episodes/72']);
+        expect(account.episodeRequests, contains(next.id));
+        response.complete(http.Response('', 204));
+        await tester.pump();
+      },
+    );
+  }
 
   for (final sleepAtEnd in [false, true]) {
     testWidgets('ED: ${sleepAtEnd ? '睡眠定时优先于自动下一集' : '跨过阈值才切换到正确的下一集'}', (
@@ -1073,6 +1149,8 @@ const _primary = PlaybackLine(
 Future<_Fixture> _mount(
   WidgetTester tester, {
   _PauseAccount? account,
+  AnimeSubject? subject,
+  BangumiMetadataRepository? bangumi,
   bool nativeLock = false,
   bool reachFirstFrame = true,
   Duration? resumePosition,
@@ -1122,7 +1200,11 @@ Future<_Fixture> _mount(
   });
   await tester.pumpWidget(
     ProviderScope(
-      overrides: [animeControllerProvider.overrideWith(() => activeAccount)],
+      overrides: [
+        animeControllerProvider.overrideWith(() => activeAccount),
+        if (bangumi != null)
+          bangumiMetadataRepositoryProvider.overrideWithValue(bangumi),
+      ],
       child: MaterialApp(
         theme: theme ?? ThemeData.dark(),
         home: PlayerPage(
@@ -1135,11 +1217,13 @@ Future<_Fixture> _mount(
                 prepareMedia: _prepareFixtureMedia,
               ),
           request: PlaySessionRequest(
-            subject: account.online
-                ? playerTestSubject.copyWith(source: 'integration')
-                : playerTestSubject,
+            subject:
+                subject ??
+                (account.online
+                    ? playerTestSubject.copyWith(source: 'integration')
+                    : playerTestSubject),
             episodes: episodes,
-            episode: playerTestEpisode,
+            episode: episodes.first,
             offlineOnly: !account.online,
             initialLine: initialLine,
             resumePosition: resumePosition,
@@ -1470,7 +1554,9 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     this.autoSwitch = true,
     this.introSeconds = 0,
     this.outroSeconds = 0,
+    this.syncProgress = false,
   });
+  final bool syncProgress;
   final bool online;
   final bool autoSwitch;
   final int introSeconds;
@@ -1484,6 +1570,7 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
   int blockedVerifications = 0;
   @override
   Future<AnimeState> build() async => (await super.build()).copyWith(
+    misc: MiscSettings(bangumiAutoSyncProgress: syncProgress),
     settings: PlaybackSettings(
       rememberLine: false,
       autoNext: outroSeconds > 0,

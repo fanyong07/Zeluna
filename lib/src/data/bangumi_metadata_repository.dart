@@ -83,9 +83,22 @@ class BangumiAccessCredential {
   String toString() => 'BangumiAccessCredential(accountId: $accountId)';
 }
 
+class BangumiWatchingItem {
+  const BangumiWatchingItem({
+    required this.subject,
+    required this.watchedEpisodes,
+    this.updatedAt,
+  });
+
+  final AnimeSubject subject;
+  final int watchedEpisodes;
+  final DateTime? updatedAt;
+}
+
 class BangumiMetadataRepository {
   BangumiMetadataRepository({
     http.Client? client,
+    String? publicMetadataToken,
     Future<BangumiAccessCredential?> Function()? accessCredentialProvider,
     Future<void> Function(BangumiAccessCredential credential)?
     onAccessTokenRejected,
@@ -96,12 +109,15 @@ class BangumiMetadataRepository {
            createNetworkHttpClient(
              NetworkRequestPolicy.forService(NetworkServiceKind.metadataApi),
            ),
+       _publicMetadataToken = publicMetadataToken,
        _accessCredentialProvider = accessCredentialProvider,
        _onAccessTokenRejected = onAccessTokenRejected,
        _clock = clock ?? DateTime.now,
        _publicCatalogBaseUrl = publicCatalogBaseUrl;
 
   final http.Client _client;
+  final String? _publicMetadataToken;
+  bool _publicTokenRejected = false;
   final Future<BangumiAccessCredential?> Function()? _accessCredentialProvider;
   final Future<void> Function(BangumiAccessCredential credential)?
   _onAccessTokenRejected;
@@ -131,6 +147,7 @@ class BangumiMetadataRepository {
   void resetAccessTokenState() {
     _credentialGeneration++;
     _suppressAccessToken = false;
+    _publicTokenRejected = false;
   }
 
   Future<BangumiTokenValidation> validateAccessToken(String token) async {
@@ -183,6 +200,156 @@ class BangumiMetadataRepository {
     } catch (_) {
       return const BangumiTokenValidation.invalid('无法连接 Bangumi，请检查网络后重试');
     }
+  }
+
+  /// [limit] is the page size; a larger library is not silently truncated.
+  Future<List<BangumiWatchingItem>> fetchWatchingCollection({
+    String? username,
+    int limit = 50,
+  }) async {
+    final generation = _credentialGeneration;
+    final credential = await _readAccessCredential();
+    if (credential == null) throw const FormatException('请先绑定有效的 Bangumi 令牌');
+    if (username == null) {
+      final response = await _collectionRequest(
+        'GET',
+        Uri.parse('$_baseUrl/v0/me'),
+        credential,
+        generation,
+      );
+      final me = _collectionJson(response);
+      final name = me['username'];
+      username = name is String ? _blankToNull(name) : null;
+      if (username == null) throw const FormatException('Bangumi 未返回用户名');
+    }
+    final collectionUri = Uri.parse(
+      _baseUrl,
+    ).replace(pathSegments: ['v0', 'users', username, 'collections']);
+    final items = <BangumiWatchingItem>[];
+    var offset = 0;
+    while (true) {
+      final uri = collectionUri.replace(
+        queryParameters: {
+          'subject_type': '2',
+          'type': '3',
+          'limit': '$limit',
+          'offset': '$offset',
+        },
+      );
+      final response = await _collectionRequest(
+        'GET',
+        uri,
+        credential,
+        generation,
+      );
+      final page = _collectionJson(response);
+      final rows = page['data'];
+      if (rows is! List) throw const FormatException('Bangumi 在看列表格式不正确');
+      for (final row in rows) {
+        if (row is! Map<String, dynamic> ||
+            row['subject'] is! Map<String, dynamic>) {
+          throw const FormatException('Bangumi 在看条目缺少作品资料');
+        }
+        final subject = _subjectFromJson(
+          row['subject'] as Map<String, dynamic>,
+        );
+        final watched = _intValue(row['ep_status']);
+        if (subject.id <= 0 || watched == null || watched < 0) {
+          throw const FormatException('Bangumi 在看条目的编号或进度无效');
+        }
+        items.add(
+          BangumiWatchingItem(
+            subject: subject,
+            watchedEpisodes: watched,
+            updatedAt: DateTime.tryParse(row['updated_at']?.toString() ?? ''),
+          ),
+        );
+      }
+      offset += rows.length;
+      if (rows.isEmpty || offset >= (_intValue(page['total']) ?? offset)) break;
+    }
+    return items;
+  }
+
+  Map<String, dynamic> _collectionJson(http.Response response) {
+    if (response.statusCode != 200) {
+      throw FormatException('读取 Bangumi 在看列表失败（HTTP ${response.statusCode}）');
+    }
+    try {
+      return _decodeResponse(response);
+    } on FormatException {
+      throw const FormatException('Bangumi 返回的数据不是有效 JSON');
+    }
+  }
+
+  Future<bool> markEpisodeWatched({
+    required int subjectId,
+    required int episodeId,
+  }) async {
+    if (subjectId <= 0 || episodeId <= 0) return false;
+    final generation = _credentialGeneration;
+    final credential = await _readAccessCredential();
+    if (credential == null) return false;
+    final episodeUri = Uri.parse(
+      '$_baseUrl/v0/users/-/collections/-/episodes/$episodeId',
+    );
+    Future<http.Response> mark() =>
+        _collectionRequest('PUT', episodeUri, credential, generation, type: 2);
+    try {
+      var result = await mark();
+      if (result.statusCode == 400 || result.statusCode == 404) {
+        final follow = await _collectionRequest(
+          'POST',
+          Uri.parse('$_baseUrl/v0/users/-/collections/$subjectId'),
+          credential,
+          generation,
+          type: 3,
+        );
+        if (follow.statusCode ~/ 100 != 2) return false;
+        result = await mark();
+      }
+      return result.statusCode ~/ 100 == 2;
+    } on Exception {
+      // A rejected token, cooldown or offline device must not interrupt playback.
+      return false;
+    }
+  }
+
+  Future<http.Response> _collectionRequest(
+    String method,
+    Uri uri,
+    BangumiAccessCredential credential,
+    int generation, {
+    int? type,
+  }) async {
+    void checkCredential() {
+      if (generation != _credentialGeneration) {
+        throw const FormatException('Bangumi 账号或令牌已变更，请重新操作');
+      }
+    }
+
+    checkCredential();
+    _ensureRequestAllowed(uri);
+    final request = http.Request(method, uri)
+      ..followRedirects = false
+      ..headers.addAll({
+        ..._headers,
+        'Authorization': 'Bearer ${credential.token}',
+      });
+    if (type != null) {
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode({'type': type});
+    }
+    final response = await _client
+        .send(request)
+        .then(http.Response.fromStream)
+        .timeout(const Duration(seconds: 12));
+    checkCredential();
+    if (response.statusCode == 401) {
+      await _rejectUserToken(credential);
+      throw const FormatException('Bangumi 令牌无效或已过期，请重新验证');
+    }
+    return _acceptResponse(response, uri);
   }
 
   AnimeHomeFeed fallbackHomeFeed() => _fallbackFeed;
@@ -720,16 +887,7 @@ class BangumiMetadataRepository {
       ]).timeout(const Duration(seconds: 22));
 
       final subject = _subjectFromJson(results[0] as Map<String, dynamic>);
-      final episodes =
-          (results[1] as List)
-              .whereType<Map>()
-              .map(
-                (item) =>
-                    _episodeFromJson(item.cast<String, dynamic>(), subject),
-              )
-              .where((item) => item.number > 0)
-              .toList()
-            ..sort((a, b) => a.number.compareTo(b.number));
+      final episodes = _episodesFromRows(results[1] as List, subject);
       final characters = (results[2] as List)
           .whereType<Map>()
           .map((item) => _characterFromJson(item.cast<String, dynamic>()))
@@ -776,6 +934,34 @@ class BangumiMetadataRepository {
       );
     }
   }
+
+  /// Only regular episodes from the official API. Never synthesize air dates on error.
+  Future<List<AnimeEpisode>> episodesForSubject(AnimeSubject subject) async {
+    final rows = <dynamic>[];
+    while (true) {
+      final page = await _getPagedPage('/v0/episodes', {
+        'subject_id': '${subject.id}',
+        'type': '0',
+        'limit': '$_episodePageSize',
+        'offset': '${rows.length}',
+      });
+      if (!page.succeeded) throw const FormatException('读取 Bangumi 分集列表失败');
+      rows.addAll(page.data);
+      if (page.data.isEmpty || rows.length >= page.total) break;
+    }
+    return _episodesFromRows(rows, subject);
+  }
+
+  List<AnimeEpisode> _episodesFromRows(
+    List<dynamic> rows,
+    AnimeSubject subject,
+  ) =>
+      rows
+          .whereType<Map<String, dynamic>>()
+          .map((row) => _episodeFromJson(row, subject))
+          .where((episode) => episode.number > 0)
+          .toList()
+        ..sort((a, b) => a.number.compareTo(b.number));
 
   Future<Map<String, dynamic>> _getObject(String path) async {
     final response = await _getWithOptionalAuth(Uri.parse('$_baseUrl$path'));
@@ -911,7 +1097,12 @@ class BangumiMetadataRepository {
 
   Future<http.Response> _getWithOptionalAuth(Uri uri) async {
     final credentialGeneration = _credentialGeneration;
-    final credential = await _readAccessCredential();
+    final publicToken = _publicMetadataToken;
+    final credential = publicToken == null
+        ? await _readAccessCredential()
+        : _publicTokenRejected
+        ? null
+        : BangumiAccessCredential(token: publicToken);
     if (credential == null || credentialGeneration != _credentialGeneration) {
       return _sendGet(uri, headers: _headers);
     }
@@ -924,12 +1115,10 @@ class BangumiMetadataRepository {
       return _sendGet(uri, headers: _headers);
     }
     if (response.statusCode == 401) {
-      _suppressAccessToken = true;
-      _credentialGeneration++;
-      try {
-        await _onAccessTokenRejected?.call(credential);
-      } catch (_) {
-        // Credential status persistence must never block anonymous metadata.
+      if (publicToken == null) {
+        await _rejectUserToken(credential);
+      } else {
+        _publicTokenRejected = true;
       }
       return _sendGet(uri, headers: _headers);
     }
@@ -937,6 +1126,16 @@ class BangumiMetadataRepository {
       return _sendGet(uri, headers: _headers);
     }
     return response;
+  }
+
+  Future<void> _rejectUserToken(BangumiAccessCredential credential) async {
+    _suppressAccessToken = true;
+    _credentialGeneration++;
+    try {
+      await _onAccessTokenRejected?.call(credential);
+    } on Exception {
+      // Secure storage can be unavailable; the token is still disabled in memory.
+    }
   }
 
   Future<BangumiAccessCredential?> _readAccessCredential() async {
@@ -1000,7 +1199,7 @@ class BangumiMetadataRepository {
       categories: categories,
       tags: tags,
       totalEpisodes: total,
-      ratingScore: (rating['score'] as num?)?.toDouble(),
+      ratingScore: double.tryParse('${rating['score']}'),
       ratingRank: _intValue(rating['rank']),
       ratingTotal: _intValue(rating['total']),
     );
@@ -1020,12 +1219,12 @@ class BangumiMetadataRepository {
     Map<String, dynamic> json,
     AnimeSubject subject,
   ) {
-    final ep = (json['ep'] as num?)?.round();
-    final sort = (json['sort'] as num?)?.round();
+    final ep = _intValue(json['ep']);
+    final sort = _intValue(json['sort']);
     final number = ep ?? sort ?? 0;
     final title = _bestChineseTitle(json['name_cn']);
     return AnimeEpisode(
-      id: _intValue(json['id']) ?? number,
+      id: _intValue(json['id']) ?? 0,
       subjectId: subject.id,
       number: number,
       title: title.startsWith('第') ? '' : title,

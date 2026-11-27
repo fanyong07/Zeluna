@@ -13,6 +13,7 @@ import '../data/anime_controller.dart';
 import '../data/chinese_text.dart';
 import '../domain/anime_models.dart';
 import '../domain/subject_content_type.dart';
+import '../library/following_update_tracker.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_interactions.dart';
 import '../shared_ui/app_navigation.dart';
@@ -4555,13 +4556,14 @@ class _DayCard extends StatelessWidget {
   }
 }
 
-class _ScheduleRightRail extends StatelessWidget {
+class _ScheduleRightRail extends ConsumerWidget {
   const _ScheduleRightRail({required this.state});
 
   final AnimeState state;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tracker = ref.watch(followingUpdateTrackerProvider);
     return ListView(
       padding: const EdgeInsets.fromLTRB(0, 6, 20, 24),
       children: [
@@ -4582,12 +4584,11 @@ class _ScheduleRightRail extends StatelessWidget {
                 for (final item in state.following.take(5))
                   CompactSubjectRow(
                     subject: _publicSubjectMetadata(context, item.subject),
-                    // Was a static 提醒 label that looked like an action but
-                    // was neither tappable nor backed by any reminder feature.
-                    // Show where the user actually left off instead.
-                    trailing: item.episode == null
-                        ? null
-                        : '看到第${item.episode!.number}集',
+                    trailing:
+                        tracker.statusFor(item, state.history).shortBadge ??
+                        (item.episode == null
+                            ? null
+                            : '看到第${item.episode!.number}集'),
                   ),
             ],
           ),

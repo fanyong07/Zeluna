@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +13,7 @@ import '../data/anime_controller.dart';
 import '../data/media_download_task.dart';
 import '../domain/anime_models.dart';
 import '../downloads/download_controller.dart';
+import '../library/following_update_tracker.dart';
 import '../rules/bundled_community_subscriptions.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_interactions.dart';
@@ -411,13 +414,14 @@ class _BannerMetric extends StatelessWidget {
   }
 }
 
-class _ProfilePlaylistSection extends StatelessWidget {
+class _ProfilePlaylistSection extends ConsumerWidget {
   const _ProfilePlaylistSection({required this.state});
 
   final AnimeState state;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tracker = ref.watch(followingUpdateTrackerProvider);
     final compact = MediaQuery.sizeOf(context).width < 760;
     final entries = state.following.take(8).toList(growable: false);
     return AppPanel(
@@ -446,6 +450,7 @@ class _ProfilePlaylistSection extends StatelessWidget {
                     final subject = entries[index].subject;
                     return _PlaylistCard(
                       title: subject.title,
+                      status: tracker.statusFor(entries[index], state.history),
                       subject: subject,
                       onTap: () => _openDetail(context, subject),
                     );
@@ -467,11 +472,13 @@ class _PlaylistCard extends StatelessWidget {
     required this.title,
     required this.subject,
     required this.onTap,
+    required this.status,
   });
 
   final String title;
   final AnimeSubject subject;
   final VoidCallback onTap;
+  final FollowingUpdateStatus status;
 
   @override
   Widget build(BuildContext context) {
@@ -496,6 +503,16 @@ class _PlaylistCard extends StatelessWidget {
                 const DecoratedBox(
                   decoration: BoxDecoration(gradient: AppOverlays.mediaCaption),
                 ),
+                if (status.shortBadge case final label?)
+                  Positioned(
+                    left: 8,
+                    top: 8,
+                    child: SmallBadge(
+                      label: label,
+                      compact: true,
+                      active: status.hasUpdates,
+                    ),
+                  ),
                 Positioned(
                   left: 12,
                   right: 12,
@@ -1657,6 +1674,7 @@ class LibraryPage extends ConsumerWidget {
     this.active = ChromeDestination.favorite,
     this.clearKey,
     this.playEntries = false,
+    this.showFollowingUpdates = false,
   });
 
   final String title;
@@ -1666,12 +1684,19 @@ class LibraryPage extends ConsumerWidget {
   final ChromeDestination active;
   final String? clearKey;
   final bool playEntries;
+  final bool showFollowingUpdates;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return AsyncAnimeGate(
       builder: (context, state) {
         final entries = entriesOf(state);
+        final empty = EmptyState(
+          icon: Icons.inbox_outlined,
+          compact: true,
+          title: emptyTitle,
+          message: emptyMessage,
+        );
         return AppChrome(
           title: title,
           active: active,
@@ -1686,76 +1711,222 @@ class LibraryPage extends ConsumerWidget {
                       .clearLibrary(clearKey!),
                   icon: const Icon(Icons.delete_outline),
                 ),
-          child: entries.isEmpty
-              ? EmptyState(
-                  icon: Icons.inbox_outlined,
-                  compact: true,
-                  title: emptyTitle,
-                  message: emptyMessage,
+          child: showFollowingUpdates
+              ? _FollowingLibrary(
+                  entries: entries,
+                  history: state.history,
+                  empty: empty,
+                  playEntries: playEntries,
                 )
-              : LayoutBuilder(
-                  builder: (context, constraints) {
-                    final columns = (constraints.maxWidth / 360).floor().clamp(
-                      1,
-                      4,
-                    );
-                    final extra =
-                        (MediaQuery.textScalerOf(context).scale(1) - 1).clamp(
-                          0.0,
-                          2.0,
-                        );
-                    return CustomScrollView(
-                      slivers: [
-                        SliverPadding(
-                          padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
-                          sliver: SliverToBoxAdapter(
-                            child: Text(
-                              '${entries.length} 部作品',
-                              style: Theme.of(context).textTheme.bodyMedium
-                                  ?.copyWith(color: context.inkMuted),
-                            ),
-                          ),
-                        ),
-                        SliverPadding(
-                          padding: EdgeInsets.fromLTRB(
-                            columns == 1 ? 14 : 24,
-                            0,
-                            columns == 1 ? 14 : 24,
-                            24,
-                          ),
-                          sliver: SliverGrid(
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: columns,
-                                  mainAxisExtent: 136 + extra * 60,
-                                  mainAxisSpacing: 14,
-                                  crossAxisSpacing: 14,
-                                ),
-                            delegate: SliverChildBuilderDelegate(
-                              (context, index) => _LibraryTile(
-                                entry: entries[index],
-                                onTap: playEntries
-                                    ? () => _playEntry(context, entries[index])
-                                    : () => _openDetail(
-                                        context,
-                                        entries[index].subject,
-                                      ),
-                                trailingIcon: playEntries
-                                    ? Icons.play_arrow_rounded
-                                    : Icons.chevron_right_rounded,
-                              ),
-                              childCount: entries.length,
-                            ),
-                          ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
+              : entries.isEmpty
+              ? empty
+              : _LibraryGrid(entries: entries, playEntries: playEntries),
         );
       },
     );
   }
+}
+
+class _FollowingLibrary extends ConsumerStatefulWidget {
+  const _FollowingLibrary({
+    required this.entries,
+    required this.history,
+    required this.empty,
+    required this.playEntries,
+  });
+
+  final List<LibraryEntry> entries;
+  final bool playEntries;
+  final List<LibraryEntry> history;
+  final Widget empty;
+
+  @override
+  ConsumerState<_FollowingLibrary> createState() => _FollowingLibraryState();
+}
+
+class _FollowingLibraryState extends ConsumerState<_FollowingLibrary> {
+  bool _onlyUpdates = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scheduleRefresh();
+  }
+
+  @override
+  void didUpdateWidget(_FollowingLibrary oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.entries != oldWidget.entries) _scheduleRefresh();
+  }
+
+  void _scheduleRefresh() => WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (mounted) unawaited(_refresh());
+  });
+
+  Future<void> _refresh({bool force = false}) => ref
+      .read(followingUpdateTrackerProvider)
+      .refreshForSubjects(widget.entries.map((e) => e.subject), force: force);
+
+  @override
+  Widget build(BuildContext context) {
+    final tracker = ref.watch(followingUpdateTrackerProvider);
+    final statuses = {
+      for (final entry in widget.entries)
+        entry.subject.identityKey: tracker.statusFor(entry, widget.history),
+    };
+    final updated = widget.entries
+        .where((entry) => statuses[entry.subject.identityKey]!.hasUpdates)
+        .toList();
+    final visible = _onlyUpdates ? updated : widget.entries;
+    final wide = MediaQuery.sizeOf(context).width >= 760;
+    return Column(
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(wide ? 24 : 14, 10, wide ? 24 : 14, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    ChoiceChip(
+                      key: const ValueKey('followingFilterAll'),
+                      visualDensity: VisualDensity.compact,
+                      label: Text('全部 (${widget.entries.length})'),
+                      selected: !_onlyUpdates,
+                      onSelected: (_) => setState(() => _onlyUpdates = false),
+                    ),
+                    ChoiceChip(
+                      key: const ValueKey('followingFilterUpdated'),
+                      visualDensity: VisualDensity.compact,
+                      label: Text('有更新 (${updated.length})'),
+                      selected: _onlyUpdates,
+                      onSelected: (_) => setState(() => _onlyUpdates = true),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: '刷新更新',
+                onPressed: tracker.refreshing
+                    ? null
+                    : () => _refresh(force: true),
+                icon: tracker.refreshing
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh_rounded),
+              ),
+              if (wide)
+                OutlinedButton.icon(
+                  onPressed: () => context.push('/settings/bangumi'),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                  ),
+                  icon: const Icon(Icons.sync_rounded, size: 17),
+                  label: const Text('Bangumi 同步'),
+                )
+              else
+                IconButton(
+                  tooltip: 'Bangumi 同步',
+                  onPressed: () => context.push('/settings/bangumi'),
+                  icon: const Icon(Icons.sync_rounded),
+                ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: visible.isNotEmpty
+              ? _LibraryGrid(
+                  entries: visible,
+                  statuses: statuses,
+                  playEntries: widget.playEntries,
+                )
+              : _onlyUpdates
+              ? const EmptyState(
+                  icon: Icons.done_all,
+                  compact: true,
+                  title: '当前追番均已追平',
+                  message: '可以切回「全部」查看追番列表。',
+                )
+              : widget.empty,
+        ),
+      ],
+    );
+  }
+}
+
+class _LibraryGrid extends StatelessWidget {
+  const _LibraryGrid({
+    required this.entries,
+    this.playEntries = false,
+    this.statuses = const {},
+  });
+
+  final List<LibraryEntry> entries;
+  final bool playEntries;
+  final Map<String, FollowingUpdateStatus> statuses;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final columns = (constraints.maxWidth / 360).floor().clamp(1, 4);
+      final extra = (MediaQuery.textScalerOf(context).scale(1) - 1).clamp(
+        0.0,
+        2.0,
+      );
+      return CustomScrollView(
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(24, 18, 24, 18),
+            sliver: SliverToBoxAdapter(
+              child: Text(
+                '${entries.length} 部作品',
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(color: context.inkMuted),
+              ),
+            ),
+          ),
+          SliverPadding(
+            padding: EdgeInsets.fromLTRB(
+              columns == 1 ? 14 : 24,
+              0,
+              columns == 1 ? 14 : 24,
+              24,
+            ),
+            sliver: SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                mainAxisExtent: 136 + extra * 60,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (context, index) => _LibraryTile(
+                  entry: entries[index],
+                  status: statuses[entries[index].subject.identityKey],
+                  onTap: playEntries
+                      ? () => _playEntry(context, entries[index])
+                      : () => _openDetail(context, entries[index].subject),
+                  trailingIcon: playEntries
+                      ? Icons.play_arrow_rounded
+                      : Icons.chevron_right_rounded,
+                ),
+                childCount: entries.length,
+              ),
+            ),
+          ),
+        ],
+      );
+    },
+  );
 }
 
 class HistoryPage extends ConsumerWidget {
@@ -2669,11 +2840,13 @@ class _LibraryTile extends StatelessWidget {
     required this.entry,
     required this.onTap,
     required this.trailingIcon,
+    this.status,
   });
 
   final LibraryEntry entry;
   final VoidCallback onTap;
   final IconData trailingIcon;
+  final FollowingUpdateStatus? status;
 
   @override
   Widget build(BuildContext context) {
@@ -2682,7 +2855,11 @@ class _LibraryTile extends StatelessWidget {
       color: scheme.surfaceContainer,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppRadius.md),
-        side: BorderSide(color: scheme.outlineVariant),
+        side: BorderSide(
+          color: status?.hasUpdates == true
+              ? scheme.primary.withValues(alpha: 0.45)
+              : scheme.outlineVariant,
+        ),
       ),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -2696,7 +2873,23 @@ class _LibraryTile extends StatelessWidget {
                 height: 106,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(6),
-                  child: _PosterThumb(subject: entry.subject),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      _PosterThumb(subject: entry.subject),
+                      if (status?.shortBadge case final label?)
+                        Positioned(
+                          bottom: 4,
+                          left: 4,
+                          right: 4,
+                          child: SmallBadge(
+                            label: label,
+                            compact: true,
+                            active: status!.hasUpdates,
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(width: 14),
@@ -2713,10 +2906,21 @@ class _LibraryTile extends StatelessWidget {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      entry.note.isEmpty ? entry.subject.year : entry.note,
+                      status?.detailLabel.isNotEmpty == true
+                          ? status!.detailLabel
+                          : entry.note.isEmpty
+                          ? entry.subject.year
+                          : entry.note,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.bodySmall,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: status?.hasUpdates == true
+                            ? scheme.primary
+                            : scheme.onSurfaceVariant,
+                        fontWeight: status?.hasUpdates == true
+                            ? FontWeight.w700
+                            : null,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -2969,7 +3173,12 @@ Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
   try {
     final detail = await controller.detail(entry.subject);
     episodes = detail.episodes;
-    episode ??= episodes.firstOrNull;
+    if (episode == null) {
+      episode = episodes.firstOrNull;
+    } else if (episode.id < 0 && entry.subject.source == 'bangumi') {
+      final number = episode.number;
+      episode = episodes.where((e) => e.number == number).firstOrNull;
+    }
   } on AccountException {
     return;
   } catch (_) {
@@ -2980,7 +3189,8 @@ Future<void> _playEntry(BuildContext context, LibraryEntry entry) async {
       !controller.isAccountContextCurrent(accountContextVersion)) {
     return;
   }
-  if (episode == null) {
+  if (episode == null ||
+      (episode.id < 0 && entry.subject.source == 'bangumi')) {
     _showToast(context, '这条记录没有可继续播放的集数');
     _openDetail(context, entry.subject);
     return;

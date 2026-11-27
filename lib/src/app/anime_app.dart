@@ -18,6 +18,7 @@ import '../player/open_media_page.dart';
 import '../profile/profile_page.dart';
 import '../rules/rule_plugin_page.dart';
 import '../settings/settings_page.dart';
+import '../settings/bangumi_sync_page.dart';
 import '../sources/media_library_page.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/app_interactions.dart';
@@ -113,6 +114,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         emptyTitle: '还没有追番',
         emptyMessage: '在详情页点“追番”后会加入这里，也可以从“我的”页进入。',
         entriesOf: (state) => state.following,
+        showFollowingUpdates: true,
         active: ChromeDestination.favorite,
       ),
     ),
@@ -194,6 +196,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       path: '/settings',
       parentNavigatorKey: rootNavigatorKey,
       builder: (context, state) => const SettingsHubPage(),
+    ),
+    GoRoute(
+      path: '/settings/bangumi',
+      parentNavigatorKey: rootNavigatorKey,
+      builder: (context, state) => const BangumiSyncPage(),
     ),
     GoRoute(
       path: '/settings/playback',

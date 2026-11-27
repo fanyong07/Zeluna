@@ -141,10 +141,8 @@ final bangumiMetadataRepositoryProvider = Provider<BangumiMetadataRepository>((
   );
   final repository = BangumiMetadataRepository(
     client: client,
+    publicMetadataToken: builtInToken,
     accessCredentialProvider: () async {
-      if (builtInToken != null) {
-        return BangumiAccessCredential(token: builtInToken);
-      }
       final snapshot = accountContext.snapshot;
       final token = await credentials.readAccessToken(
         accountId: snapshot.accountId,
@@ -155,15 +153,10 @@ final bangumiMetadataRepositoryProvider = Provider<BangumiMetadataRepository>((
         accountId: snapshot.accountId,
       );
     },
-    onAccessTokenRejected: (credential) {
-      // A build-time credential is application configuration, not account
-      // data. Its rejection must never mutate an account's secure storage.
-      if (builtInToken != null) return Future<void>.value();
-      return credentials.markRejectedToken(
-        accountId: credential.accountId,
-        rejectedToken: credential.token,
-      );
-    },
+    onAccessTokenRejected: (credential) => credentials.markRejectedToken(
+      accountId: credential.accountId,
+      rejectedToken: credential.token,
+    ),
   );
   ref.onDispose(repository.close);
   return repository;

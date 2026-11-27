@@ -744,6 +744,8 @@ class PlaySessionRequest {
   final Duration? resumePosition;
 }
 
+const episodeWatchedThreshold = 0.85;
+
 class LibraryEntry {
   const LibraryEntry({
     required this.subject,
@@ -1134,24 +1136,29 @@ class MiscSettings {
     this.wifiOnlyCache = true,
     this.keepScreenOn = true,
     this.saveCrashLog = true,
+    this.bangumiAutoSyncProgress = false,
   });
 
   final bool autoCheckUpdates;
   final bool wifiOnlyCache;
   final bool keepScreenOn;
   final bool saveCrashLog;
+  final bool bangumiAutoSyncProgress;
 
   MiscSettings copyWith({
     bool? autoCheckUpdates,
     bool? wifiOnlyCache,
     bool? keepScreenOn,
     bool? saveCrashLog,
+    bool? bangumiAutoSyncProgress,
   }) {
     return MiscSettings(
       autoCheckUpdates: autoCheckUpdates ?? this.autoCheckUpdates,
       wifiOnlyCache: wifiOnlyCache ?? this.wifiOnlyCache,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
       saveCrashLog: saveCrashLog ?? this.saveCrashLog,
+      bangumiAutoSyncProgress:
+          bangumiAutoSyncProgress ?? this.bangumiAutoSyncProgress,
     );
   }
 
@@ -1160,6 +1167,7 @@ class MiscSettings {
     'wifiOnlyCache': wifiOnlyCache,
     'keepScreenOn': keepScreenOn,
     'saveCrashLog': saveCrashLog,
+    'bangumiAutoSyncProgress': bangumiAutoSyncProgress,
   };
 
   factory MiscSettings.fromJson(Map<String, dynamic> json) {
@@ -1168,6 +1176,7 @@ class MiscSettings {
       wifiOnlyCache: json['wifiOnlyCache'] as bool? ?? true,
       keepScreenOn: json['keepScreenOn'] as bool? ?? true,
       saveCrashLog: json['saveCrashLog'] as bool? ?? true,
+      bangumiAutoSyncProgress: json['bangumiAutoSyncProgress'] == true,
     );
   }
 }

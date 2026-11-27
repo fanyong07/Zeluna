@@ -20,6 +20,7 @@ import '../data/danmaku_repository.dart' show ManualDanmakuCandidate;
 import '../playback/local_route_ranker.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
+import '../library/bangumi_sync_service.dart';
 import '../sources/media_library_adapter.dart';
 import '../recommendations/recommendation_playback.dart';
 import '../rules/rule_playback_resolver.dart';
@@ -185,6 +186,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   Duration _recommendationWatched = Duration.zero;
   Duration? _recommendationLastObservedPosition;
   DateTime? _lastPlaybackProgressPersistedAt;
+  bool _lastPersistedAsWatched = false;
   int? _handledEndedEpisodeId;
   int? _handledEndedOpenSerial;
 
@@ -1896,7 +1898,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recoveryController.notePlaybackProgress(value);
     _trackRecommendationWatchTime(value);
     _scheduleNextEpisodePrefetch();
-    unawaited(_persistPlaybackProgress());
+    unawaited(_persistPlaybackProgress(position: value));
   }
 
   void _resetRecommendationTracking() {
@@ -1906,6 +1908,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _recommendationWatched = Duration.zero;
     _recommendationLastObservedPosition = null;
     _lastPlaybackProgressPersistedAt = null;
+    _lastPersistedAsWatched = false;
     _handledEndedEpisodeId = null;
     _handledEndedOpenSerial = null;
   }
@@ -2040,6 +2043,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _backupLookupDelayTimer = null;
     _resetPlaybackStallWatchdog();
     _recordRecommendationCompletion();
+    _syncBangumiIfEnabled();
     unawaited(_persistPlaybackProgress(force: true));
     if (stopAfterEpisode) {
       unawaited(_pausePlayback());
@@ -2049,27 +2053,61 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
   }
 
-  Future<void> _persistPlaybackProgress({bool force = false}) async {
+  void _syncBangumiIfEnabled() {
+    final enabled =
+        ref.read(animeControllerProvider).value?.misc.bangumiAutoSyncProgress ==
+        true;
+    if (!enabled ||
+        !ref
+            .read(animeControllerProvider.notifier)
+            .isAccountContextCurrent(_accountContextVersion)) {
+      return;
+    }
+    unawaited(
+      ref
+          .read(bangumiSyncServiceProvider)
+          .syncEpisodeWatchedIfEnabled(
+            enabled: enabled,
+            subject: widget.request.subject,
+            episode: _episode,
+          ),
+    );
+  }
+
+  Future<void> _persistPlaybackProgress({
+    bool force = false,
+    Duration? position,
+  }) async {
+    final current = position ?? _position;
     if (_recommendationFirstFrameEpisodeId != _episode.id ||
-        _position <= Duration.zero ||
+        current <= Duration.zero ||
         _duration <= Duration.zero) {
       return;
     }
     final now = DateTime.now();
     final last = _lastPlaybackProgressPersistedAt;
+    final watched =
+        current.inMicroseconds / _duration.inMicroseconds >=
+        episodeWatchedThreshold;
+    // Persist the crossing immediately, even inside the usual 15-second window.
     if (!force &&
+        !(watched && !_lastPersistedAsWatched) &&
         last != null &&
         now.difference(last) < const Duration(seconds: 15)) {
       return;
     }
+    _lastPersistedAsWatched = watched;
     _lastPlaybackProgressPersistedAt = now;
     try {
+      if (watched) {
+        _syncBangumiIfEnabled();
+      }
       await ref
           .read(animeControllerProvider.notifier)
           .updatePlaybackProgress(
             widget.request.subject,
             _episode,
-            position: _position,
+            position: current,
             duration: _duration,
             expectedAccountContextVersion: _accountContextVersion,
           );

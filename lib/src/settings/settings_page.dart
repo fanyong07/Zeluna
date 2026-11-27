@@ -65,6 +65,13 @@ class SettingsHubPage extends ConsumerWidget {
             onTap: () => context.push('/settings/services/danmaku'),
           ),
           _SettingsHubTile(
+            icon: Icons.sync_rounded,
+            accent: AppColors.cyan,
+            title: 'Bangumi 同步',
+            value: state.misc.bangumiAutoSyncProgress ? '自动同步进度' : '令牌与追番进度',
+            onTap: () => context.push('/settings/bangumi'),
+          ),
+          _SettingsHubTile(
             icon: Icons.play_circle_outline_rounded,
             accent: scheme.primary,
             title: '播放设置',
