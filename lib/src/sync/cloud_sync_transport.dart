@@ -404,6 +404,11 @@ Map<String, dynamic> _playbackSettingsPayload(PlaybackSettings settings) => {
   'rewindSeconds': settings.rewindSeconds.clamp(1, 600),
   'forwardSeconds': settings.forwardSeconds.clamp(1, 600),
   'compatibilityMode': settings.compatibilityMode,
+  'skipIntroStartSeconds': settings.skipIntroStartSeconds,
+  'skipOutroStartSeconds': settings.skipOutroStartSeconds,
+  'skipOutroEndSeconds': settings.skipOutroEndSeconds,
+  'autoSkipOp': settings.autoSkipOp,
+  'autoSkipEd': settings.autoSkipEd,
   'skipIntroSeconds': settings.skipIntroSeconds,
   'skipOutroSeconds': settings.skipOutroSeconds,
   'subjectSkipTimings': {

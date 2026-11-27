@@ -44,6 +44,9 @@ import 'ui/external_playback_sheet.dart';
 import 'playback_continuity.dart';
 import 'player_pip_controller.dart';
 import 'sleep_timer_controller.dart';
+import 'skip/episode_skip_controller.dart';
+import 'skip/episode_skip_resolver.dart';
+import 'skip/skip_segment.dart';
 import 'playback_line_display.dart';
 import 'ui/playback_line_tile.dart';
 import 'playback_performance_trace.dart';
@@ -77,6 +80,12 @@ bool webPlaybackEventIsCurrent({
 }) {
   return eventGeneration == currentGeneration;
 }
+
+final episodeSkipRepositoryProvider = Provider<EpisodeSkipRepository>((ref) {
+  final repository = EpisodeSkipRepository();
+  ref.onDispose(repository.dispose);
+  return repository;
+});
 
 class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({
@@ -116,8 +125,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   bool _pipSupported = false;
   bool _pipActive = false;
   bool get _inPipMode => _pipActive && !_pipController.isWindows;
-  int? _introSkippedEpisodeId;
-  int? _outroTriggeredEpisodeId;
+  final _skipController = EpisodeSkipController();
+  final _autoSkippedSegmentKeys = <(int, SkipSegmentType)>{};
+  final _ignoredSegmentKeys = <(int, SkipSegmentType)>{};
+  bool _requestedOnlineSkips = false;
   Duration _lineResumePosition = Duration.zero;
   Tracks _tracks = const Tracks();
   Track _selectedTrack = const Track();
@@ -355,6 +366,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _handleDanmakuChanged() {
+    _skipController.updateDanmaku(_danmakuController.remoteComments);
     if (mounted) setState(() {});
   }
 
@@ -418,6 +430,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _sessionController.dispatch(PlaybackSessionEvent.firstFrame(line.id));
     _recordRecommendationFirstFrame();
     _playbackTrace.record('first_frame', fields: _lineTraceFields(line));
+    _syncSkipDuration();
+    if (!_usesWebPlayer && _player.platform is NativePlayer) {
+      unawaited(_loadSkipChapters(_openLineSerial));
+    }
     _loadEnabledDanmakuAfterFirstFrame();
     final inventoryEpisodeId = _episode.id;
     final metadataOpenSerial = _openLineSerial;
@@ -875,6 +891,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _lineController.dispose();
     _danmakuInputFocus.dispose();
     _danmakuController.dispose();
+    _skipController.dispose();
     _gestureController.dispose();
     _sessionController.dispose();
     _timelineRevision.dispose();
@@ -928,6 +945,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             ? state.settings
             : state.settings.copyWith(speed: _temporaryPlaybackRate);
         _applyPlaybackSettings(effectiveSettings);
+        _requestOnlineSkips(state.services);
         final playbackGeneration = _openLineSerial;
         final superResolutionStatus = _anime4kController.displayStatus;
         final superResolutionPanelStatus = _buildSuperResolutionPanelStatus(
@@ -977,7 +995,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                           onLinePanel: _toggleLinePanel,
                           onLineSelected: _selectLine,
                           player: AnimatedBuilder(
-                            animation: _timelineRevision,
+                            animation: Listenable.merge([
+                              _timelineRevision,
+                              _skipController,
+                            ]),
                             builder: (context, _) => _PlayerCanvas(
                               controller: _controller,
                               webPlayerController: _webPlayerController,
@@ -1010,7 +1031,15 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                                   _pipActive && _pipController.isWindows,
                               onPip: _pipSupported ? _togglePip : null,
                               sleepTimer: _sleepTimerController,
-                              onQuickSkipIntro: _quickSkipIntro,
+                              skipSegments: _skipController.segments,
+                              activeSkip: _visibleSkip,
+                              onSkip: _skipManually,
+                              onIgnoreSkip: (segment) => setState(
+                                () => _ignoredSegmentKeys.add((
+                                  _episode.id,
+                                  segment.type,
+                                )),
+                              ),
                               controlsVisible: _controlsVisible,
                               autoHideChrome: _shouldAutoHidePlayerControls,
                               playerMessage: _surfaceMessage,
@@ -1235,22 +1264,26 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         key: const ValueKey('player-panel-settings'),
         title: '',
         onClose: _closePanels,
-        child: PlaybackSettingsView(
-          compact: true,
-          subject: widget.request.subject,
-          episode: _episode,
-          line: _line,
-          playbackMessage: _surfaceMessage,
-          superResolutionStatus: superResolutionPanelStatus,
-          currentPosition: _position,
-          totalDuration: _duration,
-          readPosition: () => _position,
-          sleepTimer: _sleepTimerController,
-          settings: state.settings,
-          onChanged: (settings) => ref
-              .read(animeControllerProvider.notifier)
-              .updateSettings(settings),
-          onBack: () => setState(() => _settingsPanel = false),
+        child: ListenableBuilder(
+          listenable: _skipController,
+          builder: (context, _) => PlaybackSettingsView(
+            detectedSkipSegments: _skipController.segments,
+            compact: true,
+            subject: widget.request.subject,
+            episode: _episode,
+            line: _line,
+            playbackMessage: _surfaceMessage,
+            superResolutionStatus: superResolutionPanelStatus,
+            currentPosition: _position,
+            totalDuration: _duration,
+            readPosition: () => _position,
+            sleepTimer: _sleepTimerController,
+            settings: state.settings,
+            onChanged: (settings) => ref
+                .read(animeControllerProvider.notifier)
+                .updateSettings(settings),
+            onBack: () => setState(() => _settingsPanel = false),
+          ),
         ),
       );
     }
@@ -1564,6 +1597,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
             return;
           }
           setState(() => _duration = value);
+          _syncSkipDuration();
           if (value > Duration.zero) {
             _nativeVideo.resumeSeek.nudge(mediaReady: true);
           }
@@ -1719,7 +1753,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     }
     final volumeSettingChanged =
         _currentSettings.volumeBoost != settings.volumeBoost;
+    final previousTiming = _skipTiming;
     _currentSettings = settings;
+    if (_skipTiming != previousTiming) {
+      _skipController.updateManual(
+        _skipTiming.toManualSegments(duration: _duration),
+      );
+    }
     if (settings.rememberLine) {
       _preferredProviderId ??= ref
           .read(animeControllerProvider.notifier)
@@ -1989,46 +2029,121 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _currentSettings.effectiveSkipFor(widget.request.subject.identityKey);
 
   void _resetLinePlaybackState(Duration resumePosition) {
-    _introSkippedEpisodeId = _outroTriggeredEpisodeId = null;
+    _skipController.updateChapters(null);
     _lineResumePosition = resumePosition;
     _tracks = const Tracks();
     _selectedTrack = const Track();
   }
 
-  void _applyEpisodeSkips() {
-    if (!_playing || _firstFrameTraceOpenSerial != _openLineSerial) return;
-    final timing = _skipTiming;
-    final intro = Duration(seconds: timing.introSeconds);
-    if (_introSkippedEpisodeId != _episode.id &&
-        intro > Duration.zero &&
-        _lineResumePosition <= intro &&
-        !_nativeVideo.resumeSeek.isPending &&
-        !_nativeVideo.resumeSeek.isSeeking &&
-        _position < intro &&
-        (_duration == Duration.zero ||
-            _duration > intro + const Duration(seconds: 10))) {
-      _introSkippedEpisodeId = _episode.id;
-      unawaited(_seekTo(intro));
-      _showPlayerToast('已自动跳过片头');
+  void _syncSkipDuration() {
+    _skipController.updateDuration(_duration);
+    _skipController.updateManual(
+      _skipTiming.toManualSegments(duration: _duration),
+    );
+    _requestOnlineSkips(ref.read(animeControllerProvider).value?.services);
+  }
+
+  void _requestOnlineSkips(ExternalServiceSettings? services) {
+    if (_requestedOnlineSkips ||
+        services == null ||
+        _duration <= Duration.zero ||
+        widget.request.offlineOnly ||
+        widget.request.subject.source == 'direct' ||
+        _firstFrameTraceOpenSerial != _openLineSerial) {
       return;
     }
-    final outro = Duration(seconds: timing.outroSeconds);
-    if (_outroTriggeredEpisodeId != _episode.id &&
-        outro > Duration.zero &&
-        _currentSettings.autoNext &&
-        _duration > outro + const Duration(seconds: 30) &&
-        _position >= _duration - outro) {
-      _outroTriggeredEpisodeId = _episode.id;
-      _handlePlaybackEnded();
+    _requestedOnlineSkips = true;
+    unawaited(
+      _skipController.loadOnline(
+        ref.read(episodeSkipRepositoryProvider),
+        widget.request.subject,
+        _episode.number,
+        services,
+      ),
+    );
+  }
+
+  Future<void> _loadSkipChapters(int serial) async {
+    final String json;
+    try {
+      json = await _readMpvProperty('chapter-list');
+    } on Exception {
+      return;
+    }
+    if (mounted && serial == _openLineSerial) {
+      _skipController.updateChapters(json);
     }
   }
 
-  Future<void> _quickSkipIntro() {
-    final intro = Duration(seconds: _skipTiming.introSeconds);
-    _introSkippedEpisodeId = _episode.id;
-    return _seekTo(
-      _position < intro ? intro : _position + const Duration(seconds: 85),
-    );
+  SkipSegment? get _visibleSkip {
+    if (_pipActive ||
+        _controlMenuOpen ||
+        _hasOpenPanel ||
+        _loadingLine ||
+        _playbackFailed ||
+        _firstFrameTraceOpenSerial != _openLineSerial) {
+      return null;
+    }
+    final active = _skipController.activeSegmentAt(_position);
+    if (active == null ||
+        active.end - _position < const Duration(milliseconds: 1500) ||
+        _ignoredSegmentKeys.contains((_episode.id, active.type))) {
+      return null;
+    }
+    return active;
+  }
+
+  void _skipManually(SkipSegment segment) {
+    _autoSkippedSegmentKeys.add((_episode.id, segment.type));
+    if (segment.isTerminalEnding(_duration) && _canPlayNextEpisode) {
+      unawaited(_playNextEpisode());
+    } else {
+      unawaited(_seekTo(segment.end));
+    }
+  }
+
+  void _applyEpisodeSkips() {
+    if (!_playing ||
+        _duration <= Duration.zero ||
+        _firstFrameTraceOpenSerial != _openLineSerial ||
+        _nativeVideo.resumeSeek.isPending ||
+        _nativeVideo.resumeSeek.isSeeking) {
+      return;
+    }
+    for (final s in _skipController.segments) {
+      final key = (_episode.id, s.type);
+      if (!s.contains(_position) ||
+          s.end - _position < const Duration(seconds: 2) ||
+          _ignoredSegmentKeys.contains(key) ||
+          _autoSkippedSegmentKeys.contains(key)) {
+        continue;
+      }
+      final manual = s.source == SkipSegmentSource.manual;
+      if (s.type == SkipSegmentType.op &&
+          (manual || _currentSettings.autoSkipOp) &&
+          _lineResumePosition < s.end) {
+        _autoSkippedSegmentKeys.add(key);
+        unawaited(_seekTo(s.end));
+        _showPlayerToast('已自动跳过片头');
+        return;
+      }
+      if (s.type == SkipSegmentType.ed &&
+          (manual || _currentSettings.autoSkipEd)) {
+        final tail = s.isTerminalEnding(_duration);
+        if (tail &&
+            !_currentSettings.autoNext &&
+            !_currentSettings.autoSkipEd) {
+          continue;
+        }
+        _autoSkippedSegmentKeys.add(key);
+        if (tail && _canPlayNextEpisode && _currentSettings.autoNext) {
+          _handlePlaybackEnded();
+        } else {
+          unawaited(_seekTo(s.end));
+        }
+        return;
+      }
+    }
   }
 
   void _handlePlaybackEnded() {
@@ -2630,6 +2745,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _playbackFailed = false;
         _playerMessage = null;
       });
+      _syncSkipDuration();
     } catch (error) {
       if (!mounted || serial != _openLineSerial) return;
       _nativeMediaEvents.invalidate();
@@ -3176,6 +3292,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _warmupTransitionFallbackLineId = preparedLines.skip(1).firstOrNull?.id;
     _openingWarmupTransitionPrimary = false;
     _resetNextEpisodePrefetch();
+    _skipController.resetForEpisode();
+    _requestedOnlineSkips = false;
     _danmakuController.changeEpisode();
     final playbackSerial = ++_openLineSerial;
     _openProbeToken?.cancel();
@@ -3974,6 +4092,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       return;
     }
     setState(() => _duration = value);
+    _syncSkipDuration();
   }
 
   void _handleWebPlaying(int playbackGeneration, bool value) {

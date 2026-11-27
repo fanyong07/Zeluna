@@ -10,6 +10,7 @@ import 'package:anime/src/domain/anime_models.dart';
 import 'package:anime/src/data/playback_source_repository.dart';
 import 'package:anime/src/rules/rule_playback_cancellation.dart';
 import 'package:anime/src/player/player_page.dart';
+import 'package:anime/src/player/skip/episode_skip_resolver.dart';
 import 'package:anime/src/player/subtitles/subtitle_store.dart';
 import 'package:anime/src/player/video/native_video_controller.dart' as owned;
 import 'package:anime/src/player/video/media_transport_failure.dart';
@@ -32,32 +33,126 @@ import '../integration_test/support/isolated_player_environment.dart';
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
   testWidgets(
-    'OP skips once per line; quick skip uses the configured mark or advances 85s',
+    'cold open is kept, automatic skip is once per episode, rewind exposes only the contextual pill',
     (tester) async {
       final fixture = await _mount(
         tester,
-        account: _PauseAccount(introSeconds: 30),
+        account: _PauseAccount(introStartSeconds: 20, introSeconds: 50),
       );
-      fixture.engine.progress(const Duration(seconds: 16));
+      final pill = find.byKey(const ValueKey('playerSkipSegmentPill'));
+      expect(find.byKey(const ValueKey('playerQuickSkipIntro')), findsNothing);
+      expect(find.text('+85s'), findsNothing);
+      expect(pill, findsNothing);
+      expect(fixture.engine.seeks, isEmpty);
+      fixture.engine.progress(const Duration(seconds: 20));
       await tester.pump();
-      expect(fixture.engine.seeks, [const Duration(seconds: 30)]);
-      fixture.engine.progress(const Duration(seconds: 3));
       await tester.pump();
+      expect(fixture.engine.seeks, [const Duration(seconds: 50)]);
+      fixture.engine.progress(const Duration(seconds: 25));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 220));
+      expect(pill, findsOneWidget);
+      expect(find.text('跳过片头 → 00:50'), findsOneWidget);
       expect(fixture.engine.seeks, hasLength(1));
-      final button = find.byKey(const ValueKey('playerQuickSkipIntro'));
-      await tester.tap(button);
-      await tester.pump(const Duration(milliseconds: 350));
+      await tester.tap(pill);
       await tester.pump();
-      await tester.tap(button);
-      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump(const Duration(milliseconds: 220));
+      expect(fixture.engine.seeks, [
+        const Duration(seconds: 50),
+        const Duration(seconds: 50),
+      ]);
+      expect(pill, findsNothing);
+    },
+  );
+  testWidgets(
+    'online ED with 15 seconds of post-credits seeks rather than switching episodes',
+    (tester) async {
+      final account = _PauseAccount(online: true);
+      final fixture = await _mount(
+        tester,
+        account: account,
+        episodes: const [playerTestEpisode, playerTestSecondEpisode],
+        skipPayload:
+            '{"found":true,"segments":[{"type":"ed","start":80,"end":165}]}',
+      );
+      fixture.engine.progress(const Duration(seconds: 100));
       await tester.pump();
-      expect(fixture.engine.seeks.skip(1), [
-        const Duration(seconds: 30),
-        const Duration(seconds: 115),
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(fixture.engine.seeks, isEmpty);
+      final pill = find.byKey(const ValueKey('playerSkipSegmentPill'));
+      expect(find.text('跳过片尾 → 02:45'), findsOneWidget);
+      await tester.tap(pill);
+      await tester.pump();
+      expect(fixture.engine.seeks, [const Duration(seconds: 165)]);
+      expect(
+        account.episodeRequests,
+        isNot(contains(playerTestSecondEpisode.id)),
+      );
+    },
+  );
+  testWidgets(
+    'recognized OP and ED follow their own switches; only an intentional replay can revisit OP',
+    (tester) async {
+      final account = _PauseAccount(
+        online: true,
+        autoSkipOp: true,
+        autoSkipEd: true,
+      );
+      final fixture = await _mount(
+        tester,
+        account: account,
+        skipPayload:
+            '{"found":true,"segments":[{"type":"op","start":24,"end":64},{"type":"ed","start":100,"end":160}]}',
+      );
+      expect(fixture.engine.seeks, isEmpty);
+      for (final t in [24, 30, 100]) {
+        fixture.engine.progress(Duration(seconds: t));
+        await tester.pump();
+        await tester.pump();
+      }
+      expect(fixture.engine.seeks, [
+        const Duration(seconds: 64),
+        const Duration(seconds: 160),
       ]);
     },
   );
-
+  testWidgets(
+    'hidden chrome still offers terminal ED; ignore applies only to this episode and type',
+    (tester) async {
+      final account = _PauseAccount(online: true);
+      final fixture = await _mount(
+        tester,
+        account: account,
+        episodes: const [playerTestEpisode, playerTestSecondEpisode],
+        skipPayload:
+            '{"found":true,"segments":[{"type":"recap","start":18,"end":38},{"type":"ed","start":115,"end":178}]}',
+      );
+      fixture.engine.progress(const Duration(seconds: 20));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.tap(find.byTooltip('本集忽略前情'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byKey(const ValueKey('playerSkipSegmentPill')), findsNothing);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(
+        tester.getCenter(find.byKey(const ValueKey('playerGestureSurface'))),
+      );
+      await tester.pump();
+      fixture.engine.progress(const Duration(seconds: 115));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byTooltip('播放设置').hitTestable(), findsNothing);
+      await mouse.removePointer();
+      expect(find.text('跳过片尾 · 下一集').hitTestable(), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('playerSkipSegmentPill')));
+      await tester.pump();
+      await tester.pump();
+      expect(account.episodeRequests, contains(playerTestSecondEpisode.id));
+    },
+  );
   testWidgets('a resume beyond the intro is never replaced by an OP seek', (
     tester,
   ) async {
@@ -1151,6 +1246,7 @@ Future<_Fixture> _mount(
   _PauseAccount? account,
   AnimeSubject? subject,
   BangumiMetadataRepository? bangumi,
+  String skipPayload = '{"found":false}',
   bool nativeLock = false,
   bool reachFirstFrame = true,
   Duration? resumePosition,
@@ -1202,6 +1298,13 @@ Future<_Fixture> _mount(
     ProviderScope(
       overrides: [
         animeControllerProvider.overrideWith(() => activeAccount),
+        episodeSkipRepositoryProvider.overrideWith((ref) {
+          final repo = EpisodeSkipRepository(
+            client: MockClient((r) async => http.Response(skipPayload, 200)),
+          );
+          ref.onDispose(repo.dispose);
+          return repo;
+        }),
         if (bangumi != null)
           bangumiMetadataRepositoryProvider.overrideWithValue(bangumi),
       ],
@@ -1552,6 +1655,9 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     this.online = false,
     this.quick = const [_primary],
     this.autoSwitch = true,
+    this.autoSkipOp = false,
+    this.autoSkipEd = false,
+    this.introStartSeconds = 0,
     this.introSeconds = 0,
     this.outroSeconds = 0,
     this.syncProgress = false,
@@ -1559,6 +1665,8 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
   final bool syncProgress;
   final bool online;
   final bool autoSwitch;
+  final bool autoSkipOp, autoSkipEd;
+  final int introStartSeconds;
   final int introSeconds;
   final int outroSeconds;
   final episodeRequests = <int>[];
@@ -1574,6 +1682,9 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     settings: PlaybackSettings(
       rememberLine: false,
       autoNext: outroSeconds > 0,
+      autoSkipOp: autoSkipOp,
+      autoSkipEd: autoSkipEd,
+      skipIntroStartSeconds: introStartSeconds,
       skipIntroSeconds: introSeconds,
       skipOutroSeconds: outroSeconds,
       autoSwitchLine: autoSwitch,

@@ -1,4 +1,5 @@
 import '../core/identity/stable_identity.dart';
+import '../player/skip/skip_segment.dart';
 import 'client_media_resolver.dart';
 
 enum AnimeHomeTab {
@@ -1428,30 +1429,85 @@ class LocalFeedback {
 }
 
 class SkipTiming {
-  const SkipTiming({this.introSeconds = 0, this.outroSeconds = 0});
+  const SkipTiming({
+    this.introStartSeconds = 0,
+    this.introSeconds = 0,
+    this.outroStartSeconds = 0,
+    this.outroEndSeconds = 0,
+    this.outroSeconds = 0,
+  });
+  final int introStartSeconds,
+      introSeconds,
+      outroStartSeconds,
+      outroEndSeconds,
+      outroSeconds;
 
-  final int introSeconds;
-  final int outroSeconds;
+  List<SkipSegment> toManualSegments({required Duration duration}) {
+    SkipSegment mark(SkipSegmentType type, Duration start, Duration end) =>
+        SkipSegment(
+          type: type,
+          start: start,
+          end: end,
+          source: SkipSegmentSource.manual,
+        );
+    return [
+      if (introSeconds > introStartSeconds)
+        mark(
+          SkipSegmentType.op,
+          Duration(seconds: introStartSeconds),
+          Duration(seconds: introSeconds),
+        ),
+      if (outroStartSeconds > 0 && outroEndSeconds > outroStartSeconds)
+        mark(
+          SkipSegmentType.ed,
+          Duration(seconds: outroStartSeconds),
+          Duration(seconds: outroEndSeconds),
+        )
+      else if (outroSeconds > 0 &&
+          duration > Duration(seconds: outroSeconds + 30))
+        mark(
+          SkipSegmentType.ed,
+          duration - Duration(seconds: outroSeconds),
+          duration,
+        ),
+    ];
+  }
 
   Map<String, dynamic> toJson() => {
+    'introStartSeconds': introStartSeconds,
     'introSeconds': introSeconds,
+    'outroStartSeconds': outroStartSeconds,
+    'outroEndSeconds': outroEndSeconds,
     'outroSeconds': outroSeconds,
   };
-
   factory SkipTiming.fromJson(Map<String, dynamic> json) => SkipTiming(
-    introSeconds: _skipSeconds(json['introSeconds']),
+    introStartSeconds: _absoluteSeconds(json['introStartSeconds']),
+    introSeconds: json.containsKey('introStartSeconds')
+        ? _absoluteSeconds(json['introSeconds'])
+        : _skipSeconds(json['introSeconds']),
+    outroStartSeconds: _absoluteSeconds(json['outroStartSeconds']),
+    outroEndSeconds: _absoluteSeconds(json['outroEndSeconds']),
     outroSeconds: _skipSeconds(json['outroSeconds']),
   );
-
   @override
   bool operator ==(Object other) =>
       other is SkipTiming &&
+      introStartSeconds == other.introStartSeconds &&
       introSeconds == other.introSeconds &&
+      outroStartSeconds == other.outroStartSeconds &&
+      outroEndSeconds == other.outroEndSeconds &&
       outroSeconds == other.outroSeconds;
   @override
-  int get hashCode => Object.hash(introSeconds, outroSeconds);
+  int get hashCode => Object.hash(
+    introStartSeconds,
+    introSeconds,
+    outroStartSeconds,
+    outroEndSeconds,
+    outroSeconds,
+  );
 }
 
+int _absoluteSeconds(Object? value) => value is int && value > 0 ? value : 0;
 int _skipSeconds(Object? value) => value is int ? value.clamp(0, 300) : 0;
 
 class PlaybackSettings {
@@ -1469,6 +1525,11 @@ class PlaybackSettings {
     this.rewindSeconds = 10,
     this.forwardSeconds = 10,
     this.compatibilityMode = true,
+    this.skipIntroStartSeconds = 0,
+    this.skipOutroStartSeconds = 0,
+    this.skipOutroEndSeconds = 0,
+    this.autoSkipOp = false,
+    this.autoSkipEd = false,
     this.skipIntroSeconds = 0,
     this.skipOutroSeconds = 0,
     this.subjectSkipTimings = const {},
@@ -1502,6 +1563,11 @@ class PlaybackSettings {
   final int rewindSeconds;
   final int forwardSeconds;
   final bool compatibilityMode;
+  final int skipIntroStartSeconds;
+  final int skipOutroStartSeconds;
+  final int skipOutroEndSeconds;
+  final bool autoSkipOp;
+  final bool autoSkipEd;
   final int skipIntroSeconds;
   final int skipOutroSeconds;
   final Map<String, SkipTiming> subjectSkipTimings;
@@ -1520,11 +1586,15 @@ class PlaybackSettings {
   static const _maxSubjectSkips = 200;
 
   SkipTiming effectiveSkipFor(String subjectKey) =>
-      subjectSkipTimings[subjectKey] ??
-      SkipTiming(
-        introSeconds: skipIntroSeconds,
-        outroSeconds: skipOutroSeconds,
-      );
+      subjectSkipTimings[subjectKey] ?? globalSkipTiming;
+
+  SkipTiming get globalSkipTiming => SkipTiming(
+    introStartSeconds: skipIntroStartSeconds,
+    outroStartSeconds: skipOutroStartSeconds,
+    outroEndSeconds: skipOutroEndSeconds,
+    introSeconds: skipIntroSeconds,
+    outroSeconds: skipOutroSeconds,
+  );
 
   PlaybackSettings withSubjectSkip(String subjectKey, SkipTiming? timing) {
     final entries = {...subjectSkipTimings}..remove(subjectKey);
@@ -1566,6 +1636,11 @@ class PlaybackSettings {
     int? rewindSeconds,
     int? forwardSeconds,
     bool? compatibilityMode,
+    int? skipIntroStartSeconds,
+    int? skipOutroStartSeconds,
+    int? skipOutroEndSeconds,
+    bool? autoSkipOp,
+    bool? autoSkipEd,
     int? skipIntroSeconds,
     int? skipOutroSeconds,
     Map<String, SkipTiming>? subjectSkipTimings,
@@ -1596,6 +1671,13 @@ class PlaybackSettings {
       rewindSeconds: rewindSeconds ?? this.rewindSeconds,
       forwardSeconds: forwardSeconds ?? this.forwardSeconds,
       compatibilityMode: compatibilityMode ?? this.compatibilityMode,
+      skipIntroStartSeconds:
+          skipIntroStartSeconds ?? this.skipIntroStartSeconds,
+      skipOutroStartSeconds:
+          skipOutroStartSeconds ?? this.skipOutroStartSeconds,
+      skipOutroEndSeconds: skipOutroEndSeconds ?? this.skipOutroEndSeconds,
+      autoSkipOp: autoSkipOp ?? this.autoSkipOp,
+      autoSkipEd: autoSkipEd ?? this.autoSkipEd,
       skipIntroSeconds: skipIntroSeconds ?? this.skipIntroSeconds,
       skipOutroSeconds: skipOutroSeconds ?? this.skipOutroSeconds,
       subjectSkipTimings: subjectSkipTimings ?? this.subjectSkipTimings,
@@ -1628,6 +1710,11 @@ class PlaybackSettings {
     'rewindSeconds': rewindSeconds,
     'forwardSeconds': forwardSeconds,
     'compatibilityMode': compatibilityMode,
+    'skipIntroStartSeconds': skipIntroStartSeconds,
+    'skipOutroStartSeconds': skipOutroStartSeconds,
+    'skipOutroEndSeconds': skipOutroEndSeconds,
+    'autoSkipOp': autoSkipOp,
+    'autoSkipEd': autoSkipEd,
     'skipIntroSeconds': skipIntroSeconds,
     'skipOutroSeconds': skipOutroSeconds,
     'subjectSkipTimings': subjectSkipTimings.map(
@@ -1667,7 +1754,14 @@ class PlaybackSettings {
       rewindSeconds: json['rewindSeconds'] as int? ?? 10,
       forwardSeconds: json['forwardSeconds'] as int? ?? 10,
       compatibilityMode: json['compatibilityMode'] as bool? ?? true,
-      skipIntroSeconds: _skipSeconds(json['skipIntroSeconds']),
+      skipIntroStartSeconds: _absoluteSeconds(json['skipIntroStartSeconds']),
+      skipOutroStartSeconds: _absoluteSeconds(json['skipOutroStartSeconds']),
+      skipOutroEndSeconds: _absoluteSeconds(json['skipOutroEndSeconds']),
+      autoSkipOp: json['autoSkipOp'] == true,
+      autoSkipEd: json['autoSkipEd'] == true,
+      skipIntroSeconds: json.containsKey('skipIntroStartSeconds')
+          ? _absoluteSeconds(json['skipIntroSeconds'])
+          : _skipSeconds(json['skipIntroSeconds']),
       skipOutroSeconds: _skipSeconds(json['skipOutroSeconds']),
       subjectSkipTimings: _readSubjectSkips(json['subjectSkipTimings']),
       autoNext: json['autoNext'] as bool? ?? true,

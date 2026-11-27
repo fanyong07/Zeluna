@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
+import '../player/skip/skip_segment.dart';
 import '../player/anime4k_shader_manager.dart';
 import '../player/playback_line_display.dart';
 import '../player/sleep_timer_controller.dart';
@@ -409,6 +410,7 @@ class PlaybackSettingsView extends StatelessWidget {
     this.currentPosition,
     this.totalDuration,
     this.readPosition,
+    this.detectedSkipSegments = const [],
     this.sleepTimer,
   });
 
@@ -424,6 +426,7 @@ class PlaybackSettingsView extends StatelessWidget {
   final Duration? currentPosition;
   final Duration? totalDuration;
   final ValueGetter<Duration>? readPosition;
+  final List<SkipSegment> detectedSkipSegments;
   final SleepTimerController? sleepTimer;
 
   @override
@@ -646,7 +649,7 @@ class PlaybackSettingsView extends StatelessWidget {
                     _SettingsSection(
                       icon: Icons.skip_next_rounded,
                       title: '片头片尾跳过',
-                      subtitle: '0 秒表示不跳过，片尾仅在自动续播时跳过',
+                      subtitle: '识别到区间时提示跳过，手动设置优先',
                       compact: compact,
                       child: _SkipTimingControls(
                         key: ValueKey(subject?.identityKey),
@@ -656,6 +659,7 @@ class PlaybackSettingsView extends StatelessWidget {
                         currentPosition: currentPosition,
                         totalDuration: totalDuration,
                         readPosition: readPosition,
+                        detectedSkipSegments: detectedSkipSegments,
                       ),
                     ),
                     if (sleepTimer case final timer?)
@@ -797,12 +801,14 @@ class _SkipTimingControls extends StatefulWidget {
     required this.currentPosition,
     required this.totalDuration,
     required this.readPosition,
+    required this.detectedSkipSegments,
   });
   final PlaybackSettings settings;
   final String? subjectKey;
   final ValueChanged<PlaybackSettings> onChanged;
   final Duration? currentPosition, totalDuration;
   final ValueGetter<Duration>? readPosition;
+  final List<SkipSegment> detectedSkipSegments;
   @override
   State<_SkipTimingControls> createState() => _SkipTimingControlsState();
 }
@@ -822,35 +828,40 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
         (editingOverride || settings.subjectSkipTimings.containsKey(key));
     final timing = individual
         ? settings.subjectSkipTimings[key] ?? const SkipTiming()
-        : SkipTiming(
-            introSeconds: settings.skipIntroSeconds,
-            outroSeconds: settings.skipOutroSeconds,
-          );
-    void save({int? intro, int? outro}) {
+        : settings.globalSkipTiming;
+    void save({
+      int? introStart,
+      int? intro,
+      int? outroStart,
+      int? outroEnd,
+      int? outro,
+    }) {
       final value = SkipTiming(
-        introSeconds: (intro ?? timing.introSeconds).clamp(0, 300),
-        outroSeconds: (outro ?? timing.outroSeconds).clamp(0, 300),
+        introStartSeconds: introStart ?? timing.introStartSeconds,
+        introSeconds: intro ?? timing.introSeconds,
+        outroStartSeconds: outroStart ?? timing.outroStartSeconds,
+        outroEndSeconds: outroEnd ?? timing.outroEndSeconds,
+        outroSeconds: outro ?? timing.outroSeconds,
       );
       widget.onChanged(
         individual
             ? settings.withSubjectSkip(key, value)
             : settings.copyWith(
+                skipIntroStartSeconds: value.introStartSeconds,
+                skipOutroStartSeconds: value.outroStartSeconds,
+                skipOutroEndSeconds: value.outroEndSeconds,
                 skipIntroSeconds: value.introSeconds,
                 skipOutroSeconds: value.outroSeconds,
               ),
       );
     }
 
-    String formatSeconds(int seconds) {
-      if (seconds <= 0) return '不跳过';
-      final mins = seconds ~/ 60;
-      final secs = seconds % 60;
-      return mins > 0
-          ? '$mins:${secs.toString().padLeft(2, '0')} ($seconds 秒)'
-          : '$seconds 秒';
-    }
-
-    Widget step(String label, int seconds, ValueChanged<int> change) {
+    Widget step(
+      String label,
+      int seconds,
+      ValueChanged<int> change, {
+      bool legacy = false,
+    }) {
       final colors = Theme.of(context).colorScheme;
       return Padding(
         padding: const EdgeInsets.only(top: 8),
@@ -878,7 +889,7 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
                       ),
                       const SizedBox(height: 1),
                       Text(
-                        formatSeconds(seconds),
+                        skipTimeLabel(Duration(seconds: seconds)),
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: seconds > 0
                               ? colors.primary
@@ -889,9 +900,20 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
                     ],
                   ),
                 ),
+                if (widget.currentPosition != null && !legacy)
+                  IconButton(
+                    tooltip: '以当前进度设为$label',
+                    icon: const Icon(Icons.flag_outlined, size: 17),
+                    onPressed: () => change(
+                      (widget.readPosition?.call() ?? widget.currentPosition!)
+                          .inSeconds,
+                    ),
+                  ),
                 IconButton.filledTonal(
                   tooltip: '$label减 5 秒',
-                  onPressed: seconds > 0 ? () => change(seconds - 5) : null,
+                  onPressed: seconds > 0
+                      ? () => change(seconds < 5 ? 0 : seconds - 5)
+                      : null,
                   visualDensity: VisualDensity.compact,
                   iconSize: 18,
                   icon: const Icon(Icons.remove_rounded),
@@ -899,7 +921,11 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
                 const SizedBox(width: 6),
                 IconButton.filledTonal(
                   tooltip: '$label加 5 秒',
-                  onPressed: seconds < 300 ? () => change(seconds + 5) : null,
+                  onPressed: legacy && seconds >= 300
+                      ? null
+                      : () => change(
+                          legacy ? (seconds + 5).clamp(0, 300) : seconds + 5,
+                        ),
                   visualDensity: VisualDensity.compact,
                   iconSize: 18,
                   icon: const Icon(Icons.add_rounded),
@@ -911,11 +937,73 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
       );
     }
 
-    Duration position() =>
-        widget.readPosition?.call() ?? widget.currentPosition!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        SettingsSwitchRow(
+          title: '自动跳过识别到的片头',
+          value: settings.autoSkipOp,
+          onChanged: (v) => widget.onChanged(settings.copyWith(autoSkipOp: v)),
+        ),
+        SettingsSwitchRow(
+          title: '自动跳过识别到的片尾',
+          value: settings.autoSkipEd,
+          onChanged: (v) => widget.onChanged(settings.copyWith(autoSkipEd: v)),
+        ),
+        if (key != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.42),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.outlineVariant.withValues(alpha: 0.55),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      widget.detectedSkipSegments.isEmpty
+                          ? Icons.info_outline_rounded
+                          : Icons.auto_awesome_rounded,
+                      size: 16,
+                      color: widget.detectedSkipSegments.isEmpty
+                          ? Theme.of(context).colorScheme.onSurfaceVariant
+                          : Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        widget.detectedSkipSegments.isEmpty
+                            ? '暂未识别到本集片头片尾，可手动标记'
+                            : widget.detectedSkipSegments
+                                  .map(
+                                    (s) =>
+                                        '${s.shortLabel} ${skipTimeLabel(s.start)} - ${skipTimeLabel(s.end)} · ${s.source.label}',
+                                  )
+                                  .join('\n'),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          height: 1.45,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
         if (key != null)
           SettingsSwitchRow(
             title: '当前番剧单独设置',
@@ -928,46 +1016,17 @@ class _SkipTimingControlsState extends State<_SkipTimingControls> {
               );
             },
           ),
-        step('片头', timing.introSeconds, (v) => save(intro: v)),
-        step('片尾', timing.outroSeconds, (v) => save(outro: v)),
-        if (key != null && widget.currentPosition != null) ...[
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () => save(intro: position().inSeconds),
-                style: OutlinedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                ),
-                icon: const Icon(Icons.flag_outlined, size: 15),
-                label: const Text('以当前进度设为片头'),
-              ),
-              OutlinedButton.icon(
-                onPressed:
-                    (widget.totalDuration ?? Duration.zero) > Duration.zero
-                    ? () => save(
-                        outro: (widget.totalDuration! - position()).inSeconds,
-                      )
-                    : null,
-                style: OutlinedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 6,
-                  ),
-                ),
-                icon: const Icon(Icons.skip_next_rounded, size: 16),
-                label: const Text('以剩余时长设为片尾'),
-              ),
-            ],
+        step('片头起点', timing.introStartSeconds, (v) => save(introStart: v)),
+        step('片头终点', timing.introSeconds, (v) => save(intro: v)),
+        step('片尾起点', timing.outroStartSeconds, (v) => save(outroStart: v)),
+        step('片尾终点', timing.outroEndSeconds, (v) => save(outroEnd: v)),
+        if (timing.outroSeconds > 0)
+          step(
+            '旧版片尾倒数',
+            timing.outroSeconds,
+            (v) => save(outro: v),
+            legacy: true,
           ),
-        ],
       ],
     );
   }

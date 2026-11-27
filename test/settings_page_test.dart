@@ -84,6 +84,7 @@ void main() {
 
     final autoFullscreen = find.byKey(const ValueKey('setting_switch_自动全屏'));
     await tester.ensureVisible(autoFullscreen);
+    await tester.pumpAndSettle();
     await tester.tap(autoFullscreen);
     await tester.pumpAndSettle();
     expect(changes.last.autoFullscreen, isTrue);

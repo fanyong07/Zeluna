@@ -339,7 +339,10 @@ class _PlayerCanvas extends StatelessWidget {
     required this.miniWindowActive,
     required this.onPip,
     required this.sleepTimer,
-    required this.onQuickSkipIntro,
+    required this.skipSegments,
+    required this.activeSkip,
+    required this.onSkip,
+    required this.onIgnoreSkip,
     required this.controlsVisible,
     required this.autoHideChrome,
     required this.onToggleControls,
@@ -380,7 +383,9 @@ class _PlayerCanvas extends StatelessWidget {
   final bool inPipMode, miniWindowActive;
   final VoidCallback? onPip;
   final SleepTimerController sleepTimer;
-  final VoidCallback onQuickSkipIntro;
+  final List<SkipSegment> skipSegments;
+  final SkipSegment? activeSkip;
+  final ValueChanged<SkipSegment> onSkip, onIgnoreSkip;
   final bool controlsVisible;
   final bool autoHideChrome;
   final Future<void> Function() onBack;
@@ -520,7 +525,7 @@ class _PlayerCanvas extends StatelessWidget {
                           }
                         }
 
-                        return MouseRegion(
+                        final video = MouseRegion(
                           hitTestBehavior: HitTestBehavior.translucent,
                           onEnter: (event) => updateHotZone(
                             event.localPosition,
@@ -675,12 +680,7 @@ class _PlayerCanvas extends StatelessWidget {
                                             ),
                                           ),
                                           PlayerBottomBar(
-                                            onQuickSkipIntro: onQuickSkipIntro,
-                                            introSeconds: settings
-                                                .effectiveSkipFor(
-                                                  subject.identityKey,
-                                                )
-                                                .introSeconds,
+                                            skipSegments: skipSegments,
                                             line: line,
                                             settings: settings,
                                             services: services,
@@ -725,6 +725,41 @@ class _PlayerCanvas extends StatelessWidget {
                             ),
                           ),
                         );
+                        return Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            video,
+                            Positioned(
+                              right: horizontalInset,
+                              bottom:
+                                  safePadding.bottom +
+                                  math.min(116.0, constraints.maxHeight * .45),
+                              child: AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 160),
+                                layoutBuilder: (current, previous) => Stack(
+                                  alignment: Alignment.centerRight,
+                                  children: [
+                                    for (final child in previous)
+                                      IgnorePointer(child: child),
+                                    ?current,
+                                  ],
+                                ),
+                                child: activeSkip == null
+                                    ? const SizedBox.shrink()
+                                    : _SkipSegmentPill(
+                                        segment: activeSkip!,
+                                        nextEpisode:
+                                            activeSkip!.isTerminalEnding(
+                                              duration,
+                                            ) &&
+                                            onNextEpisode != null,
+                                        onSkip: onSkip,
+                                        onIgnore: onIgnoreSkip,
+                                      ),
+                              ),
+                            ),
+                          ],
+                        );
                       },
                     ),
                   ),
@@ -736,6 +771,82 @@ class _PlayerCanvas extends StatelessWidget {
       ],
     );
   }
+}
+
+class _SkipSegmentPill extends StatelessWidget {
+  const _SkipSegmentPill({
+    required this.segment,
+    required this.nextEpisode,
+    required this.onSkip,
+    required this.onIgnore,
+  });
+  final SkipSegment segment;
+  final bool nextEpisode;
+  final ValueChanged<SkipSegment> onSkip, onIgnore;
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.42),
+          blurRadius: 14,
+          offset: const Offset(0, 4),
+        ),
+      ],
+    ),
+    child: Material(
+      color: AppColors.theaterBg.withValues(alpha: 0.86),
+      shape: const StadiumBorder(
+        side: BorderSide(color: AppColors.theaterBorderBright),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            key: const ValueKey('playerSkipSegmentPill'),
+            onTap: () => onSkip(segment),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(13, 8, 10, 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.fast_forward_rounded,
+                    size: 16,
+                    color: AppColors.primary2,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${segment.actionLabel}${nextEpisode ? ' · 下一集' : ' → ${skipTimeLabel(segment.end)}'}',
+                    style: const TextStyle(
+                      color: AppColors.theaterInk,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Container(width: 1, height: 16, color: Colors.white24),
+          IconButton(
+            tooltip: '本集忽略${segment.shortLabel}',
+            onPressed: () => onIgnore(segment),
+            constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+            padding: EdgeInsets.zero,
+            icon: const Icon(
+              Icons.close_rounded,
+              size: 15,
+              color: AppColors.theaterMuted,
+            ),
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 enum _PlayerGestureKind { brightness, volume, speed, seek }

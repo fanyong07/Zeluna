@@ -317,8 +317,7 @@ class _PlayerHeader extends StatelessWidget {
 class PlayerBottomBar extends StatelessWidget {
   const PlayerBottomBar({
     super.key,
-    this.introSeconds = 0,
-    this.onQuickSkipIntro,
+    this.skipSegments = const [],
     required this.line,
     required this.settings,
     required this.services,
@@ -350,8 +349,7 @@ class PlayerBottomBar extends StatelessWidget {
     required this.onLinePanel,
   });
 
-  final int introSeconds;
-  final VoidCallback? onQuickSkipIntro;
+  final List<SkipSegment> skipSegments;
   final PlaybackLine? line;
   final PlaybackSettings settings;
   final ExternalServiceSettings services;
@@ -405,54 +403,20 @@ class PlayerBottomBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                '${_durationLabel(position)} / ${_durationLabel(duration)}',
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: AppColors.theaterInk,
-                  fontWeight: FontWeight.w700,
-                  fontSize: portraitMobile ? 12 : 11,
-                ),
-              ),
-              if (onQuickSkipIntro != null) ...[
-                const Spacer(),
-                OutlinedButton.icon(
-                  key: const ValueKey('playerQuickSkipIntro'),
-                  onPressed: line?.available == true ? onQuickSkipIntro : null,
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(52, 26),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 9,
-                      vertical: 2,
-                    ),
-                    foregroundColor: AppColors.theaterInk,
-                    backgroundColor: AppColors.theaterPanelHigh.withValues(
-                      alpha: 0.82,
-                    ),
-                    side: const BorderSide(
-                      color: AppColors.theaterBorderBright,
-                    ),
-                    shape: const StadiumBorder(),
-                    textStyle: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  icon: const Icon(Icons.fast_forward_rounded, size: 14),
-                  label: Text(
-                    position < Duration(seconds: introSeconds) ? '跳片头' : '+85s',
-                  ),
-                ),
-              ],
-            ],
+          Text(
+            '${_durationLabel(position)} / ${_durationLabel(duration)}',
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              color: AppColors.theaterInk,
+              fontWeight: FontWeight.w700,
+              fontSize: portraitMobile ? 12 : 11,
+            ),
           ),
           Padding(
             padding: EdgeInsets.symmetric(
               vertical: compact && !mobileLandscape ? 2 : 6,
             ),
             child: _BufferedSeekBar(
+              skipSegments: skipSegments,
               progress: progress,
               buffered: bufferProgress,
               enabled: canSeek,
@@ -1134,6 +1098,7 @@ class _BufferedSeekBar extends StatefulWidget {
     required this.buffered,
     required this.enabled,
     required this.duration,
+    required this.skipSegments,
     this.height = 28,
     required this.onSeek,
   });
@@ -1142,6 +1107,7 @@ class _BufferedSeekBar extends StatefulWidget {
   final double buffered;
   final bool enabled;
   final Duration duration;
+  final List<SkipSegment> skipSegments;
   final double height;
   final ValueChanged<double> onSeek;
 
@@ -1171,15 +1137,25 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
         final width = constraints.maxWidth;
         final thumbX = width * played;
         final hoverX = _hoverX;
-        final hoverLabel = hoverX == null || width <= 0
+        final hoverTime = hoverX == null || width <= 0
             ? null
-            : _durationLabel(
-                Duration(
-                  milliseconds:
-                      (widget.duration.inMilliseconds * (hoverX / width))
-                          .round(),
-                ),
-              );
+            : widget.duration * (hoverX / width);
+        final segment = hoverTime == null
+            ? null
+            : widget.skipSegments
+                  .where(
+                    (s) =>
+                        s.contains(hoverTime) ||
+                        (s.start - hoverTime).abs() <=
+                            const Duration(seconds: 2) ||
+                        (s.end - hoverTime).abs() <= const Duration(seconds: 2),
+                  )
+                  .firstOrNull;
+        final hoverLabel = hoverTime == null
+            ? null
+            : segment == null
+            ? _durationLabel(hoverTime)
+            : '${skipTimeLabel(hoverTime)} · ${segment.shortLabel}';
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: enabled
@@ -1206,7 +1182,10 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
                 children: [
                   if (hoverLabel != null)
                     Positioned(
-                      left: (hoverX! - 26).clamp(0.0, width - 52),
+                      left: (hoverX! - 44).clamp(
+                        0.0,
+                        math.max(0.0, width - 90),
+                      ),
                       top: -26,
                       child: IgnorePointer(
                         child: DecoratedBox(
@@ -1235,7 +1214,10 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
                     ),
                   Positioned.fill(
                     child: CustomPaint(
+                      key: const ValueKey('playerSeekTrack'),
                       painter: _BufferedSeekBarPainter(
+                        duration: widget.duration,
+                        skipSegments: widget.skipSegments,
                         played: played,
                         buffered: cached,
                         enabled: enabled,
@@ -1278,11 +1260,15 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
 
 class _BufferedSeekBarPainter extends CustomPainter {
   const _BufferedSeekBarPainter({
+    required this.duration,
+    required this.skipSegments,
     required this.played,
     required this.buffered,
     required this.enabled,
   });
 
+  final Duration duration;
+  final List<SkipSegment> skipSegments;
   final double played;
   final double buffered;
   final bool enabled;
@@ -1320,11 +1306,38 @@ class _BufferedSeekBarPainter extends CustomPainter {
         active,
       );
     }
+    if (duration > Duration.zero && skipSegments.isNotEmpty) {
+      final highlight = Paint()
+        ..color = Colors.white.withValues(alpha: .42)
+        ..strokeWidth = 4.5
+        ..strokeCap = StrokeCap.round;
+      final outline = Paint()..color = Colors.black87;
+      final dot = Paint()..color = Colors.white;
+      double clampDotX(double raw) =>
+          size.width > 8 ? raw.clamp(3.8, size.width - 3.8) : raw;
+      for (final s in skipSegments) {
+        final start = Offset(
+          clampDotX(size.width * _progress(s.start, duration)),
+          centerY,
+        );
+        final end = Offset(
+          clampDotX(size.width * _progress(s.end, duration)),
+          centerY,
+        );
+        canvas.drawLine(start, end, highlight);
+        for (final point in [start, end]) {
+          canvas.drawCircle(point, 3.8, outline);
+          canvas.drawCircle(point, 2.7, dot);
+        }
+      }
+    }
   }
 
   @override
   bool shouldRepaint(covariant _BufferedSeekBarPainter oldDelegate) {
-    return oldDelegate.played != played ||
+    return oldDelegate.duration != duration ||
+        oldDelegate.skipSegments != skipSegments ||
+        oldDelegate.played != played ||
         oldDelegate.buffered != buffered ||
         oldDelegate.enabled != enabled;
   }

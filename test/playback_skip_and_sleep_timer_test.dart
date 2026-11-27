@@ -42,6 +42,66 @@ void main() {
     expect(old.subjectSkipTimings, isEmpty);
   });
 
+  test(
+    'legacy countdown and new absolute marks survive JSON and cloud sync',
+    () {
+      const duration = Duration(minutes: 24);
+      final old = PlaybackSettings.fromJson({
+        'skipIntroSeconds': 85,
+        'skipOutroSeconds': 20,
+      });
+      expect(old.autoSkipOp || old.autoSkipEd, isFalse);
+      final legacy = old.globalSkipTiming.toManualSegments(duration: duration);
+      expect(legacy.map((s) => (s.start.inSeconds, s.end.inSeconds)), [
+        (0, 85),
+        (1420, 1440),
+      ]);
+      expect(
+        old.globalSkipTiming.toManualSegments(
+          duration: const Duration(seconds: 50),
+        ),
+        hasLength(1),
+      );
+      const custom = SkipTiming(
+        introStartSeconds: 353,
+        introSeconds: 443,
+        outroStartSeconds: 1270,
+        outroEndSeconds: 1360,
+        outroSeconds: 30,
+      );
+      final settings = old
+          .copyWith(
+            skipIntroStartSeconds: 353,
+            skipIntroSeconds: 443,
+            skipOutroStartSeconds: 1270,
+            skipOutroEndSeconds: 1360,
+            skipOutroSeconds: 30,
+            autoSkipOp: true,
+            autoSkipEd: true,
+          )
+          .withSubjectSkip('test', custom);
+      final wire = CloudSyncMutation.playbackSettings(
+        mutationId: 'absolute-skip-marks',
+        settings: settings,
+      );
+      for (final payload in [
+        settings.toJson(),
+        CloudSyncMutation.fromJson(wire.toJson()).payload,
+      ]) {
+        final read = PlaybackSettings.fromJson(payload);
+        expect(read.autoSkipOp && read.autoSkipEd, isTrue);
+        expect(read.subjectSkipTimings['test'], custom);
+        expect(read.globalSkipTiming, custom);
+        expect(
+          read.globalSkipTiming
+              .toManualSegments(duration: duration)
+              .map((s) => (s.start.inSeconds, s.end.inSeconds)),
+          [(353, 443), (1270, 1360)],
+        );
+      }
+    },
+  );
+
   test('持久化边界夹逼秒数，并保留最近修改的 200 部作品', () {
     final raw = {
       for (var i = 0; i < 210; i++)
