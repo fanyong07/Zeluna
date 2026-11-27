@@ -242,6 +242,162 @@ class DanmakuDisplayControls extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text('选中的类型将不再显示', style: TextStyle(color: muted, fontSize: 11)),
+          const SizedBox(height: 12),
+          Text('时间轴微调', style: TextStyle(color: ink, fontSize: 13)),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  key: const ValueKey('danmakuOffsetMinus'),
+                  onPressed: settings.timeOffsetSeconds > -10
+                      ? () => _save(
+                          context,
+                          settings.copyWith(
+                            timeOffsetSeconds: (settings.timeOffsetSeconds - .5)
+                                .clamp(-10, 10),
+                          ),
+                        )
+                      : null,
+                  style: OutlinedButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 36),
+                    foregroundColor: ink,
+                    side: BorderSide(color: muted.withValues(alpha: .3)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  child: const Text('-0.5s', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Tooltip(
+                  message: '点击归零',
+                  child: OutlinedButton(
+                    key: const ValueKey('danmakuOffsetReset'),
+                    onPressed: () =>
+                        _save(context, settings.copyWith(timeOffsetSeconds: 0)),
+                    style: OutlinedButton.styleFrom(
+                      padding: EdgeInsets.zero,
+                      minimumSize: const Size(0, 36),
+                      foregroundColor: settings.timeOffsetSeconds != 0
+                          ? accent
+                          : ink,
+                      backgroundColor: settings.timeOffsetSeconds != 0
+                          ? accent.withValues(alpha: .13)
+                          : Colors.transparent,
+                      side: BorderSide(
+                        color: settings.timeOffsetSeconds != 0
+                            ? accent
+                            : muted.withValues(alpha: .3),
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ),
+                    child: Text(
+                      '${settings.timeOffsetSeconds > 0 ? '+' : ''}${settings.timeOffsetSeconds.toStringAsFixed(1)}s',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: OutlinedButton(
+                  key: const ValueKey('danmakuOffsetPlus'),
+                  onPressed: settings.timeOffsetSeconds < 10
+                      ? () => _save(
+                          context,
+                          settings.copyWith(
+                            timeOffsetSeconds: (settings.timeOffsetSeconds + .5)
+                                .clamp(-10, 10),
+                          ),
+                        )
+                      : null,
+                  style: OutlinedButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(0, 36),
+                    foregroundColor: ink,
+                    side: BorderSide(color: muted.withValues(alpha: .3)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  child: const Text('+0.5s', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '正值延后出现 · 负值提前出现 · 点中间归零',
+            style: TextStyle(color: muted, fontSize: 11),
+          ),
+          const SizedBox(height: 12),
+          Text('同屏密度', style: TextStyle(color: ink, fontSize: 13)),
+          const SizedBox(height: 6),
+          LayoutBuilder(
+            builder: (context, constraints) => Wrap(
+              spacing: 5,
+              runSpacing: 5,
+              children: [
+                for (final (count, label) in const [
+                  (12, '稀疏(12)'),
+                  (24, '适中(24)'),
+                  (48, '较密(48)'),
+                  (0, '不限(0)'),
+                ])
+                  SizedBox(
+                    width: (constraints.maxWidth - 15) / 4,
+                    child: Semantics(
+                      selected: settings.maxOnScreen == count,
+                      child: OutlinedButton(
+                        key: ValueKey('danmakuDensity$count'),
+                        onPressed: () => _save(
+                          context,
+                          settings.copyWith(maxOnScreen: count),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          padding: EdgeInsets.zero,
+                          minimumSize: const Size(0, 36),
+                          foregroundColor: settings.maxOnScreen == count
+                              ? accent
+                              : ink,
+                          backgroundColor: settings.maxOnScreen == count
+                              ? accent.withValues(alpha: .13)
+                              : Colors.transparent,
+                          side: BorderSide(
+                            color: settings.maxOnScreen == count
+                                ? accent
+                                : muted.withValues(alpha: .3),
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                        ),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                            child: Text(
+                              label,
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Align(
             alignment: Alignment.centerRight,
             child: TextButton(

@@ -13,6 +13,9 @@ class _PlayerHeader extends StatelessWidget {
     required this.onCast,
     required this.onSettings,
     required this.onSubtitles,
+    required this.onPip,
+    required this.miniWindowActive,
+    required this.sleepTimer,
   });
 
   final AnimeSubject subject;
@@ -26,12 +29,81 @@ class _PlayerHeader extends StatelessWidget {
   final Future<void> Function() onCast;
   final VoidCallback onSettings;
   final VoidCallback onSubtitles;
+  final VoidCallback? onPip;
+  final bool miniWindowActive;
+  final SleepTimerController sleepTimer;
 
   @override
   Widget build(BuildContext context) {
     final compact = usesCompactPlayerBottomControlsForSize(
       MediaQuery.sizeOf(context),
       defaultTargetPlatform,
+    );
+    final sleepBadge = ListenableBuilder(
+      listenable: sleepTimer,
+      builder: (context, _) => sleepTimer.isActive
+          ? Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Material(
+                key: const ValueKey('playerSleepTimerBadge'),
+                color: AppColors.primary.withValues(alpha: 0.16),
+                shape: StadiumBorder(
+                  side: BorderSide(
+                    color: AppColors.primary2.withValues(alpha: 0.36),
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: onSettings,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.bedtime_rounded,
+                          size: 13,
+                          color: AppColors.primary2,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          sleepTimer.badgeLabel,
+                          style: const TextStyle(
+                            color: AppColors.theaterInk,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            )
+          : const SizedBox.shrink(),
+    );
+    Widget pipButton([ButtonStyle? style]) => IconButton(
+      key: const ValueKey('playerPipButton'),
+      tooltip: defaultTargetPlatform == TargetPlatform.windows
+          ? (miniWindowActive ? '退出置顶小窗' : '置顶小窗')
+          : '画中画',
+      onPressed: onPip,
+      style: miniWindowActive
+          ? (style ?? const ButtonStyle()).copyWith(
+              backgroundColor: WidgetStatePropertyAll(
+                AppColors.primary.withValues(alpha: 0.18),
+              ),
+            )
+          : style,
+      icon: Icon(
+        Icons.picture_in_picture_alt_rounded,
+        size: compact ? 22 : 22,
+        color: miniWindowActive ? AppColors.primary2 : AppColors.theaterInk,
+      ),
     );
     if (compact) {
       final densePortrait =
@@ -91,6 +163,8 @@ class _PlayerHeader extends StatelessWidget {
                 ],
               ),
             ),
+            sleepBadge,
+            if (onPip != null) pipButton(iconButtonStyle),
             IconButton(
               tooltip: '刷新线路',
               onPressed: onReload,
@@ -175,6 +249,8 @@ class _PlayerHeader extends StatelessWidget {
               ],
             ),
           ),
+          sleepBadge,
+          if (onPip != null) pipButton(),
           _HeaderIcon(
             theaterMode ? Icons.close_fullscreen : Icons.crop_16_9_rounded,
             tooltip: theaterMode ? '退出影院模式' : '影院模式',
@@ -241,6 +317,8 @@ class _PlayerHeader extends StatelessWidget {
 class PlayerBottomBar extends StatelessWidget {
   const PlayerBottomBar({
     super.key,
+    this.introSeconds = 0,
+    this.onQuickSkipIntro,
     required this.line,
     required this.settings,
     required this.services,
@@ -272,6 +350,8 @@ class PlayerBottomBar extends StatelessWidget {
     required this.onLinePanel,
   });
 
+  final int introSeconds;
+  final VoidCallback? onQuickSkipIntro;
   final PlaybackLine? line;
   final PlaybackSettings settings;
   final ExternalServiceSettings services;
@@ -325,13 +405,48 @@ class PlayerBottomBar extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '${_durationLabel(position)} / ${_durationLabel(duration)}',
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: AppColors.theaterInk,
-              fontWeight: FontWeight.w700,
-              fontSize: portraitMobile ? 12 : 11,
-            ),
+          Row(
+            children: [
+              Text(
+                '${_durationLabel(position)} / ${_durationLabel(duration)}',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  color: AppColors.theaterInk,
+                  fontWeight: FontWeight.w700,
+                  fontSize: portraitMobile ? 12 : 11,
+                ),
+              ),
+              if (onQuickSkipIntro != null) ...[
+                const Spacer(),
+                OutlinedButton.icon(
+                  key: const ValueKey('playerQuickSkipIntro'),
+                  onPressed: line?.available == true ? onQuickSkipIntro : null,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(52, 26),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 2,
+                    ),
+                    foregroundColor: AppColors.theaterInk,
+                    backgroundColor: AppColors.theaterPanelHigh.withValues(
+                      alpha: 0.82,
+                    ),
+                    side: const BorderSide(
+                      color: AppColors.theaterBorderBright,
+                    ),
+                    shape: const StadiumBorder(),
+                    textStyle: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  icon: const Icon(Icons.fast_forward_rounded, size: 14),
+                  label: Text(
+                    position < Duration(seconds: introSeconds) ? '跳片头' : '+85s',
+                  ),
+                ),
+              ],
+            ],
           ),
           Padding(
             padding: EdgeInsets.symmetric(

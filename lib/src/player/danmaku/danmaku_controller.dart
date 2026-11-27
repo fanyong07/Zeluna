@@ -54,6 +54,13 @@ final class DanmakuController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void applyManualTimeline(int episodeId, DanmakuTimeline timeline) {
+    ++_loadSerial; // A pending automatic match must not replace the user's choice.
+    _requestedEpisodeId = _commentsEpisodeId = episodeId;
+    _remoteComments = List.unmodifiable(timeline.comments);
+    notifyListeners();
+  }
+
   Future<void> loadEpisode({
     required int episodeId,
     bool forceRefresh = false,

@@ -13,6 +13,7 @@ import 'package:anime/src/player/subtitles/subtitle_store.dart';
 import 'package:anime/src/player/video/native_video_controller.dart' as owned;
 import 'package:anime/src/player/video/media_transport_failure.dart';
 import 'package:anime/src/shared_ui/app_design.dart';
+import 'package:anime/src/settings/settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,6 +28,134 @@ import '../integration_test/support/isolated_player_environment.dart';
 // paths. Only the platform engine/video texture and account persistence are
 // isolated. Engine commands (not reducer output) are the regression oracle.
 void main() {
+  testWidgets(
+    'OP skips once per line; quick skip uses the configured mark or advances 85s',
+    (tester) async {
+      final fixture = await _mount(
+        tester,
+        account: _PauseAccount(introSeconds: 30),
+      );
+      fixture.engine.progress(const Duration(seconds: 16));
+      await tester.pump();
+      expect(fixture.engine.seeks, [const Duration(seconds: 30)]);
+      fixture.engine.progress(const Duration(seconds: 3));
+      await tester.pump();
+      expect(fixture.engine.seeks, hasLength(1));
+      final button = find.byKey(const ValueKey('playerQuickSkipIntro'));
+      await tester.tap(button);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump();
+      await tester.tap(button);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump();
+      expect(fixture.engine.seeks.skip(1), [
+        const Duration(seconds: 30),
+        const Duration(seconds: 115),
+      ]);
+    },
+  );
+
+  testWidgets('a resume beyond the intro is never replaced by an OP seek', (
+    tester,
+  ) async {
+    const resume = Duration(seconds: 90);
+    final fixture = await _mount(
+      tester,
+      account: _PauseAccount(introSeconds: 30),
+      resumePosition: resume,
+    );
+    fixture.engine.progress(const Duration(seconds: 2));
+    await tester.pump(const Duration(seconds: 1));
+    expect(fixture.engine.seeks, contains(resume));
+    expect(fixture.engine.seeks, isNot(contains(const Duration(seconds: 30))));
+  });
+
+  for (final sleepAtEnd in [false, true]) {
+    testWidgets('ED: ${sleepAtEnd ? '睡眠定时优先于自动下一集' : '跨过阈值才切换到正确的下一集'}', (
+      tester,
+    ) async {
+      final account = _PauseAccount(online: true, outroSeconds: 20);
+      final fixture = await _mount(
+        tester,
+        account: account,
+        episodes: const [playerTestEpisode, playerTestSecondEpisode],
+      );
+      if (sleepAtEnd) {
+        await tester.tap(find.byTooltip('播放设置'));
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.pump();
+        tester
+            .widget<PlaybackSettingsView>(find.byType(PlaybackSettingsView))
+            .sleepTimer!
+            .setEndOfEpisode();
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('playerSleepTimerBadge')),
+          findsOneWidget,
+        );
+      }
+      fixture.engine.progress(const Duration(seconds: 159));
+      await tester.pump();
+      expect(fixture.engine.state.playing, isTrue);
+      expect(
+        account.episodeRequests,
+        isNot(contains(playerTestSecondEpisode.id)),
+      );
+      fixture.engine.progress(const Duration(seconds: 160));
+      await tester.pump();
+      await tester.pump();
+      if (sleepAtEnd) {
+        expect(fixture.engine.state.playing, isFalse);
+        expect(
+          find.byKey(const ValueKey('playerSleepTimerBadge')),
+          findsNothing,
+        );
+        fixture.engine.finish();
+        await tester.pump();
+        expect(
+          account.episodeRequests,
+          isNot(contains(playerTestSecondEpisode.id)),
+        );
+      } else {
+        expect(account.episodeRequests, contains(playerTestSecondEpisode.id));
+      }
+    });
+  }
+
+  testWidgets(
+    'Android PiP removes player chrome and drawers without reopening the decoder',
+    (tester) async {
+      const channel = MethodChannel('app.anime.anime/pip');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (_) async => true);
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final fixture = await _mount(tester, viewport: const Size(390, 844));
+      expect(find.byKey(const ValueKey('playerPipButton')), findsOneWidget);
+      Future<void> change(bool active) async {
+        await messenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(MethodCall('onPipChanged', active)),
+          (_) {},
+        );
+        await tester.pump();
+      }
+
+      await tester.tap(find.byTooltip('播放设置'));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump();
+      await change(true);
+      expect(find.byType(PlaybackSettingsView), findsNothing);
+      expect(find.byType(PlayerBottomBar), findsNothing);
+      expect(find.byKey(const ValueKey('playerPipButton')), findsNothing);
+      expect(find.byType(Video), findsOneWidget);
+      expect(find.byType(PlayerDanmakuLayers), findsOneWidget);
+      await change(false);
+      expect(find.byType(PlayerBottomBar), findsOneWidget);
+      expect(fixture.engine.opens, hasLength(1));
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.android),
+  );
+
   testWidgets(
     'mobile progress ticks rebuild canvas, not page and route lists',
     (tester) async {
@@ -946,6 +1075,8 @@ Future<_Fixture> _mount(
   _PauseAccount? account,
   bool nativeLock = false,
   bool reachFirstFrame = true,
+  Duration? resumePosition,
+  List<AnimeEpisode> episodes = const [playerTestEpisode],
   PlaybackLine initialLine = _primary,
   Size viewport = const Size(1280, 800),
   ThemeData? theme,
@@ -1007,10 +1138,11 @@ Future<_Fixture> _mount(
             subject: account.online
                 ? playerTestSubject.copyWith(source: 'integration')
                 : playerTestSubject,
-            episodes: const [playerTestEpisode],
+            episodes: episodes,
             episode: playerTestEpisode,
             offlineOnly: !account.online,
             initialLine: initialLine,
+            resumePosition: resumePosition,
           ),
         ),
       ),
@@ -1135,6 +1267,10 @@ class _RecordingEngine extends PlatformPlayer {
   }
 
   void fail(String message) => errorController.add(message);
+  void finish() {
+    state = state.copyWith(completed: true);
+    completedController.add(true);
+  }
 
   void progress(Duration value) {
     state = state.copyWith(position: value);
@@ -1174,7 +1310,12 @@ class _RecordingEngine extends PlatformPlayer {
   }
 
   @override
-  Future<void> seek(Duration duration) async => progress(duration);
+  Future<void> seek(Duration duration) async {
+    seeks.add(duration);
+    progress(duration);
+  }
+
+  final seeks = <Duration>[];
   @override
   Future<void> setVolume(double volume) async {
     state = state.copyWith(volume: volume);
@@ -1327,9 +1468,14 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     this.online = false,
     this.quick = const [_primary],
     this.autoSwitch = true,
+    this.introSeconds = 0,
+    this.outroSeconds = 0,
   });
   final bool online;
   final bool autoSwitch;
+  final int introSeconds;
+  final int outroSeconds;
+  final episodeRequests = <int>[];
   final List<PlaybackLine> quick;
   Completer<List<PlaybackLine>>? quickResult;
   final expanded = StreamController<PlaybackLineLookupUpdate>();
@@ -1340,7 +1486,9 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
   Future<AnimeState> build() async => (await super.build()).copyWith(
     settings: PlaybackSettings(
       rememberLine: false,
-      autoNext: false,
+      autoNext: outroSeconds > 0,
+      skipIntroSeconds: introSeconds,
+      skipOutroSeconds: outroSeconds,
       autoSwitchLine: autoSwitch,
     ),
   );
@@ -1349,13 +1497,20 @@ class _PauseAccount extends IsolatedPlayerTestAccount {
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) async => quickResult == null ? quick : await quickResult!.future;
+  }) async {
+    episodeRequests.add(episode.id);
+    if (episode.id == playerTestSecondEpisode.id) return [];
+    return quickResult == null ? quick : await quickResult!.future;
+  }
+
   @override
   Stream<PlaybackLineLookupUpdate> lineUpdatesForEpisode(
     AnimeSubject subject,
     AnimeEpisode episode, {
     RulePlaybackCancellationToken? cancellationToken,
-  }) => expanded.stream;
+  }) => episode.id == playerTestSecondEpisode.id
+      ? const Stream.empty()
+      : expanded.stream;
   @override
   Future<List<PlaybackLine>> prepareSingleBackupForEpisode(
     AnimeSubject subject,

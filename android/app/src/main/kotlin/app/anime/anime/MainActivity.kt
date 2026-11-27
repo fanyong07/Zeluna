@@ -1,5 +1,6 @@
 package app.anime.anime
 
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -14,6 +15,7 @@ open class MainActivity : FlutterActivity() {
     private var videoCompatibilityChannel: MethodChannel? = null
     private var nativeVideoSurfaceChannel: NativeVideoSurfaceChannel? = null
     private var cspMethodChannel: CspMethodChannel? = null
+    private var pipChannel: PlayerPipMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
     private var appUpdateMethodChannel: AppUpdateMethodChannel? = null
 
@@ -64,6 +66,7 @@ open class MainActivity : FlutterActivity() {
                 }
             }
         }
+        pipChannel = PlayerPipMethodChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         nativeVideoSurfaceChannel = NativeVideoSurfaceChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             flutterEngine.renderer,
@@ -81,7 +84,14 @@ open class MainActivity : FlutterActivity() {
         )
     }
 
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipChannel?.notifyPipChanged(isInPictureInPictureMode)
+    }
+
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        pipChannel?.close()
+        pipChannel = null
         videoCompatibilityChannel?.setMethodCallHandler(null)
         videoCompatibilityChannel = null
         nativeVideoSurfaceChannel?.close()

@@ -16,6 +16,7 @@ import '../app/anime_app.dart';
 import '../app/app_theme.dart';
 import '../accounts/local_account_repository.dart';
 import '../data/anime_controller.dart';
+import '../data/danmaku_repository.dart' show ManualDanmakuCandidate;
 import '../playback/local_route_ranker.dart';
 import '../data/playback_source_repository.dart';
 import '../domain/anime_models.dart';
@@ -38,6 +39,8 @@ import 'lines/playback_line_repository.dart';
 import 'lines/playback_recovery_controller.dart';
 import 'local_media.dart';
 import 'playback_continuity.dart';
+import 'player_pip_controller.dart';
+import 'sleep_timer_controller.dart';
 import 'playback_line_display.dart';
 import 'ui/playback_line_tile.dart';
 import 'playback_performance_trace.dart';
@@ -105,6 +108,16 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   late final Anime4KController _anime4kController;
   late PlaybackPerformanceTrace _playbackTrace;
   NativeMediaEventGuard get _nativeMediaEvents => _nativeVideo.events;
+  late final SleepTimerController _sleepTimerController;
+  late final PlayerPipController _pipController;
+  bool _pipSupported = false;
+  bool _pipActive = false;
+  bool get _inPipMode => _pipActive && !_pipController.isWindows;
+  int? _introSkippedEpisodeId;
+  int? _outroTriggeredEpisodeId;
+  Duration _lineResumePosition = Duration.zero;
+  Tracks _tracks = const Tracks();
+  Track _selectedTrack = const Track();
   final _appFullscreen = AppFullscreenController();
   final _subscriptions = <StreamSubscription<dynamic>>[];
   int? _handledFailureOpenSerial;
@@ -210,6 +223,27 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         widget.nativeVideoControllerFactory?.call(() => _openLineSerial) ??
         NativeVideoController(readOpenSerial: () => _openLineSerial);
     _webVideo = WebVideoController();
+    _sleepTimerController = SleepTimerController(
+      onTriggered: () {
+        unawaited(_pausePlayback());
+        _showPlayerToast('定时关闭已触发，已暂停播放');
+      },
+    );
+    _pipController = PlayerPipController(
+      onChanged: (active) {
+        if (!mounted) return;
+        if (active && !_pipController.isWindows) {
+          final messenger = ScaffoldMessenger.maybeOf(context);
+          messenger?.clearSnackBars();
+          messenger?.removeCurrentSnackBar();
+        }
+        setState(() {
+          _pipActive = active;
+          if (active && _pipController.isWindows) _fullscreen = false;
+        });
+      },
+    );
+    unawaited(_initializePip());
     _gestureController = PlayerGestureController();
     _nextEpisodeWarmupCoordinator = NextEpisodeWarmupCoordinator();
     _episode = widget.request.episode;
@@ -299,6 +333,21 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
         _recordFinalPlaybackFailure(reason: 'offline_line_unavailable');
       }
     });
+  }
+
+  Future<void> _initializePip() async {
+    final supported = await _pipController.initialize();
+    if (mounted && supported) setState(() => _pipSupported = true);
+  }
+
+  Future<void> _togglePip() async {
+    final params = _player.state.videoParams;
+    final changed = await _pipController.toggle(
+      active: _pipActive,
+      width: params.dw ?? params.w,
+      height: params.dh ?? params.h,
+    );
+    if (!changed) _showPlayerToast('未能切换小窗模式，请重试');
   }
 
   void _handleDanmakuChanged() {
@@ -825,6 +874,9 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _gestureController.dispose();
     _sessionController.dispose();
     _timelineRevision.dispose();
+    _sleepTimerController.dispose();
+    if (!_leaving) unawaited(_pipController.exitIfActive());
+    _pipController.dispose();
     super.dispose();
   }
 
@@ -899,13 +951,13 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                   onKeyEvent: (node, event) =>
                       _handleShortcut(event, state.settings),
                   child: buildPlayerSafeArea(
-                    fullscreen: _fullscreen,
+                    fullscreen: _fullscreen || _pipActive,
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
                         _ResponsivePlayerLayout(
-                          portrait: portraitPlayerLayout,
-                          fullscreen: _fullscreen,
+                          portrait: portraitPlayerLayout && !_pipActive,
+                          fullscreen: _fullscreen || _pipActive,
                           theaterExpanded: _theaterMode,
                           onToggleTheaterMode: _toggleTheaterMode,
                           subject: widget.request.subject,
@@ -949,6 +1001,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                               playbackFailed: _playbackFailed,
                               fullscreen: _fullscreen,
                               muted: _muted,
+                              inPipMode: _inPipMode,
+                              miniWindowActive:
+                                  _pipActive && _pipController.isWindows,
+                              onPip: _pipSupported ? _togglePip : null,
+                              sleepTimer: _sleepTimerController,
+                              onQuickSkipIntro: _quickSkipIntro,
                               controlsVisible: _controlsVisible,
                               autoHideChrome: _shouldAutoHidePlayerControls,
                               playerMessage: _surfaceMessage,
@@ -1029,31 +1087,35 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                             ),
                           ),
                         ),
-                        AnimatedSwitcher(
-                          duration: MediaQuery.disableAnimationsOf(context)
-                              ? Duration.zero
-                              : const Duration(milliseconds: 220),
-                          reverseDuration:
-                              MediaQuery.disableAnimationsOf(context)
-                              ? Duration.zero
-                              : const Duration(milliseconds: 180),
-                          switchInCurve: Curves.easeOutCubic,
-                          switchOutCurve: Curves.easeInCubic,
-                          layoutBuilder: (currentChild, previousChildren) =>
-                              Stack(
-                                fit: StackFit.expand,
-                                children: [...previousChildren, ?currentChild],
-                              ),
-                          transitionBuilder: (child, animation) =>
-                              _PlayerDrawerTransitionScope(
-                                animation: animation,
-                                child: child,
-                              ),
-                          child: _buildActivePlayerPanel(
-                            state,
-                            superResolutionPanelStatus,
+                        if (!_inPipMode)
+                          AnimatedSwitcher(
+                            duration: MediaQuery.disableAnimationsOf(context)
+                                ? Duration.zero
+                                : const Duration(milliseconds: 220),
+                            reverseDuration:
+                                MediaQuery.disableAnimationsOf(context)
+                                ? Duration.zero
+                                : const Duration(milliseconds: 180),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            layoutBuilder: (currentChild, previousChildren) =>
+                                Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    ...previousChildren,
+                                    ?currentChild,
+                                  ],
+                                ),
+                            transitionBuilder: (child, animation) =>
+                                _PlayerDrawerTransitionScope(
+                                  animation: animation,
+                                  child: child,
+                                ),
+                            child: _buildActivePlayerPanel(
+                              state,
+                              superResolutionPanelStatus,
+                            ),
                           ),
-                        ),
                       ],
                     ),
                   ),
@@ -1105,11 +1167,20 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
     }
     if (_danmakuPanel) {
+      final accountVersion = _accountContextVersion;
       return _PlayerFunctionPage(
         key: const ValueKey('player-panel-danmaku'),
         title: '弹幕设置',
         onClose: _closePanels,
         child: _DanmakuPanel(
+          key: ValueKey((_accountContextVersion, _episode.id)),
+          subject: widget.request.subject,
+          episode: _episode,
+          onMatched: (id, timeline) {
+            if (id == _episode.id && accountVersion == _accountContextVersion) {
+              _danmakuController.applyManualTimeline(id, timeline);
+            }
+          },
           comments: _danmakuController.remoteComments,
           onDelete: _deleteDanmaku,
           onReload: () => _loadDanmakuForCurrentEpisode(forceRefresh: true),
@@ -1117,23 +1188,30 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       );
     }
     if (_subtitlePanel) {
+      final embeddedTracks = kIsWeb || _usesWebPlayer
+          ? null
+          : EmbeddedTrackControls(
+              tracks: _tracks,
+              selected: _selectedTrack,
+              onAudioTrack: _selectAudioTrack,
+              onSubtitleTrack: _selectEmbeddedSubtitleTrack,
+            );
       return _PlayerFunctionPage(
         key: const ValueKey('player-panel-subtitle'),
-        title: '字幕 · 补充原文',
+        title: '字幕与音轨',
         onClose: _closePanels,
         child: _supplementalSubtitles == null
-            ? Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_subtitleStorageError ?? '正在读取本地字幕设置…'),
-                    if (_subtitleStorageError != null)
-                      TextButton(
-                        onPressed: _initializeSupplementalSubtitles,
-                        child: const Text('重试'),
-                      ),
-                  ],
-                ),
+            ? ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  ?embeddedTracks,
+                  Text(_subtitleStorageError ?? '正在读取本地字幕设置…'),
+                  if (_subtitleStorageError != null)
+                    TextButton(
+                      onPressed: _initializeSupplementalSubtitles,
+                      child: const Text('重试'),
+                    ),
+                ],
               )
             : SupplementalSubtitlePanel(
                 key: ValueKey(
@@ -1144,6 +1222,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
                 episode: _episode,
                 episodes: widget.request.episodes,
                 createRepository: () => SubtitleRepository(state.services),
+                embeddedTracks: embeddedTracks,
               ),
       );
     }
@@ -1159,6 +1238,10 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           line: _line,
           playbackMessage: _surfaceMessage,
           superResolutionStatus: superResolutionPanelStatus,
+          currentPosition: _position,
+          totalDuration: _duration,
+          readPosition: () => _position,
+          sleepTimer: _sleepTimerController,
           settings: state.settings,
           onChanged: (settings) => ref
               .read(animeControllerProvider.notifier)
@@ -1359,6 +1442,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       _nativeVideo.resumeSeek.handleProgress(snapshot.position);
     }
     setState(() {
+      _tracks = _player.state.tracks;
+      _selectedTrack = _player.state.track;
       if (snapshot != null) {
         _playing = snapshot.playing;
         _position = snapshot.position;
@@ -1380,8 +1465,37 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _scheduleNextEpisodePrefetch();
   }
 
+  Future<void> _selectAudioTrack(AudioTrack track) =>
+      _player.setAudioTrack(track);
+  Future<void> _selectEmbeddedSubtitleTrack(SubtitleTrack track) =>
+      _player.setSubtitleTrack(track);
+
   void _bindPlayer() {
     _nativeVideo
+      ..track(
+        _player.stream.tracks.listen((value) {
+          final state = _player.state;
+          if (_acceptsNativeValue(
+            state,
+            eventValue: value,
+            playerStateValue: state.tracks,
+          )) {
+            setState(() => _tracks = value);
+          }
+        }),
+      )
+      ..track(
+        _player.stream.track.listen((value) {
+          final state = _player.state;
+          if (_acceptsNativeValue(
+            state,
+            eventValue: value,
+            playerStateValue: state.track,
+          )) {
+            setState(() => _selectedTrack = value);
+          }
+        }),
+      )
       ..track(
         _player.stream.playing.listen((value) {
           final playerState = _player.state;
@@ -1431,6 +1545,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
           _position = value;
           _timelineRevision.value++;
           if (reachedFirstFrame) _confirmNativeFirstFrame();
+          _applyEpisodeSkips();
           _maybeRefreshNextEpisodePrefetch();
         }),
       )
@@ -1865,12 +1980,59 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     );
   }
 
+  SkipTiming get _skipTiming =>
+      _currentSettings.effectiveSkipFor(widget.request.subject.identityKey);
+
+  void _resetLinePlaybackState(Duration resumePosition) {
+    _introSkippedEpisodeId = _outroTriggeredEpisodeId = null;
+    _lineResumePosition = resumePosition;
+    _tracks = const Tracks();
+    _selectedTrack = const Track();
+  }
+
+  void _applyEpisodeSkips() {
+    if (!_playing || _firstFrameTraceOpenSerial != _openLineSerial) return;
+    final timing = _skipTiming;
+    final intro = Duration(seconds: timing.introSeconds);
+    if (_introSkippedEpisodeId != _episode.id &&
+        intro > Duration.zero &&
+        _lineResumePosition <= intro &&
+        !_nativeVideo.resumeSeek.isPending &&
+        !_nativeVideo.resumeSeek.isSeeking &&
+        _position < intro &&
+        (_duration == Duration.zero ||
+            _duration > intro + const Duration(seconds: 10))) {
+      _introSkippedEpisodeId = _episode.id;
+      unawaited(_seekTo(intro));
+      _showPlayerToast('已自动跳过片头');
+      return;
+    }
+    final outro = Duration(seconds: timing.outroSeconds);
+    if (_outroTriggeredEpisodeId != _episode.id &&
+        outro > Duration.zero &&
+        _currentSettings.autoNext &&
+        _duration > outro + const Duration(seconds: 30) &&
+        _position >= _duration - outro) {
+      _outroTriggeredEpisodeId = _episode.id;
+      _handlePlaybackEnded();
+    }
+  }
+
+  Future<void> _quickSkipIntro() {
+    final intro = Duration(seconds: _skipTiming.introSeconds);
+    _introSkippedEpisodeId = _episode.id;
+    return _seekTo(
+      _position < intro ? intro : _position + const Duration(seconds: 85),
+    );
+  }
+
   void _handlePlaybackEnded() {
     if (!mounted ||
         (_handledEndedEpisodeId == _episode.id &&
             _handledEndedOpenSerial == _openLineSerial)) {
       return;
     }
+    final stopAfterEpisode = _sleepTimerController.consumeEndOfEpisode();
     _handledEndedEpisodeId = _episode.id;
     _handledEndedOpenSerial = _openLineSerial;
     _sessionController.dispatch(PlaybackSessionEvent.playbackEnded());
@@ -1879,7 +2041,12 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _resetPlaybackStallWatchdog();
     _recordRecommendationCompletion();
     unawaited(_persistPlaybackProgress(force: true));
-    if (_currentSettings.autoNext) unawaited(_playNextEpisode());
+    if (stopAfterEpisode) {
+      unawaited(_pausePlayback());
+      _showPlayerToast('本集播完已定时暂停');
+    } else if (_currentSettings.autoNext) {
+      unawaited(_playNextEpisode());
+    }
   }
 
   Future<void> _persistPlaybackProgress({bool force = false}) async {
@@ -2214,6 +2381,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
       ),
     );
     _nativeVideo.resumeSeek.cancel();
+    _resetLinePlaybackState(requestedResumePosition);
     final serial = ++_openLineSerial;
     _metadataProbeToken?.cancel();
     _metadataProbeToken = null;
@@ -2823,10 +2991,11 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _seekTo(Duration target) async {
     _revealPlayerControls();
-    if (_duration <= Duration.zero) return;
-    final max = _duration.inMilliseconds;
-    final clamped = target.inMilliseconds.clamp(0, max);
-    final position = Duration(milliseconds: clamped);
+    final position = target.isNegative
+        ? Duration.zero
+        : _duration > Duration.zero && target > _duration
+        ? _duration
+        : target;
     _sessionController.dispatch(PlaybackSessionEvent.userSeek(position));
     _resetPlaybackStallWatchdog(
       position: position,
@@ -2990,6 +3159,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _handledFailureOpenSerial = null;
     _recoveryController.clearPendingAutoSwitch();
     _pendingInitialResumePosition = null;
+    _resetLinePlaybackState(Duration.zero);
     _nativeVideo.resumeSeek.cancel();
     _resetRecommendationTracking();
     setState(() {
@@ -3276,6 +3446,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     if (!mounted) return;
     setState(() {
       _fullscreen = enabled;
+      if (enabled && _pipController.isWindows) _pipActive = false;
       if (!enabled) return;
       _episodePanel = false;
       _linePanel = false;
@@ -3324,6 +3495,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _supplementalSubtitles?.invalidate();
     _nativeMediaEvents.invalidate();
     _cancelSingleBackupLookup();
+    await _pipController.exitIfActive();
     await _lineRepository.cancelLookup();
     await _persistPlaybackProgress(force: true);
     await _restoreSystemUi();
@@ -3760,6 +3932,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
     _notePlaybackProgress(value);
     _position = value;
     _timelineRevision.value++;
+    _applyEpisodeSkips();
     _maybeRefreshNextEpisodePrefetch();
   }
 
@@ -3816,7 +3989,7 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
   }
 
   void _showPlayerToast(String message) {
-    if (!mounted) return;
+    if (!mounted || _inPipMode) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
     );

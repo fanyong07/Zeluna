@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart'
+    show AudioTrack, SubtitleTrack, Track, Tracks;
 
 import '../../domain/anime_models.dart';
 import '../../shared_ui/app_design.dart';
@@ -9,6 +11,128 @@ import 'subtitle_document.dart';
 import 'subtitle_matching.dart';
 import 'subtitle_repository.dart';
 import 'supplemental_subtitle_controller.dart';
+
+/// Built independently of the supplemental subtitle store (including during a storage error).
+class EmbeddedTrackControls extends StatelessWidget {
+  const EmbeddedTrackControls({
+    super.key,
+    required this.tracks,
+    required this.selected,
+    required this.onAudioTrack,
+    required this.onSubtitleTrack,
+  });
+  final Tracks tracks;
+  final Track selected;
+  final ValueChanged<AudioTrack> onAudioTrack;
+  final ValueChanged<SubtitleTrack> onSubtitleTrack;
+
+  @override
+  Widget build(BuildContext context) {
+    bool real(String id) => id != 'auto' && id != 'no';
+    final audio = tracks.audio.where((t) => real(t.id) && !t.uri);
+    final subtitles = tracks.subtitle.where(
+      (t) => real(t.id) && !t.uri && !t.data,
+    );
+    Widget choices<T>(
+      String heading,
+      String fallback,
+      Iterable<(T, String, String?, String?)> options,
+      T current,
+      ValueChanged<T> select, {
+      Widget? off,
+    }) {
+      final labels = <T, String>{};
+      final counts = <String, int>{};
+      for (final (track, id, title, language) in options) {
+        final name = title?.trim() ?? '';
+        final lang = language?.trim() ?? '';
+        final label = [
+          if (name.isNotEmpty) name,
+          if (lang.isNotEmpty && lang.toLowerCase() != name.toLowerCase()) lang,
+        ].join(' · ');
+        labels[track] = label.isEmpty ? '$fallback $id' : label;
+        counts.update(labels[track]!, (n) => n + 1, ifAbsent: () => 1);
+      }
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  off == null
+                      ? Icons.audiotrack_rounded
+                      : Icons.closed_caption_outlined,
+                  size: 15,
+                  color: AppColors.theaterMuted,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  heading,
+                  style: const TextStyle(
+                    color: AppColors.theaterInk,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              children: [
+                ?off,
+                for (final (track, id, _, _) in options)
+                  ChoiceChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      counts[labels[track]] == 1
+                          ? labels[track]!
+                          : '${labels[track]} · $id',
+                    ),
+                    selected: current == track,
+                    onSelected: (_) => select(track),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (audio.isEmpty && subtitles.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (audio.isNotEmpty)
+          choices(
+            '片源音轨',
+            '音轨',
+            audio.map((t) => (t, t.id, t.title, t.language)),
+            selected.audio,
+            onAudioTrack,
+          ),
+        if (subtitles.isNotEmpty)
+          choices(
+            '片源内嵌字幕',
+            '字幕',
+            subtitles.map((t) => (t, t.id, t.title, t.language)),
+            selected.subtitle,
+            onSubtitleTrack,
+            off: ChoiceChip(
+              visualDensity: VisualDensity.compact,
+              label: const Text('关闭内嵌字幕'),
+              selected: selected.subtitle.id == 'no',
+              onSelected: (_) => onSubtitleTrack(SubtitleTrack.no()),
+            ),
+          ),
+        const Divider(height: 16, color: AppColors.theaterBorder),
+      ],
+    );
+  }
+}
 
 class SubtitleImportFile {
   const SubtitleImportFile(this.name, this.bytes);
@@ -25,7 +149,9 @@ class SupplementalSubtitlePanel extends StatefulWidget {
     required this.episodes,
     required this.createRepository,
     this.pickFiles,
+    this.embeddedTracks,
   });
+  final Widget? embeddedTracks;
   final SupplementalSubtitleController controller;
   final AnimeSubject subject;
   final AnimeEpisode episode;
@@ -247,6 +373,7 @@ class _SupplementalSubtitlePanelState extends State<SupplementalSubtitlePanel> {
     builder: (context, _) => ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
       children: [
+        ?widget.embeddedTracks,
         const Text(
           '保留片源字幕，只补原文',
           style: TextStyle(

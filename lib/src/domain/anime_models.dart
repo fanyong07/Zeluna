@@ -1038,6 +1038,8 @@ class DanmakuSettings {
     this.fontSize = 18,
     this.displayArea = .75,
     this.speed = 1,
+    this.timeOffsetSeconds = 0,
+    this.maxOnScreen = 0,
     this.blockTop = false,
     this.blockBottom = false,
     this.blockScroll = false,
@@ -1053,6 +1055,8 @@ class DanmakuSettings {
 
   /// Danmaku travel speed, independent of video playback speed.
   final double speed;
+  final double timeOffsetSeconds;
+  final int maxOnScreen;
   final bool blockTop;
   final bool blockBottom;
   final bool blockScroll;
@@ -1064,6 +1068,8 @@ class DanmakuSettings {
     double? fontSize,
     double? displayArea,
     double? speed,
+    double? timeOffsetSeconds,
+    int? maxOnScreen,
     bool? blockTop,
     bool? blockBottom,
     bool? blockScroll,
@@ -1074,6 +1080,8 @@ class DanmakuSettings {
     fontSize: fontSize ?? this.fontSize,
     displayArea: displayArea ?? this.displayArea,
     speed: speed ?? this.speed,
+    timeOffsetSeconds: timeOffsetSeconds ?? this.timeOffsetSeconds,
+    maxOnScreen: maxOnScreen ?? this.maxOnScreen,
     blockTop: blockTop ?? this.blockTop,
     blockBottom: blockBottom ?? this.blockBottom,
     blockScroll: blockScroll ?? this.blockScroll,
@@ -1086,6 +1094,8 @@ class DanmakuSettings {
     'fontSize': fontSize,
     'displayArea': displayArea,
     'speed': speed,
+    'timeOffsetSeconds': timeOffsetSeconds,
+    'maxOnScreen': maxOnScreen,
     'blockTop': blockTop,
     'blockBottom': blockBottom,
     'blockScroll': blockScroll,
@@ -1105,6 +1115,11 @@ class DanmakuSettings {
       fontSize: number('fontSize', 18, 12, 28),
       displayArea: number('displayArea', .75, .25, 1),
       speed: number('speed', 1, .5, 2),
+      timeOffsetSeconds: number('timeOffsetSeconds', 0, -10, 10),
+      maxOnScreen: switch (json['maxOnScreen']) {
+        int n when n > 0 => n,
+        _ => 0,
+      },
       blockTop: json['blockTop'] as bool? ?? false,
       blockBottom: json['blockBottom'] as bool? ?? false,
       blockScroll: json['blockScroll'] as bool? ?? false,
@@ -1403,6 +1418,33 @@ class LocalFeedback {
   }
 }
 
+class SkipTiming {
+  const SkipTiming({this.introSeconds = 0, this.outroSeconds = 0});
+
+  final int introSeconds;
+  final int outroSeconds;
+
+  Map<String, dynamic> toJson() => {
+    'introSeconds': introSeconds,
+    'outroSeconds': outroSeconds,
+  };
+
+  factory SkipTiming.fromJson(Map<String, dynamic> json) => SkipTiming(
+    introSeconds: _skipSeconds(json['introSeconds']),
+    outroSeconds: _skipSeconds(json['outroSeconds']),
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is SkipTiming &&
+      introSeconds == other.introSeconds &&
+      outroSeconds == other.outroSeconds;
+  @override
+  int get hashCode => Object.hash(introSeconds, outroSeconds);
+}
+
+int _skipSeconds(Object? value) => value is int ? value.clamp(0, 300) : 0;
+
 class PlaybackSettings {
   const PlaybackSettings({
     this.volumeBoost = 0.26,
@@ -1418,6 +1460,9 @@ class PlaybackSettings {
     this.rewindSeconds = 10,
     this.forwardSeconds = 10,
     this.compatibilityMode = true,
+    this.skipIntroSeconds = 0,
+    this.skipOutroSeconds = 0,
+    this.subjectSkipTimings = const {},
     this.autoNext = true,
     this.autoSwitchLine = true,
     this.autoFullscreen = false,
@@ -1448,6 +1493,9 @@ class PlaybackSettings {
   final int rewindSeconds;
   final int forwardSeconds;
   final bool compatibilityMode;
+  final int skipIntroSeconds;
+  final int skipOutroSeconds;
+  final Map<String, SkipTiming> subjectSkipTimings;
   final bool autoNext;
   final bool autoSwitchLine;
   final bool autoFullscreen;
@@ -1459,6 +1507,41 @@ class PlaybackSettings {
   final bool shortcutFullscreen;
   final bool shortcutMute;
   final bool shortcutReload;
+
+  static const _maxSubjectSkips = 200;
+
+  SkipTiming effectiveSkipFor(String subjectKey) =>
+      subjectSkipTimings[subjectKey] ??
+      SkipTiming(
+        introSeconds: skipIntroSeconds,
+        outroSeconds: skipOutroSeconds,
+      );
+
+  PlaybackSettings withSubjectSkip(String subjectKey, SkipTiming? timing) {
+    final entries = {...subjectSkipTimings}..remove(subjectKey);
+    if (timing != null && timing != const SkipTiming()) {
+      entries[subjectKey] = timing;
+    }
+    if (entries.length > _maxSubjectSkips) entries.remove(entries.keys.first);
+    return copyWith(subjectSkipTimings: Map.unmodifiable(entries));
+  }
+
+  static Map<String, SkipTiming> _readSubjectSkips(Object? raw) {
+    if (raw is! Map) return const {};
+    final entries = <String, SkipTiming>{};
+    for (final entry in raw.entries) {
+      if (entry case MapEntry(key: String key, value: Map value)) {
+        final timing = SkipTiming.fromJson(value.cast<String, dynamic>());
+        if (key.isNotEmpty && timing != const SkipTiming()) {
+          entries[key] = timing;
+          if (entries.length > _maxSubjectSkips) {
+            entries.remove(entries.keys.first);
+          }
+        }
+      }
+    }
+    return Map.unmodifiable(entries);
+  }
 
   PlaybackSettings copyWith({
     double? volumeBoost,
@@ -1474,6 +1557,9 @@ class PlaybackSettings {
     int? rewindSeconds,
     int? forwardSeconds,
     bool? compatibilityMode,
+    int? skipIntroSeconds,
+    int? skipOutroSeconds,
+    Map<String, SkipTiming>? subjectSkipTimings,
     bool? autoNext,
     bool? autoSwitchLine,
     bool? autoFullscreen,
@@ -1501,6 +1587,9 @@ class PlaybackSettings {
       rewindSeconds: rewindSeconds ?? this.rewindSeconds,
       forwardSeconds: forwardSeconds ?? this.forwardSeconds,
       compatibilityMode: compatibilityMode ?? this.compatibilityMode,
+      skipIntroSeconds: skipIntroSeconds ?? this.skipIntroSeconds,
+      skipOutroSeconds: skipOutroSeconds ?? this.skipOutroSeconds,
+      subjectSkipTimings: subjectSkipTimings ?? this.subjectSkipTimings,
       autoNext: autoNext ?? this.autoNext,
       autoSwitchLine: autoSwitchLine ?? this.autoSwitchLine,
       autoFullscreen: autoFullscreen ?? this.autoFullscreen,
@@ -1530,6 +1619,11 @@ class PlaybackSettings {
     'rewindSeconds': rewindSeconds,
     'forwardSeconds': forwardSeconds,
     'compatibilityMode': compatibilityMode,
+    'skipIntroSeconds': skipIntroSeconds,
+    'skipOutroSeconds': skipOutroSeconds,
+    'subjectSkipTimings': subjectSkipTimings.map(
+      (key, timing) => MapEntry(key, timing.toJson()),
+    ),
     'autoNext': autoNext,
     'autoSwitchLine': autoSwitchLine,
     'autoFullscreen': autoFullscreen,
@@ -1564,6 +1658,9 @@ class PlaybackSettings {
       rewindSeconds: json['rewindSeconds'] as int? ?? 10,
       forwardSeconds: json['forwardSeconds'] as int? ?? 10,
       compatibilityMode: json['compatibilityMode'] as bool? ?? true,
+      skipIntroSeconds: _skipSeconds(json['skipIntroSeconds']),
+      skipOutroSeconds: _skipSeconds(json['skipOutroSeconds']),
+      subjectSkipTimings: _readSubjectSkips(json['subjectSkipTimings']),
       autoNext: json['autoNext'] as bool? ?? true,
       autoSwitchLine: json['autoSwitchLine'] as bool? ?? true,
       autoFullscreen: json['autoFullscreen'] as bool? ?? false,

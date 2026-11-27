@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <flutter/encodable_value.h>
+#include <flutter_windows.h>
 
 #include <optional>
 #include <string>
@@ -114,6 +115,19 @@ bool FlutterWindow::OnCreate() {
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
                  result) {
+        if (call.method_name() == "isMiniWindow") {
+          result->Success(flutter::EncodableValue(mini_window_));
+          return;
+        }
+        if (call.method_name() == "setMiniWindow") {
+          const auto* enabled = std::get_if<bool>(call.arguments());
+          if (!enabled || !SetMiniWindow(*enabled)) {
+            result->Error("window_mini_failed", "Could not change mini window mode.");
+          } else {
+            result->Success(flutter::EncodableValue(mini_window_));
+          }
+          return;
+        }
         if (call.method_name() == "isFullscreen") {
           result->Success(flutter::EncodableValue(IsFullscreen()));
           return;
@@ -166,7 +180,52 @@ void FlutterWindow::OnDestroy() {
   Win32Window::OnDestroy();
 }
 
+bool FlutterWindow::SetMiniWindow(bool enabled) {
+  if (enabled == mini_window_) return true;
+  HWND window = GetHandle();
+  if (enabled) {
+    if ((fullscreen_state_saved_ || IsFullscreen()) && !ExitFullscreen())
+      return false;
+    const HMONITOR current =
+        ::MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor{sizeof(MONITORINFO)};
+    mini_original_placement_.length = sizeof(WINDOWPLACEMENT);
+    if (!::GetWindowPlacement(window, &mini_original_placement_) ||
+        !::GetWindowRect(window, &mini_original_rect_) ||
+        !::GetMonitorInfo(current, &monitor)) {
+      return false;
+    }
+    if (::IsIconic(window) || ::IsZoomed(window))
+      ::ShowWindow(window, SW_RESTORE);
+    const int dpi = FlutterDesktopGetDpiForMonitor(current);
+    const int width = ::MulDiv(560, dpi, 96);
+    const int height = ::MulDiv(315, dpi, 96);
+    const int margin = ::MulDiv(24, dpi, 96);
+    if (!::SetWindowPos(window, HWND_TOPMOST,
+                        monitor.rcWork.right - width - margin,
+                        monitor.rcWork.bottom - height - margin, width, height,
+                        SWP_FRAMECHANGED | SWP_SHOWWINDOW)) {
+      ::SetWindowPlacement(window, &mini_original_placement_);
+      return false;
+    }
+  } else {
+    const RECT& rect = mini_original_rect_;
+    if (!::SetWindowPos(window, HWND_NOTOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED) ||
+        !::SetWindowPlacement(window, &mini_original_placement_))
+      return false;
+    if (mini_original_placement_.showCmd == SW_SHOWNORMAL &&
+        !::SetWindowPos(window, nullptr, rect.left, rect.top,
+                        rect.right - rect.left, rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE))
+      return false;
+  }
+  mini_window_ = enabled;
+  return true;
+}
+
 bool FlutterWindow::EnterFullscreen() {
+  if (mini_window_ && !SetMiniWindow(false)) return false;
   HWND window = GetHandle();
   if (window == nullptr) {
     return false;

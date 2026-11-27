@@ -404,6 +404,12 @@ Map<String, dynamic> _playbackSettingsPayload(PlaybackSettings settings) => {
   'rewindSeconds': settings.rewindSeconds.clamp(1, 600),
   'forwardSeconds': settings.forwardSeconds.clamp(1, 600),
   'compatibilityMode': settings.compatibilityMode,
+  'skipIntroSeconds': settings.skipIntroSeconds,
+  'skipOutroSeconds': settings.skipOutroSeconds,
+  'subjectSkipTimings': {
+    for (final entry in settings.subjectSkipTimings.entries)
+      if (entry.key.length <= 300) entry.key: entry.value.toJson(),
+  },
   'autoNext': settings.autoNext,
   'autoSwitchLine': settings.autoSwitchLine,
   'autoFullscreen': settings.autoFullscreen,

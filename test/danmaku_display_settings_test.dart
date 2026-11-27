@@ -156,6 +156,8 @@ void main() {
         blockBottom: true,
         blockScroll: true,
         blockKeywords: ['保留的屏蔽词'],
+        timeOffsetSeconds: 1,
+        maxOnScreen: 48,
       );
       await tester.pumpWidget(
         MaterialApp(
@@ -173,6 +175,21 @@ void main() {
           ),
         ),
       );
+      Future<void> tapControl(String key) async {
+        final target = find.byKey(ValueKey(key));
+        await tester.ensureVisible(target);
+        await tester.pumpAndSettle();
+        await tester.tap(target);
+        await tester.pumpAndSettle();
+      }
+
+      await tapControl('danmakuOffsetPlus');
+      expect(find.text('+1.5s'), findsOneWidget);
+      await tapControl('danmakuOffsetReset');
+      await tapControl('danmakuOffsetMinus');
+      expect(settings.timeOffsetSeconds, -.5);
+      await tapControl('danmakuDensity12');
+      expect(settings.maxOnScreen, 12);
       await tester.ensureVisible(
         find.byKey(const ValueKey('danmakuResetDisplay')),
       );

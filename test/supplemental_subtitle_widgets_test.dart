@@ -14,6 +14,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_kit/media_kit.dart'
+    show AudioTrack, SubtitleTrack, Track, Tracks;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -112,6 +114,44 @@ Widget panel(
 );
 
 void main() {
+  testWidgets('内嵌轨道与外挂字幕独立，可选择实际音轨并显式关闭内嵌字幕', (tester) async {
+    final c = await controller(withDocument: true);
+    const audio = AudioTrack('1', '日语音轨', 'ja');
+    const sub = SubtitleTrack('2', null, 'zh');
+    AudioTrack? chosenAudio;
+    SubtitleTrack? chosenSub;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SupplementalSubtitlePanel(
+            controller: c,
+            subject: subject,
+            episode: episode(1),
+            episodes: [episode(1)],
+            createRepository: () =>
+                SubtitleRepository(const ExternalServiceSettings()),
+            embeddedTracks: EmbeddedTrackControls(
+              tracks: const Tracks(
+                audio: [AudioTrack('auto', null, null), audio],
+                subtitle: [sub],
+              ),
+              selected: const Track(),
+              onAudioTrack: (t) => chosenAudio = t,
+              onSubtitleTrack: (t) => chosenSub = t,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('日语音轨 · ja'));
+    await tester.tap(find.text('zh'));
+    expect(chosenAudio, audio);
+    expect(chosenSub, sub);
+    await tester.tap(find.text('关闭内嵌字幕'));
+    expect(chosenSub, SubtitleTrack.no());
+    expect(c.textAt(const Duration(seconds: 2)), isNotEmpty);
+  });
+
   testWidgets(
     'enabling captions fetches the unique server library file without import',
     (tester) async {

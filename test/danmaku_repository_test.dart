@@ -11,6 +11,86 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  test(
+    'manual search deduplicates seasons; explicit numbers never fall back to a different episode',
+    () async {
+      const settings = ExternalServiceSettings();
+      final repo = DanmakuRepository(
+        officialClient: MockClient((request) async {
+          final query = request.url.queryParameters;
+          expect(query['title'], '手动关键词');
+          expect(query['original_title'], '手动关键词');
+          expect(query['episode_number'], '4');
+          expect(query['subject_key'], _subject.identityKey);
+          return _cacheTimelineResponse(4, commentCount: 1);
+        }),
+        client: MockClient((request) async {
+          switch (request.url.path) {
+            case '/x/web-interface/nav':
+              return _jsonResponse({'code': -101});
+            case '/x/web-interface/wbi/search/type':
+              expect(request.url.queryParameters['keyword'], '手动关键词');
+              return _jsonResponse({
+                'code': 0,
+                'data': {
+                  'result': [
+                    for (var i = 0; i < 2; i++)
+                      {'season_id': 77, 'title': '<em>系列</em>'},
+                  ],
+                },
+              });
+            case '/pgc/view/web/season':
+              expect(request.url.queryParameters['season_id'], '77');
+              return _jsonResponse({
+                'code': 0,
+                'result': {
+                  'title': '系列',
+                  'episodes': [
+                    {'title': '1', 'cid': 11},
+                    {'title': '4', 'cid': 44},
+                  ],
+                },
+              });
+            case '/x/v1/dm/list.so':
+              expect(request.url.queryParameters['oid'], '44');
+              return http.Response.bytes(
+                utf8.encode('<i><d p="1,1,25,16777215,0,0,u,7">第四集</d></i>'),
+                200,
+              );
+            default:
+              throw StateError(request.url.path);
+          }
+        }),
+      );
+      addTearDown(repo.close);
+      final choices = await repo.searchManualCandidates('  手动关键词 ', settings);
+      expect(choices.map((c) => c.seasonId), [null, 77]);
+      expect(choices.last.title, '系列');
+      Future<DanmakuTimeline> load(int? season, int number) =>
+          repo.loadManualTimeline(
+            subject: _subject,
+            episode: _cacheEpisode(1),
+            settings: settings,
+            keyword: '手动关键词',
+            bilibiliSeasonId: season,
+            episodeNumber: number,
+          );
+      expect((await load(null, 4)).comments, hasLength(1));
+      expect((await load(77, 4)).comments.single.text, '第四集');
+      expect((await load(77, 2)).comments, isEmpty);
+      expect(
+        await repo.searchManualCandidates(
+          '无来源',
+          settings.copyWith(
+            dandanplayDanmakuEnabled: false,
+            bilibiliDanmakuEnabled: false,
+          ),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
   group('bounded timeline cache', () {
     const settings = ExternalServiceSettings(bilibiliDanmakuEnabled: false);
 

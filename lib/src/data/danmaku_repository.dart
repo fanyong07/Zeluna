@@ -26,6 +26,17 @@ class TransientDanmakuFailure extends DanmakuMatch {
   }) : super(available: false);
 }
 
+class ManualDanmakuCandidate {
+  const ManualDanmakuCandidate({
+    required this.title,
+    required this.provider,
+    this.seasonId,
+  });
+  final String title;
+  final String provider;
+  final int? seasonId;
+}
+
 class DanmakuRepository {
   /// Limits apply only to retained timelines, not to comments returned to the
   /// player. Setting either cache limit to zero disables timeline retention.
@@ -125,6 +136,70 @@ class DanmakuRepository {
     return future;
   }
 
+  Future<List<ManualDanmakuCandidate>> searchManualCandidates(
+    String keyword,
+    ExternalServiceSettings settings,
+  ) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    final candidates = <ManualDanmakuCandidate>[
+      if (settings.dandanplayDanmakuEnabled)
+        ManualDanmakuCandidate(title: query, provider: '官方弹幕'),
+    ];
+    if (settings.bilibiliDanmakuEnabled) {
+      final result = await _searchBilibiliBangumi(query);
+      final seen = <int>{};
+      for (final item in result.items) {
+        final id = _intValue(item['season_id']);
+        final title = _plainText(item['title']);
+        if (id != null && id > 0 && title.isNotEmpty && seen.add(id)) {
+          candidates.add(
+            ManualDanmakuCandidate(
+              title: title,
+              provider: 'Bilibili',
+              seasonId: id,
+            ),
+          );
+        }
+      }
+    }
+    return candidates;
+  }
+
+  Future<DanmakuTimeline> loadManualTimeline({
+    required AnimeSubject subject,
+    required AnimeEpisode episode,
+    required ExternalServiceSettings settings,
+    required String keyword,
+    int? bilibiliSeasonId,
+    int? episodeNumber,
+  }) async {
+    final query = keyword.trim();
+    final number = episodeNumber ?? episode.number;
+    if (query.isEmpty || number < 1) return const DanmakuTimeline();
+    if (bilibiliSeasonId != null) {
+      if (!settings.bilibiliDanmakuEnabled) return const DanmakuTimeline();
+      return _timelineFromResults([
+        await _loadBilibili(
+          subject,
+          episode,
+          seasonId: bilibiliSeasonId,
+          exactNumber: number,
+        ),
+      ]);
+    }
+    if (!settings.dandanplayDanmakuEnabled) return const DanmakuTimeline();
+    return _timelineFromResults([
+      await _loadOfficial(
+        subject,
+        episode,
+        settings,
+        keyword: query,
+        episodeNumber: number,
+      ),
+    ]);
+  }
+
   void _cacheTimeline(String key, DanmakuTimeline timeline) {
     final now = _now();
     _pruneExpiredTimelines(now);
@@ -204,6 +279,10 @@ class DanmakuRepository {
     final results = (await Future.wait(
       loaders,
     )).whereType<_DanmakuSourceResult>();
+    return _timelineFromResults(results);
+  }
+
+  DanmakuTimeline _timelineFromResults(Iterable<_DanmakuSourceResult> results) {
     final sources = results
         .expand((result) => result.matches)
         .toList(growable: false);
@@ -216,11 +295,13 @@ class DanmakuRepository {
     );
   }
 
-  Future<_DanmakuSourceResult?> _loadOfficial(
+  Future<_DanmakuSourceResult> _loadOfficial(
     AnimeSubject subject,
     AnimeEpisode episode,
-    ExternalServiceSettings settings,
-  ) async {
+    ExternalServiceSettings settings, {
+    String? keyword,
+    int? episodeNumber,
+  }) async {
     final budget = _stopwatchFactory()..start();
     try {
       final token =
@@ -242,9 +323,9 @@ class DanmakuRepository {
           'subject_key': subject.identityKey,
           'episode_key': episode.identityKey(subjectKey: subject.identityKey),
           'limit': '1000',
-          'title': subject.title,
-          'original_title': subject.originalTitle,
-          'episode_number': '${episode.number}',
+          'title': keyword ?? subject.title,
+          'original_title': keyword ?? subject.originalTitle,
+          'episode_number': '${episodeNumber ?? episode.number}',
           'media_type': subjectContentTypeOf(subject).name,
           'include_dandanplay': '${settings.dandanplayDanmakuEnabled}',
         },
@@ -392,10 +473,19 @@ class DanmakuRepository {
 
   Future<_DanmakuSourceResult> _loadBilibili(
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) async {
+    AnimeEpisode episode, {
+    int? seasonId,
+    int? exactNumber,
+  }) async {
     try {
-      final match = await _findBilibiliEpisode(subject, episode);
+      final match = seasonId == null
+          ? await _findBilibiliEpisode(subject, episode)
+          : await _bilibiliSeasonEpisode(
+              seasonId,
+              subject,
+              episode,
+              exactNumber: exactNumber,
+            );
       if (match == null) {
         return _DanmakuSourceResult(
           match: _unavailableMatch(
@@ -508,7 +598,15 @@ class DanmakuRepository {
     if (selected == null || bestScore < 55) return null;
     final seasonId = _intValue(selected['season_id']);
     if (seasonId == null) return null;
+    return _bilibiliSeasonEpisode(seasonId, subject, episode);
+  }
 
+  Future<_BilibiliEpisode?> _bilibiliSeasonEpisode(
+    int seasonId,
+    AnimeSubject subject,
+    AnimeEpisode episode, {
+    int? exactNumber,
+  }) async {
     final response = await _get(
       Uri.parse(
         'https://api.bilibili.com/pgc/view/web/season',
@@ -523,7 +621,12 @@ class DanmakuRepository {
     if (result is! Map || result['episodes'] is! List) return null;
     final episodes = (result['episodes'] as List).whereType<Map>().toList();
     if (episodes.isEmpty) return null;
-    final selectedEpisode = _pickBilibiliEpisode(episodes, subject, episode);
+    final selectedEpisode = _pickBilibiliEpisode(
+      episodes,
+      subject,
+      episode,
+      exactNumber: exactNumber,
+    );
     if (selectedEpisode == null) return null;
     final cid = _intValue(selectedEpisode['cid']) ?? 0;
     if (cid <= 0) return null;
@@ -718,14 +821,21 @@ class DanmakuRepository {
   Map<dynamic, dynamic>? _pickBilibiliEpisode(
     List<Map<dynamic, dynamic>> episodes,
     AnimeSubject subject,
-    AnimeEpisode episode,
-  ) {
-    if (subject.platform.toLowerCase() == 'movie') return episodes.first;
+    AnimeEpisode episode, {
+    int? exactNumber,
+  }) {
+    if (exactNumber == null && subject.platform.toLowerCase() == 'movie') {
+      return episodes.first;
+    }
+    final number = exactNumber ?? episode.number;
     for (final item in episodes) {
-      if (_episodeNumber(item['title']) == episode.number ||
-          _episodeNumber(item['short_title']) == episode.number) {
+      if (_episodeNumber(item['title']) == number ||
+          _episodeNumber(item['short_title']) == number) {
         return item;
       }
+    }
+    if (exactNumber != null) {
+      return null; // Never substitute a different episode for an explicit match.
     }
     final index = episode.number - 1;
     if (index >= 0 && index < episodes.length) return episodes[index];

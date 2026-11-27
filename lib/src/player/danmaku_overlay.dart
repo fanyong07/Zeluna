@@ -69,6 +69,8 @@ class _RemoteDanmakuOverlayState extends State<RemoteDanmakuOverlay> {
             settings.speed,
             settings.displayArea,
             settings.enabled,
+            settings.timeOffsetSeconds,
+            settings.maxOnScreen,
             settings.blockTop,
             settings.blockBottom,
             settings.blockScroll,
@@ -85,7 +87,8 @@ class _RemoteDanmakuOverlayState extends State<RemoteDanmakuOverlay> {
               direction: direction,
             );
           }
-          final placements = _layout!.at(widget.position);
+          final effectivePosition = _danmakuPosition(widget.position, settings);
+          final placements = _layout!.at(effectivePosition);
           return ClipRect(
             clipper: DanmakuAreaClipper(bounds),
             child: Stack(
@@ -93,7 +96,9 @@ class _RemoteDanmakuOverlayState extends State<RemoteDanmakuOverlay> {
                 for (final placement in placements)
                   Positioned(
                     key: ValueKey(placement.index),
-                    left: placement.xAt(widget.position.inMicroseconds / 1000),
+                    left: placement.xAt(
+                      effectivePosition.inMicroseconds / 1000,
+                    ),
                     top: placement.top,
                     width: placement.size.width,
                     height: placement.size.height,
@@ -321,7 +326,7 @@ class _DanmakuLayout {
     // Bound burst work separately from on-screen density. Short comments may
     // share a track once a safe gap opens; wide canvases must not stop at one
     // comment per track or at a small area-scaled count.
-    candidateBudget = (lanes * 4).clamp(32, _maxActiveDanmaku);
+    candidateBudget = math.min(maxActive, math.max(32, lanes * 4));
   }
 
   final List<DanmakuComment> comments;
@@ -331,6 +336,9 @@ class _DanmakuLayout {
   final TextDirection direction;
   late final double laneHeight;
   late final int lanes;
+  late final int maxActive = settings.maxOnScreen > 0
+      ? math.min(settings.maxOnScreen, _maxActiveDanmaku)
+      : _maxActiveDanmaku;
   late final int candidateBudget;
   final _active = <_DanmakuPlacement>[];
   final _sizes = <(String, bool), Size>{};
@@ -438,7 +446,7 @@ class _DanmakuLayout {
           ? _bucketEnd
           : _bucketStart + (_bucketAttempts * (count - 1) ~/ (samples - 1));
       _active.removeWhere((entry) => entry.end <= start);
-      if (_active.length >= _maxActiveDanmaku ||
+      if (_active.length >= maxActive ||
           comment.text.trim().isEmpty ||
           _isBlocked(comment, settings)) {
         continue;
@@ -611,6 +619,10 @@ int _lowerBound(List<DanmakuComment> comments, double milliseconds) {
   return low;
 }
 
+Duration _danmakuPosition(Duration position, DanmakuSettings settings) =>
+    position -
+    Duration(milliseconds: (settings.timeOffsetSeconds * 1000).round());
+
 /// Time/mode eligibility only. Without a viewport this helper cannot decide
 /// spatial density; the overlay performs measured track admission separately.
 List<DanmakuComment> visibleDanmakuComments(
@@ -619,6 +631,7 @@ List<DanmakuComment> visibleDanmakuComments(
   required DanmakuSettings settings,
   int limit = _maxActiveDanmaku,
 }) {
+  position = _danmakuPosition(position, settings);
   final budget = math.max(0, limit);
   if (!settings.enabled ||
       comments.isEmpty ||

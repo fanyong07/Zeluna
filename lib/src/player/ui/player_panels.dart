@@ -891,10 +891,17 @@ class _LinePanelBodyState extends State<_LinePanelBody> {
 
 class _DanmakuPanel extends ConsumerStatefulWidget {
   const _DanmakuPanel({
+    super.key,
+    required this.subject,
+    required this.episode,
+    required this.onMatched,
     required this.comments,
     required this.onDelete,
     required this.onReload,
   });
+  final AnimeSubject subject;
+  final AnimeEpisode episode;
+  final void Function(int, DanmakuTimeline) onMatched;
   final List<DanmakuComment> comments;
   final Future<void> Function(DanmakuComment comment) onDelete;
   final Future<void> Function() onReload;
@@ -903,7 +910,62 @@ class _DanmakuPanel extends ConsumerStatefulWidget {
 }
 
 class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
+  late final _keyword = TextEditingController(text: widget.subject.title);
+  late final _number = TextEditingController(text: '${widget.episode.number}');
+  List<ManualDanmakuCandidate> _candidates = const [];
+  bool _matching = false;
+  String? _matchMessage;
   String? _deletingId;
+
+  @override
+  void dispose() {
+    _keyword.dispose();
+    _number.dispose();
+    super.dispose();
+  }
+
+  Future<void> _match([ManualDanmakuCandidate? choice]) async {
+    final query = _keyword.text.trim();
+    final number = int.tryParse(_number.text.trim());
+    if (query.isEmpty || number == null || number <= 0) {
+      setState(() => _matchMessage = '请填写作品名和有效集数');
+      return;
+    }
+    final repo = ref.read(danmakuRepositoryProvider);
+    final services = ref.read(animeControllerProvider).requireValue.services;
+    setState(() {
+      _matching = true;
+      _matchMessage = null;
+    });
+    if (choice == null) {
+      final results = await repo.searchManualCandidates(query, services);
+      if (!mounted) return;
+      setState(() {
+        _matching = false;
+        _candidates = results;
+        if (results.isEmpty) _matchMessage = '未找到候选，请检查弹幕来源或更换关键词';
+      });
+      return;
+    }
+    final episode = widget.episode;
+    final timeline = await repo.loadManualTimeline(
+      subject: widget.subject,
+      episode: episode,
+      settings: services,
+      keyword: choice.title,
+      episodeNumber: number,
+      bilibiliSeasonId: choice.seasonId,
+    );
+    if (!mounted) return;
+    if (timeline.comments.isNotEmpty) widget.onMatched(episode.id, timeline);
+    setState(() {
+      _matching = false;
+      _matchMessage = timeline.comments.isNotEmpty
+          ? '已匹配第 $number 集，加载 ${timeline.comments.length} 条弹幕'
+          : (timeline.sources.firstOrNull?.message ?? '本集未找到弹幕，已保留原时间线');
+    });
+  }
+
   bool _reloading = false;
   Future<void> _delete(DanmakuComment comment) async {
     if (_deletingId != null) return;
@@ -978,6 +1040,212 @@ class _DanmakuPanelState extends ConsumerState<_DanmakuPanel> {
                 ),
               ),
             ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: AppColors.theaterPanelHigh.withValues(alpha: 0.65),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.theaterBorder),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(
+                        Icons.manage_search_rounded,
+                        size: 16,
+                        color: AppColors.theaterMuted,
+                      ),
+                      SizedBox(width: 6),
+                      Text(
+                        '手动匹配弹幕',
+                        style: TextStyle(
+                          color: AppColors.theaterInk,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _keyword,
+                          enabled: !_matching,
+                          style: const TextStyle(
+                            color: AppColors.theaterInk,
+                            fontSize: 13,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: '作品关键词',
+                            isDense: true,
+                            filled: true,
+                            fillColor: AppColors.theaterBg.withValues(
+                              alpha: 0.65,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 10,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(
+                                color: AppColors.theaterBorder,
+                              ),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(
+                                color: AppColors.theaterBorder,
+                              ),
+                            ),
+                          ),
+                          onChanged: (_) => setState(() {
+                            _candidates = const [];
+                            _matchMessage = null;
+                          }),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 64,
+                        child: TextField(
+                          controller: _number,
+                          enabled: !_matching,
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppColors.theaterInk,
+                            fontSize: 13,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: '集数',
+                            isDense: true,
+                            filled: true,
+                            fillColor: AppColors.theaterBg.withValues(
+                              alpha: 0.65,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 10,
+                            ),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(
+                                color: AppColors.theaterBorder,
+                              ),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(
+                                color: AppColors.theaterBorder,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: _matching ? null : () => _match(),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 36),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    icon: _matching
+                        ? const SizedBox.square(
+                            dimension: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.search_rounded, size: 17),
+                    label: Text(_matching ? '匹配中…' : '搜索匹配'),
+                  ),
+                  if (_matchMessage case final message?) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      message,
+                      style: const TextStyle(
+                        color: AppColors.theaterMuted,
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                  if (_candidates.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    for (final candidate in _candidates)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Material(
+                          color: AppColors.theaterBg.withValues(alpha: 0.65),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: const BorderSide(
+                              color: AppColors.theaterBorder,
+                            ),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: _matching ? null : () => _match(candidate),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 9,
+                              ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          candidate.title,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color: AppColors.theaterInk,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          candidate.provider,
+                                          style: const TextStyle(
+                                            color: AppColors.theaterMuted,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const Icon(
+                                    Icons.chevron_right_rounded,
+                                    size: 18,
+                                    color: AppColors.theaterMuted,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
+            ),
           ),
         ),
         if (mine.isNotEmpty) ...[

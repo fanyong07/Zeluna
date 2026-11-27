@@ -9,6 +9,7 @@ import '../data/anime_controller.dart';
 import '../domain/anime_models.dart';
 import '../player/anime4k_shader_manager.dart';
 import '../player/playback_line_display.dart';
+import '../player/sleep_timer_controller.dart';
 import '../shared_ui/app_chrome.dart';
 import '../shared_ui/settings_ui.dart';
 import '../shared_ui/app_navigation.dart';
@@ -398,6 +399,10 @@ class PlaybackSettingsView extends StatelessWidget {
     this.line,
     this.playbackMessage,
     this.superResolutionStatus,
+    this.currentPosition,
+    this.totalDuration,
+    this.readPosition,
+    this.sleepTimer,
   });
 
   final PlaybackSettings settings;
@@ -409,6 +414,10 @@ class PlaybackSettingsView extends StatelessWidget {
   final PlaybackLine? line;
   final String? playbackMessage;
   final Widget? superResolutionStatus;
+  final Duration? currentPosition;
+  final Duration? totalDuration;
+  final ValueGetter<Duration>? readPosition;
+  final SleepTimerController? sleepTimer;
 
   @override
   Widget build(BuildContext context) {
@@ -628,6 +637,99 @@ class PlaybackSettingsView extends StatelessWidget {
                       ),
                     ),
                     _SettingsSection(
+                      icon: Icons.skip_next_rounded,
+                      title: '片头片尾跳过',
+                      subtitle: '0 秒表示不跳过，片尾仅在自动续播时跳过',
+                      compact: compact,
+                      child: _SkipTimingControls(
+                        key: ValueKey(subject?.identityKey),
+                        settings: settings,
+                        subjectKey: subject?.identityKey,
+                        onChanged: onChanged,
+                        currentPosition: currentPosition,
+                        totalDuration: totalDuration,
+                        readPosition: readPosition,
+                      ),
+                    ),
+                    if (sleepTimer case final timer?)
+                      _SettingsSection(
+                        icon: Icons.bedtime_outlined,
+                        title: '睡眠定时',
+                        subtitle: '定时结束后暂停播放',
+                        compact: compact,
+                        child: ListenableBuilder(
+                          listenable: timer,
+                          builder: (context, _) => Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  ChoiceChip(
+                                    visualDensity: VisualDensity.compact,
+                                    label: const Text('关闭'),
+                                    selected: !timer.isActive,
+                                    onSelected: (_) => timer.setOff(),
+                                  ),
+                                  ChoiceChip(
+                                    visualDensity: VisualDensity.compact,
+                                    label: const Text('播完本集'),
+                                    selected:
+                                        timer.mode ==
+                                        SleepTimerMode.endOfEpisode,
+                                    onSelected: (_) => timer.setEndOfEpisode(),
+                                  ),
+                                  for (final minutes in const [15, 30, 60])
+                                    ChoiceChip(
+                                      visualDensity: VisualDensity.compact,
+                                      label: Text('$minutes分钟'),
+                                      selected:
+                                          timer.countdownDuration ==
+                                          Duration(minutes: minutes),
+                                      onSelected: (_) => timer.startCountdown(
+                                        Duration(minutes: minutes),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              if (timer.isActive) ...[
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.bedtime_rounded,
+                                      size: 14,
+                                      color: Theme.of(
+                                        context,
+                                      ).colorScheme.primary,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      timer.mode == SleepTimerMode.endOfEpisode
+                                          ? '本集播完后自动暂停播放'
+                                          : '将在 ${timer.badgeLabel} 后自动暂停播放',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                            fontWeight: FontWeight.w600,
+                                            fontFeatures: const [
+                                              FontFeature.tabularFigures(),
+                                            ],
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    _SettingsSection(
                       icon: Icons.playlist_play_rounded,
                       title: '播放行为',
                       subtitle: '管理连续播放、失败恢复和全屏行为',
@@ -675,6 +777,191 @@ class PlaybackSettingsView extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _SkipTimingControls extends StatefulWidget {
+  const _SkipTimingControls({
+    super.key,
+    required this.settings,
+    required this.subjectKey,
+    required this.onChanged,
+    required this.currentPosition,
+    required this.totalDuration,
+    required this.readPosition,
+  });
+  final PlaybackSettings settings;
+  final String? subjectKey;
+  final ValueChanged<PlaybackSettings> onChanged;
+  final Duration? currentPosition, totalDuration;
+  final ValueGetter<Duration>? readPosition;
+  @override
+  State<_SkipTimingControls> createState() => _SkipTimingControlsState();
+}
+
+class _SkipTimingControlsState extends State<_SkipTimingControls> {
+  // A zero/zero override is not persisted; keep the editor open while entering it.
+  late bool editingOverride = widget.settings.subjectSkipTimings.containsKey(
+    widget.subjectKey,
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = widget.settings;
+    final key = widget.subjectKey;
+    final individual =
+        key != null &&
+        (editingOverride || settings.subjectSkipTimings.containsKey(key));
+    final timing = individual
+        ? settings.subjectSkipTimings[key] ?? const SkipTiming()
+        : SkipTiming(
+            introSeconds: settings.skipIntroSeconds,
+            outroSeconds: settings.skipOutroSeconds,
+          );
+    void save({int? intro, int? outro}) {
+      final value = SkipTiming(
+        introSeconds: (intro ?? timing.introSeconds).clamp(0, 300),
+        outroSeconds: (outro ?? timing.outroSeconds).clamp(0, 300),
+      );
+      widget.onChanged(
+        individual
+            ? settings.withSubjectSkip(key, value)
+            : settings.copyWith(
+                skipIntroSeconds: value.introSeconds,
+                skipOutroSeconds: value.outroSeconds,
+              ),
+      );
+    }
+
+    String formatSeconds(int seconds) {
+      if (seconds <= 0) return '不跳过';
+      final mins = seconds ~/ 60;
+      final secs = seconds % 60;
+      return mins > 0
+          ? '$mins:${secs.toString().padLeft(2, '0')} ($seconds 秒)'
+          : '$seconds 秒';
+    }
+
+    Widget step(String label, int seconds, ValueChanged<int> change) {
+      final colors = Theme.of(context).colorScheme;
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: colors.surfaceContainerHighest.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: colors.outlineVariant.withValues(alpha: 0.55),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        label,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        formatSeconds(seconds),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: seconds > 0
+                              ? colors.primary
+                              : colors.onSurfaceVariant,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton.filledTonal(
+                  tooltip: '$label减 5 秒',
+                  onPressed: seconds > 0 ? () => change(seconds - 5) : null,
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  icon: const Icon(Icons.remove_rounded),
+                ),
+                const SizedBox(width: 6),
+                IconButton.filledTonal(
+                  tooltip: '$label加 5 秒',
+                  onPressed: seconds < 300 ? () => change(seconds + 5) : null,
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                  icon: const Icon(Icons.add_rounded),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    Duration position() =>
+        widget.readPosition?.call() ?? widget.currentPosition!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (key != null)
+          SettingsSwitchRow(
+            title: '当前番剧单独设置',
+            subtitle: individual ? '只影响这部番剧' : '使用全局默认，以下调整对所有番剧生效',
+            value: individual,
+            onChanged: (enabled) {
+              setState(() => editingOverride = enabled);
+              widget.onChanged(
+                settings.withSubjectSkip(key, enabled ? timing : null),
+              );
+            },
+          ),
+        step('片头', timing.introSeconds, (v) => save(intro: v)),
+        step('片尾', timing.outroSeconds, (v) => save(outro: v)),
+        if (key != null && widget.currentPosition != null) ...[
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => save(intro: position().inSeconds),
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                ),
+                icon: const Icon(Icons.flag_outlined, size: 15),
+                label: const Text('以当前进度设为片头'),
+              ),
+              OutlinedButton.icon(
+                onPressed:
+                    (widget.totalDuration ?? Duration.zero) > Duration.zero
+                    ? () => save(
+                        outro: (widget.totalDuration! - position()).inSeconds,
+                      )
+                    : null,
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                ),
+                icon: const Icon(Icons.skip_next_rounded, size: 16),
+                label: const Text('以剩余时长设为片尾'),
+              ),
+            ],
+          ),
+        ],
+      ],
     );
   }
 }

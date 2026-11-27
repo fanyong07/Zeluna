@@ -335,6 +335,11 @@ class _PlayerCanvas extends StatelessWidget {
     required this.onSettingsPanel,
     required this.onSubtitlePanel,
     this.supplementalSubtitles,
+    required this.inPipMode,
+    required this.miniWindowActive,
+    required this.onPip,
+    required this.sleepTimer,
+    required this.onQuickSkipIntro,
     required this.controlsVisible,
     required this.autoHideChrome,
     required this.onToggleControls,
@@ -372,6 +377,10 @@ class _PlayerCanvas extends StatelessWidget {
   final bool fullscreen;
   final bool muted;
   final String? playerMessage;
+  final bool inPipMode, miniWindowActive;
+  final VoidCallback? onPip;
+  final SleepTimerController sleepTimer;
+  final VoidCallback onQuickSkipIntro;
   final bool controlsVisible;
   final bool autoHideChrome;
   final Future<void> Function() onBack;
@@ -417,10 +426,10 @@ class _PlayerCanvas extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final chromeVisible = controlsVisible || !autoHideChrome;
+    final chromeVisible = !inPipMode && (controlsVisible || !autoHideChrome);
     final safePadding = MediaQuery.paddingOf(context);
     final compact = _isMobilePlayerLayout(context);
-    final edgeToEdge = fullscreen || compact;
+    final edgeToEdge = fullscreen || compact || inPipMode || miniWindowActive;
     final horizontalSafe = math.max(safePadding.left, safePadding.right);
     final horizontalInset =
         (compact ? 10.0 : (fullscreen ? 28.0 : 18.0)) + horizontalSafe;
@@ -523,6 +532,7 @@ class _PlayerCanvas extends StatelessWidget {
                           ),
                           onExit: (_) => onChromeHotZoneChanged(false),
                           child: PlayerGestureSurface(
+                            videoOnly: inPipMode,
                             volume: muted ? 0 : volume,
                             position: position,
                             duration: duration,
@@ -561,6 +571,7 @@ class _PlayerCanvas extends StatelessWidget {
                                   onWebDuration: onWebDuration,
                                   onWebPlaying: onWebPlaying,
                                   onWebEnded: onWebEnded,
+                                  inPipMode: inPipMode,
                                   poster: PosterArt(
                                     coverUrl: subject.bannerUrl,
                                     fallbackCoverUrl: subject.coverUrl,
@@ -570,53 +581,54 @@ class _PlayerCanvas extends StatelessWidget {
                                 // The scrim belongs to the video, not the
                                 // comments. Painting it above danmaku turns
                                 // bright glyphs gray and muddies the outline.
-                                Positioned.fill(
-                                  child: IgnorePointer(
-                                    child: AnimatedOpacity(
-                                      opacity: chromeVisible ? 1 : 0,
-                                      duration: const Duration(
-                                        milliseconds: 180,
-                                      ),
-                                      child: Stack(
-                                        children: [
-                                          Positioned(
-                                            left: 0,
-                                            right: 0,
-                                            top: 0,
-                                            height: compact ? 88 : 126,
-                                            child: DecoratedBox(
-                                              decoration: BoxDecoration(
-                                                gradient:
-                                                    AppOverlays.playerTopFade,
+                                if (!inPipMode)
+                                  Positioned.fill(
+                                    child: IgnorePointer(
+                                      child: AnimatedOpacity(
+                                        opacity: chromeVisible ? 1 : 0,
+                                        duration: const Duration(
+                                          milliseconds: 180,
+                                        ),
+                                        child: Stack(
+                                          children: [
+                                            Positioned(
+                                              left: 0,
+                                              right: 0,
+                                              top: 0,
+                                              height: compact ? 88 : 126,
+                                              child: DecoratedBox(
+                                                decoration: BoxDecoration(
+                                                  gradient:
+                                                      AppOverlays.playerTopFade,
+                                                ),
                                               ),
                                             ),
-                                          ),
-                                          Positioned(
-                                            left: 0,
-                                            right: 0,
-                                            bottom: 0,
-                                            height:
-                                                compact &&
-                                                    MediaQuery.sizeOf(
-                                                          context,
-                                                        ).height >
-                                                        MediaQuery.sizeOf(
-                                                          context,
-                                                        ).width
-                                                ? 124
-                                                : 190,
-                                            child: DecoratedBox(
-                                              decoration: BoxDecoration(
-                                                gradient: AppOverlays
-                                                    .playerBottomFade,
+                                            Positioned(
+                                              left: 0,
+                                              right: 0,
+                                              bottom: 0,
+                                              height:
+                                                  compact &&
+                                                      MediaQuery.sizeOf(
+                                                            context,
+                                                          ).height >
+                                                          MediaQuery.sizeOf(
+                                                            context,
+                                                          ).width
+                                                  ? 124
+                                                  : 190,
+                                              child: DecoratedBox(
+                                                decoration: BoxDecoration(
+                                                  gradient: AppOverlays
+                                                      .playerBottomFade,
+                                                ),
                                               ),
                                             ),
-                                          ),
-                                        ],
+                                          ],
+                                        ),
                                       ),
                                     ),
                                   ),
-                                ),
                                 PlayerDanmakuLayers(
                                   remoteComments: remoteDanmaku,
                                   localComments: localDanmaku,
@@ -631,71 +643,84 @@ class _PlayerCanvas extends StatelessWidget {
                                     position: position,
                                     controlsVisible: chromeVisible,
                                   ),
-                                AnimatedOpacity(
-                                  opacity: chromeVisible ? 1 : 0,
-                                  duration: const Duration(milliseconds: 180),
-                                  child: IgnorePointer(
-                                    ignoring: !chromeVisible,
-                                    child: Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        Positioned(
-                                          left: horizontalInset,
-                                          right: horizontalInset,
-                                          top: topInset,
-                                          child: _PlayerHeader(
-                                            subject: subject,
-                                            episode: episode,
-                                            line: line,
-                                            onBack: onBack,
-                                            onReload: onReload,
-                                            onScreenshot: onScreenshot,
-                                            onTheaterMode: onTheaterMode,
-                                            theaterMode: theaterMode,
-                                            onCast: onCast,
-                                            onSettings: onSettingsPanel,
-                                            onSubtitles: onSubtitlePanel,
+                                if (!inPipMode)
+                                  AnimatedOpacity(
+                                    opacity: chromeVisible ? 1 : 0,
+                                    duration: const Duration(milliseconds: 180),
+                                    child: IgnorePointer(
+                                      ignoring: !chromeVisible,
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          Positioned(
+                                            left: horizontalInset,
+                                            right: horizontalInset,
+                                            top: topInset,
+                                            child: _PlayerHeader(
+                                              sleepTimer: sleepTimer,
+                                              onPip: onPip,
+                                              miniWindowActive:
+                                                  miniWindowActive,
+                                              subject: subject,
+                                              episode: episode,
+                                              line: line,
+                                              onBack: onBack,
+                                              onReload: onReload,
+                                              onScreenshot: onScreenshot,
+                                              onTheaterMode: onTheaterMode,
+                                              theaterMode: theaterMode,
+                                              onCast: onCast,
+                                              onSettings: onSettingsPanel,
+                                              onSubtitles: onSubtitlePanel,
+                                            ),
                                           ),
-                                        ),
-                                        PlayerBottomBar(
-                                          line: line,
-                                          settings: settings,
-                                          services: services,
-                                          danmaku: danmaku,
-                                          position: position,
-                                          duration: duration,
-                                          buffer: buffer,
-                                          volume: volume,
-                                          playing: playing,
-                                          buffering: buffering,
-                                          loadingLine:
-                                              loadingLine ||
-                                              lineLookupInProgress,
-                                          fullscreen: fullscreen,
-                                          muted: muted,
-                                          onPlayPause: onPlayPause,
-                                          onPreviousEpisode: onPreviousEpisode,
-                                          onNextEpisode: onNextEpisode,
-                                          onSeek: onSeek,
-                                          onMute: onMute,
-                                          onVolumeChanged: onVolumeChanged,
-                                          onSpeedSelected: onSpeedSelected,
-                                          onControlMenuChanged:
-                                              onControlMenuChanged,
-                                          onFullscreen: onFullscreen,
-                                          onDanmakuPanel: onDanmakuPanel,
-                                          onDanmakuEnabledChanged:
-                                              onDanmakuEnabledChanged,
-                                          danmakuInput: danmakuInput,
-                                          danmakuInputFocus: danmakuInputFocus,
-                                          onSendDanmaku: onSendDanmaku,
-                                          onEpisodePanel: onEpisodePanel,
-                                          onLinePanel: onLinePanel,
-                                        ),
-                                      ],
+                                          PlayerBottomBar(
+                                            onQuickSkipIntro: onQuickSkipIntro,
+                                            introSeconds: settings
+                                                .effectiveSkipFor(
+                                                  subject.identityKey,
+                                                )
+                                                .introSeconds,
+                                            line: line,
+                                            settings: settings,
+                                            services: services,
+                                            danmaku: danmaku,
+                                            position: position,
+                                            duration: duration,
+                                            buffer: buffer,
+                                            volume: volume,
+                                            playing: playing,
+                                            buffering: buffering,
+                                            loadingLine:
+                                                loadingLine ||
+                                                lineLookupInProgress,
+                                            fullscreen: fullscreen,
+                                            muted: muted,
+                                            onPlayPause: onPlayPause,
+                                            onPreviousEpisode:
+                                                onPreviousEpisode,
+                                            onNextEpisode: onNextEpisode,
+                                            onSeek: onSeek,
+                                            onMute: onMute,
+                                            onVolumeChanged: onVolumeChanged,
+                                            onSpeedSelected: onSpeedSelected,
+                                            onControlMenuChanged:
+                                                onControlMenuChanged,
+                                            onFullscreen: onFullscreen,
+                                            onDanmakuPanel: onDanmakuPanel,
+                                            onDanmakuEnabledChanged:
+                                                onDanmakuEnabledChanged,
+                                            danmakuInput: danmakuInput,
+                                            danmakuInputFocus:
+                                                danmakuInputFocus,
+                                            onSendDanmaku: onSendDanmaku,
+                                            onEpisodePanel: onEpisodePanel,
+                                            onLinePanel: onLinePanel,
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                ),
                               ],
                             ),
                           ),
@@ -742,6 +767,7 @@ class PlayerGestureSurface extends StatefulWidget {
     required this.volume,
     required this.onVolumeChanged,
     required this.onTap,
+    this.videoOnly = false,
     required this.onDoubleTapLeft,
     required this.onDoubleTapCenter,
     required this.onDoubleTapRight,
@@ -764,6 +790,7 @@ class PlayerGestureSurface extends StatefulWidget {
   final Future<void> Function() onDoubleTapRight;
   final VoidCallback onLongPressStart;
   final VoidCallback onLongPressEnd;
+  final bool videoOnly;
   final Widget child;
   final Duration position;
   final Duration duration;
@@ -1026,6 +1053,7 @@ class _PlayerGestureSurfaceState extends State<PlayerGestureSurface> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.videoOnly) return widget.child;
     return Listener(
       onPointerSignal: _handlePointerSignal,
       child: GestureDetector(
@@ -1198,6 +1226,7 @@ class _StreamVideoSurface extends StatelessWidget {
     required this.onWebDuration,
     required this.onWebPlaying,
     required this.onWebEnded,
+    required this.inPipMode,
     required this.poster,
   });
 
@@ -1219,6 +1248,7 @@ class _StreamVideoSurface extends StatelessWidget {
   final ValueChanged<Duration> onWebDuration;
   final ValueChanged<bool> onWebPlaying;
   final VoidCallback onWebEnded;
+  final bool inPipMode;
   final Widget poster;
 
   @override
@@ -1253,6 +1283,7 @@ class _StreamVideoSurface extends StatelessWidget {
       video = Video(
         controller: controller,
         controls: null,
+        pauseUponEnteringBackgroundMode: !inPipMode,
         fit: _fitForVideoScale(settings.videoScale),
         filterQuality: superResolutionActive
             ? FilterQuality.high
@@ -1262,8 +1293,8 @@ class _StreamVideoSurface extends StatelessWidget {
     return Stack(
       fit: StackFit.expand,
       children: [
-        if (shouldShowVideo) video else poster,
-        if (!hasStream || failed || loading)
+        if (shouldShowVideo || inPipMode) video else poster,
+        if (!inPipMode && (!hasStream || failed || loading))
           Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,

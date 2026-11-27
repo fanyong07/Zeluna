@@ -25,6 +25,7 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  bool SetMiniWindow(bool enabled);
   bool EnterFullscreen();
   bool ExitFullscreen();
   bool IsFullscreen();
@@ -40,6 +41,10 @@ class FlutterWindow : public Win32Window {
       storage_channel_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       window_channel_;
+
+  bool mini_window_ = false;
+  RECT mini_original_rect_{};
+  WINDOWPLACEMENT mini_original_placement_{};
 
   bool fullscreen_state_saved_ = false;
   LONG_PTR fullscreen_original_style_ = 0;
