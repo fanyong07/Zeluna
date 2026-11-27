@@ -8,6 +8,7 @@ import 'app_update_models.dart';
 import 'app_update_platform.dart';
 import 'app_update_repository.dart';
 import 'app_update_store.dart';
+import 'windows_app_update_platform.dart';
 
 enum AppUpdatePhase {
   idle,
@@ -25,11 +26,17 @@ enum AppUpdatePhase {
 }
 
 final appUpdateControllerProvider = Provider<AppUpdateController>((ref) {
+  final windows = !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
   final controller = AppUpdateController(
-    supported: !kIsWeb && defaultTargetPlatform == TargetPlatform.android,
-    repository: ReleaseAppUpdateRepository(),
+    supported:
+        windows || (!kIsWeb && defaultTargetPlatform == TargetPlatform.android),
+    repository: ReleaseAppUpdateRepository(
+      targetPlatform: windows ? 'windows' : 'android',
+    ),
     downloader: createAppUpdateDownloader(),
-    platform: const AndroidAppUpdatePlatform(),
+    platform: windows
+        ? const WindowsAppUpdatePlatform()
+        : const AndroidAppUpdatePlatform(),
     store: HiveAppUpdateStore(),
   );
   ref.onDispose(controller.dispose);
@@ -122,7 +129,11 @@ class AppUpdateController extends ChangeNotifier {
           final candidate = UpdateRelease.fromJson(
             Map<String, dynamic>.from(pending['release'] as Map),
           );
-          if (_compatible(candidate) &&
+          final installedPlatform = environment!.sdkInt == 0
+              ? 'windows'
+              : 'android';
+          if (candidate.platform == installedPlatform &&
+              _compatible(candidate) &&
               candidate.isNewerThan(
                 environment!.versionName,
                 environment!.versionCode,
@@ -167,9 +178,9 @@ class AppUpdateController extends ChangeNotifier {
 
   bool _compatible(UpdateRelease value) {
     final env = environment;
-    return env != null &&
-        env.packageName == 'app.anime.anime' &&
-        (value.minSdk == null || value.minSdk! <= env.sdkInt) &&
+    if (env == null || env.packageName != appUpdatePackageName) return false;
+    if (value.platform == 'windows') return true;
+    return (value.minSdk == null || value.minSdk! <= env.sdkInt) &&
         (value.abis.isEmpty || value.abis.any(env.supportedAbis.contains));
   }
 

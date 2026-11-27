@@ -85,17 +85,19 @@ class AndroidAppUpdatePlatform implements AppUpdatePlatform {
 }
 
 bool updateErrorInvalidatesPackage(Object error) =>
+    error is UpdateFailure &&
+        const {'verification', 'storage_path'}.contains(error.code) ||
     error is PlatformException &&
-    const {
-      'update_invalid_path',
-      'update_hash_mismatch',
-      'update_size_mismatch',
-      'update_package_mismatch',
-      'update_version_mismatch',
-      'update_not_newer',
-      'update_signature_mismatch',
-      'update_incompatible',
-    }.contains(error.code);
+        const {
+          'update_invalid_path',
+          'update_hash_mismatch',
+          'update_size_mismatch',
+          'update_package_mismatch',
+          'update_version_mismatch',
+          'update_not_newer',
+          'update_signature_mismatch',
+          'update_incompatible',
+        }.contains(error.code);
 
 String updateErrorMessage(Object error) {
   if (error is UpdateFailure) return error.message;

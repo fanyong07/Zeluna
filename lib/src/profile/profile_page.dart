@@ -10,6 +10,7 @@ import '../accounts/local_account_repository.dart';
 import '../app/anime_app.dart';
 import '../catalog/catalog_page.dart';
 import '../data/anime_controller.dart';
+import '../downloads/download_network_guard.dart';
 import '../data/media_download_task.dart';
 import '../domain/anime_models.dart';
 import '../downloads/download_controller.dart';
@@ -1189,59 +1190,74 @@ class DownloadManagementPage extends ConsumerWidget {
               compact ? 14 : 24,
               120,
             ),
-            child: tasks.isEmpty
-                ? const EmptyState(
-                    icon: Icons.inbox_outlined,
-                    compact: true,
-                    title: '还没有下载任务',
-                    message: '在详情页点击下载后，任务会显示在这里。',
-                  )
-                : ListView.separated(
-                    itemCount: tasks.length + 1,
-                    separatorBuilder: (context, index) =>
-                        const SizedBox(height: 10),
-                    itemBuilder: (context, index) {
-                      if (index == 0) {
-                        final controller = ref.read(
-                          animeControllerProvider.notifier,
-                        );
-                        return Column(
-                          children: [
-                            AppPanel(
-                              child: SectionTitle(
-                                title: '全部下载',
-                                subtitle: '${tasks.length} 个下载任务，可在这里暂停、继续或删除',
-                                icon: Icons.download_for_offline_outlined,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            FutureBuilder<DownloadStorageSnapshot>(
-                              future: controller.isDownloadDomainReady
-                                  ? controller.downloadStorageSnapshot()
-                                  : null,
-                              builder: (context, snapshot) {
-                                final usage = snapshot.data;
-                                if (usage == null) {
-                                  return const SizedBox.shrink();
-                                }
-                                return _DownloadStoragePanel(
-                                  usage: usage,
-                                  onCleanup: usage.orphanedPaths.isEmpty
-                                      ? null
-                                      : () => _confirmCleanupStorage(
-                                          context,
-                                          controller,
-                                          usage.orphanedPaths,
-                                        ),
-                                );
-                              },
-                            ),
-                          ],
-                        );
-                      }
-                      return _DownloadTaskCard(task: tasks[index - 1]);
-                    },
-                  ),
+            child: Column(
+              children: [
+                SwitchListTile(
+                  key: const ValueKey('wifiOnlyDownloadSwitch'),
+                  title: const Text('仅在 Wi-Fi 下缓存'),
+                  value: state.misc.wifiOnlyCache,
+                  onChanged: (value) => ref
+                      .read(animeControllerProvider.notifier)
+                      .updateMisc(state.misc.copyWith(wifiOnlyCache: value)),
+                ),
+                Expanded(
+                  child: tasks.isEmpty
+                      ? const EmptyState(
+                          icon: Icons.inbox_outlined,
+                          compact: true,
+                          title: '还没有下载任务',
+                          message: '在详情页点击下载后，任务会显示在这里。',
+                        )
+                      : ListView.separated(
+                          itemCount: tasks.length + 1,
+                          separatorBuilder: (context, index) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            if (index == 0) {
+                              final controller = ref.read(
+                                animeControllerProvider.notifier,
+                              );
+                              return Column(
+                                children: [
+                                  AppPanel(
+                                    child: SectionTitle(
+                                      title: '全部下载',
+                                      subtitle:
+                                          '${tasks.length} 个下载任务，可在这里暂停、继续或删除',
+                                      icon: Icons.download_for_offline_outlined,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  FutureBuilder<DownloadStorageSnapshot>(
+                                    future: controller.isDownloadDomainReady
+                                        ? controller.downloadStorageSnapshot()
+                                        : null,
+                                    builder: (context, snapshot) {
+                                      final usage = snapshot.data;
+                                      if (usage == null) {
+                                        return const SizedBox.shrink();
+                                      }
+                                      return _DownloadStoragePanel(
+                                        usage: usage,
+                                        onCleanup: usage.orphanedPaths.isEmpty
+                                            ? null
+                                            : () => _confirmCleanupStorage(
+                                                context,
+                                                controller,
+                                                usage.orphanedPaths,
+                                              ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              );
+                            }
+                            return _DownloadTaskCard(task: tasks[index - 1]);
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -1438,7 +1454,14 @@ class _DownloadTaskActions extends ConsumerWidget {
             task.status == MediaDownloadTaskStatus.corrupt)
           IconButton(
             tooltip: task.downloadedBytes > 0 ? '继续下载' : '重新下载',
-            onPressed: () => controller.resumeDownload(task.id),
+            onPressed: () async {
+              final account = controller.accountContextVersion;
+              if (await confirmDownloadNetwork(context, ref) &&
+                  context.mounted &&
+                  controller.isAccountContextCurrent(account)) {
+                await controller.resumeDownload(task.id);
+              }
+            },
             icon: const Icon(Icons.refresh_rounded),
           ),
         if (task.isActive || task.status == MediaDownloadTaskStatus.paused)

@@ -32,6 +32,7 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
   ReleaseAppUpdateRepository({
     http.Client Function()? clientFactory,
     Uri? endpoint,
+    this.targetPlatform = 'android',
     String manifestUrl = const String.fromEnvironment(
       'ZELUNA_UPDATE_MANIFEST_URL',
     ),
@@ -47,6 +48,9 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
   final http.Client Function()? _clientFactory;
   final Uri _endpoint;
   final String _manifestUrl;
+  final String targetPlatform;
+  String _artifactName(String tag) =>
+      'Zeluna-$tag-${targetPlatform == 'windows' ? 'Windows.zip' : 'Android.apk'}';
   final Duration checkTimeout;
 
   @override
@@ -84,7 +88,9 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
             parseUpdateUri(_manifestUrl),
             operation,
           );
-          return UpdateRelease.fromJson(json!);
+          final release = UpdateRelease.fromJson(json!);
+          if (release.platform != targetPlatform) throw invalidUpdateManifest;
+          return release;
         }
         try {
           final release = await _json(
@@ -150,17 +156,17 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
     final assets = release['assets'];
     if (assets is! List) throw invalidUpdateManifest;
     final manifestName = 'Zeluna-$tag-manifest.json';
-    final apkName = 'Zeluna-$tag-Android.apk';
+    final artifactName = _artifactName(tag);
     final manifestAsset = _exactAsset(assets, manifestName);
-    final apkAsset = _exactAsset(assets, apkName);
+    final artifactAsset = _exactAsset(assets, artifactName);
     final manifestSize = manifestAsset['size'];
-    final apkSize = apkAsset['size'];
+    final artifactSize = artifactAsset['size'];
     if (manifestSize is! int ||
         manifestSize <= 0 ||
         manifestSize > appUpdateMaxJsonBytes ||
-        apkSize is! int ||
-        apkSize <= 0 ||
-        apkSize > appUpdateMaxApkBytes) {
+        artifactSize is! int ||
+        artifactSize <= 0 ||
+        artifactSize > appUpdateMaxApkBytes) {
       throw invalidUpdateManifest;
     }
     final body = release['body'];
@@ -171,7 +177,7 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
       cancellation,
       notes: (body as String?) ?? '',
       manifestSize: manifestSize,
-      apkSize: apkSize,
+      artifactSize: artifactSize,
     );
   }
 
@@ -225,11 +231,11 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
     UpdateCancellation cancellation, {
     required String notes,
     int? manifestSize,
-    int? apkSize,
+    int? artifactSize,
   }) async {
     final version = tag.substring(1);
     final manifestName = 'Zeluna-$tag-manifest.json';
-    final apkName = 'Zeluna-$tag-Android.apk';
+    final artifactName = _artifactName(tag);
     // The API's browser_download_url/url fields are never trusted as endpoints.
     final base = 'https://github.com/fanyong07/Zeluna/releases/download/$tag/';
     final manifest = (await _json(
@@ -255,25 +261,27 @@ class ReleaseAppUpdateRepository implements AppUpdateRepository {
     }
     final artifacts = manifest['artifacts'];
     if (artifacts is! List) throw invalidUpdateManifest;
-    final apk = _exactAsset(artifacts, apkName);
-    if (apk['bytes'] is! int ||
-        (apkSize != null && apk['bytes'] != apkSize) ||
-        apk['native_abis'] is! List ||
-        (apk['native_abis'] as List).isEmpty) {
+    final artifact = _exactAsset(artifacts, artifactName);
+    if (artifact['bytes'] is! int ||
+        (artifactSize != null && artifact['bytes'] != artifactSize) ||
+        (targetPlatform == 'android' &&
+            (artifact['native_abis'] is! List ||
+                (artifact['native_abis'] as List).isEmpty))) {
       throw invalidUpdateManifest;
     }
     return UpdateRelease.fromJson({
       'schema': 'zeluna-app-update-v1',
-      'platform': 'android',
+      'platform': targetPlatform,
       'package_name': appUpdatePackageName,
       'version': version,
       'build_number': build,
       'apk': {
-        'url': '$base$apkName',
-        'sha256': apk['sha256'],
-        'bytes': apk['bytes'],
-        'abis': apk['native_abis'],
-        if (apk.containsKey('min_sdk')) 'min_sdk': apk['min_sdk'],
+        'url': '$base$artifactName',
+        'sha256': artifact['sha256'],
+        'bytes': artifact['bytes'],
+        if (targetPlatform == 'android') 'abis': artifact['native_abis'],
+        if (targetPlatform == 'android' && artifact.containsKey('min_sdk'))
+          'min_sdk': artifact['min_sdk'],
       },
       'notes': notes.length > appUpdateMaxNotesLength
           ? notes.substring(0, appUpdateMaxNotesLength)

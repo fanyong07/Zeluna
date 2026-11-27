@@ -27,7 +27,7 @@ class IoAppUpdateDownloader implements AppUpdateDownloader {
   final Duration totalTimeout;
   final Set<String> _ownedDirectories = {};
   static final _ownedName = RegExp(
-    r'^app-[1-9][0-9]*-[0-9a-f]{64}\.apk(?:\.part)?$',
+    r'^app-[1-9][0-9]*-[0-9a-f]{64}\.(?:apk|zip)(?:\.part)?$',
   );
 
   @override
@@ -65,7 +65,9 @@ class IoAppUpdateDownloader implements AppUpdateDownloader {
     try {
       final root = await _registerDirectory(directory);
       operation.throwIfCancelled();
-      final basename = 'app-${checked.buildNumber}-${checked.sha256}.apk';
+      final windows = checked.platform == 'windows';
+      final basename =
+          'app-${checked.buildNumber}-${checked.sha256}.${windows ? 'zip' : 'apk'}';
       finalPath = File.fromUri(Directory(root).uri.resolve(basename)).path;
       partPath = '$finalPath.part';
       await _removeOwnedFile(partPath);
@@ -89,9 +91,11 @@ class IoAppUpdateDownloader implements AppUpdateDownloader {
       );
       client = createAppUpdateHttpClient(policy, clientFactory: _clientFactory);
       final request = http.Request('GET', checked.apkUri)
-        ..headers.addAll(const {
+        ..headers.addAll({
           'user-agent': 'Zeluna-App-Updater',
-          'accept': 'application/vnd.android.package-archive',
+          'accept': windows
+              ? 'application/zip'
+              : 'application/vnd.android.package-archive',
           'accept-encoding': 'identity',
         });
       final pendingResponse = client.send(request).then((response) async {

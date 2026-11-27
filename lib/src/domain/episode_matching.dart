@@ -25,6 +25,12 @@ final _seasonAsciiLabel = RegExp(
 );
 final _seasonChineseLabel = RegExp(r'第\s*([0-9一二三四五六七八九十两兩]+)\s*季');
 
+bool isMainEpisode(AnimeEpisode episode) =>
+    episode.number > 0 &&
+    !_promoLabel.hasMatch(episode.title) &&
+    !_specialLabel.hasMatch(episode.title) &&
+    !_collectionLabel.hasMatch(episode.title);
+
 List<T> matchingEpisodes<T>(
   List<T> items,
   AnimeEpisode episode,

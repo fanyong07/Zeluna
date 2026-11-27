@@ -23,11 +23,13 @@ class UpdateRelease {
     required this.sha256,
     required this.bytes,
     required this.notes,
+    this.platform = 'android',
     this.releasePage,
     this.abis = const [],
     this.minSdk,
   });
 
+  final String platform;
   final String version;
   final int buildNumber;
   final Uri apkUri;
@@ -57,7 +59,7 @@ class UpdateRelease {
 
   Map<String, Object?> toJson() => {
     'schema': 'zeluna-app-update-v1',
-    'platform': 'android',
+    'platform': platform,
     'package_name': appUpdatePackageName,
     'version': version,
     'build_number': buildNumber,
@@ -74,7 +76,7 @@ class UpdateRelease {
 
   factory UpdateRelease.fromJson(Map<String, dynamic> json) {
     if (json['schema'] != 'zeluna-app-update-v1' ||
-        json['platform'] != 'android' ||
+        !const {'android', 'windows'}.contains(json['platform']) ||
         json['package_name'] != appUpdatePackageName) {
       throw invalidUpdateManifest;
     }
@@ -114,6 +116,7 @@ class UpdateRelease {
       throw invalidUpdateManifest;
     }
     return UpdateRelease(
+      platform: json['platform'] as String,
       version: version,
       buildNumber: build,
       apkUri: parseUpdateUri(apk['url']),

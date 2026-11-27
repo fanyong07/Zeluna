@@ -11,7 +11,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../app/anime_app.dart';
 import '../data/anime_controller.dart';
 import '../data/chinese_text.dart';
+import '../downloads/batch_download_sheet.dart';
+import '../downloads/download_network_guard.dart';
 import '../domain/anime_models.dart';
+import '../domain/episode_matching.dart';
 import '../domain/subject_content_type.dart';
 import '../library/following_update_tracker.dart';
 import '../shared_ui/app_chrome.dart';
@@ -2018,6 +2021,19 @@ class _DetailPageState extends ConsumerState<DetailPage> {
         final historyEntry = selected.history;
         final compact = MediaQuery.sizeOf(context).width < 760;
 
+        final downloadsSupported = ref
+            .read(animeControllerProvider.notifier)
+            .supportsOfflineDownloads;
+        final live = bundle.subject.source.startsWith('m3u-channel:');
+        final canBatch =
+            downloadsSupported && !live && bundle.episodes.any(isMainEpisode);
+        void batchDownload() => showBatchDownloadSheet(
+          context,
+          ref,
+          bundle: bundle,
+          historyEntry: historyEntry,
+        );
+
         void play(AnimeEpisode episode) {
           final controller = ref.read(animeControllerProvider.notifier);
           final accountContextVersion = controller.accountContextVersion;
@@ -2099,17 +2115,27 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                       final controller = ref.read(
                         animeControllerProvider.notifier,
                       );
-                      if (!controller.supportsOfflineDownloads) {
+                      if (!downloadsSupported) {
                         _showToast(context, '网页版暂不支持离线下载，请使用桌面或移动客户端。');
                         return;
                       }
-                      if (bundle.subject.source.startsWith('m3u-channel:')) {
+                      if (live) {
                         _showToast(context, '直播频道暂不支持离线下载。');
                         return;
                       }
-                      final episode = continueEpisode();
+                      if (bundle.episodes.length > 1 && canBatch) {
+                        batchDownload();
+                        return;
+                      }
+                      final episode = bundle.episodes.singleOrNull;
                       if (episode == null) {
                         _showToast(context, '这部作品还没有可下载的集数');
+                        return;
+                      }
+                      final account = controller.accountContextVersion;
+                      if (!await confirmDownloadNetwork(context, ref) ||
+                          !context.mounted ||
+                          !controller.isAccountContextCurrent(account)) {
                         return;
                       }
                       _showToast(context, '正在准备下载…');
@@ -2138,7 +2164,11 @@ class _DetailPageState extends ConsumerState<DetailPage> {
                     : TabBarView(
                         children: [
                           _DetailInfo(bundle: bundle),
-                          _EpisodeGrid(bundle: bundle, onPlay: play),
+                          _EpisodeGrid(
+                            bundle: bundle,
+                            onPlay: play,
+                            onBatch: canBatch ? batchDownload : null,
+                          ),
                           _CharacterGrid(items: bundle.characters),
                           _StaffGrid(items: bundle.staff),
                           _RecommendationGrid(
@@ -3980,7 +4010,12 @@ class _DetailInfo extends StatelessWidget {
 }
 
 class _EpisodeGrid extends StatelessWidget {
-  const _EpisodeGrid({required this.bundle, required this.onPlay});
+  const _EpisodeGrid({
+    required this.bundle,
+    required this.onPlay,
+    required this.onBatch,
+  });
+  final VoidCallback? onBatch;
 
   final AnimeDetailBundle bundle;
   final ValueChanged<AnimeEpisode> onPlay;
@@ -3990,67 +4025,89 @@ class _EpisodeGrid extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = (constraints.maxWidth / 210).floor().clamp(1, 6);
-        return GridView.builder(
+        return CustomScrollView(
           key: const ValueKey('detailEpisodeGrid'),
-          padding: const EdgeInsets.fromLTRB(0, 0, 0, 120),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            mainAxisSpacing: 10,
-            crossAxisSpacing: 10,
-            mainAxisExtent: 58,
-          ),
-          itemCount: bundle.episodes.length,
-          itemBuilder: (context, index) {
-            final episode = bundle.episodes[index];
-            final scheme = Theme.of(context).colorScheme;
-            return InkWell(
-              borderRadius: BorderRadius.circular(AppRadius.md),
-              onTap: () => onPlay(episode),
-              child: AppPanel(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
-                color: index == 0
-                    ? scheme.primaryContainer
-                    : scheme.surfaceContainer,
-                borderColor: index == 0
-                    ? scheme.primary
-                    : scheme.outlineVariant,
-                child: Row(
-                  children: [
-                    Text(
-                      '${episode.number}',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        color: index == 0
-                            ? scheme.primary
-                            : scheme.onSurfaceVariant,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        episode.title.trim().isEmpty
-                            ? '第${episode.number}集'
-                            : episode.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurface,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
-                    Icon(
-                      Icons.play_arrow_rounded,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ],
+          slivers: [
+            if (onBatch != null)
+              SliverToBoxAdapter(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    key: const ValueKey('detailBatchDownloadButton'),
+                    onPressed: onBatch,
+                    icon: const Icon(Icons.download_outlined),
+                    label: const Text('批量缓存'),
+                  ),
                 ),
               ),
-            );
-          },
+            SliverPadding(
+              padding: const EdgeInsets.only(bottom: 120),
+              sliver: SliverGrid.builder(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  mainAxisSpacing: 10,
+                  crossAxisSpacing: 10,
+                  mainAxisExtent: 58,
+                ),
+                itemCount: bundle.episodes.length,
+                itemBuilder: (context, index) {
+                  final episode = bundle.episodes[index];
+                  final scheme = Theme.of(context).colorScheme;
+                  return InkWell(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    onTap: () => onPlay(episode),
+                    child: AppPanel(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      color: index == 0
+                          ? scheme.primaryContainer
+                          : scheme.surfaceContainer,
+                      borderColor: index == 0
+                          ? scheme.primary
+                          : scheme.outlineVariant,
+                      child: Row(
+                        children: [
+                          Text(
+                            '${episode.number}',
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(
+                                  color: index == 0
+                                      ? scheme.primary
+                                      : scheme.onSurfaceVariant,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              episode.title.trim().isEmpty
+                                  ? '第${episode.number}集'
+                                  : episode.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleSmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurface,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                            ),
+                          ),
+                          Icon(
+                            Icons.play_arrow_rounded,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
         );
       },
     );

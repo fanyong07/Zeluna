@@ -39,6 +39,8 @@ import 'lines/playback_line_controller.dart';
 import 'lines/playback_line_repository.dart';
 import 'lines/playback_recovery_controller.dart';
 import 'local_media.dart';
+import 'external_player_launcher.dart';
+import 'ui/external_playback_sheet.dart';
 import 'playback_continuity.dart';
 import 'player_pip_controller.dart';
 import 'sleep_timer_controller.dart';
@@ -3800,26 +3802,14 @@ class _PlayerPageState extends ConsumerState<PlayerPage>
 
   Future<void> _showExternalPlayback() async {
     final url = _line?.url?.trim() ?? '';
-    if (url.isEmpty) {
-      _showPlayerToast('当前没有可分享的播放地址');
+    if (!isExternalMediaUrl(url)) {
+      _showPlayerToast('当前没有可分享的 HTTP 播放直链');
       return;
     }
-    await Clipboard.setData(ClipboardData(text: url));
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('投屏与外部播放'),
-        content: const Text(
-          '已复制当前播放地址，可以粘贴到电视或投屏 App（支持 AirPlay、Chromecast 等）里播放。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('知道了'),
-          ),
-        ],
-      ),
+    await showExternalPlaybackSheet(
+      context,
+      url: url,
+      title: '${widget.request.subject.title} · ${_episode.displayTitle}',
     );
   }
 

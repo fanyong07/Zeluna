@@ -15,6 +15,8 @@ open class MainActivity : FlutterActivity() {
     private var videoCompatibilityChannel: MethodChannel? = null
     private var nativeVideoSurfaceChannel: NativeVideoSurfaceChannel? = null
     private var cspMethodChannel: CspMethodChannel? = null
+    private var networkStatus: NetworkStatusMethodChannel? = null
+    private var externalPlayer: ExternalPlayerMethodChannel? = null
     private var pipChannel: PlayerPipMethodChannel? = null
     private var storageMethodChannel: StorageMethodChannel? = null
     private var appUpdateMethodChannel: AppUpdateMethodChannel? = null
@@ -66,6 +68,9 @@ open class MainActivity : FlutterActivity() {
                 }
             }
         }
+        val messenger = flutterEngine.dartExecutor.binaryMessenger
+        networkStatus = NetworkStatusMethodChannel(this, messenger)
+        externalPlayer = ExternalPlayerMethodChannel(this, messenger)
         pipChannel = PlayerPipMethodChannel(this, flutterEngine.dartExecutor.binaryMessenger)
         nativeVideoSurfaceChannel = NativeVideoSurfaceChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -90,6 +95,10 @@ open class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        networkStatus?.close()
+        networkStatus = null
+        externalPlayer?.close()
+        externalPlayer = null
         pipChannel?.close()
         pipChannel = null
         videoCompatibilityChannel?.setMethodCallHandler(null)

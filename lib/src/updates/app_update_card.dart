@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -29,11 +30,17 @@ class _AppUpdateCardState extends ConsumerState<AppUpdateCard> {
         if (!controller.supported) {
           return const SettingsCard(
             children: [
-              SettingsReadonlyRow(title: '应用内更新', value: '当前提供 Android 安装包更新'),
+              SettingsReadonlyRow(
+                title: '应用内更新',
+                value: '当前提供 Android 和 Windows 更新',
+              ),
             ],
           );
         }
         final release = controller.release;
+        final windows = release == null
+            ? defaultTargetPlatform == TargetPlatform.windows
+            : release.platform == 'windows';
         final progress = controller.progress;
         final downloading = controller.phase == AppUpdatePhase.downloading;
         final permission =
@@ -48,7 +55,10 @@ class _AppUpdateCardState extends ConsumerState<AppUpdateCard> {
                 children: [
                   Text('应用更新', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
-                  Semantics(liveRegion: true, child: Text(_status(controller))),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(_status(controller, windows)),
+                  ),
                   if (controller.lastChecked != null) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -155,9 +165,16 @@ class _AppUpdateCardState extends ConsumerState<AppUpdateCard> {
                       if (!controller.busy && ready && !permission)
                         FilledButton.icon(
                           onPressed: controller.install,
-                          icon: const Icon(Icons.system_update_alt),
+                          icon: Icon(
+                            windows
+                                ? Icons.folder_open_rounded
+                                : Icons.system_update_alt,
+                          ),
                           label: Text(
-                            controller.phase == AppUpdatePhase.installerOpened
+                            windows
+                                ? '打开更新包目录'
+                                : controller.phase ==
+                                      AppUpdatePhase.installerOpened
                                 ? '再次打开安装'
                                 : '立即安装',
                           ),
@@ -171,7 +188,11 @@ class _AppUpdateCardState extends ConsumerState<AppUpdateCard> {
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    permission
+                    windows
+                        ? (ready
+                              ? '更新包已通过 SHA-256 校验，打开目录后解压覆盖现有文件即可，本地配置与记录会保留'
+                              : '下载后将校验 SHA-256，不会自动覆盖程序文件。')
+                        : permission
                         ? '在系统设置中开启“允许来自此来源的应用”，返回后再点击“立即安装”。'
                         : '仅下载同包名、同签名的新版本。安装由 Android 确认；无需卸载旧版，现有数据会保留。',
                     style: Theme.of(context).textTheme.bodySmall,
@@ -199,20 +220,24 @@ class _AppUpdateCardState extends ConsumerState<AppUpdateCard> {
     );
   }
 
-  String _status(AppUpdateController value) => switch (value.phase) {
-    AppUpdatePhase.idle => '点击下方按钮检查新版本',
-    AppUpdatePhase.checking => '正在检查更新…',
-    AppUpdatePhase.upToDate => '当前已是最新可用版本',
-    AppUpdatePhase.available => '发现新版本',
-    AppUpdatePhase.downloading => '正在下载安装包…',
-    AppUpdatePhase.verifying => '正在验证安装包完整性、版本和签名…',
-    AppUpdatePhase.ready => '安装包已验证，可以安装',
-    AppUpdatePhase.permissionRequired => '需要开启本应用的安装来源权限',
-    AppUpdatePhase.openingInstaller => '正在验证并打开系统安装界面…',
-    AppUpdatePhase.installerOpened => '已打开系统安装界面，请完成安装；取消后可再次打开',
-    AppUpdatePhase.failed => '更新操作未完成',
-    AppUpdatePhase.unsupported => '当前提供 Android 安装包更新',
-  };
+  String _status(AppUpdateController value, bool windows) =>
+      switch (value.phase) {
+        AppUpdatePhase.idle => '点击下方按钮检查新版本',
+        AppUpdatePhase.checking => '正在检查更新…',
+        AppUpdatePhase.upToDate => '当前已是最新可用版本',
+        AppUpdatePhase.available => '发现新版本',
+        AppUpdatePhase.downloading => '正在下载安装包…',
+        AppUpdatePhase.verifying =>
+          windows ? '正在校验更新包 SHA-256…' : '正在验证安装包完整性、版本和签名…',
+        AppUpdatePhase.ready => windows ? '更新包已验证，可以打开目录' : '安装包已验证，可以安装',
+        AppUpdatePhase.permissionRequired => '需要开启本应用的安装来源权限',
+        AppUpdatePhase.openingInstaller =>
+          windows ? '正在打开更新包目录…' : '正在验证并打开系统安装界面…',
+        AppUpdatePhase.installerOpened =>
+          windows ? '已选中更新包，退出 Zeluna 后解压覆盖程序文件' : '已打开系统安装界面，请完成安装；取消后可再次打开',
+        AppUpdatePhase.failed => '更新操作未完成',
+        AppUpdatePhase.unsupported => '当前提供 Android 和 Windows 更新',
+      };
 }
 
 String _size(int bytes) => '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
